@@ -68,7 +68,17 @@ const ALL_SHOWN = {
   guestAccess: true,
   serverAccess: true,
   creation: true,
-  upgrades: true
+  upgrades: true,
+  verification: true,
+  calls: true,
+  callSignalling: true,
+  polls: true,
+  stickers: true,
+  locations: true,
+  spaces: true,
+  widgets: true,
+  otherEvents: true,
+  deletedMessages: true
 };
 
 test('GIVEN the room, account, settings and profile calls WHEN made THEN each matches a host command and its arguments', async () => {
@@ -254,7 +264,7 @@ test('GIVEN account settings WHEN saved THEN only the known settings cross, neve
       notificationNames: true,
       loadRoomPictures: false,
       captureProtection: true,
-      timelineEvents: { ...ALL_SHOWN, polls: false },
+      timelineEvents: { ...ALL_SHOWN, polls: false, futureKind: false },
       theme: 'blue',
       sharePresence: true,
       presence: 'offline',
@@ -273,7 +283,7 @@ test('GIVEN account settings WHEN saved THEN only the known settings cross, neve
       notificationNames: true,
       loadRoomPictures: false,
       captureProtection: true,
-      timelineEvents: ALL_SHOWN,
+      timelineEvents: { ...ALL_SHOWN, polls: false },
       theme: 'blue',
       sharePresence: true,
       presence: 'offline'

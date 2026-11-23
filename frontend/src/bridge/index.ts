@@ -1015,7 +1015,17 @@ function timelineEvents(given: TimelineEvents | undefined): Partial<TimelineEven
     guestAccess: events.guestAccess,
     serverAccess: events.serverAccess,
     creation: events.creation,
-    upgrades: events.upgrades
+    upgrades: events.upgrades,
+    verification: events.verification,
+    calls: events.calls,
+    callSignalling: events.callSignalling,
+    polls: events.polls,
+    stickers: events.stickers,
+    locations: events.locations,
+    spaces: events.spaces,
+    widgets: events.widgets,
+    otherEvents: events.otherEvents,
+    deletedMessages: events.deletedMessages
   };
 }
 

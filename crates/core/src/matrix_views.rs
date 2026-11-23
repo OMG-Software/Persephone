@@ -6,21 +6,29 @@
 //!   (`contacts.rs`), and is named after them when it has no name.
 //! * Each item carries the event's `origin_server_ts`: the time the sender's
 //!   homeserver claims, unchecked. An event without a usable one has none.
-//! * Text messages (text, notice, emote) are shown as messages, and images
-//!   as image items without fetching anything (`media.rs`). Other
-//!   `m.room.message` types become an `unsupported` notice, so nothing
-//!   disappears. An encrypted event that cannot be shown becomes a notice
-//!   saying why: `withheld` (the sender withheld the key from this device),
-//!   `untrusted_sender` (the sending device is not signed by its owner, which
-//!   the decryption settings refuse; ADR-0005) or `undecryptable`.
+//! * Text messages (text, notice, emote, server notice) are shown as
+//!   messages, images as image items and files as file items, without
+//!   fetching anything (`media.rs`, `files.rs`). An encrypted event that
+//!   cannot be shown becomes a notice saying why: `withheld` (the sender
+//!   withheld the key from this device), `untrusted_sender` (the sending
+//!   device is not signed by its owner, which the decryption settings refuse;
+//!   ADR-0005) or `undecryptable`.
 //! * Membership changes and changes to the room's name, topic, picture,
 //!   encryption, access, history visibility, power levels, addresses, server
 //!   ACL and version are `state` items (`state_change`): who joined or was
 //!   removed, and who changed what, matters most in an encrypted room. A
-//!   change of picture alone, a redacted state event, and other state are not
-//!   shown. A reaction is a `reaction` item naming the event it reacts to,
-//!   with its key projected like a name; other non-message events are not
-//!   shown.
+//!   reaction is a `reaction` item naming the event it reacts to, with its
+//!   key projected like a name.
+//! * Every other event is an `other` item (`other_item`): its kind, such as
+//!   a verification step, a call, a poll or a sticker, and its type projected
+//!   like a name. Nothing from its content is sent, so nothing disappears and
+//!   nothing new is trusted.
+//! * Items the account's switches hide are left out before a page fills
+//!   (`timeline_filter`). While a page has room, older chunks are fetched,
+//!   so hidden events do not crowd out messages. A later chunk starts only
+//!   while the page has sent fewer than `MAX_PAGE_REQUESTS` requests and is
+//!   younger than `PAGE_TIME_BUDGET`; the page then returns what it has,
+//!   with a cursor for the rest.
 //! * An edit (`m.replace`) of a text message is an `edit` item only when its
 //!   sender sent the edited message, compared by full user ID: anyone can
 //!   send an edit naming someone else's message. The edited message's sender
@@ -65,13 +73,14 @@ use matrix_sdk::{
     },
 };
 use persephone_contracts::{
-    ContactStatus, MembershipChange, NoticeKind, RoomEncryption, RoomList, RoomSummary, SenderName,
-    StateChange, TimelineItem, TimelinePage, UnixMillis,
+    ContactStatus, MembershipChange, NoticeKind, OtherEvent, RoomEncryption, RoomList, RoomSummary,
+    SenderName, StateChange, TimelineEvents, TimelineItem, TimelinePage, UnixMillis,
 };
 use persephone_core_protocol::{ErrorCode, MAX_CURSOR_BYTES, MAX_ROOM_ID_BYTES};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     sync::{Mutex, MutexGuard},
+    time::{Duration, Instant},
 };
 
 /// Most pagination tokens kept at once, across all rooms.
@@ -90,6 +99,17 @@ pub const MAX_KNOWN_SENDERS: usize = 512;
 /// Most edited messages a page reads from the homeserver to check an edit's
 /// sender; an edit beyond them is left out of that page.
 pub const MAX_EDIT_LOOKUPS: usize = 8;
+/// Most `/messages` requests a timeline page sends before a later chunk,
+/// counting each smaller retry of a chunk over the byte budget. The first
+/// chunk always loads, as before switches hid anything; a later chunk, which
+/// only switched-off events make the page fetch, starts a request only while
+/// the page has sent fewer than this many.
+pub const MAX_PAGE_REQUESTS: usize = 5;
+/// How long a page may go on fetching later chunks. A request for one starts
+/// only before this time, so hidden events make a page take at most this plus
+/// one request's timeout longer than its first chunk. The page returns what it
+/// has, with a cursor for the rest.
+pub const PAGE_TIME_BUDGET: Duration = Duration::from_secs(5);
 
 #[derive(Default)]
 pub struct MatrixViews {
@@ -207,31 +227,204 @@ fn edit_claim(event: &TimelineEvent) -> Option<EditClaim> {
     })
 }
 
-/// Whether the event is a message (plain, encrypted or a sticker) that was
-/// deleted: the homeserver keeps the deletion in `unsigned`.
-fn deleted_message(event: &TimelineEvent) -> bool {
-    let raw = event.raw();
-    let is_message = raw
-        .get_field::<String>("type")
-        .ok()
-        .flatten()
-        .is_some_and(|kind| {
-            matches!(
-                kind.as_str(),
-                "m.room.message" | "m.room.encrypted" | "m.sticker"
-            )
-        });
-    let state = raw
+/// Whether the event is a state event: it has a `state_key`.
+fn is_state(event: &TimelineEvent) -> bool {
+    event
+        .raw()
         .get_field::<serde_json::Value>("state_key")
         .ok()
         .flatten()
-        .is_some();
-    let redacted = raw
+        .is_some()
+}
+
+/// Whether the event was deleted: the homeserver keeps the deletion in
+/// `unsigned`.
+fn redacted(event: &TimelineEvent) -> bool {
+    event
+        .raw()
         .get_field::<serde_json::Value>("unsigned")
         .ok()
         .flatten()
-        .is_some_and(|unsigned| unsigned.get("redacted_because").is_some());
-    is_message && !state && redacted
+        .is_some_and(|unsigned| unsigned.get("redacted_because").is_some())
+}
+
+/// Whether the event is a message, plain or encrypted, that was deleted. A
+/// deleted sticker, poll or other message-like event keeps its kind
+/// (`other_item`).
+fn deleted_message(event: &TimelineEvent) -> bool {
+    let is_message = event
+        .raw()
+        .get_field::<String>("type")
+        .ok()
+        .flatten()
+        .is_some_and(|kind| matches!(kind.as_str(), "m.room.message" | "m.room.encrypted"));
+    is_message && !is_state(event) && redacted(event)
+}
+
+/// The kind of a message-like event that has no other form, by its type.
+fn event_kind(kind: &str) -> OtherEvent {
+    match kind {
+        "m.key.verification.request" => OtherEvent::VerificationRequest,
+        "m.key.verification.ready" => OtherEvent::VerificationReady,
+        "m.key.verification.start" => OtherEvent::VerificationStart,
+        "m.key.verification.accept" | "m.key.verification.key" | "m.key.verification.mac" => {
+            OtherEvent::VerificationStep
+        }
+        "m.key.verification.cancel" => OtherEvent::VerificationCancelled,
+        "m.key.verification.done" => OtherEvent::VerificationDone,
+        "m.call.invite"
+        | "m.call.notify"
+        | "org.matrix.msc4075.call.notify"
+        | "m.rtc.notification"
+        | "org.matrix.msc4075.rtc.notification" => OtherEvent::CallStarted,
+        "m.call.answer" => OtherEvent::CallAnswered,
+        "m.call.reject" | "m.rtc.decline" | "org.matrix.msc4310.rtc.decline" => {
+            OtherEvent::CallDeclined
+        }
+        "m.call.hangup" => OtherEvent::CallEnded,
+        "m.call.candidates"
+        | "m.call.negotiate"
+        | "m.call.replaces"
+        | "m.call.select_answer"
+        | "m.call.sdp_stream_metadata_changed"
+        | "org.matrix.call.sdp_stream_metadata_changed"
+        | "m.call.asserted_identity"
+        | "org.matrix.call.asserted_identity"
+        | "io.element.call.encryption_keys" => OtherEvent::CallSignalling,
+        "m.poll.start" | "org.matrix.msc3381.poll.start" => OtherEvent::PollStarted,
+        "m.poll.response" | "org.matrix.msc3381.poll.response" => OtherEvent::PollVote,
+        "m.poll.end" | "org.matrix.msc3381.poll.end" => OtherEvent::PollEnded,
+        "m.sticker" => OtherEvent::Sticker,
+        "m.location" | "m.beacon" | "org.matrix.msc3672.beacon" => OtherEvent::Location,
+        "m.room.message" => OtherEvent::Message,
+        _ => OtherEvent::Event,
+    }
+}
+
+/// Whether call member content has a membership: a non-empty
+/// `memberships` list, or, in the older form, any content.
+fn in_call(content: Option<&serde_json::Value>) -> bool {
+    content
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|content| match content.get("memberships") {
+            Some(memberships) => memberships.as_array().is_some_and(|list| !list.is_empty()),
+            None => !content.is_empty(),
+        })
+}
+
+/// The kind of a state event that is not a shown room change, by its type.
+/// A call member event is a join when it adds a membership and a leave when
+/// it removes the last one. One that keeps the sender in the call, or out
+/// of it, as the previous content (`prev`) shows, is an update. Without the
+/// previous content, the current content decides.
+fn state_kind(
+    kind: &str,
+    content: Option<&serde_json::Value>,
+    prev: Option<&serde_json::Value>,
+) -> OtherEvent {
+    match kind {
+        "m.call.member" | "org.matrix.msc3401.call.member" => {
+            let now = in_call(content);
+            match (prev.map(|prev| in_call(Some(prev))), now) {
+                (Some(before), now) if before == now => OtherEvent::CallUpdated,
+                (_, true) => OtherEvent::CallJoined,
+                (_, false) => OtherEvent::CallLeft,
+            }
+        }
+        "m.beacon_info" | "org.matrix.msc3672.beacon_info" => {
+            // A live share ends with the same event, marked not live.
+            let live = content
+                .and_then(|content| content.get("live"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true);
+            if live {
+                OtherEvent::Location
+            } else {
+                OtherEvent::LocationStopped
+            }
+        }
+        "m.space.child" => OtherEvent::SpaceChild,
+        "m.space.parent" => OtherEvent::SpaceParent,
+        "im.vector.modular.widgets" | "m.widget" | "io.element.widgets.layout" => {
+            OtherEvent::Widget
+        }
+        // A pending invite is revoked, or spent, by sending the event again
+        // with empty content: only one that still names an invite is one.
+        "m.room.third_party_invite" => {
+            if content
+                .and_then(serde_json::Value::as_object)
+                .is_some_and(|content| !content.is_empty())
+            {
+                OtherEvent::ThirdPartyInvite
+            } else {
+                OtherEvent::State
+            }
+        }
+        _ => OtherEvent::State,
+    }
+}
+
+/// An event with no other form, as an `other` item: its kind and its type,
+/// read from the raw event so that a type this build cannot parse still
+/// shows. A reaction or deletion that could not be read stays out: neither
+/// is a line of its own. A deleted message-like event keeps its kind, from
+/// its type, and is marked `deleted`, so the page applies both its kind's
+/// switch and the deleted messages switch. A deleted state event's remaining
+/// content says nothing, so it keeps its kind only where the line claims no
+/// more than a change (spaces and widgets); otherwise it is generic `state`
+/// (an emptied call member event is no proof that its sender left the call).
+fn other_item(
+    event: &TimelineEvent,
+    event_id: String,
+    sender: String,
+    origin_server_ts: Option<UnixMillis>,
+) -> Option<TimelineItem> {
+    let raw = event.raw();
+    let kind = raw.get_field::<String>("type").ok().flatten()?;
+    let state = is_state(event);
+    if !state && matches!(kind.as_str(), "m.reaction" | "m.room.redaction") {
+        return None;
+    }
+    let deleted = !state && redacted(event);
+    let content = raw.get_field::<serde_json::Value>("content").ok().flatten();
+    let (event_kind, event_type) = if state {
+        let prev = raw
+            .get_field::<serde_json::Value>("unsigned")
+            .ok()
+            .flatten()
+            .and_then(|unsigned| unsigned.get("prev_content").cloned());
+        let found = state_kind(&kind, content.as_ref(), prev.as_ref());
+        let neutral = matches!(
+            found,
+            OtherEvent::SpaceChild | OtherEvent::SpaceParent | OtherEvent::Widget
+        );
+        if redacted(event) && !neutral {
+            (OtherEvent::State, kind.as_str())
+        } else {
+            (found, kind.as_str())
+        }
+    } else {
+        let msgtype = content
+            .as_ref()
+            .and_then(|content| content.get("msgtype"))
+            .and_then(serde_json::Value::as_str);
+        // A message names its `msgtype`. One with no readable `msgtype` is a
+        // generic event, named by its type.
+        match (event_kind(&kind), msgtype) {
+            (OtherEvent::Message, Some(msgtype)) => (OtherEvent::Message, msgtype),
+            (OtherEvent::Message, None) => (OtherEvent::Event, kind.as_str()),
+            (other, _) => (other, kind.as_str()),
+        }
+    };
+    Some(TimelineItem::Other {
+        event_id,
+        sender,
+        origin_server_ts,
+        event: event_kind,
+        event_type: project_name(event_type),
+        state,
+        deleted,
+    })
 }
 
 /// The visible form of one event, or `None` for events not shown. An edit
@@ -308,14 +501,18 @@ fn project(event: &TimelineEvent) -> Option<TimelineItem> {
             });
         }
         Ok(AnySyncTimelineEvent::State(state)) => {
-            return state_change(&state).map(|change| TimelineItem::State {
-                event_id,
-                sender,
-                origin_server_ts,
-                change,
-            });
+            return match state_change(&state) {
+                Some(change) => Some(TimelineItem::State {
+                    event_id,
+                    sender,
+                    origin_server_ts,
+                    change,
+                }),
+                None if member_unchanged(&state) => None,
+                None => other_item(event, event_id, sender, origin_server_ts),
+            };
         }
-        _ => return None,
+        _ => return other_item(event, event_id, sender, origin_server_ts),
     };
     // A reply's quoted fallback is the sender's copy of another event: it
     // can say anything, so it is dropped and the page quotes the event
@@ -354,20 +551,50 @@ fn project(event: &TimelineEvent) -> Option<TimelineItem> {
             origin_server_ts,
             reply_to,
         },
+        MessageType::ServerNotice(notice) => TimelineItem::Message {
+            event_id,
+            sender,
+            body: text(&notice.body),
+            origin_server_ts,
+            reply_to,
+        },
         MessageType::Image(image) => {
             crate::media::timeline_item(event_id, sender, origin_server_ts, image)
         }
         MessageType::File(_) | MessageType::Audio(_) | MessageType::Video(_) => {
-            let file = crate::files::file_parts(&message.content.msgtype)?;
-            crate::files::timeline_item(event_id, sender, origin_server_ts, &file)
+            match crate::files::file_parts(&message.content.msgtype) {
+                Some(file) => {
+                    crate::files::timeline_item(event_id, sender, origin_server_ts, &file)
+                }
+                None => other_message(event_id, sender, origin_server_ts, &message.content.msgtype),
+            }
         }
-        _ => TimelineItem::Notice {
-            event_id,
-            sender,
-            notice: NoticeKind::Unsupported,
-            origin_server_ts,
-        },
+        msgtype => other_message(event_id, sender, origin_server_ts, msgtype),
     })
+}
+
+/// A message this build does not show as text, an image or a file, as an
+/// `other` item named by its `msgtype`. Its body is never sent.
+fn other_message(
+    event_id: String,
+    sender: String,
+    origin_server_ts: Option<UnixMillis>,
+    msgtype: &MessageType,
+) -> TimelineItem {
+    let event = match msgtype {
+        MessageType::VerificationRequest(_) => OtherEvent::VerificationRequest,
+        MessageType::Location(_) => OtherEvent::Location,
+        _ => OtherEvent::Message,
+    };
+    TimelineItem::Other {
+        event_id,
+        sender,
+        origin_server_ts,
+        event,
+        event_type: project_name(msgtype.msgtype()),
+        state: false,
+        deleted: false,
+    }
 }
 
 /// A name or topic as shown: projected, and `None` when empty.
@@ -392,7 +619,8 @@ fn named_users(items: &[TimelineItem]) -> BTreeSet<&str> {
             | TimelineItem::File { sender, .. }
             | TimelineItem::Edit { sender, .. }
             | TimelineItem::Reaction { sender, .. }
-            | TimelineItem::Redaction { sender, .. } => sender,
+            | TimelineItem::Redaction { sender, .. }
+            | TimelineItem::Other { sender, .. } => sender,
             TimelineItem::State { sender, change, .. } => {
                 if let StateChange::Member { target, .. }
                 | StateChange::DisplayName { target, .. }
@@ -463,6 +691,16 @@ pub(crate) async fn page_names(
             display_name,
         })
         .collect()
+}
+
+/// Whether a member event changes nothing: a membership sent again with the
+/// same content. It is not a line of its own, because nothing happened.
+fn member_unchanged(event: &AnySyncStateEvent) -> bool {
+    matches!(
+        event,
+        AnySyncStateEvent::RoomMember(SyncStateEvent::Original(member))
+            if matches!(member.membership_change(), Change::None)
+    )
 }
 
 /// What a state event changed, or `None` for a change not shown.
@@ -644,6 +882,8 @@ impl MatrixViews {
     /// which must be a text message that is not an edit itself. The edited
     /// message's sender comes from `chunk`, from those remembered, or, while
     /// `lookups` allows, from the homeserver; otherwise the edit is left out.
+    /// In a later chunk (`lookups.until` set), a read the budget does not
+    /// allow defers the chunk instead (`lookups.deferred`).
     async fn checked_edit(
         &self,
         joined: &matrix_sdk::Room,
@@ -651,7 +891,7 @@ impl MatrixViews {
         chunk: &[TimelineEvent],
         edit: &TimelineEvent,
         claim: EditClaim,
-        lookups: &mut usize,
+        lookups: &mut EditLookups,
     ) -> Option<TimelineItem> {
         let event_id = edit.event_id()?.to_string();
         let in_chunk = chunk
@@ -661,8 +901,7 @@ impl MatrixViews {
             Some(event) => editable_sender(event),
             None => match self.known_sender(room, &claim.replaces) {
                 Some(sender) => Some(sender),
-                None if *lookups < MAX_EDIT_LOOKUPS => {
-                    *lookups += 1;
+                None if lookups.start() => {
                     let original = joined.event(&claim.replaces, None).await.ok()?;
                     self.remember_sender(room, &original);
                     editable_sender(&original)
@@ -810,7 +1049,8 @@ impl MatrixViews {
                 TimelineItem::Message { event_id, .. }
                 | TimelineItem::Image { event_id, .. }
                 | TimelineItem::File { event_id, .. }
-                | TimelineItem::Notice { event_id, .. } => event_id == id.as_str(),
+                | TimelineItem::Notice { event_id, .. }
+                | TimelineItem::Other { event_id, .. } => event_id == id.as_str(),
                 _ => false,
             })
             .cloned();
@@ -833,7 +1073,7 @@ impl MatrixViews {
         let ignored = crate::abuse::ignored_set(client).await?;
         let room = joined.room_id().as_str();
         let mut items = Vec::new();
-        let mut lookups = 0;
+        let mut lookups = EditLookups::default();
         for event in chunk {
             if event
                 .event_id()
@@ -868,85 +1108,216 @@ impl MatrixViews {
 
     /// One bounded page of history older than `cursor`, or the newest page.
     /// Refuse unreadable ignore state before fetching and filter ignored
-    /// message content while preserving state events and redactions.
+    /// message content while preserving state events and redactions. Items
+    /// the account's switches (`events`) hide are left out before the page
+    /// fills, so the core fetches older chunks while the page has room left
+    /// (`timeline_filter`), within `MAX_PAGE_REQUESTS` and `PAGE_TIME_BUDGET`.
     pub async fn timeline_page(
         &self,
         client: &Client,
         room: &str,
         cursor: Option<&str>,
+        events: &TimelineEvents,
     ) -> Result<TimelinePage, ErrorCode> {
         let joined = joined_room(client, room)?;
         let ignored = crate::abuse::ignored_set(client).await?;
-        let from = cursor.map(|cursor| self.token(room, cursor)).transpose()?;
-        let mut limit = MAX_PAGE_ITEMS;
-        loop {
-            let mut options = MessagesOptions::backward().from(from.as_deref());
-            options.limit = UInt::try_from(limit as u64).unwrap_or(UInt::MIN);
-            // The answer then carries the member events of the people the
-            // page shows, for their display names.
-            options.filter.lazy_load_options = LazyLoadOptions::Enabled {
-                include_redundant_members: true,
-            };
-            let messages = joined
-                .messages(options)
-                .await
-                .map_err(|_| ErrorCode::Unavailable)?;
-            // Backward pagination returns newest first; pages read oldest first.
-            let mut items = Vec::new();
-            let mut lookups = 0;
-            for event in messages.chunk.iter().rev() {
-                if ignored_content(event, &ignored) {
+        let mut token = cursor.map(|cursor| self.token(room, cursor)).transpose()?;
+        // Oldest first, as pages read; each chunk is older than the last.
+        let mut items: Vec<TimelineItem> = Vec::new();
+        let mut state = Vec::new();
+        let mut names = Vec::new();
+        let mut lookups = EditLookups::default();
+        let started = Instant::now();
+        let mut requests = 0;
+        'fetches: for fetch in 0usize.. {
+            let room_left = MAX_PAGE_ITEMS - items.len();
+            // After the first chunk, no token is the start of the room.
+            if room_left == 0 || (fetch > 0 && token.is_none()) {
+                break;
+            }
+            let mut limit = room_left;
+            loop {
+                // A later chunk keeps the page within its budgets; the page
+                // ends at the token it has, which stays valid.
+                if fetch > 0
+                    && (requests >= MAX_PAGE_REQUESTS || started.elapsed() >= PAGE_TIME_BUDGET)
+                {
+                    break 'fetches;
+                }
+                requests += 1;
+                // Edits of a later chunk read the homeserver only within the
+                // time budget too, and never go unchecked: a later chunk that
+                // needs more reads than are left waits for the next page.
+                lookups.until = (fetch > 0).then(|| started + PAGE_TIME_BUDGET);
+                let Some(chunk) = self
+                    .fetch_chunk(
+                        &joined,
+                        room,
+                        token.as_deref(),
+                        limit,
+                        &ignored,
+                        events,
+                        &mut lookups,
+                    )
+                    .await?
+                else {
+                    // Its edits need more reads or time than are left: the
+                    // next page fetches this chunk again, first, with a new
+                    // budget.
+                    break 'fetches;
+                };
+                // A homeserver that answers a token with the same token did
+                // not move: its chunk would repeat this page's events.
+                if fetch > 0 && chunk.end.is_some() && chunk.end == token {
+                    break 'fetches;
+                }
+                let with: Vec<TimelineItem> = chunk.items.iter().chain(&items).cloned().collect();
+                let with_state: Vec<_> = state.iter().chain(&chunk.state).cloned().collect();
+                let with_names = page_names(&joined, &with, &with_state).await;
+                if page_bytes(&with, &with_names) <= MAX_PAGE_BYTES {
+                    items = with;
+                    state = with_state;
+                    names = with_names;
+                    token = chunk.end;
+                    break;
+                }
+                // The SDK cannot resume inside a chunk: fetch fewer events.
+                if limit > 1 {
+                    limit /= 2;
                     continue;
                 }
-                self.remember_sender(room, event);
-                let item = match edit_claim(event) {
-                    Some(claim) => {
-                        self.checked_edit(
-                            &joined,
-                            room,
-                            &messages.chunk,
-                            event,
-                            claim,
-                            &mut lookups,
-                        )
-                        .await
-                    }
-                    None => project(event),
-                };
-                items.extend(item);
+                if fetch == 0 {
+                    // One event over the budget cannot happen with projected
+                    // bodies; drop it rather than exceed the frame.
+                    items.clear();
+                    names.clear();
+                    token = chunk.end;
+                }
+                // A later chunk that does not fit starts the next page.
+                break 'fetches;
             }
-            let mut names = page_names(&joined, &items, &messages.state).await;
-            let bytes: usize = items
-                .iter()
-                .map(|item| serde_json::to_vec(item).map_or(usize::MAX, |v| v.len()))
-                .chain(
-                    names
-                        .iter()
-                        .map(|name| serde_json::to_vec(name).map_or(usize::MAX, |v| v.len())),
-                )
-                .fold(0usize, usize::saturating_add);
-            if bytes > MAX_PAGE_BYTES && limit > 1 {
-                limit /= 2;
+        }
+        Ok(TimelinePage {
+            room_id: room.to_owned(),
+            items,
+            next_cursor: token.map(|token| self.remember(room, token)),
+            names,
+        })
+    }
+
+    /// Up to `limit` events older than `from` (or the newest), projected and
+    /// filtered by `events`, oldest first; `None` when a later chunk's edit
+    /// needs a read the budget does not allow (`EditLookups::deferred`).
+    #[allow(clippy::too_many_arguments)]
+    async fn fetch_chunk(
+        &self,
+        joined: &matrix_sdk::Room,
+        room: &str,
+        from: Option<&str>,
+        limit: usize,
+        ignored: &std::collections::BTreeSet<OwnedUserId>,
+        events: &TimelineEvents,
+        lookups: &mut EditLookups,
+    ) -> Result<Option<Chunk>, ErrorCode> {
+        let mut options = MessagesOptions::backward().from(from);
+        options.limit = UInt::try_from(limit as u64).unwrap_or(UInt::MIN);
+        // The answer then carries the member events of the people the
+        // page shows, for their display names.
+        options.filter.lazy_load_options = LazyLoadOptions::Enabled {
+            include_redundant_members: true,
+        };
+        let messages = joined
+            .messages(options)
+            .await
+            .map_err(|_| ErrorCode::Unavailable)?;
+        // Backward pagination returns newest first; pages read oldest first.
+        let mut items = Vec::new();
+        for event in messages.chunk.iter().rev() {
+            if ignored_content(event, ignored) {
                 continue;
             }
-            if bytes > MAX_PAGE_BYTES {
-                // One event over the budget cannot happen with projected
-                // bodies; drop it rather than exceed the frame.
-                items.clear();
-                names.clear();
-            }
-            let next_cursor = messages
-                .end
-                .filter(|_| !messages.chunk.is_empty())
-                .map(|token| self.remember(room, token));
-            return Ok(TimelinePage {
-                room_id: room.to_owned(),
-                items,
-                next_cursor,
-                names,
-            });
+            self.remember_sender(room, event);
+            let item = match edit_claim(event) {
+                Some(claim) => {
+                    let item = self
+                        .checked_edit(joined, room, &messages.chunk, event, claim, lookups)
+                        .await;
+                    if lookups.deferred {
+                        return Ok(None);
+                    }
+                    item
+                }
+                None => project(event),
+            };
+            items.extend(item.filter(|item| crate::timeline_filter::shown(item, events)));
         }
+        // Only the members the kept items name: a page of many chunks keeps
+        // its member events bounded by what it shows.
+        let named = named_users(&items);
+        let state = messages
+            .state
+            .into_iter()
+            .filter(|raw| {
+                raw.get_field::<String>("state_key")
+                    .ok()
+                    .flatten()
+                    .is_some_and(|user| named.contains(user.as_str()))
+            })
+            .collect();
+        let end = messages.end.filter(|_| !messages.chunk.is_empty());
+        Ok(Some(Chunk { items, state, end }))
     }
+}
+
+/// The homeserver reads of edited messages that a page may still make: at
+/// most `MAX_EDIT_LOOKUPS`, and none that starts at or after `until`.
+///
+/// The first chunk leaves out an edit beyond the reads, as one page always
+/// did. A later chunk, which has `until`, is deferred instead: the next page
+/// reads it first, with a new budget, so a page of many chunks loses no edit
+/// that a page of one chunk would show.
+#[derive(Default)]
+struct EditLookups {
+    used: usize,
+    until: Option<Instant>,
+    /// A later chunk needed a read that the budget did not allow.
+    deferred: bool,
+}
+
+impl EditLookups {
+    /// Whether a read may start now; it then counts.
+    fn start(&mut self) -> bool {
+        let spent = self.used >= MAX_EDIT_LOOKUPS
+            || self.until.is_some_and(|until| Instant::now() >= until);
+        if spent {
+            self.deferred = self.until.is_some();
+            return false;
+        }
+        self.used += 1;
+        true
+    }
+}
+
+/// One fetched chunk of history, projected and filtered, oldest first.
+struct Chunk {
+    items: Vec<TimelineItem>,
+    /// The member events of the people the items name.
+    state: Vec<Raw<AnyStateEvent>>,
+    /// The token for older history; `None` at the start of the room.
+    end: Option<String>,
+}
+
+/// The serialized size of a page's items and names.
+fn page_bytes(items: &[TimelineItem], names: &[SenderName]) -> usize {
+    items
+        .iter()
+        .map(|item| serde_json::to_vec(item).map_or(usize::MAX, |v| v.len()))
+        .chain(
+            names
+                .iter()
+                .map(|name| serde_json::to_vec(name).map_or(usize::MAX, |v| v.len())),
+        )
+        .fold(0usize, usize::saturating_add)
 }
 
 #[cfg(test)]
@@ -1316,11 +1687,402 @@ mod tests {
         )
     }
 
+    /// The room change an event shows, or `None` when it is no room change:
+    /// nothing, or a generic `other` state item.
     fn change_of(event: &TimelineEvent) -> Option<StateChange> {
         match project(event) {
             Some(TimelineItem::State { change, .. }) => Some(change),
             None => None,
             Some(other) => panic!("a state item or nothing: {other:?}"),
+        }
+    }
+
+    /// The kind and shown type of an `other` item, or `None` for anything else.
+    fn other_of(event: &TimelineEvent) -> Option<(OtherEvent, String)> {
+        match project(event) {
+            Some(TimelineItem::Other {
+                event, event_type, ..
+            }) => Some((event, event_type)),
+            _ => None,
+        }
+    }
+
+    fn message_like(kind: &str, content: serde_json::Value) -> TimelineEvent {
+        raw_event(serde_json::json!({
+            "type": kind, "event_id": "$e", "sender": "@alice:example.org",
+            "origin_server_ts": 1, "content": content,
+        }))
+    }
+
+    /// GIVEN the message types this build shows no text, image or file for
+    /// WHEN projected THEN each is an `other` item named by its `msgtype`, an
+    /// in-room verification request and a location have their own kind, and
+    /// no body is sent; a server notice is a message.
+    #[test]
+    fn given_other_message_types_then_each_is_named_and_its_body_is_not_sent() {
+        let message = |content| other_of(&plain_event(content));
+        assert_eq!(
+            message(serde_json::json!({
+                "msgtype": "m.key.verification.request", "body": "secret body",
+                "to": "@bob:example.org", "from_device": "D",
+                "methods": ["m.sas.v1"],
+            })),
+            Some((
+                OtherEvent::VerificationRequest,
+                "m.key.verification.request".into()
+            ))
+        );
+        assert_eq!(
+            message(serde_json::json!({
+                "msgtype": "m.location", "body": "here", "geo_uri": "geo:51.5,0.1",
+            })),
+            Some((OtherEvent::Location, "m.location".into()))
+        );
+        let hostile = format!("org.example\u{202E}<b>{}", "x".repeat(300));
+        let Some((OtherEvent::Message, shown)) =
+            message(serde_json::json!({ "msgtype": hostile, "body": "secret body" }))
+        else {
+            panic!("an other message");
+        };
+        assert!(shown.starts_with("org.example") && !shown.contains('\u{202E}'));
+        assert!(shown.chars().count() <= crate::views::MAX_DISPLAY_NAME_CHARS + 1);
+        let item = project(&plain_event(serde_json::json!({
+            "msgtype": "org.example.custom", "body": "secret body",
+        })));
+        assert!(
+            !serde_json::to_string(&item)
+                .unwrap()
+                .contains("secret body"),
+            "{item:?}"
+        );
+        let Some(TimelineItem::Message { body, .. }) = project(&plain_event(serde_json::json!({
+            "msgtype": "m.server_notice", "body": "Server maintenance",
+            "server_notice_type": "m.server_notice.usage_limit_reached",
+        }))) else {
+            panic!("a server notice is a message");
+        };
+        assert_eq!(body, "Server maintenance");
+    }
+
+    /// GIVEN message-like events of each known type and an unknown one WHEN
+    /// projected THEN each is an `other` item of its kind with its type.
+    #[test]
+    fn given_other_message_like_events_then_each_has_its_kind() {
+        for (kind, expected) in [
+            ("m.key.verification.ready", OtherEvent::VerificationReady),
+            ("m.key.verification.start", OtherEvent::VerificationStart),
+            ("m.key.verification.key", OtherEvent::VerificationStep),
+            ("m.key.verification.mac", OtherEvent::VerificationStep),
+            (
+                "m.key.verification.cancel",
+                OtherEvent::VerificationCancelled,
+            ),
+            ("m.key.verification.done", OtherEvent::VerificationDone),
+            ("m.call.invite", OtherEvent::CallStarted),
+            (
+                "org.matrix.msc4075.rtc.notification",
+                OtherEvent::CallStarted,
+            ),
+            ("m.call.answer", OtherEvent::CallAnswered),
+            ("m.call.reject", OtherEvent::CallDeclined),
+            ("m.call.hangup", OtherEvent::CallEnded),
+            ("m.call.candidates", OtherEvent::CallSignalling),
+            ("m.call.select_answer", OtherEvent::CallSignalling),
+            (
+                "io.element.call.encryption_keys",
+                OtherEvent::CallSignalling,
+            ),
+            ("org.matrix.msc3381.poll.start", OtherEvent::PollStarted),
+            ("m.poll.response", OtherEvent::PollVote),
+            ("m.poll.end", OtherEvent::PollEnded),
+            ("m.sticker", OtherEvent::Sticker),
+            ("m.location", OtherEvent::Location),
+            ("m.beacon", OtherEvent::Location),
+            ("org.example.custom", OtherEvent::Event),
+        ] {
+            assert_eq!(
+                other_of(&message_like(kind, serde_json::json!({ "body": "x" }))),
+                Some((expected, kind.into())),
+                "{kind}"
+            );
+        }
+        // GIVEN a message with no readable `msgtype` THEN it is a generic
+        // event named by its type, not a message of type m.room.message.
+        assert_eq!(
+            other_of(&raw_event(serde_json::json!({
+                "type": "m.room.message", "event_id": "$m", "sender": "@alice:example.org",
+                "origin_server_ts": 1, "content": { "body": "hi" },
+            }))),
+            Some((OtherEvent::Event, "m.room.message".into()))
+        );
+    }
+
+    /// A decrypted event, as the SDK gives one from an encrypted room.
+    fn decrypted_event(event: serde_json::Value) -> TimelineEvent {
+        use matrix_sdk::deserialized_responses::{
+            AlgorithmInfo, DecryptedRoomEvent, EncryptionInfo, VerificationState,
+        };
+        TimelineEvent::from_decrypted(
+            DecryptedRoomEvent {
+                event: Raw::from_json_string(event.to_string()).unwrap(),
+                encryption_info: std::sync::Arc::new(EncryptionInfo {
+                    sender: matrix_sdk::ruma::user_id!("@alice:example.org").to_owned(),
+                    sender_device: None,
+                    forwarder: None,
+                    algorithm_info: AlgorithmInfo::OlmV1Curve25519AesSha2 {
+                        curve25519_public_key_base64: "key".into(),
+                    },
+                    verification_state: VerificationState::Verified,
+                }),
+                unsigned_encryption_info: None,
+            },
+            None,
+        )
+    }
+
+    /// GIVEN well-formed in-room verification steps and a poll, decrypted
+    /// from an encrypted room WHEN projected THEN each is read from its
+    /// decrypted type, not `m.room.encrypted`, and has its own kind: a step
+    /// after the request is an event type of its own, not a `msgtype`.
+    #[test]
+    fn given_decrypted_other_events_then_their_decrypted_type_is_used() {
+        let relates = serde_json::json!({ "rel_type": "m.reference", "event_id": "$request" });
+        for (kind, content, expected) in [
+            (
+                "m.key.verification.ready",
+                serde_json::json!({
+                    "from_device": "DEVICE", "methods": ["m.sas.v1"], "m.relates_to": relates,
+                }),
+                OtherEvent::VerificationReady,
+            ),
+            (
+                "m.key.verification.done",
+                serde_json::json!({ "m.relates_to": relates }),
+                OtherEvent::VerificationDone,
+            ),
+            (
+                "m.poll.start",
+                serde_json::json!({
+                    "m.text": [{ "body": "Lunch?" }],
+                    "m.poll": { "question": { "m.text": [{ "body": "Lunch?" }] },
+                        "answers": [{ "m.id": "a", "m.text": [{ "body": "Yes" }] },
+                                    { "m.id": "b", "m.text": [{ "body": "No" }] }] },
+                }),
+                OtherEvent::PollStarted,
+            ),
+        ] {
+            let event = decrypted_event(serde_json::json!({
+                "type": kind, "event_id": "$e", "sender": "@alice:example.org",
+                "room_id": "!room:example.org", "origin_server_ts": 1, "content": content,
+            }));
+            assert!(matches!(event.kind, TimelineEventKind::Decrypted(_)));
+            assert_eq!(other_of(&event), Some((expected, kind.into())), "{kind}");
+        }
+    }
+
+    /// GIVEN state events that are no shown room change WHEN projected THEN
+    /// each is an `other` item of its kind; a call member event is a join
+    /// with a membership and a leave without one.
+    #[test]
+    fn given_other_state_events_then_each_has_its_kind() {
+        const A: &str = "@alice:example.org";
+        let state = |kind: &str, content: serde_json::Value| {
+            other_of(&state_event(kind, A, "key", content, None))
+        };
+        for (kind, content, expected) in [
+            (
+                "m.space.child",
+                serde_json::json!({ "via": ["s"] }),
+                OtherEvent::SpaceChild,
+            ),
+            (
+                "m.space.parent",
+                serde_json::json!({}),
+                OtherEvent::SpaceParent,
+            ),
+            (
+                "im.vector.modular.widgets",
+                serde_json::json!({ "type": "x" }),
+                OtherEvent::Widget,
+            ),
+            (
+                "m.room.third_party_invite",
+                serde_json::json!({ "display_name": "a…" }),
+                OtherEvent::ThirdPartyInvite,
+            ),
+            // A revoked invite: the same event, emptied.
+            (
+                "m.room.third_party_invite",
+                serde_json::json!({}),
+                OtherEvent::State,
+            ),
+            ("m.beacon_info", serde_json::json!({}), OtherEvent::Location),
+            (
+                "m.beacon_info",
+                serde_json::json!({ "live": true }),
+                OtherEvent::Location,
+            ),
+            (
+                "org.matrix.msc3672.beacon_info",
+                serde_json::json!({ "live": false }),
+                OtherEvent::LocationStopped,
+            ),
+            (
+                "m.beacon_info",
+                serde_json::json!({ "live": false }),
+                OtherEvent::LocationStopped,
+            ),
+            (
+                "m.call.member",
+                serde_json::json!({ "application": "m.call", "call_id": "" }),
+                OtherEvent::CallJoined,
+            ),
+            (
+                "org.matrix.msc3401.call.member",
+                serde_json::json!({ "memberships": [{ "call_id": "" }] }),
+                OtherEvent::CallJoined,
+            ),
+            ("m.call.member", serde_json::json!({}), OtherEvent::CallLeft),
+            (
+                "org.matrix.msc3401.call.member",
+                serde_json::json!({ "memberships": [] }),
+                OtherEvent::CallLeft,
+            ),
+            (
+                "org.example.custom",
+                serde_json::json!({ "x": 1 }),
+                OtherEvent::State,
+            ),
+        ] {
+            assert_eq!(
+                state(kind, content),
+                Some((expected, kind.into())),
+                "{kind}"
+            );
+        }
+        // GIVEN the previous call member content THEN a join adds the first
+        // membership, a leave removes the last, and anything else is an
+        // update: a second device, or one of two leaving, is no join.
+        let one = serde_json::json!({ "memberships": [{ "call_id": "", "device_id": "A" }] });
+        let two = serde_json::json!({ "memberships": [
+            { "call_id": "", "device_id": "A" }, { "call_id": "", "device_id": "B" }
+        ] });
+        let none = serde_json::json!({ "memberships": [] });
+        for (content, prev, expected) in [
+            (&one, &none, OtherEvent::CallJoined),
+            (&none, &one, OtherEvent::CallLeft),
+            (&two, &one, OtherEvent::CallUpdated),
+            (&one, &two, OtherEvent::CallUpdated),
+            (&none, &none, OtherEvent::CallUpdated),
+        ] {
+            assert_eq!(
+                other_of(&state_event(
+                    "org.matrix.msc3401.call.member",
+                    A,
+                    "_@alice:example.org_A",
+                    content.clone(),
+                    Some(prev.clone()),
+                )),
+                Some((expected, "org.matrix.msc3401.call.member".into())),
+                "{content} after {prev}"
+            );
+        }
+        // A member event that changes nothing is not a line: nothing
+        // happened. A deleted one still shows as room state.
+        assert!(
+            project(&state_event(
+                "m.room.member",
+                A,
+                A,
+                serde_json::json!({ "membership": "join" }),
+                Some(serde_json::json!({ "membership": "join" })),
+            ))
+            .is_none()
+        );
+    }
+
+    /// GIVEN deleted events that are not messages WHEN projected THEN a
+    /// message-like one keeps its kind and is marked deleted, a state one is
+    /// an `other` state item, and an unreadable reaction or deletion stays
+    /// out.
+    #[test]
+    fn given_deleted_or_unreadable_other_events_then_they_show_as_deleted_or_not_at_all() {
+        let unsigned = serde_json::json!({ "redacted_because": {
+            "type": "m.room.redaction", "sender": "@mod:example.org",
+            "event_id": "$why", "origin_server_ts": 2, "content": {}
+        }});
+        for (kind, expected) in [
+            ("m.poll.start", OtherEvent::PollStarted),
+            ("m.sticker", OtherEvent::Sticker),
+            ("m.call.invite", OtherEvent::CallStarted),
+        ] {
+            let item = project(&raw_event(serde_json::json!({
+                "type": kind, "event_id": "$p", "sender": "@alice:example.org",
+                "origin_server_ts": 1, "content": {}, "unsigned": unsigned,
+            })));
+            assert!(
+                matches!(
+                    &item,
+                    Some(TimelineItem::Other { event, event_type, state: false, deleted: true, .. })
+                        if *event == expected && event_type == kind
+                ),
+                "{kind}: {item:?}"
+            );
+        }
+        // A deleted state event's emptied content says nothing: an emptied
+        // call member event is no proof that its sender left the call. A
+        // space or widget line only says it changed, so it keeps its kind and
+        // its own switch.
+        for (kind, expected) in [
+            ("m.space.child", OtherEvent::SpaceChild),
+            ("m.space.parent", OtherEvent::SpaceParent),
+            ("m.widget", OtherEvent::Widget),
+            ("m.call.member", OtherEvent::State),
+            ("m.room.third_party_invite", OtherEvent::State),
+            ("m.beacon_info", OtherEvent::State),
+            ("m.room.name", OtherEvent::State),
+            ("m.room.member", OtherEvent::State),
+        ] {
+            let item = project(&raw_event(serde_json::json!({
+                "type": kind, "event_id": "$s", "sender": "@alice:example.org",
+                "state_key": "k", "origin_server_ts": 1, "content": {}, "unsigned": unsigned,
+            })));
+            let Some(TimelineItem::Other {
+                event,
+                event_type,
+                state,
+                ..
+            }) = item
+            else {
+                panic!("{kind}: an other item: {item:?}");
+            };
+            assert_eq!((event, event_type.as_str(), state), (expected, kind, true));
+        }
+        // GIVEN the same kind as a message and as a state event THEN only the
+        // state one is marked as state.
+        for (kind, state_key, expected) in [
+            ("m.beacon", None, false),
+            ("m.beacon_info", Some("k"), true),
+        ] {
+            let mut event = serde_json::json!({
+                "type": kind, "event_id": "$l", "sender": "@alice:example.org",
+                "origin_server_ts": 1, "content": {},
+            });
+            if let Some(key) = state_key {
+                event["state_key"] = key.into();
+            }
+            let item = project(&raw_event(event));
+            assert!(
+                matches!(
+                    item,
+                    Some(TimelineItem::Other { event: OtherEvent::Location, state, .. }) if state == expected
+                ),
+                "{kind}: {item:?}"
+            );
+        }
+        for kind in ["m.reaction", "m.room.redaction"] {
+            let item = project(&message_like(kind, serde_json::json!({ "broken": true })));
+            assert!(item.is_none(), "{kind}: {item:?}");
         }
     }
 
@@ -1376,7 +2138,7 @@ mod tests {
                 "{sender} {prev:?} -> {membership}"
             );
         }
-        // No change at all is not shown.
+        // No change at all is no member change.
         assert_eq!(member(B, B, "join", Some("join")), None);
     }
 
@@ -1400,7 +2162,8 @@ mod tests {
             change(MembershipChange::Kicked)
         );
         assert_eq!(member(B, B, "join", None), change(MembershipChange::Joined));
-        // A leave after a leave that the event does say is still no change.
+        // A leave after a leave that the event does say is still no member
+        // change.
         assert_eq!(member(B, B, "leave", Some("leave")), None);
     }
 
@@ -1497,7 +2260,7 @@ mod tests {
 
     /// GIVEN changes to the room's state WHEN projected THEN each security-
     /// relevant one is shown, names and topics are projected and empty ones
-    /// are `None`, and an unknown state type is not shown.
+    /// are `None`, and an unknown state type is no room change.
     #[test]
     fn given_room_state_events_then_known_changes_are_shown() {
         const A: &str = "@alice:example.org";
@@ -1586,9 +2349,16 @@ mod tests {
             ),
             Some(StateChange::GuestAccess { allowed: false })
         );
+        // A type with no room change is a generic state line, not a change.
         assert_eq!(
-            room("org.example.custom", serde_json::json!({ "x": 1 })),
-            None
+            other_of(&state_event(
+                "org.example.custom",
+                A,
+                "",
+                serde_json::json!({ "x": 1 }),
+                None
+            )),
+            Some((OtherEvent::State, "org.example.custom".into()))
         );
     }
 

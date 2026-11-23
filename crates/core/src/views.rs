@@ -389,7 +389,8 @@ mod tests {
                     | TimelineItem::Redaction { .. }
                     | TimelineItem::Reaction { .. }
                     | TimelineItem::File { .. }
-                    | TimelineItem::State { .. } => unreachable!(),
+                    | TimelineItem::State { .. }
+                    | TimelineItem::Other { .. } => unreachable!(),
                 })
                 .collect();
             seen.splice(0..0, ids);
@@ -424,7 +425,8 @@ mod tests {
                     | TimelineItem::Redaction { .. }
                     | TimelineItem::Reaction { .. }
                     | TimelineItem::File { .. }
-                    | TimelineItem::State { .. } => unreachable!(),
+                    | TimelineItem::State { .. }
+                    | TimelineItem::Other { .. } => unreachable!(),
                 })
                 .collect()
         };

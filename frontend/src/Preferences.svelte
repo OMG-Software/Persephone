@@ -7,6 +7,7 @@
   import DiagnosticsSettings from './DiagnosticsSettings.svelte';
   import { notWindows } from './image';
   import { EVENT_SWITCHES } from './stateText';
+  import { OTHER_SWITCHES } from './eventText';
   import {
     CHAT_TEXT_SIZES,
     IDLE_LOCK_CHOICES,
@@ -111,6 +112,30 @@
     </p>
     <div class="event-switches">
       {#each EVENT_SWITCHES as { key, label } (key)}
+        <label class="switch-row">
+          <input
+            type="checkbox"
+            role="switch"
+            checked={settings.timelineEvents[key]}
+            onchange={(event) => onchange({ timelineEvents: { [key]: event.currentTarget.checked } })}
+          />
+          <span>{label}</span>
+        </label>
+      {/each}
+    </div>
+  </div>
+  <div class="panel" role="group" aria-labelledby="other-switches-heading">
+    <h3 id="other-switches-heading">Other events in the timeline</h3>
+    <p class="note">
+      Choose which other events show as lines between the messages, such as verification
+      requests, calls and polls. Persephone shows what kind each event is, not its content.
+      Messages of any type, images, files and messages that cannot be decrypted have no switch.
+      A deleted message or event shows as a line such as "Message deleted." unless you hide
+      those lines below. Invitations by email or phone follow the "Invitations, declined and
+      withdrawn" switch above.
+    </p>
+    <div class="event-switches">
+      {#each OTHER_SWITCHES as { key, label } (key)}
         <label class="switch-row">
           <input
             type="checkbox"

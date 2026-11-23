@@ -65,7 +65,17 @@ test('GIVEN an account whose settings have not loaded THEN Enter sends, sizes ar
       guestAccess: true,
       serverAccess: true,
       creation: true,
-      upgrades: true
+      upgrades: true,
+      verification: true,
+      calls: true,
+      callSignalling: true,
+      polls: true,
+      stickers: true,
+      locations: true,
+      spaces: true,
+      widgets: true,
+      otherEvents: true,
+      deletedMessages: true
     },
     theme: 'orange',
     sharePresence: true,

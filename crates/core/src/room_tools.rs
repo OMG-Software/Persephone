@@ -12,7 +12,7 @@ use matrix_sdk::{
 };
 use persephone_contracts::{
     AttachmentKind, AttachmentPage, FocusedTimeline, LocalSearchFilters, PinnedMessages,
-    TimelineItem, TimelinePage,
+    TimelineEvents, TimelineItem, TimelinePage,
 };
 use persephone_core_protocol::{ErrorCode, MAX_EVENT_ID_BYTES, MAX_TIMELINE_EVENTS};
 use std::time::Duration;
@@ -50,6 +50,7 @@ pub async fn jump_to_date(
     views: &MatrixViews,
     room: &str,
     timestamp: u64,
+    events: &TimelineEvents,
 ) -> Result<FocusedTimeline, ErrorCode> {
     let joined = joined_room(client, room)?;
     let ts = MilliSecondsSinceUnixEpoch(
@@ -81,7 +82,7 @@ pub async fn jump_to_date(
         views,
         room,
         found.event_id.as_str(),
-        Some((timestamp, backward)),
+        Some((timestamp, backward, events)),
     )
     .await
 }
@@ -182,7 +183,7 @@ async fn focused_context(
     views: &MatrixViews,
     room: &str,
     raw: &str,
-    date: Option<(u64, bool)>,
+    date: Option<(u64, bool, &TimelineEvents)>,
 ) -> Result<FocusedTimeline, ErrorCode> {
     let joined = joined_room(client, room)?;
     let id = event_id(raw)?;
@@ -205,7 +206,7 @@ async fn focused_context(
         chunk.extend(context.events_after);
         let mut items = views.project_chunk(client, &joined, &chunk).await?;
         let selected = match date {
-            Some((timestamp, backward)) => date_target(&items, timestamp, backward)
+            Some((timestamp, backward, events)) => date_target(&items, timestamp, backward, events)
                 .ok_or(ErrorCode::NotFound)?
                 .to_owned(),
             None if items.iter().any(|item| item_id(item) == Some(raw)) => raw.to_owned(),
@@ -240,8 +241,15 @@ async fn focused_context(
     }
 }
 
-/// Skip hidden messages and relation-only events that have no timeline row.
-fn date_target(items: &[TimelineItem], timestamp: u64, backward: bool) -> Option<&str> {
+/// The line nearest `timestamp` that the account's switches show, so the
+/// page has it to scroll to. Relation-only events, which have no line, and
+/// deleted messages are skipped.
+fn date_target<'a>(
+    items: &'a [TimelineItem],
+    timestamp: u64,
+    backward: bool,
+    events: &TimelineEvents,
+) -> Option<&'a str> {
     let redacted: std::collections::BTreeSet<&str> = items
         .iter()
         .filter_map(|item| {
@@ -252,43 +260,51 @@ fn date_target(items: &[TimelineItem], timestamp: u64, backward: bool) -> Option
             }
         })
         .collect();
-    let candidates = items.iter().filter_map(|item| {
-        let (id, time) = match item {
-            TimelineItem::Message {
-                event_id,
-                origin_server_ts,
-                ..
-            }
-            | TimelineItem::Image {
-                event_id,
-                origin_server_ts,
-                ..
-            }
-            | TimelineItem::File {
-                event_id,
-                origin_server_ts,
-                ..
-            }
-            | TimelineItem::Notice {
-                event_id,
-                origin_server_ts,
-                ..
-            }
-            | TimelineItem::State {
-                event_id,
-                origin_server_ts,
-                ..
-            } => (event_id, origin_server_ts.as_ref()?.get()),
-            _ => return None,
-        };
-        (!redacted.contains(id.as_str())
-            && if backward {
-                time <= timestamp
-            } else {
-                time >= timestamp
-            })
-        .then_some((id.as_str(), time))
-    });
+    let candidates = items
+        .iter()
+        .filter(|item| crate::timeline_filter::shown(item, events))
+        .filter_map(|item| {
+            let (id, time) = match item {
+                TimelineItem::Message {
+                    event_id,
+                    origin_server_ts,
+                    ..
+                }
+                | TimelineItem::Image {
+                    event_id,
+                    origin_server_ts,
+                    ..
+                }
+                | TimelineItem::File {
+                    event_id,
+                    origin_server_ts,
+                    ..
+                }
+                | TimelineItem::Notice {
+                    event_id,
+                    origin_server_ts,
+                    ..
+                }
+                | TimelineItem::State {
+                    event_id,
+                    origin_server_ts,
+                    ..
+                }
+                | TimelineItem::Other {
+                    event_id,
+                    origin_server_ts,
+                    ..
+                } => (event_id, origin_server_ts.as_ref()?.get()),
+                _ => return None,
+            };
+            (!redacted.contains(id.as_str())
+                && if backward {
+                    time <= timestamp
+                } else {
+                    time >= timestamp
+                })
+            .then_some((id.as_str(), time))
+        });
     if backward {
         candidates.max_by_key(|(_, time)| *time)
     } else {
@@ -307,7 +323,8 @@ fn item_id(item: &TimelineItem) -> Option<&str> {
         | TimelineItem::Edit { event_id, .. }
         | TimelineItem::Reaction { event_id, .. }
         | TimelineItem::Redaction { event_id, .. }
-        | TimelineItem::State { event_id, .. } => Some(event_id),
+        | TimelineItem::State { event_id, .. }
+        | TimelineItem::Other { event_id, .. } => Some(event_id),
         TimelineItem::Gap { .. } => None,
     }
 }
@@ -582,6 +599,41 @@ pub async fn attachments(
 mod tests {
     use super::*;
 
+    /// GIVEN call connection lines nearer the date than a message WHEN a date
+    /// target is chosen THEN it is the nearest line the switches show: the
+    /// call line while its switch is on, the message once it is off.
+    #[test]
+    fn given_switched_off_lines_near_a_date_then_the_nearest_shown_line_is_the_target() {
+        use persephone_contracts::{OtherEvent, UnixMillis};
+        let other = |id: &str, ts: u64| TimelineItem::Other {
+            event_id: id.into(),
+            sender: "@a:example.org".into(),
+            origin_server_ts: Some(UnixMillis::new(ts).unwrap()),
+            event: OtherEvent::CallSignalling,
+            event_type: "m.call.candidates".into(),
+            state: false,
+            deleted: false,
+        };
+        let message = TimelineItem::Message {
+            event_id: "$message".into(),
+            sender: "@a:example.org".into(),
+            body: "hi".into(),
+            origin_server_ts: Some(UnixMillis::new(30).unwrap()),
+            reply_to: None,
+        };
+        let items = [other("$early", 10), other("$near", 20), message];
+        let on = TimelineEvents::default();
+        let off = TimelineEvents {
+            call_signalling: false,
+            ..TimelineEvents::default()
+        };
+        assert_eq!(date_target(&items, 15, false, &on), Some("$near"));
+        assert_eq!(date_target(&items, 15, false, &off), Some("$message"));
+        assert_eq!(date_target(&items, 25, true, &on), Some("$near"));
+        assert_eq!(date_target(&items, 25, true, &off), None);
+        assert_eq!(date_target(&items[..2], 15, false, &off), None);
+    }
+
     #[test]
     /// Check event ID rejection before any request can reach the homeserver.
     fn given_invalid_or_oversized_event_id_then_reject_before_network() {
@@ -759,7 +811,14 @@ mod tests {
             .mount(&server)
             .await;
         assert!(matches!(
-            jump_to_date(&client, &MatrixViews::default(), ROOM, 1).await,
+            jump_to_date(
+                &client,
+                &MatrixViews::default(),
+                ROOM,
+                1,
+                &TimelineEvents::default()
+            )
+            .await,
             Err(ErrorCode::Unavailable)
         ));
         assert!(
@@ -914,7 +973,9 @@ mod tests {
             .await;
         context_mock(&server).await;
         let views = MatrixViews::default();
-        let result = jump_to_date(&client, &views, ROOM, 10).await.unwrap();
+        let result = jump_to_date(&client, &views, ROOM, 10, &TimelineEvents::default())
+            .await
+            .unwrap();
         assert_eq!(result.event_id, "$wanted");
         assert!(matches!(
             result.page.items.last(),
@@ -959,10 +1020,16 @@ mod tests {
             .await;
         context_mock(&server).await;
         assert_eq!(
-            jump_to_date(&client, &MatrixViews::default(), ROOM, 20)
-                .await
-                .unwrap()
-                .event_id,
+            jump_to_date(
+                &client,
+                &MatrixViews::default(),
+                ROOM,
+                20,
+                &TimelineEvents::default()
+            )
+            .await
+            .unwrap()
+            .event_id,
             "$wanted"
         );
     }
@@ -1326,9 +1393,15 @@ mod tests {
     async fn given_ignored_date_target_then_visible_later_context_event_is_selected() {
         let server = MockServer::builder().start().await;
         let client = ignored_date_fixture(&server, true).await;
-        let result = jump_to_date(&client, &MatrixViews::default(), ROOM, 10)
-            .await
-            .unwrap();
+        let result = jump_to_date(
+            &client,
+            &MatrixViews::default(),
+            ROOM,
+            10,
+            &TimelineEvents::default(),
+        )
+        .await
+        .unwrap();
         assert_eq!(result.event_id, "$visible");
         assert!(
             !result
@@ -1345,7 +1418,14 @@ mod tests {
         let server = MockServer::builder().start().await;
         let client = ignored_date_fixture(&server, false).await;
         assert!(matches!(
-            jump_to_date(&client, &MatrixViews::default(), ROOM, 10).await,
+            jump_to_date(
+                &client,
+                &MatrixViews::default(),
+                ROOM,
+                10,
+                &TimelineEvents::default()
+            )
+            .await,
             Err(ErrorCode::NotFound)
         ));
         assert!(

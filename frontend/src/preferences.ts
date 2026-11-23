@@ -19,7 +19,8 @@ export const DEFAULT_SETTINGS: AccountSettings = {
   loadRoomPictures: false,
   // Hidden from screenshots and screen sharing until the account turns it off.
   captureProtection: true,
-  // Every kind of room change shows until the account turns one off.
+  // Every kind of room change and other event shows until the account turns
+  // one off.
   timelineEvents: {
     joins: true,
     leaves: true,
@@ -40,7 +41,17 @@ export const DEFAULT_SETTINGS: AccountSettings = {
     guestAccess: true,
     serverAccess: true,
     creation: true,
-    upgrades: true
+    upgrades: true,
+    verification: true,
+    calls: true,
+    callSignalling: true,
+    polls: true,
+    stickers: true,
+    locations: true,
+    spaces: true,
+    widgets: true,
+    otherEvents: true,
+    deletedMessages: true
   },
   theme: DEFAULT_THEME,
   // Presence is shared, as online, until the account changes it (ADR-0057).

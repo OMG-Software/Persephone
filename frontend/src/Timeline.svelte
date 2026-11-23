@@ -17,7 +17,8 @@
   import RoomPicture from './RoomPicture.svelte';
   import type { RoomPictures } from './roomPictures';
   import { personText, shownName } from './people';
-  import { changeShown, stateParts } from './stateText';
+  import { stateParts } from './stateText';
+  import { deletedParts, itemShown, otherParts } from './eventText';
   import { clockTime, dayDividers, fullTime, toDate } from './time';
   import { DEFAULT_SETTINGS } from './preferences';
   import { applyRelations, newestEvent, quoteOf, type ShownItem } from './timeline';
@@ -115,17 +116,17 @@
     onloadpicture?: () => void;
     // The room's known display names, by user ID: shown beside each ID.
     names?: ReadonlyMap<string, string>;
-    // Which kinds of room changes to show (the account's settings).
+    // Which kinds of room changes and other events to show (the account's
+    // settings).
     events?: TimelineEvents;
   } = $props();
 
   // Edits, deletions and reactions are not lines of their own: each message
   // shows its newest edit and its reactions, or that it was deleted.
-  // Room changes whose switch is off in the settings are left out.
+  // Room changes, other events and deleted messages whose switch is off in
+  // the settings are left out.
   const shown = $derived(
-    applyRelations(items, ownUserId).filter(
-      (item) => item.kind !== 'state' || changeShown(item.change, events)
-    )
+    applyRelations(items, ownUserId).filter((item) => itemShown(item, events))
   );
 
   // Fixed text per trust level; the core sends codes only.
@@ -145,9 +146,10 @@
     withheld: 'Encrypted message. The sender did not share its key with this device.',
     untrusted_sender:
       'Encrypted message from a device its owner has not verified. It is not shown, because it could come from a device they never added.',
-    unsupported: 'A kind of message Persephone does not show yet.',
     deleted: 'Message deleted.'
   };
+  // A notice code this build does not know (the core never sends one).
+  const unknownNotice = 'A message that is not shown.';
   const key = (item: ShownItem, index: number) =>
     item.kind === 'gap' ? 'gap-' + index : item.event_id;
 
@@ -258,6 +260,11 @@
       {#if error}
         <p role="alert" class="error">{error}</p>
       {/if}
+      {#if shown.length === 0 && hasOlder && !loading}
+        <!-- The core leaves out what the settings hide, so a page of them
+             only is empty; say so rather than look like an empty room. -->
+        <p class="gap">Nothing to show in the newest history. Your settings can hide some kinds of events.</p>
+      {/if}
       <ol>
         {#each shown as item, index (key(item, index))}
           <li data-event-id={item.kind === 'gap' ? undefined : item.event_id}
@@ -305,7 +312,7 @@
                 <span
                   ><PersonName userId={item.sender} name={shownName(item.sender, names)} />: {noticeText[
                     item.notice
-                  ] ?? noticeText.unsupported}</span
+                  ] ?? unknownNotice}</span
                 >
                 {#if date}
                   <time datetime={date.toISOString()} title={fullTime(date)}>{clockTime(date)}</time>
@@ -325,14 +332,31 @@
                   <time datetime={date.toISOString()} title={fullTime(date)}>{clockTime(date)}</time>
                 {/if}
               </p>
+            {:else if item.kind === 'other'}
+              {@const date = toDate(item.origin_server_ts)}
+              {@const parts = (item.deleted ? deletedParts : otherParts)(item.sender, item.event, item.event_type)}
+              <p class="notice other-event" class:state-change={!item.deleted}>
+                <span
+                  >{#each parts as part, at (at)}{#if 'person' in part}<PersonName
+                        userId={part.person}
+                        name={shownName(part.person, names)}
+                      />{:else if 'name' in part}<bdi>{part.name}</bdi
+                      >{:else}{part.text}{/if}{/each}</span
+                >
+                {#if date}
+                  <time datetime={date.toISOString()} title={fullTime(date)}>{clockTime(date)}</time>
+                {/if}
+              </p>
             {:else}
               <p class="gap">Some messages are not shown here.</p>
             {/if}
-            {#if item.kind === 'image' || item.kind === 'file' || item.kind === 'notice'}
+            {#if item.kind === 'image' || item.kind === 'file' || item.kind === 'notice' || item.kind === 'other'}
               <div class="item-actions">
                 <MessageActions
                   sender={personText(item.sender, names)}
-                  onpin={onpin && item.kind !== 'notice' ? () => onpin(item.event_id) : undefined}
+                  onpin={onpin && item.kind !== 'notice' && item.kind !== 'other'
+                    ? () => onpin(item.event_id)
+                    : undefined}
                   onreport={onreport && ownUserId !== null && item.sender !== ownUserId
                     ? () => onreport(item.event_id, item.sender)
                     : undefined}
