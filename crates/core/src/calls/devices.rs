@@ -169,6 +169,9 @@ pub fn list(host: &dyn CallHost, cancel: &AtomicBool) -> Result<Listing, ListErr
         link.finish(FINISH_TIMEOUT);
         return Err(ListError::Cancelled);
     }
+    // This worker gets no `SetDiagnostics`, so it sends no records, and its
+    // first message is the answer. Turning its log on would need this wait
+    // to skip `FromWorker::Diagnostic` (ADR-0058).
     let answer = if link.send(ToWorker::ListDevices).is_ok() {
         let deadline = Instant::now() + LIST_TIMEOUT;
         loop {

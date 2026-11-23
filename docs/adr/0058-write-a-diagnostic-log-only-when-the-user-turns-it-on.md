@@ -74,6 +74,11 @@ can apply one redaction rule, one size limit and one deletion rule.
   one question is open, a second request is refused with `limit_exceeded`.
 * Turning it off needs no question. The file stays until the next start, so
   the user can send it (owner's choice).
+* When the core ends, also for a profile switch, it turns the log off after
+  the stores lock, so the queue is written and the file is synced. A switch
+  starts the other profile's core as a new process, after this one's log
+  is off; that core has the other profile's file, and its own start erases
+  that file.
 * The core announces each change with the content-free event
   `diagnostics_changed { on }`. The UI host and the page start or stop
   sending their records.
@@ -159,10 +164,14 @@ Each line has `ts` (Unix milliseconds), `seq` (a counter for this run),
 Every string goes through one filter in the core before it is written,
 including field names and values from other processes:
 
-* A field whose name contains `password`, `passphrase`, `secret`, `token`,
-  `jwt`, `key`, `credential`, `authorization`, `cookie` or `recovery` is
-  written as `[redacted]`. Exceptions are `room_key_count` style counters;
-  there are none now.
+* A field whose name contains `password`, `passphrase`, `passwd`, `secret`,
+  `token`, `jwt`, `credential`, `authorization`, `cookie`, `recovery` or
+  `private`, or has a part (split at `_`, `-`, `.` or a space) that ends
+  with `key` or `keys` (`key`, `frame_key`, `apikey`, but not `keyed`), is
+  written as `[redacted]`. The case does not matter. The one exception is
+  `state_key`, which is kept: it is event metadata (see Records), not a
+  credential. An exception is added only for a named metadata field, never
+  for a pattern.
 * In free text, these are replaced with `[redacted]`: JWTs (`eyJ…` with two
   dots), Matrix tokens (`syt_`, `syr_`, `mat_`, `mct_`), the value after
   `access_token=`, `token=`, `password=` and `Bearer `, JSON string values of

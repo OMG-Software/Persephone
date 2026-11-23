@@ -5029,6 +5029,30 @@ mod tests {
         assert!(call.portal_needed(true));
     }
 
+    /// GIVEN the log on before the join WHEN the worker sends records before
+    /// it reports `Connected` THEN the call goes on: the records end no call
+    /// and change nothing, and `Connected` still applies (ADR-0058).
+    #[test]
+    fn given_records_before_connected_then_the_call_goes_on() {
+        let fixture = test_call(
+            no_admission(),
+            Arc::new(Flags::default()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let inner = controller(FakeHost::new(true, None)).inner.clone();
+        let mut call = fixture.call;
+        for message in ["connecting", "ice candidate"] {
+            let record = FromWorker::Diagnostic {
+                level: 3,
+                target: "livekit::room".into(),
+                message: message.into(),
+            };
+            assert_eq!(call.worker_event(&inner, &record), Ok(()));
+            assert_eq!(call.view.apply(&record), Applied::Same);
+        }
+        assert_eq!(call.view.apply(&FromWorker::Connected), Applied::Changed);
+    }
+
     /// GIVEN the worker already reported the camera `On` while the own tile
     /// is blocked by an off WHEN the task takes the latest camera-on (the
     /// view does not change) THEN the store is synced and the own picture is

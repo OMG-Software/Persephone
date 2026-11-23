@@ -304,6 +304,11 @@ fn run(options: Options) -> ExitCode {
     // Exit locks through the same path as a requested lock: admission closes,
     // admitted work finishes, then the stores close.
     let state = core.session().lock(EXIT_LOCK_TIMEOUT, || {}).0;
+    // The diagnostic log writes its queue, flushes and syncs before this
+    // process ends, and before a switch starts the other profile's core,
+    // which has its own file (ADR-0058). Lines still queued would be lost
+    // otherwise.
+    diagnostics::global().turn_off();
     // A switch starts the new core last, once this one's stores are locked.
     // The new core opens another profile, so even a lock that did not finish
     // hands nothing over: this process exits next, and its stores with it.
