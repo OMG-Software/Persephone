@@ -2,8 +2,8 @@
 
 The contained process that runs one call (ADR-0043). It joins one LiveKit room with frame encryption and platform audio. It speaks the bounded protocol of `crates/call-protocol` over stdin and stdout.
 
-- Treat the core's messages and the SFU as untrusted. Validate every identity before it goes back to the core. Send no free text, only closed `FailureCode` values.
-- Stdout is the frame channel. Write nothing else to it. Write nothing to stderr. Add no logging output.
+- Treat the core's messages and the SFU as untrusted. Validate every identity before it goes back to the core. Send no free text, only closed `FailureCode` values. The one exception is `FromWorker::Diagnostic` (ADR-0058): `diagnostics.rs` sends `log` records and room event notes only while the core has sent `SetDiagnostics { on: true }`, at most 256 waiting, 200 a second and 8 per writer round after control messages. Never put a token, JWT, key or frame key in a note.
+- Stdout is the frame channel. Write nothing else to it. Write nothing to stderr. Add no logging output other than the diagnostic records above.
 - Keep the JWT, TURN credentials and frame keys in `Zeroizing` until they go to LiveKit. Move them out with `std::mem::take`; do not copy them. Never log them.
 - Use bounded queues only. The LiveKit event receiver is unbounded inside the SDK; the worker drains it in one task.
 - Check containment before reading any input. On a missing control send `Ready`, then `Failed(Containment)`, and exit. The feature `dev-uncontained` skips the exit for local tests only. Never enable it in a build that ships.

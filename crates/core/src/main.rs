@@ -51,6 +51,7 @@ use persephone_contracts::StoreState;
 use persephone_core::{
     Core, ServeEnd,
     credentials::{self, CredentialSource},
+    diagnostics,
     passphrase::Unlock,
     profiles::{self, Profiles},
     serve,
@@ -182,6 +183,9 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    // The diagnostic log is off; this only routes the core's `tracing` and
+    // `log` output to it for when the user turns it on (ADR-0058).
+    diagnostics::install();
     #[cfg(target_os = "macos")]
     return macos_main(options);
     #[cfg(not(target_os = "macos"))]
@@ -230,6 +234,20 @@ fn run(options: Options) -> ExitCode {
                 Profiles::new(base, options.profile.clone(), options.account.unwrap_or(1))
             })
     };
+    // An old diagnostic log is erased at every start, before the profile
+    // opens (ADR-0058). A failure is reported by kind only. `--demo` has no
+    // slots, so it has no log path: no log, and nothing is erased.
+    let diagnostics_path = slots
+        .as_ref()
+        .map(|slots| diagnostics::path_in(&slots.dir()));
+    if let Some(path) = &diagnostics_path
+        && let Err(error) = diagnostics::erase(path)
+    {
+        eprintln!(
+            "persephone: cannot erase the old diagnostic log: {:?}",
+            error.kind()
+        );
+    }
     let session = match &slots {
         _ if options.demo => Session::not_configured(),
         Some(slots) => Session::open(slots.dir(), vault::platform(), Unlock::new(source.clone())),
@@ -242,7 +260,8 @@ fn run(options: Options) -> ExitCode {
     }
     let core = Core::default()
         .with_credentials(source)
-        .with_session(session);
+        .with_session(session)
+        .with_diagnostics(diagnostics_path);
     let core = match slots {
         Some(slots) => core.with_profiles(slots),
         None => core,
@@ -285,6 +304,11 @@ fn run(options: Options) -> ExitCode {
     // Exit locks through the same path as a requested lock: admission closes,
     // admitted work finishes, then the stores close.
     let state = core.session().lock(EXIT_LOCK_TIMEOUT, || {}).0;
+    // The diagnostic log writes its queue, flushes and syncs before this
+    // process ends, and before a switch starts the other profile's core,
+    // which has its own file (ADR-0058). Lines still queued would be lost
+    // otherwise.
+    diagnostics::global().turn_off();
     // A switch starts the new core last, once this one's stores are locked.
     // The new core opens another profile, so even a lock that did not finish
     // hands nothing over: this process exits next, and its stores with it.

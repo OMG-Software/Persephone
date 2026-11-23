@@ -21,6 +21,10 @@ persephone-core-protocol = { path = "../crates/core-protocol" }
 persephone-media-protocol = { path = "../crates/media-protocol" }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.154"
+# The diagnostic log (ADR-0058): this process's `log` records go to the core
+# while the user has it on. Already in the lock through tauri's stack at this
+# version.
+log = { version = "=0.4.34", default-features = false }
 # Explicit features only. `custom-protocol` makes every build, debug included,
 # serve the embedded frontend; there is no development server. Off: devtools in
 # release, dynamic ACL changes, tracing (which records IPC payloads),

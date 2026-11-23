@@ -31,6 +31,13 @@ chacha20poly1305 = { version = "=0.11.0", default-features = false, features = [
 # Only the `Stream` trait, to read the SDK's room-key stream; already in the
 # graph through matrix-sdk at this version.
 futures-core = { version = "=0.3.34", default-features = false }
+# The opt-in diagnostic log (ADR-0058): its `tracing` subscriber and `log`
+# logger, and the patterns that remove credentials from library text. All
+# three are already in the lock through matrix-sdk and reqwest, at these
+# versions and features.
+log = { version = "=0.4.34", default-features = false }
+regex = "=1.13.1"
+tracing = { version = "=0.1.44", default-features = false, features = ["std"] }
 # Same explicit features as the P0 Matrix fixtures; rustls-aws-lc-rs is also
 # what gives reqwest its TLS backend when the core is built on its own.
 # experimental-send-custom-to-device: the Olm-encrypted call key to-device

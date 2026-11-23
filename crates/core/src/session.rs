@@ -900,6 +900,12 @@ fn run_sync(
             std::future::ready(())
         })
     };
+    // Every event's metadata for the diagnostic log; nothing while it is off
+    // (ADR-0058).
+    let diagnostic_handlers = {
+        let _context = runtime.enter();
+        crate::diagnostics::events::register(&client)
+    };
     // The SDK keeps notification handlers as long as the client, so this one
     // holds the session only weakly.
     let mut notifying = false;
@@ -1097,6 +1103,9 @@ fn run_sync(
         client.remove_event_handler(handler);
     }
     client.remove_event_handler(members_handler);
+    for handler in diagnostic_handlers {
+        client.remove_event_handler(handler);
+    }
     drop(changes);
     drop(identities);
     drop(keys);

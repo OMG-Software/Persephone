@@ -4,6 +4,7 @@
   import { notificationLevelText } from './accountChanges';
   import ProxySettings from './ProxySettings.svelte';
   import CallDevices from './CallDevices.svelte';
+  import DiagnosticsSettings from './DiagnosticsSettings.svelte';
   import { notWindows } from './image';
   import { EVENT_SWITCHES } from './stateText';
   import {
@@ -318,6 +319,10 @@
         Lock at once with {mac ? '⌘⇧L' : 'Ctrl+Shift+L'}.
       </p>
     {/if}
+  </div>
+  <div class="panel">
+    <h3>Diagnostics</h3>
+    <DiagnosticsSettings />
   </div>
   {#if failure}
     <p role="alert" class="error">{failure}</p>

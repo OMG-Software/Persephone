@@ -503,6 +503,12 @@ and ephemeral correlation ID. Never log event bodies, stable room/user IDs,
 credentials, recovery material, or unrestricted Debug dumps. Failure cases and
 support exports need the same review as normal operation; disable automatic
 crash uploading and inspect local crash artifacts.
+The opt-in diagnostic log of ADR-0058 is the one exception: while the user has
+turned it on in this run, it holds stable IDs and event metadata, and it is
+deleted at the next start. Persephone's own event records never hold event
+content, and every line passes a redaction filter for credentials and keys.
+Library records are free text, so the filter is a best-effort control, not a
+proof that no other text or secret is in the file.
 
 Commit Rust/frontend locks, audit exact production and build-time graphs per
 target, minimize enabled features, review new dependencies and unmaintained

@@ -206,6 +206,29 @@ pub const NEW_BACKUP: (&str, &str) = (
      Delete the old backup and start a new one?",
 );
 
+/// The warning before the diagnostic log is turned on (ADR-0058).
+pub const DIAGNOSTICS: (&str, &str) = (
+    "Turn on the diagnostic log?",
+    "Persephone writes a diagnostic log to a file in its profile folder \
+     until you turn it off or close Persephone. Use it only to find a fault, \
+     for example in a call.\n\n\
+     The log can hold information that identifies you and others: your user \
+     ID and account name, other people's user IDs, room IDs, server names, \
+     device IDs, network addresses, and the type, sender, time and size of \
+     every Matrix event. Persephone's own records of events hold no message \
+     text, images or other event content, but the libraries it uses can \
+     add their own text.\n\n\
+     Persephone never writes passwords, access tokens, call tokens or keys \
+     to it on purpose, and it removes them from the text of the libraries \
+     it uses. That filter cannot be complete, so read the file before you \
+     send it to anyone.\n\n\
+     When you turn it off, the file stays until Persephone starts again \
+     with this profile. At that start, Persephone writes random bytes over \
+     the file and deletes it. On an SSD and some file systems, old copies of the data \
+     can stay on the disk.\n\n\
+     Turn on the diagnostic log?",
+);
+
 /// The Save dialog's title for a new recovery key, and the file name it
 /// suggests.
 pub const SAVE_RECOVERY_KEY: (&str, &str) = (

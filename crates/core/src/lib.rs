@@ -40,6 +40,7 @@ pub mod calls;
 pub mod contacts;
 pub mod conversations;
 pub mod credentials;
+pub mod diagnostics;
 pub mod directory;
 pub mod discovery;
 pub mod files;
@@ -162,6 +163,8 @@ struct Notifications {
     video_taken: Option<Instant>,
     /// The report of third-party modules changed since the last notification.
     modules_changed: bool,
+    /// The diagnostic log was turned on or off since the last notification.
+    diagnostics_changed: bool,
     /// The latest desktop notification waiting to be sent (ADR-0022): room
     /// and sender names. A newer one replaces it.
     toast: Option<(String, String)>,
@@ -206,6 +209,15 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Hub {
+    /// Queues one `diagnostics_changed` event.
+    fn diagnostics_changed(&self) {
+        let mut notifications = lock(&self.notifications);
+        if !notifications.diagnostics_changed {
+            notifications.diagnostics_changed = true;
+            self.changed.notify_all();
+        }
+    }
+
     /// Queues one content-free `modules_changed` event.
     fn modules_changed(&self) {
         let mut notifications = lock(&self.notifications);
@@ -493,6 +505,14 @@ pub struct Core {
     /// Serializes reading and writing the reviewed ids in the store, so two
     /// acknowledgements do not overwrite each other. The scan never takes it.
     modules_store: Mutex<()>,
+    /// Where this run's diagnostic log goes (ADR-0058); `None` for
+    /// synthetic data or a profile without a directory.
+    diagnostics_path: Option<std::path::PathBuf>,
+    /// The question to turn the log on is shown: a second one is refused.
+    diagnostics_asking: AtomicBool,
+    /// An "off" drains the writer: a second one is refused meanwhile, so
+    /// repeated requests cannot start a thread each.
+    diagnostics_stopping: AtomicBool,
 }
 
 /// Counts one running long call until it is dropped, with its thread or with
@@ -730,6 +750,9 @@ impl Core {
             long_calls: AtomicUsize::new(0),
             modules: Mutex::new(modules::Modules::default()),
             modules_store: Mutex::new(()),
+            diagnostics_path: None,
+            diagnostics_asking: AtomicBool::new(false),
+            diagnostics_stopping: AtomicBool::new(false),
         }
     }
 
@@ -770,6 +793,126 @@ impl Core {
     pub fn with_credentials(mut self, source: Arc<dyn CredentialSource>) -> Self {
         self.credentials = source;
         self
+    }
+
+    /// Where the diagnostic log goes when the user turns it on (ADR-0058);
+    /// `None` leaves it unavailable.
+    pub fn with_diagnostics(mut self, path: Option<std::path::PathBuf>) -> Self {
+        self.diagnostics_path = path;
+        self
+    }
+
+    fn diagnostics_status(&self) -> persephone_contracts::DiagnosticsStatus {
+        let log = diagnostics::global();
+        persephone_contracts::DiagnosticsStatus {
+            on: log.is_on(),
+            full: log.is_full(),
+            failed: log.has_failed(),
+            available: self.diagnostics_path.is_some(),
+            path: log.path().map(|path| path.display().to_string()),
+        }
+    }
+
+    /// Asks in the core's own window, then turns the log on: `true` when
+    /// on, `false` when the user said no. One question at a time.
+    fn diagnostics_on(&self) -> Result<LongCall<'_>, ErrorCode> {
+        let path = self
+            .diagnostics_path
+            .clone()
+            .ok_or(ErrorCode::Unavailable)?;
+        if diagnostics::global().is_on() {
+            return Ok(Box::new(|| Outcome::Ok(serde_json::Value::Bool(true))));
+        }
+        if self.diagnostics_asking.swap(true, Ordering::SeqCst) {
+            return Err(ErrorCode::LimitExceeded);
+        }
+        // Clears the flag when the call ends in any way, also when it is
+        // dropped unrun or the prompt panics.
+        let asking = ClearOnDrop(&self.diagnostics_asking);
+        // An "off" sent while the question is open wins over the "yes".
+        let epoch = diagnostics::global().epoch();
+        Ok(Box::new(move || {
+            let answer = self.credentials.confirm_diagnostics();
+            drop(asking);
+            match answer {
+                Ok(true) => {}
+                Ok(false) | Err(credentials::PromptError::Cancelled) => {
+                    return Outcome::Ok(serde_json::Value::Bool(false));
+                }
+                Err(credentials::PromptError::Unsupported) => {
+                    return Outcome::Error(ErrorCode::Unavailable);
+                }
+                Err(_) => return Outcome::Error(ErrorCode::Internal),
+            }
+            match diagnostics::global().turn_on_unless_off_since(&path, epoch) {
+                Ok(true) => {}
+                Ok(false) => return Outcome::Ok(serde_json::Value::Bool(false)),
+                Err(_) => return Outcome::Error(ErrorCode::Unavailable),
+            }
+            self.hub.diagnostics_changed();
+            Outcome::Ok(serde_json::Value::Bool(true))
+        }))
+    }
+
+    /// Turns the log off. Every "off" cancels an "on" that waits for the
+    /// user. Only an "off" with a writer to drain gets a thread, because the
+    /// drain waits for the writer to write and flush: one at a time, and a
+    /// second one meanwhile is refused before a thread is started. An "off"
+    /// for a log that is already off is answered at once (`Ok(None)`).
+    /// So the drain threads, also those whose reply waits for a UI that
+    /// stopped reading, are bounded by the user's own "yes" answers in the
+    /// core's window: only a "yes" turns the log on again.
+    fn diagnostics_off(&self) -> Result<Option<LongCall<'_>>, ErrorCode> {
+        let log = diagnostics::global();
+        if self.diagnostics_stopping.swap(true, Ordering::SeqCst) {
+            log.cancel_pending_on();
+            return Err(ErrorCode::LimitExceeded);
+        }
+        let stopping = ClearOnDrop(&self.diagnostics_stopping);
+        log.cancel_pending_on();
+        // Checked after the cancel, so no later "on" passes its check. An
+        // "on" that passed it just before may still finish; it then sends
+        // `diagnostics_changed`, so the page shows the log on and can ask
+        // again.
+        if !log.is_on() {
+            return Ok(None);
+        }
+        Ok(Some(Box::new(move || {
+            diagnostics::global().turn_off();
+            drop(stopping);
+            self.hub.diagnostics_changed();
+            Outcome::Ok(serde_json::Value::Bool(false))
+        })))
+    }
+
+    /// The UI host's or the page's records, checked against the protocol's
+    /// limits. Ignored while the log is off.
+    fn diagnostic_records(
+        source: persephone_core_protocol::RecordSource,
+        records: &[persephone_core_protocol::DiagnosticRecord],
+    ) -> Outcome {
+        use persephone_core_protocol::{DiagnosticRecord, RecordLevel, RecordSource};
+        if !DiagnosticRecord::batch_fits(records) {
+            return Outcome::Error(ErrorCode::LimitExceeded);
+        }
+        let log = diagnostics::global();
+        if !log.is_on() {
+            return Outcome::Ok(serde_json::Value::Null);
+        }
+        let source = match source {
+            RecordSource::Ui => diagnostics::Source::Ui,
+            RecordSource::Page => diagnostics::Source::Page,
+        };
+        for record in records {
+            let level = match record.level {
+                RecordLevel::Error => diagnostics::Level::Error,
+                RecordLevel::Warn => diagnostics::Level::Warn,
+                RecordLevel::Info => diagnostics::Level::Info,
+                RecordLevel::Debug => diagnostics::Level::Debug,
+            };
+            log.record(source, level, &record.target, &record.message, &[]);
+        }
+        Outcome::Ok(serde_json::Value::Null)
     }
 
     pub fn session(&self) -> &Session {
@@ -878,6 +1021,18 @@ impl Core {
             },
             Call::CallDevices {} => match self.call_devices() {
                 Ok(call) => Answer::Later(id, call),
+                Err(code) => error(code),
+            },
+            Call::SetDiagnostics { on: true } => match self.diagnostics_on() {
+                Ok(call) => Answer::Later(id, call),
+                Err(code) => error(code),
+            },
+            Call::SetDiagnostics { on: false } => match self.diagnostics_off() {
+                Ok(Some(call)) => Answer::Later(id, call),
+                Ok(None) => Answer::Reply(Reply {
+                    id,
+                    outcome: Outcome::Ok(serde_json::Value::Bool(false)),
+                }),
                 Err(code) => error(code),
             },
             Call::AcceptInvite { .. }
@@ -1146,6 +1301,13 @@ impl Core {
                         Err(_) => Outcome::Error(ErrorCode::Locked),
                     }
                 }
+            }
+            Call::DiagnosticsStatus {} => ok(&self.diagnostics_status()),
+            // Turning on asks first and turning off waits for the writer,
+            // so only `answer` runs them, as long calls.
+            Call::SetDiagnostics { .. } => Outcome::Error(ErrorCode::Unavailable),
+            Call::DiagnosticRecords { source, records } => {
+                Self::diagnostic_records(*source, records)
             }
             Call::ProxySetting {} => match self.proxy_setting() {
                 Ok(socks) => ok(&persephone_contracts::ProxySetting {
@@ -3528,6 +3690,7 @@ impl Core {
                 && !notifications.calls_changed
                 && !notifications.rings_changed
                 && !notifications.modules_changed
+                && !notifications.diagnostics_changed
                 && notifications.toast.is_none()
                 && !video_due
                 && !notifications.closed;
@@ -3577,6 +3740,11 @@ impl Core {
             std::mem::take(&mut notifications.rings_changed).then_some(Event::RingsChanged {});
         let modules =
             std::mem::take(&mut notifications.modules_changed).then_some(Event::ModulesChanged {});
+        let diagnostics = std::mem::take(&mut notifications.diagnostics_changed).then(|| {
+            Event::DiagnosticsChanged {
+                on: diagnostics::global().is_on(),
+            }
+        });
         let for_call = std::mem::take(&mut notifications.toast_call);
         let toast = notifications
             .toast
@@ -3596,6 +3764,7 @@ impl Core {
                 .chain(rings)
                 .chain(video)
                 .chain(modules)
+                .chain(diagnostics)
                 .chain(toast)
                 .chain(
                     rooms
@@ -3641,6 +3810,65 @@ impl Core {
     }
 }
 
+/// Holds one of the core's "one at a time" diagnostics flags; it is cleared
+/// when this is dropped, also when the call is dropped unrun or panics.
+struct ClearOnDrop<'a>(&'a AtomicBool);
+
+impl Drop for ClearOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Commands sent many times each second (video pictures, image bands) or
+/// that only feed the log (record batches): only their failures are noted,
+/// as the page does (ADR-0058).
+const QUIET_REQUESTS: &[&str] = &["call_video_frame", "image_band", "diagnostic_records"];
+
+/// One command for the diagnostic log: its name, its request ID, how it
+/// ended (`ok`, an error code, or `running` for a long call that reports
+/// again when it ends) and how long it took. A quiet command that succeeded
+/// is not noted.
+fn note_request(log: &diagnostics::Log, id: u32, name: &str, outcome: String, started: Instant) {
+    if outcome == "ok" && QUIET_REQUESTS.contains(&name) {
+        return;
+    }
+    log.record(
+        diagnostics::Source::Core,
+        diagnostics::Level::Debug,
+        "persephone::request",
+        name,
+        &[
+            ("id", serde_json::Value::from(id)),
+            ("outcome", serde_json::Value::from(outcome)),
+            (
+                "ms",
+                serde_json::Value::from(
+                    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                ),
+            ),
+        ],
+    );
+}
+
+fn outcome_kind(outcome: &Outcome) -> String {
+    match outcome {
+        Outcome::Ok(_) => "ok".into(),
+        Outcome::Error(code) => serde_json::to_value(code)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .unwrap_or_else(|| "error".into()),
+    }
+}
+
+fn answer_kind(answer: &Answer<'_>) -> String {
+    match answer {
+        Answer::Reply(reply) => outcome_kind(&reply.outcome),
+        Answer::Pixels(..) | Answer::Video(..) => "ok".into(),
+        Answer::Later(..) => "running".into(),
+    }
+}
+
 /// Serves requests from `input` until the UI closes the stream or violates the
 /// protocol, while a second thread writes notifications. Replies and events
 /// share `output` and are written whole, one frame at a time.
@@ -3677,6 +3905,19 @@ pub fn serve<R: Read, W: Write + Send>(core: &Core, mut input: R, output: W) -> 
                         ready = true;
                         lock(&core.hub.notifications).ready = true;
                     }
+                    // The diagnostic log gets each command's name, outcome
+                    // and time, never its arguments (ADR-0058).
+                    let started = Instant::now();
+                    let named = diagnostics::global()
+                        .is_on()
+                        .then(|| match &incoming {
+                            ToCore::Request(request)
+                            | ToCore::Paste(request, _)
+                            | ToCore::PasteRefused(request) => {
+                                request.call.command().map(|name| (request.id, name))
+                            }
+                        })
+                        .flatten();
                     let answer = match incoming {
                         ToCore::Request(request) => core.answer(&request),
                         ToCore::Paste(request, image) => core.answer_paste(&request, image),
@@ -3687,6 +3928,15 @@ pub fn serve<R: Read, W: Write + Send>(core: &Core, mut input: R, output: W) -> 
                             outcome: Outcome::Error(ErrorCode::LimitExceeded),
                         }),
                     };
+                    if let Some((id, name)) = &named {
+                        note_request(
+                            diagnostics::global(),
+                            *id,
+                            name,
+                            answer_kind(&answer),
+                            started,
+                        );
+                    }
                     let written = match answer {
                         Answer::Reply(reply) => {
                             send(&mut *lock(&output), &CoreMessage::Reply(reply))
@@ -3738,10 +3988,17 @@ pub fn serve<R: Read, W: Write + Send>(core: &Core, mut input: R, output: W) -> 
                                 .stack_size(LONG_CALL_STACK_BYTES)
                                 .spawn_scoped(scope, move || {
                                     let _running = running;
-                                    let reply = CoreMessage::Reply(Reply {
-                                        id,
-                                        outcome: call(),
-                                    });
+                                    let outcome = call();
+                                    if let Some((id, name)) = &named {
+                                        note_request(
+                                            diagnostics::global(),
+                                            *id,
+                                            name,
+                                            outcome_kind(&outcome),
+                                            started,
+                                        );
+                                    }
+                                    let reply = CoreMessage::Reply(Reply { id, outcome });
                                     if send(&mut *lock(output), &reply).is_err() {
                                         core.close();
                                     }
@@ -5009,5 +5266,370 @@ mod tests {
         let notifications = lock(&hub.notifications);
         assert!(notifications.room_list_changed);
         assert!(notifications.pending.is_empty(), "no room content changed");
+    }
+
+    /// Answers the diagnostic log's question with a fixed answer.
+    struct DiagnosticsAnswer(bool);
+
+    impl CredentialSource for DiagnosticsAnswer {
+        fn ask(&self, _: &str) -> Result<credentials::Credentials, credentials::PromptError> {
+            Err(credentials::PromptError::Unsupported)
+        }
+
+        fn confirm_open_link(
+            &self,
+            caption: &str,
+            _: &str,
+        ) -> Result<bool, credentials::PromptError> {
+            assert_eq!(caption, prompt_text::DIAGNOSTICS.0);
+            Ok(self.0)
+        }
+    }
+
+    /// Runs one test that changes the process's diagnostic log through
+    /// `Core` at a time: such a test reads the log's epoch, and another one
+    /// that sends "off" moves it in between.
+    fn global_log_test() -> std::sync::MutexGuard<'static, ()> {
+        static GLOBAL_LOG: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        GLOBAL_LOG
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// GIVEN a core with a log path WHEN the user says no, then yes, then
+    /// turns the log off THEN it is on only after the yes, each change
+    /// raises one event, the page's records are written only while on, and
+    /// the file stays after off. The only test that uses the process's log.
+    #[test]
+    fn given_the_switch_when_answered_then_the_log_follows_the_user() {
+        use persephone_core_protocol::{DiagnosticRecord, RecordLevel, RecordSource};
+        let _global = global_log_test();
+        let dir = tempfile::tempdir().unwrap();
+        let path = diagnostics::path_in(dir.path());
+        let no = Core::default()
+            .with_credentials(Arc::new(DiagnosticsAnswer(false)))
+            .with_diagnostics(Some(path.clone()));
+        let answer = no.diagnostics_on().unwrap()();
+        assert_eq!(answer, Outcome::Ok(serde_json::Value::Bool(false)));
+        assert!(!no.diagnostics_status().on);
+        assert!(!path.exists());
+
+        let core = Core::default()
+            .with_credentials(Arc::new(DiagnosticsAnswer(true)))
+            .with_diagnostics(Some(path.clone()));
+        let page = |message: &str| {
+            Core::diagnostic_records(
+                RecordSource::Page,
+                &[DiagnosticRecord {
+                    level: RecordLevel::Info,
+                    target: "bridge".into(),
+                    message: message.into(),
+                }],
+            )
+        };
+        page("before on");
+        assert_eq!(
+            core.diagnostics_on().unwrap()(),
+            Outcome::Ok(serde_json::Value::Bool(true))
+        );
+        assert_eq!(
+            core.take_events(),
+            Some(vec![Event::DiagnosticsChanged { on: true }])
+        );
+        let status = core.diagnostics_status();
+        assert!(status.on && status.available);
+        assert_eq!(status.path, Some(path.display().to_string()));
+        page("while on");
+        // Off drains and flushes the writer, so it is a long call, run off
+        // the serving loop.
+        let off = core.answer(&Request {
+            id: 9,
+            call: Call::SetDiagnostics { on: false },
+        });
+        let Answer::Later(9, off) = off else {
+            panic!("turning off must be a long call");
+        };
+        assert_eq!(off(), Outcome::Ok(serde_json::Value::Bool(false)));
+        assert_eq!(
+            core.take_events(),
+            Some(vec![Event::DiagnosticsChanged { on: false }])
+        );
+        page("after off");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("while on"), "{text}");
+        assert!(
+            !text.contains("before on") && !text.contains("after off"),
+            "{text}"
+        );
+        assert!(!core.diagnostics_status().on);
+        assert_eq!(
+            core.diagnostics_status().path,
+            Some(path.display().to_string())
+        );
+    }
+
+    /// GIVEN too many records, or one over its limits THEN the call is
+    /// refused; GIVEN no log path THEN turning on is unavailable.
+    #[test]
+    fn given_bad_records_or_no_path_then_refused() {
+        use persephone_core_protocol::{
+            DiagnosticRecord, MAX_DIAGNOSTIC_MESSAGE_BYTES, MAX_DIAGNOSTIC_RECORDS, RecordLevel,
+            RecordSource,
+        };
+        let record = |message: String| DiagnosticRecord {
+            level: RecordLevel::Debug,
+            target: "t".into(),
+            message,
+        };
+        let many = vec![record("m".into()); MAX_DIAGNOSTIC_RECORDS + 1];
+        assert_eq!(
+            Core::diagnostic_records(RecordSource::Ui, &many),
+            Outcome::Error(ErrorCode::LimitExceeded)
+        );
+        let long = [record("m".repeat(MAX_DIAGNOSTIC_MESSAGE_BYTES + 1))];
+        assert_eq!(
+            Core::diagnostic_records(RecordSource::Ui, &long),
+            Outcome::Error(ErrorCode::LimitExceeded)
+        );
+        let core = Core::default();
+        assert!(matches!(core.diagnostics_on(), Err(ErrorCode::Unavailable)));
+        assert!(!core.diagnostics_status().available);
+    }
+
+    /// GIVEN the log on and an "off" that is not finished WHEN the UI sends
+    /// more THEN each is refused before a thread is started, and still
+    /// cancels a pending "on"; GIVEN the log off THEN an "off" is answered
+    /// at once, with no thread, also when the UI does not read replies.
+    #[test]
+    fn given_an_off_running_when_more_arrive_then_refused() {
+        let _global = global_log_test();
+        let dir = tempfile::tempdir().unwrap();
+        let core = Core::default();
+        let off = |id| {
+            core.answer(&Request {
+                id,
+                call: Call::SetDiagnostics { on: false },
+            })
+        };
+        let at_once = |answer: Answer<'_>| {
+            matches!(
+                answer,
+                Answer::Reply(Reply {
+                    outcome: Outcome::Ok(serde_json::Value::Bool(false)),
+                    ..
+                })
+            )
+        };
+        let epoch = diagnostics::global().epoch();
+        for id in 20..30 {
+            assert!(at_once(off(id)), "request {id}: off needs no thread");
+        }
+        assert!(diagnostics::global().epoch() >= epoch + 10);
+        diagnostics::global()
+            .turn_on(&diagnostics::path_in(dir.path()))
+            .unwrap();
+        let first = off(1);
+        assert!(matches!(first, Answer::Later(1, _)));
+        let epoch = diagnostics::global().epoch();
+        for id in 2..10 {
+            assert!(
+                matches!(
+                    off(id),
+                    Answer::Reply(Reply {
+                        outcome: Outcome::Error(ErrorCode::LimitExceeded),
+                        ..
+                    })
+                ),
+                "request {id}"
+            );
+        }
+        assert!(diagnostics::global().epoch() >= epoch + 8);
+        // Dropped unrun (as at a profile switch), it frees the slot.
+        drop(first);
+        let Answer::Later(10, drain) = off(10) else {
+            panic!("an off with a writer to drain is a long call");
+        };
+        assert_eq!(drain(), Outcome::Ok(serde_json::Value::Bool(false)));
+        assert!(!diagnostics::global().is_on());
+        assert!(at_once(off(11)));
+    }
+
+    /// GIVEN the log on and a UI that stops reading WHEN it sends many "off"
+    /// requests through the serving loop THEN at most one drain runs while
+    /// the output is blocked, and once the UI reads again every request has
+    /// its answer: off, or refused while the drain ran.
+    #[test]
+    fn given_blocked_output_when_offs_repeat_then_one_drain_at_most() {
+        use persephone_core_protocol::{FromCore, receive_from_core};
+        use std::sync::{Condvar, Mutex};
+
+        /// Whether the output is open, and what it took.
+        type Taken = Mutex<(bool, Vec<u8>)>;
+        /// Output that takes nothing until it is opened.
+        #[derive(Clone, Default)]
+        struct Gate(Arc<(Taken, Condvar)>);
+        impl std::io::Write for Gate {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                let (lock, opened) = &*self.0;
+                let mut state = lock.lock().unwrap();
+                while !state.0 {
+                    state = opened.wait(state).unwrap();
+                }
+                state.1.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        /// Input that gives one request at a time, 10 ms apart, so that
+        /// each request comes after the drain before it ended: a burst
+        /// would be refused while the first drain still runs.
+        struct Paced(
+            std::collections::VecDeque<Vec<u8>>,
+            std::io::Cursor<Vec<u8>>,
+        );
+        impl std::io::Read for Paced {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                loop {
+                    let read = self.1.read(buffer)?;
+                    if read > 0 {
+                        return Ok(read);
+                    }
+                    let Some(next) = self.0.pop_front() else {
+                        return Ok(0);
+                    };
+                    std::thread::sleep(Duration::from_millis(10));
+                    self.1 = std::io::Cursor::new(next);
+                }
+            }
+        }
+
+        let _global = global_log_test();
+        let dir = tempfile::tempdir().unwrap();
+        diagnostics::global()
+            .turn_on(&diagnostics::path_in(dir.path()))
+            .unwrap();
+        let core = Core::default();
+        const OFFS: u32 = 50;
+        let input = Paced(
+            (1..=OFFS)
+                .map(|id| request(id, Call::SetDiagnostics { on: false }))
+                .collect(),
+            std::io::Cursor::new(Vec::new()),
+        );
+        let gate = Gate::default();
+        let most = std::thread::scope(|scope| {
+            let served = scope.spawn(|| serve(&core, input, gate.clone()));
+            let mut most = 0;
+            // Longer than the 50 requests take to arrive.
+            let until = Instant::now() + Duration::from_millis(900);
+            while Instant::now() < until {
+                most = most.max(core.long_calls.load(Ordering::SeqCst));
+                std::thread::yield_now();
+            }
+            let (lock, opened) = &*gate.0;
+            lock.lock().unwrap().0 = true;
+            opened.notify_all();
+            assert_eq!(served.join().unwrap(), ServeEnd::UiClosed);
+            most
+        });
+        assert!(most <= 1, "{most} drains at once");
+        assert!(!diagnostics::global().is_on());
+        let output = std::mem::take(&mut gate.0.0.lock().unwrap().1);
+        let budgets = ResourceBudgets::default();
+        let mut reader = std::io::Cursor::new(output);
+        let mut answered = std::collections::BTreeSet::new();
+        while let Ok(FromCore::Message(message)) = receive_from_core(&mut reader, &budgets) {
+            if let CoreMessage::Reply(reply) = message {
+                assert!(
+                    matches!(
+                        reply.outcome,
+                        Outcome::Ok(serde_json::Value::Bool(false))
+                            | Outcome::Error(ErrorCode::LimitExceeded)
+                    ),
+                    "{reply:?}"
+                );
+                answered.insert(reply.id);
+            }
+        }
+        assert_eq!(answered, (1..=OFFS).collect());
+    }
+
+    /// GIVEN requests that succeeded, failed and are still running WHEN they
+    /// are noted THEN each line names the command, its request ID and its
+    /// outcome code, and nothing else of the request.
+    #[test]
+    fn given_requests_when_noted_then_lines_hold_name_id_and_outcome() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = diagnostics::path_in(dir.path());
+        let log = diagnostics::Log::default();
+        log.turn_on(&path).unwrap();
+        let reply = |outcome| Answer::Reply(Reply { id: 1, outcome });
+        let started = Instant::now();
+        note_request(
+            &log,
+            1,
+            "room_list",
+            answer_kind(&reply(Outcome::Ok(serde_json::Value::Null))),
+            started,
+        );
+        note_request(
+            &log,
+            2,
+            "sign_in",
+            answer_kind(&reply(Outcome::Error(ErrorCode::LimitExceeded))),
+            started,
+        );
+        // Frame fetches and record batches are noted only when they fail.
+        note_request(&log, 4, "call_video_frame", "ok".into(), started);
+        note_request(&log, 5, "image_band", "core_internal".into(), started);
+        note_request(&log, 6, "diagnostic_records", "ok".into(), started);
+        note_request(
+            &log,
+            7,
+            "diagnostic_records",
+            "limit_exceeded".into(),
+            started,
+        );
+        note_request(
+            &log,
+            3,
+            "set_diagnostics",
+            answer_kind(&Answer::Later(
+                3,
+                Box::new(|| Outcome::Ok(serde_json::Value::Null)),
+            )),
+            started,
+        );
+        log.turn_off();
+        let lines: Vec<serde_json::Value> = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .filter(|line: &serde_json::Value| line["target"] == "persephone::request")
+            .collect();
+        let seen: Vec<(String, u64, String)> = lines
+            .iter()
+            .map(|line| {
+                (
+                    line["message"].as_str().unwrap().to_owned(),
+                    line["fields"]["id"].as_u64().unwrap(),
+                    line["fields"]["outcome"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                ("room_list".into(), 1, "ok".into()),
+                ("sign_in".into(), 2, "limit_exceeded".into()),
+                ("image_band".into(), 5, "core_internal".into()),
+                ("diagnostic_records".into(), 7, "limit_exceeded".into()),
+                ("set_diagnostics".into(), 3, "running".into()),
+            ]
+        );
+        assert!(lines.iter().all(|line| line["fields"]["ms"].is_u64()));
     }
 }

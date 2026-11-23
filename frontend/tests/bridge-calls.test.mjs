@@ -171,6 +171,9 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
     [() => bridge.proxySetting(), 'proxy_setting', {}],
     [() => bridge.setProxySetting('127.0.0.1:9050'), 'set_proxy_setting', { proxy: '127.0.0.1:9050' }],
     [() => bridge.setProxySetting(null), 'set_proxy_setting', { proxy: null }],
+    [() => bridge.diagnosticsStatus(), 'diagnostics_status', {}],
+    [() => bridge.setDiagnostics(true), 'set_diagnostics', { on: true }],
+    [() => bridge.setDiagnostics(false), 'set_diagnostics', { on: false }],
     [() => bridge.callDevices(), 'call_devices', {}],
     [() => bridge.setCallDevices('mic', null, 'cam'), 'set_call_devices', { recording: 'mic', playout: null, camera: 'cam' }],
     [() => bridge.setCallDevices(null, 'spk', null), 'set_call_devices', { recording: null, playout: 'spk', camera: null }],
@@ -362,7 +365,10 @@ test('GIVEN a paste that is not one PNG or JPEG of 1 byte to 20 MiB WHEN attache
 
 test('GIVEN session channel messages WHEN delivered THEN each reaches its own callback and only an unknown message counts as a session change', async () => {
   let channel;
+  const asked = [];
   mockIPC((command, args) => {
+    asked.push(command);
+    if (command === 'diagnostics_status') return { on: false, full: false, failed: false, available: true, path: null };
     assert.equal(command, 'watch_session');
     channel = args.onChange;
     return null;
@@ -377,10 +383,74 @@ test('GIVEN session channel messages WHEN delivered THEN each reaches its own ca
     () => seen.push('callVideo'),
     () => seen.push('rings')
   );
-  for (const message of ['calls', 'callVideo', 'modules', 'rooms', 'security', 'session', 'something-new', 'calls', 'callvideo', 'rings', 'Rings']) {
+  for (const message of ['calls', 'callVideo', 'modules', 'rooms', 'security', 'session', 'something-new', 'calls', 'callvideo', 'rings', 'Rings', 'diagnostics']) {
     channel.onmessage(message);
   }
   assert.deepEqual(seen, ['calls', 'callVideo', 'modules', 'rooms', 'security', 'session', 'session', 'calls', 'session', 'rings', 'session']);
+  // Watching asks the log's state once, and the `diagnostics` message asks again
+  // instead of clearing the page.
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(asked, ['watch_session', 'diagnostics_status', 'diagnostics_status']);
+});
+
+test('GIVEN the diagnostic log on WHEN a status read fails THEN the page keeps following it; WHEN a later read says off THEN it stops', async () => {
+  let channel;
+  let status = { on: true, full: false, failed: false, available: true, path: null };
+  mockIPC((command, args) => {
+    if (command === 'watch_session') {
+      channel = args.onChange;
+      return null;
+    }
+    if (command === 'diagnostics_status') {
+      if (status === null) throw 'core_unavailable';
+      return status;
+    }
+    return null;
+  });
+  const nothing = () => {};
+  await bridge.watchSession(nothing, nothing, nothing, nothing, nothing, nothing, nothing);
+  assert.equal(bridge.diagnosticsOn(), true);
+  status = null;
+  channel.onmessage('diagnostics');
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(bridge.diagnosticsOn(), true, 'an unreadable state is not off');
+  status = { on: false, full: false, failed: false, available: true, path: null };
+  channel.onmessage('diagnostics');
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(bridge.diagnosticsOn(), false);
+});
+
+test('GIVEN the diagnostic log WHEN it is on THEN host calls are noted by name and outcome only, and off notes nothing', async () => {
+  const records = [];
+  let on = true;
+  mockIPC((command, args) => {
+    if (command === 'diagnostics_status') return { on, full: false, failed: false, available: true, path: null };
+    if (command === 'diagnostic_records') {
+      records.push(...args.records);
+      return null;
+    }
+    if (command === 'watch_session') return null;
+    if (command === 'set_proxy_setting') throw 'invalid_argument';
+    if (command === 'sign_in') throw 'secret: Bearer abc';
+    return null;
+  });
+  const nothing = () => {};
+  await bridge.watchSession(nothing, nothing, nothing, nothing, nothing, nothing, nothing);
+  assert.equal(bridge.diagnosticsOn(), true);
+  await bridge.proxySetting();
+  await assert.rejects(bridge.setProxySetting('127.0.0.1:1'));
+  await assert.rejects(bridge.signIn('https://e.org'));
+  const diagnostics = await import('../src/bridge/diagnostics.ts');
+  const batch = diagnostics.takeBatch();
+  const messages = batch.map((record) => record.message.replace(/ \d+ ms$/, ''));
+  assert.deepEqual(messages, ['proxy_setting ok', 'set_proxy_setting invalid_argument', 'sign_in error']);
+  const text = JSON.stringify(batch);
+  for (const secret of ['127.0.0.1', 'e.org', 'Bearer', 'abc']) assert.ok(!text.includes(secret), secret);
+
+  diagnostics.setPageDiagnostics(false);
+  await bridge.proxySetting();
+  assert.deepEqual(diagnostics.takeBatch(), []);
+  assert.deepEqual(records, []);
 });
 
 test('GIVEN the video frame call WHEN the host answers THEN an empty body is no picture, a whole picture is parsed and anything else is refused', async () => {

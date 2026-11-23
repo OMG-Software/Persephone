@@ -3,8 +3,10 @@
 //! One process runs one call. It checks its own containment, reports the
 //! result in `Ready`, and then reads core messages from stdin and writes
 //! worker messages to stdout, both as media-protocol Control frames. The
-//! first message must be `Join` or `ListDevices`. Stdout is the frame channel: nothing else
-//! may write to it, and the worker writes nothing to stderr.
+//! first message must be `Join` or `ListDevices`, after any number of
+//! `SetDiagnostics`. Stdout is the frame channel: nothing else may write to
+//! it, and the worker writes nothing to stderr. Diagnostic records go to the
+//! core over stdout only while the core has turned them on (ADR-0058).
 //!
 //! Three bounded queues connect the parts: the stdin reader thread, the
 //! call task, and the stdout writer thread. Video pictures do not use the
@@ -14,6 +16,7 @@ mod args;
 mod camera;
 mod camera_channel;
 mod containment;
+mod diagnostics;
 mod mapping;
 #[cfg(test)]
 mod native_volume_tests;
@@ -63,6 +66,8 @@ fn main() -> ExitCode {
     if !arguments_ok {
         bits |= containment::CHECK_FAILED;
     }
+    // Records only after the core turns them on.
+    diagnostics::install();
     let (output, writer_queue) = Output::new();
     let writer = std::thread::spawn(move || output::write_stdout(writer_queue));
     let Ok(runtime) = build_runtime() else {
@@ -109,7 +114,7 @@ async fn run(bits: u32, output: Output) -> u8 {
     // Input is read only after the containment check passed.
     let (input_tx, mut input) = mpsc::channel::<Input>(INPUT_CAPACITY);
     std::thread::spawn(move || read_loop(input_tx));
-    match input.recv().await {
+    match first_message(&mut input, |on| diagnostics::global().set_on(on)).await {
         Some(Input::Message(ToWorker::ListDevices)) => session::list_devices(&output).await,
         Some(Input::Message(first)) if mapping::is_first_message_allowed(&first) => {
             session::run(first, &mut input, &output).await
@@ -122,6 +127,21 @@ async fn run(bits: u32, output: Output) -> u8 {
                 })
                 .await;
             EXIT_FAILED
+        }
+    }
+}
+
+/// The first message that is not the diagnostic log switch. The switch may
+/// come first, any number of times, so the join's own records are kept
+/// (ADR-0058); each one goes to `switch`.
+async fn first_message(
+    input: &mut mpsc::Receiver<Input>,
+    mut switch: impl FnMut(bool),
+) -> Option<Input> {
+    loop {
+        match input.recv().await {
+            Some(Input::Message(ToWorker::SetDiagnostics { on })) => switch(on),
+            other => return other,
         }
     }
 }
@@ -145,7 +165,40 @@ fn read_loop(queue: mpsc::Sender<Input>) {
 
 #[cfg(test)]
 mod tests {
-    use super::build_runtime;
+    use super::{Input, build_runtime, first_message};
+    use persephone_call_protocol::ToWorker;
+    use tokio::sync::mpsc;
+
+    /// GIVEN switches before the first message WHEN the worker waits for it
+    /// THEN each switch is applied in order and the next message is returned;
+    /// a closed input after a switch is no message.
+    #[test]
+    fn given_switches_before_the_first_message_then_they_apply_and_it_follows() {
+        let runtime = build_runtime().expect("runtime builds");
+        runtime.block_on(async {
+            let (tx, mut rx) = mpsc::channel(8);
+            for item in [
+                Input::Message(ToWorker::SetDiagnostics { on: true }),
+                Input::Message(ToWorker::SetDiagnostics { on: false }),
+                Input::Message(ToWorker::SetDiagnostics { on: true }),
+                Input::Message(ToWorker::ListDevices),
+            ] {
+                tx.send(item).await.expect("queued");
+            }
+            let mut seen = Vec::new();
+            let first = first_message(&mut rx, |on| seen.push(on)).await;
+            assert!(matches!(first, Some(Input::Message(ToWorker::ListDevices))));
+            assert_eq!(seen, [true, false, true]);
+
+            tx.send(Input::Message(ToWorker::SetDiagnostics { on: true }))
+                .await
+                .expect("queued");
+            drop(tx);
+            let mut seen = Vec::new();
+            assert!(first_message(&mut rx, |on| seen.push(on)).await.is_none());
+            assert_eq!(seen, [true]);
+        });
+    }
 
     /// GIVEN the worker's runtime WHEN a loopback TCP connection is made on it
     /// THEN it succeeds (a runtime without the IO driver panics here, as the

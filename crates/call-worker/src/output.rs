@@ -22,6 +22,8 @@ use crate::video::rgba_len;
 
 /// Worker messages waiting for the stdout writer.
 pub const OUTPUT_CAPACITY: usize = 64;
+/// Diagnostic records written between two looks at the control queue.
+const DIAGNOSTICS_PER_ROUND: usize = 8;
 
 /// What the writer thread reads from the control queue.
 pub enum Item {
@@ -190,6 +192,7 @@ impl Output {
     /// Makes the output and the receiver for the writer thread.
     pub fn new() -> (Self, Receiver) {
         let (queue, receiver) = mpsc::channel(OUTPUT_CAPACITY);
+        crate::diagnostics::global().attach(queue.downgrade());
         let slots = Arc::new(VideoSlots::default());
         (
             Self {
@@ -274,10 +277,27 @@ pub fn write_loop<W: Write>(mut out: W, mut input: Receiver) -> bool {
                 }
             }
         }
+        // Diagnostic records only after every waiting control message, a
+        // few at a time, so neither control messages nor pictures wait long
+        // behind them (ADR-0058).
+        let mut more_records = false;
+        for taken in 1..=DIAGNOSTICS_PER_ROUND {
+            let Some(record) = crate::diagnostics::global().take() else {
+                break;
+            };
+            if write_message(&mut out, &record).is_err() {
+                return false;
+            }
+            // Perhaps more wait: look again before sleeping.
+            more_records = taken == DIAGNOSTICS_PER_ROUND;
+        }
         if let Some((tile, picture)) = input.slots.take() {
             if write_picture(&mut out, tile, &picture).is_err() {
                 return false;
             }
+            continue;
+        }
+        if more_records {
             continue;
         }
         if closed {

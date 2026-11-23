@@ -36,6 +36,8 @@ use persephone_media_protocol::{
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::io::{self, Read, Write};
 
+mod command_name;
+
 pub const MAX_LOCAL_SEARCH_BYTES: usize = 128;
 pub const MAX_SECTION_BYTES: usize = 64;
 pub const MAX_REPORT_REASON_BYTES: usize = 1000;
@@ -281,6 +283,24 @@ pub enum Call {
         /// Required, though it may be null.
         #[serde(deserialize_with = "Option::deserialize")]
         proxy: Option<String>,
+    },
+    /// Whether the diagnostic log is on, and its file (ADR-0058).
+    DiagnosticsStatus {},
+    /// Turn the diagnostic log on or off; the reply is whether it is on. On
+    /// asks the user first in the core's own window, so it can take until
+    /// they answer; a "no" replies `false`. Off needs no question and keeps
+    /// the file until the next start. Each change raises
+    /// [`Event::DiagnosticsChanged`].
+    SetDiagnostics {
+        on: bool,
+    },
+    /// Records for the diagnostic log from the UI host or the page: at most
+    /// [`MAX_DIAGNOSTIC_RECORDS`], each bounded as [`DiagnosticRecord`]
+    /// says. Ignored while the log is off. The UI host sets `source`; a
+    /// page's records always arrive as `page`.
+    DiagnosticRecords {
+        source: RecordSource,
+        records: Vec<DiagnosticRecord>,
     },
     /// The call microphones and speakers, and the saved choice (ADR-0043).
     /// Lists the devices through a contained call worker, so it can take
@@ -1046,6 +1066,12 @@ pub enum Event {
     /// The list of third-party modules changed: ask for `third_party_modules`.
     /// Content-free and coalesced like `SecurityChanged`.
     ModulesChanged {},
+    /// The diagnostic log was turned on or off (ADR-0058). The UI host and
+    /// the page send their records only while it is on. Coalesced; `on` is
+    /// the state when the event left the core.
+    DiagnosticsChanged {
+        on: bool,
+    },
     /// A message arrived that the account's push rules say to notify of, and
     /// desktop notifications are on (ADR-0022). The UI process shows a
     /// desktop notification with these names and never forwards it to the
@@ -1060,6 +1086,77 @@ pub enum Event {
         #[serde(default)]
         call: bool,
     },
+}
+
+/// Most records in one `diagnostic_records` call.
+pub const MAX_DIAGNOSTIC_RECORDS: usize = 64;
+/// Longest record message, in bytes.
+pub const MAX_DIAGNOSTIC_MESSAGE_BYTES: usize = 1024;
+/// Longest record target, in bytes.
+pub const MAX_DIAGNOSTIC_TARGET_BYTES: usize = 64;
+/// Most bytes of one call's records as JSON. JSON escaping can make a
+/// control character six bytes, so records within their own limits can
+/// still exceed the control frame; this keeps the call well under it. A
+/// full batch of plain records at their limits (about 72 KiB) fits.
+pub const MAX_DIAGNOSTIC_BATCH_BYTES: usize = 96 * 1024;
+
+/// The process a `diagnostic_records` call speaks for.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RecordSource {
+    Ui,
+    Page,
+}
+
+/// A record's level.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RecordLevel {
+    Error,
+    Warn,
+    Info,
+    Debug,
+}
+
+/// One record from the UI host or the page: a target of at most
+/// [`MAX_DIAGNOSTIC_TARGET_BYTES`] and a message of at most
+/// [`MAX_DIAGNOSTIC_MESSAGE_BYTES`]. The core redacts both again.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DiagnosticRecord {
+    pub level: RecordLevel,
+    pub target: String,
+    pub message: String,
+}
+
+impl DiagnosticRecord {
+    pub fn within_bounds(&self) -> bool {
+        self.target.len() <= MAX_DIAGNOSTIC_TARGET_BYTES
+            && self.message.len() <= MAX_DIAGNOSTIC_MESSAGE_BYTES
+    }
+
+    /// This record's size as JSON, with escapes.
+    pub fn encoded_len(&self) -> usize {
+        serde_json::to_vec(self).map_or(usize::MAX, |bytes| bytes.len())
+    }
+
+    /// Whether `records` may go in one call: at most
+    /// [`MAX_DIAGNOSTIC_RECORDS`], each within its bounds, and at most
+    /// [`MAX_DIAGNOSTIC_BATCH_BYTES`] as JSON.
+    pub fn batch_fits(records: &[Self]) -> bool {
+        records.len() <= MAX_DIAGNOSTIC_RECORDS
+            && records.iter().all(Self::within_bounds)
+            && serde_json::to_vec(records)
+                .is_ok_and(|bytes| bytes.len() <= MAX_DIAGNOSTIC_BATCH_BYTES)
+    }
+}
+
+impl Call {
+    /// The command's name, such as `proxy_setting`, without its arguments:
+    /// none of them is copied (ADR-0058).
+    pub fn command(&self) -> Option<String> {
+        command_name::tag_of(self)
+    }
 }
 
 /// Every frame from the core to the UI: a reply to a call, or an event.
@@ -1906,6 +2003,25 @@ mod tests {
                 r#"{"id":1,"call":{"command":"set_proxy_setting","proxy":null}}"#,
             ),
             (
+                Call::DiagnosticsStatus {},
+                r#"{"id":1,"call":{"command":"diagnostics_status"}}"#,
+            ),
+            (
+                Call::SetDiagnostics { on: true },
+                r#"{"id":1,"call":{"command":"set_diagnostics","on":true}}"#,
+            ),
+            (
+                Call::DiagnosticRecords {
+                    source: RecordSource::Page,
+                    records: vec![DiagnosticRecord {
+                        level: RecordLevel::Warn,
+                        target: "bridge".into(),
+                        message: "room_list error locked".into(),
+                    }],
+                },
+                r#"{"id":1,"call":{"command":"diagnostic_records","source":"page","records":[{"level":"warn","target":"bridge","message":"room_list error locked"}]}}"#,
+            ),
+            (
                 Call::CallDevices {},
                 r#"{"id":1,"call":{"command":"call_devices"}}"#,
             ),
@@ -2545,6 +2661,12 @@ mod tests {
             br#"{"id":1,"call":{"command":"set_proxy_setting"}}"#,
             br#"{"id":1,"call":{"command":"set_proxy_setting","proxy":"h:1","password":"x"}}"#,
             br#"{"id":1,"call":{"command":"proxy_setting","proxy":null}}"#,
+            br#"{"id":1,"call":{"command":"set_diagnostics"}}"#,
+            br#"{"id":1,"call":{"command":"set_diagnostics","on":"yes"}}"#,
+            br#"{"id":1,"call":{"command":"diagnostics_status","on":true}}"#,
+            br#"{"id":1,"call":{"command":"diagnostic_records","source":"core","records":[]}}"#,
+            br#"{"id":1,"call":{"command":"diagnostic_records","source":"page","records":[{"level":"trace","target":"t","message":"m"}]}}"#,
+            br#"{"id":1,"call":{"command":"diagnostic_records","source":"page","records":[{"level":"info","target":"t","message":"m","fields":{}}]}}"#,
             br#"{"id":1,"call":{"command":"set_call_devices"}}"#,
             br#"{"id":1,"call":{"command":"set_call_devices","recording":null}}"#,
             br#"{"id":1,"call":{"command":"set_call_devices","playout":null}}"#,
@@ -3729,5 +3851,90 @@ mod timeline_events_wire_tests {
         ] {
             assert!(!personal_call_within_limits(&refused), "{refused:?}");
         }
+    }
+
+    /// GIVEN calls with and without arguments WHEN their names are taken
+    /// THEN each is the wire tag.
+    #[test]
+    fn given_calls_when_named_then_tag_only() {
+        assert_eq!(
+            Call::ProxySetting {}.command().as_deref(),
+            Some("proxy_setting")
+        );
+        assert_eq!(
+            Call::SetProxySetting {
+                proxy: Some("h:1".into())
+            }
+            .command()
+            .as_deref(),
+            Some("set_proxy_setting")
+        );
+        assert_eq!(
+            Call::SetDiagnostics { on: true }.command().as_deref(),
+            Some("set_diagnostics")
+        );
+        for call in [
+            Call::AppStatus {},
+            Call::SignInWithOidc {
+                homeserver: "https://example.org/".into(),
+            },
+            Call::DiagnosticRecords {
+                source: RecordSource::Ui,
+                records: Vec::new(),
+            },
+        ] {
+            let name = call.command().expect("every call has a name");
+            let wire = serde_json::to_value(&call).unwrap();
+            assert_eq!(wire["command"], name.as_str());
+        }
+    }
+
+    /// GIVEN a diagnostics event THEN its wire form carries only `on`.
+    #[test]
+    fn given_diagnostics_event_then_wire_form_is_small() {
+        let event = CoreMessage::Event(Event::DiagnosticsChanged { on: true });
+        assert_eq!(
+            serde_json::to_string(&event).unwrap(),
+            r#"{"event":{"diagnostics_changed":{"on":true}}}"#
+        );
+    }
+
+    /// GIVEN records at and over the limits THEN only those within pass.
+    #[test]
+    fn given_records_then_bounds_are_checked() {
+        let record = |target: usize, message: usize| DiagnosticRecord {
+            level: RecordLevel::Info,
+            target: "t".repeat(target),
+            message: "m".repeat(message),
+        };
+        assert!(record(MAX_DIAGNOSTIC_TARGET_BYTES, MAX_DIAGNOSTIC_MESSAGE_BYTES).within_bounds());
+        assert!(!record(MAX_DIAGNOSTIC_TARGET_BYTES + 1, 1).within_bounds());
+        assert!(!record(1, MAX_DIAGNOSTIC_MESSAGE_BYTES + 1).within_bounds());
+    }
+
+    /// GIVEN a full batch of plain records THEN it fits; GIVEN the same
+    /// count of records within their limits but made of control characters,
+    /// which JSON escapes to six bytes THEN it does not, and it would also
+    /// have broken the control frame limit.
+    #[test]
+    fn given_escaped_records_then_the_batch_size_is_checked() {
+        let record = |message: String| DiagnosticRecord {
+            level: RecordLevel::Debug,
+            target: "t".into(),
+            message,
+        };
+        let plain = vec![record("m".repeat(MAX_DIAGNOSTIC_MESSAGE_BYTES)); MAX_DIAGNOSTIC_RECORDS];
+        assert!(DiagnosticRecord::batch_fits(&plain));
+        let escaped =
+            vec![record("\u{0}".repeat(MAX_DIAGNOSTIC_MESSAGE_BYTES)); MAX_DIAGNOSTIC_RECORDS];
+        assert!(escaped.iter().all(DiagnosticRecord::within_bounds));
+        assert!(!DiagnosticRecord::batch_fits(&escaped));
+        assert!(serde_json::to_vec(&escaped).unwrap().len() > 128 * 1024);
+        assert!(!DiagnosticRecord::batch_fits(&vec![
+            record("m".into());
+            MAX_DIAGNOSTIC_RECORDS
+                + 1
+        ]));
+        assert!(record("\u{0}".into()).encoded_len() > record("m".into()).encoded_len());
     }
 }

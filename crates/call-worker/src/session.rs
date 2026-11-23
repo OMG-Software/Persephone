@@ -19,7 +19,8 @@ use livekit::{
     options::{TrackPublishOptions, VideoCodec, VideoEncoding},
     prelude::{
         AudioProcessingOptions, LocalAudioTrack, LocalTrack, LocalTrackPublication,
-        LocalVideoTrack, PlatformAudio, RemoteAudioTrack, RemoteTrack, TrackSid, TrackSource,
+        LocalVideoTrack, PlatformAudio, RemoteAudioTrack, RemoteTrack, RemoteTrackPublication,
+        TrackSid, TrackSource,
     },
     rtc_engine::EngineError,
     webrtc::{
@@ -1701,6 +1702,10 @@ impl Call<'_> {
                 self.apply_playout();
                 Ok(Vec::new())
             }
+            ToWorker::SetDiagnostics { on } => {
+                crate::diagnostics::global().set_on(on);
+                Ok(Vec::new())
+            }
             ToWorker::SetCamera { on: true, remote } => {
                 // The remote that came with this command, taken now so it
                 // cannot go to another one: the camera channel gives them
@@ -1962,6 +1967,7 @@ async fn event_loop(
             event = events.recv() => match event {
                 // A decryption failure of one participant does not end the call.
                 Some(event) => {
+                    note_room_event(0, &event);
                     if call.on_event(0, &event).await.is_err() {
                         return End::Failed(FailureCode::Internal);
                     }
@@ -1975,6 +1981,7 @@ async fn event_loop(
                 // A failure of another SFU never ends the call.
                 match item {
                     Some(event) => {
+                        note_room_event(index, &event);
                         if call.on_event(index, &event).await.is_err() {
                             return End::Failed(FailureCode::Internal);
                         }
@@ -2276,6 +2283,222 @@ async fn publish_microphone(
         })
 }
 
+/// One diagnostic record for a room event that matters for media, while the
+/// log is on (ADR-0058): identities, track IDs, kinds and states. Never a
+/// payload, a token, a URL or a name. Only an event that is noted takes from
+/// the record budget, and its text is built only once it is admitted, so a
+/// flood of room events costs a count, not formatting.
+fn note_room_event(connection: u8, event: &RoomEvent) {
+    let diagnostics = crate::diagnostics::global();
+    if !is_noted(event) || !diagnostics.admit() {
+        return;
+    }
+    if let Some((level, text)) = describe_room_event(connection, event) {
+        diagnostics.push_admitted(level, "persephone::call_worker::room", &text);
+    }
+}
+
+/// Whether [`describe_room_event`] makes a record for `event`, without
+/// building it.
+fn is_noted(event: &RoomEvent) -> bool {
+    matches!(
+        event,
+        RoomEvent::Connected { .. }
+            | RoomEvent::ConnectionStateChanged(_)
+            | RoomEvent::Reconnecting
+            | RoomEvent::Reconnected
+            | RoomEvent::Disconnected { .. }
+            | RoomEvent::ParticipantConnected(_)
+            | RoomEvent::ParticipantDisconnected(_)
+            | RoomEvent::TrackPublished { .. }
+            | RoomEvent::TrackUnpublished { .. }
+            | RoomEvent::TrackSubscribed { .. }
+            | RoomEvent::TrackUnsubscribed { .. }
+            | RoomEvent::TrackSubscriptionFailed { .. }
+            | RoomEvent::TrackMuted { .. }
+            | RoomEvent::TrackUnmuted { .. }
+            | RoomEvent::LocalTrackPublished { .. }
+            | RoomEvent::LocalTrackUnpublished { .. }
+            | RoomEvent::E2eeStateChanged { .. }
+            | RoomEvent::ParticipantEncryptionStatusChanged { .. }
+            | RoomEvent::ConnectionQualityChanged { .. }
+            | RoomEvent::TokenRefreshed { .. }
+    )
+}
+
+/// The level and text of the record for `event` on `connection`, or `None`
+/// for an event that does not matter for media. The connection comes
+/// first, so the own room's tracks and another SFU's stay apart.
+fn describe_room_event(connection: u8, event: &RoomEvent) -> Option<(u8, String)> {
+    describe_room_event_text(event).map(|(level, text)| {
+        (
+            level,
+            bounded_text(format_args!("connection {connection}: {text}")),
+        )
+    })
+}
+
+/// Text formatted within the protocol's message limit: identities and IDs
+/// come from the SFU, so their text is never built whole.
+fn bounded_text(args: std::fmt::Arguments<'_>) -> String {
+    crate::diagnostics::format_bounded(args, persephone_call_protocol::MAX_DIAGNOSTIC_MESSAGE_BYTES)
+}
+
+fn describe_room_event_text(event: &RoomEvent) -> Option<(u8, String)> {
+    use crate::diagnostics::{DEBUG, INFO, WARN};
+    macro_rules! text {
+        ($($arg:tt)*) => {
+            bounded_text(format_args!($($arg)*))
+        };
+    }
+    let track = |publication: &RemoteTrackPublication| {
+        text!(
+            "{} {:?} {:?}",
+            publication.sid(),
+            publication.kind(),
+            publication.source()
+        )
+    };
+    Some(match event {
+        RoomEvent::Connected {
+            participants_with_tracks,
+        } => (
+            INFO,
+            text!("connected, {} participants", participants_with_tracks.len()),
+        ),
+        RoomEvent::ConnectionStateChanged(state) => (INFO, text!("connection state {state:?}")),
+        RoomEvent::Reconnecting => (WARN, "reconnecting".to_owned()),
+        RoomEvent::Reconnected => (INFO, "reconnected".to_owned()),
+        RoomEvent::Disconnected { reason } => (WARN, text!("disconnected: {reason:?}")),
+        RoomEvent::ParticipantConnected(participant) => (
+            INFO,
+            text!("participant connected {}", participant.identity()),
+        ),
+        RoomEvent::ParticipantDisconnected(participant) => (
+            INFO,
+            text!("participant disconnected {}", participant.identity()),
+        ),
+        RoomEvent::TrackPublished {
+            publication,
+            participant,
+        } => (
+            INFO,
+            text!(
+                "track published {} by {}",
+                track(publication),
+                participant.identity()
+            ),
+        ),
+        RoomEvent::TrackUnpublished {
+            publication,
+            participant,
+        } => (
+            INFO,
+            text!(
+                "track unpublished {} by {}",
+                track(publication),
+                participant.identity()
+            ),
+        ),
+        RoomEvent::TrackSubscribed {
+            publication,
+            participant,
+            ..
+        } => (
+            INFO,
+            text!(
+                "track subscribed {} from {}",
+                track(publication),
+                participant.identity()
+            ),
+        ),
+        RoomEvent::TrackUnsubscribed {
+            publication,
+            participant,
+            ..
+        } => (
+            INFO,
+            text!(
+                "track unsubscribed {} from {}",
+                track(publication),
+                participant.identity()
+            ),
+        ),
+        RoomEvent::TrackSubscriptionFailed {
+            participant,
+            error,
+            track_sid,
+        } => (
+            WARN,
+            text!(
+                "track subscription failed {track_sid} from {}: {error:?}",
+                participant.identity()
+            ),
+        ),
+        RoomEvent::TrackMuted {
+            participant,
+            publication,
+        } => (
+            DEBUG,
+            text!(
+                "track muted {} by {}",
+                publication.sid(),
+                participant.identity()
+            ),
+        ),
+        RoomEvent::TrackUnmuted {
+            participant,
+            publication,
+        } => (
+            DEBUG,
+            text!(
+                "track unmuted {} by {}",
+                publication.sid(),
+                participant.identity()
+            ),
+        ),
+        RoomEvent::LocalTrackPublished { publication, .. } => (
+            INFO,
+            text!(
+                "own track published {} {:?} {:?}",
+                publication.sid(),
+                publication.kind(),
+                publication.source()
+            ),
+        ),
+        RoomEvent::LocalTrackUnpublished { publication, .. } => {
+            (INFO, text!("own track unpublished {}", publication.sid()))
+        }
+        RoomEvent::E2eeStateChanged { participant, state } => (
+            INFO,
+            text!("frame encryption {state:?} for {}", participant.identity()),
+        ),
+        RoomEvent::ParticipantEncryptionStatusChanged {
+            participant,
+            is_encrypted,
+        } => (
+            INFO,
+            text!(
+                "participant {} encrypted: {is_encrypted}",
+                participant.identity()
+            ),
+        ),
+        RoomEvent::ConnectionQualityChanged {
+            quality,
+            participant,
+        } => (
+            DEBUG,
+            text!(
+                "connection quality {quality:?} for {}",
+                participant.identity()
+            ),
+        ),
+        // The new token itself is never written.
+        RoomEvent::TokenRefreshed { .. } => (DEBUG, "token refreshed".to_owned()),
+        _ => return None,
+    })
+}
+
 /// Reduces a room event to what the core is told. Everything else is dropped.
 fn room_change(connection: u8, event: &RoomEvent) -> Option<RoomChange> {
     match event {
@@ -2330,6 +2553,64 @@ async fn fail(output: &Output, code: FailureCode) -> u8 {
 mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
+
+    /// GIVEN room events that need no participant WHEN described THEN each
+    /// names its connection, its state or reason and its level, and a token
+    /// refresh never holds the token.
+    #[test]
+    fn given_room_events_when_described_then_records_name_connection_and_state() {
+        use crate::diagnostics::{INFO, WARN};
+        let cases = [
+            (RoomEvent::Reconnecting, WARN, "connection 0: reconnecting"),
+            (RoomEvent::Reconnected, INFO, "connection 0: reconnected"),
+            (
+                RoomEvent::ConnectionStateChanged(livekit::ConnectionState::Connected),
+                INFO,
+                "connection 0: connection state Connected",
+            ),
+            (
+                RoomEvent::Disconnected {
+                    reason: livekit::DisconnectReason::ServerShutdown,
+                },
+                WARN,
+                "connection 0: disconnected: ServerShutdown",
+            ),
+            (
+                RoomEvent::Connected {
+                    participants_with_tracks: Vec::new(),
+                },
+                INFO,
+                "connection 0: connected, 0 participants",
+            ),
+        ];
+        for (event, level, text) in cases {
+            assert!(is_noted(&event), "{text}");
+            assert_eq!(
+                describe_room_event(0, &event),
+                Some((level, text.to_owned()))
+            );
+        }
+        let other = describe_room_event(2, &RoomEvent::Reconnecting).unwrap().1;
+        assert_eq!(other, "connection 2: reconnecting");
+        let refreshed = RoomEvent::TokenRefreshed {
+            token: "eyJsecret.payload.sig".into(),
+        };
+        assert!(is_noted(&refreshed));
+        let (_, text) = describe_room_event(1, &refreshed).unwrap();
+        assert_eq!(text, "connection 1: token refreshed");
+    }
+
+    /// GIVEN a room event that does not matter for media WHEN described THEN
+    /// no record is made, so its metadata text never reaches the log.
+    #[test]
+    fn given_an_uninteresting_room_event_when_described_then_none() {
+        let event = RoomEvent::RoomMetadataChanged {
+            old_metadata: "old".into(),
+            metadata: "new".into(),
+        };
+        assert!(!is_noted(&event), "it must take no budget");
+        assert_eq!(describe_room_event(0, &event), None);
+    }
 
     fn solid_i420(width: u32, height: u32, y: u8, u: u8, v: u8) -> I420Buffer {
         let mut buffer = I420Buffer::new(width, height);

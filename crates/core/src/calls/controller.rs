@@ -619,7 +619,10 @@ impl View {
 
     fn apply(&mut self, event: &FromWorker) -> Applied {
         match event {
-            FromWorker::Ready { .. } | FromWorker::ParticipantJoined { .. } => Applied::Same,
+            // A record goes to the diagnostic log, never to the view.
+            FromWorker::Ready { .. }
+            | FromWorker::ParticipantJoined { .. }
+            | FromWorker::Diagnostic { .. } => Applied::Same,
             FromWorker::Camera { state } => self.set_camera(match state {
                 CameraState::Off => CallCamera::Off,
                 CameraState::On => CallCamera::On,
@@ -824,6 +827,19 @@ pub(crate) fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// Writes one call worker record to the diagnostic log (ADR-0058). The
+/// text is the worker's, untrusted: the log redacts it like any other.
+fn worker_record(level: u8, target: &str, message: &str) {
+    use crate::diagnostics::{Level, Source, global};
+    let level = match level {
+        1 => Level::Error,
+        2 => Level::Warn,
+        3 => Level::Info,
+        _ => Level::Debug,
+    };
+    global().record(Source::CallWorker, level, target, message, &[]);
 }
 
 fn turn_for_worker(turn: Option<TurnServers>) -> Vec<TurnServer> {
@@ -1560,6 +1576,11 @@ impl CallController {
             camera_on: scope.video && !portal_camera,
             volume: scope.devices.volume(),
         };
+        // Before the join, so the worker's connection records are kept
+        // (ADR-0058). The call task sends the switch again when it starts.
+        if crate::diagnostics::global().is_on() {
+            let _ = link.send(ToWorker::SetDiagnostics { on: true });
+        }
         if link.send(join).is_err() {
             setup.link = Some(link);
             return Err(CallError::Worker(StartError::NotReady));
@@ -2838,6 +2859,15 @@ impl Call {
     /// picture of a new stream shows under the old participant, even on a
     /// page whose status is older.
     fn worker_event(&mut self, inner: &Inner, event: &FromWorker) -> Result<(), EndReason> {
+        if let FromWorker::Diagnostic {
+            level,
+            target,
+            message,
+        } = event
+        {
+            worker_record(*level, target, message);
+            return Ok(());
+        }
         // A camera that is not on has no capture left: its remote is used up.
         // An `On` after a remote went (and no off since) is a capture over it.
         if let FromWorker::Camera { state } = event {
@@ -3077,6 +3107,20 @@ impl Call {
         Ok(())
     }
 
+    /// Gives the worker the diagnostic log's switch in `pending`. When the
+    /// queue is full, the switch waits for the next retry instead of ending
+    /// the call; a newer value replaces a waiting one, so only the latest
+    /// goes. The worker filters its records by its last value until then,
+    /// and the core drops records from a worker while its log is off.
+    fn apply_diagnostics(&self, pending: &mut Option<(Instant, bool)>) -> Result<(), EndReason> {
+        if let Some((_, on)) = pending.take()
+            && !self.queue_worker(ToWorker::SetDiagnostics { on })?
+        {
+            *pending = Some((Instant::now() + UNSENT_RETRY, on));
+        }
+        Ok(())
+    }
+
     /// Queues `message` when the worker's queue has room: `false` when it is
     /// full. Only a closed queue is an error.
     fn queue_worker(&self, message: ToWorker) -> Result<bool, EndReason> {
@@ -3219,6 +3263,10 @@ impl Call {
         // there was none, the worker gets the Join's volume again.
         let mut volume = self.volume.subscribe();
         volume.mark_changed();
+        // The diagnostic log's switch, sent at once and on each change.
+        let mut diagnostics = crate::diagnostics::global().watch();
+        diagnostics.mark_changed();
+        let mut pending_diagnostics: Option<(Instant, bool)> = None;
         self.start_keys(inner).await?;
         // A video join on the portal path asks for the camera now (the join
         // sent `camera_on: false`).
@@ -3229,6 +3277,7 @@ impl Call {
         loop {
             let due = pending_own.as_ref().map(|(at, _)| *at);
             let retry = self.unsent_retry;
+            let diagnostics_due = pending_diagnostics.map(|(at, _)| at);
             tokio::select! {
                 _ = &mut *stop => return Ok(()),
                 () = wake.notified() => self.take_waiting_stop(inner, u64::MAX)?,
@@ -3253,6 +3302,17 @@ impl Call {
                     let percent = *volume.borrow_and_update();
                     self.volume_changed(inner, percent)?;
                 }
+                Ok(()) = diagnostics.changed() => {
+                    let on = *diagnostics.borrow_and_update();
+                    pending_diagnostics = Some((Instant::now(), on));
+                    self.apply_diagnostics(&mut pending_diagnostics)?;
+                }
+                () = async {
+                    match diagnostics_due {
+                        Some(at) => time::sleep_until(at.into()).await,
+                        None => std::future::pending().await,
+                    }
+                } => self.apply_diagnostics(&mut pending_diagnostics)?,
                 remote = portal_done(&mut self.portal) => self.portal_finished(inner, remote)?,
                 (picked, cancelled) = screen_pick_done(&mut self.screen_pick) => {
                     if cancelled {
@@ -4757,6 +4817,41 @@ mod tests {
         ));
     }
 
+    /// GIVEN a diagnostics switch and a full worker queue WHEN it is applied
+    /// THEN the call goes on and the switch waits; WHEN the queue has room
+    /// THEN the worker gets it; WHEN the queue is closed THEN the call ends.
+    #[tokio::test]
+    async fn given_a_full_queue_then_the_diagnostics_switch_waits() {
+        let fixture = test_call(
+            no_admission(),
+            Arc::new(Flags::default()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let (call, mut to_worker) = (fixture.call, fixture.to_worker);
+        let now = Instant::now();
+        let mut pending = Some((now, true));
+
+        fill_queue(&call, &mut to_worker, 0);
+        call.apply_diagnostics(&mut pending).unwrap();
+        let (retry, on) = pending.expect("the switch waits");
+        assert!(retry > now && on);
+
+        while to_worker.try_recv().is_ok() {}
+        call.apply_diagnostics(&mut pending).unwrap();
+        assert_eq!(pending, None);
+        assert!(matches!(
+            to_worker.try_recv(),
+            Ok(ToWorker::SetDiagnostics { on: true })
+        ));
+
+        let mut pending = Some((now, false));
+        drop(to_worker);
+        assert!(matches!(
+            call.apply_diagnostics(&mut pending),
+            Err(EndReason::WorkerStopped)
+        ));
+    }
+
     /// Ends a portal request that produced no remote.
     fn finish_without_remote(call: &mut Call, inner: &Inner) {
         #[cfg(target_os = "linux")]
@@ -4932,6 +5027,30 @@ mod tests {
         call.camera_command(&inner, false, 0).unwrap();
         call.worker_event(&inner, &camera(CameraState::On)).unwrap();
         assert!(call.portal_needed(true));
+    }
+
+    /// GIVEN the log on before the join WHEN the worker sends records before
+    /// it reports `Connected` THEN the call goes on: the records end no call
+    /// and change nothing, and `Connected` still applies (ADR-0058).
+    #[test]
+    fn given_records_before_connected_then_the_call_goes_on() {
+        let fixture = test_call(
+            no_admission(),
+            Arc::new(Flags::default()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let inner = controller(FakeHost::new(true, None)).inner.clone();
+        let mut call = fixture.call;
+        for message in ["connecting", "ice candidate"] {
+            let record = FromWorker::Diagnostic {
+                level: 3,
+                target: "livekit::room".into(),
+                message: message.into(),
+            };
+            assert_eq!(call.worker_event(&inner, &record), Ok(()));
+            assert_eq!(call.view.apply(&record), Applied::Same);
+        }
+        assert_eq!(call.view.apply(&FromWorker::Connected), Applied::Changed);
     }
 
     /// GIVEN the worker already reported the camera `On` while the own tile

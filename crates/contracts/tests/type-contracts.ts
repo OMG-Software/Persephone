@@ -13,6 +13,7 @@ import type {
   CallVideoTile,
   LocalSearchFilters,
   ConnectionHealth,
+  DiagnosticsStatus,
   AttachmentKind,
   SyncMode,
   ImagePick,
@@ -186,6 +187,14 @@ const unknownAttachment: AttachmentKind = "videos";
 const unknownSync: SyncMode = "polling";
 // @ts-expect-error missing health observations must be explicit null
 const missingHealth: ConnectionHealth = { accountState: "signed_out", storeState: "protected", syncMode: "unknown", consecutiveFailures: 0, retryDelayMs: 0, lastError: null };
+const logOn: DiagnosticsStatus = { on: true, full: false, failed: false, available: true, path: "/p/diagnostics/persephone.jsonl" };
+const logNever: DiagnosticsStatus = { on: false, full: false, failed: false, available: false, path: null };
+// @ts-expect-error a log with no file names it as explicit null
+const logMissingPath: DiagnosticsStatus = { on: false, full: false, failed: false, available: true };
+// @ts-expect-error the write-failure flag is required
+const logMissingFailed: DiagnosticsStatus = { on: true, full: false, available: true, path: null };
+// @ts-expect-error the state names a file only, never its content
+const logWithText: DiagnosticsStatus = { ...logOn, lines: ["x"] };
 // @ts-expect-error only the defined module scan states are accepted
 const unknownScan: ModuleScanState = "done";
 // @ts-expect-error only the defined module signatures are accepted
@@ -289,3 +298,8 @@ void ringList;
 void ringWithName;
 void unknownIntent;
 void missingDeclined;
+void logOn;
+void logNever;
+void logMissingPath;
+void logMissingFailed;
+void logWithText;

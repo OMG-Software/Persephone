@@ -245,7 +245,32 @@ after leaving a room. Use Saved drafts to view or discard those local records.
 The app keeps images that you load in memory only. It drops them when you
 lock the profile or sign out.
 
-The app does not write log files. It does not keep your login password.
+The app does not keep your login password.
+
+### Diagnostic log
+
+The app writes no log file unless you turn on the diagnostic log in Settings,
+Diagnostics. It is off each time the app starts. Before it starts, the app asks
+you in its own window. While it is on, the app writes one file,
+`diagnostics/persephone.jsonl`, in the profile's folder. Settings shows the
+full path.
+
+The log holds what the app and its libraries report: your user ID, other
+users' IDs, room IDs, server names, device IDs, network addresses, and the
+type, sender, time and size of each Matrix event. The app's own records of
+events never hold message text, media or other event content. The libraries
+the app uses can put other text in their own records, and the app does not
+remove message text from that text. The app never writes passwords, access
+tokens, call tokens or keys to the log on purpose, and it filters such values
+out of library text. A filter cannot be complete, so read the file before you
+send it to anyone.
+
+When you turn the log off, the file stays, so you can send it. Each profile
+has its own file. The next time the app starts with that profile, it writes
+random bytes over the file and then deletes it. The file of a profile that
+you do not start again stays on the disk until you do. On
+an SSD, and on some file systems, old copies of the data can stay on the disk
+where no application can reach them. The app cannot remove those copies.
 
 ### Signing out and resetting
 

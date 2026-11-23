@@ -413,6 +413,14 @@ export type DeviceList = { devices: Array<DeviceSummary>, truncated: boolean, };
 
 export type ProxySetting = { proxy: string | null, };
 
+export type DiagnosticsStatus = { on: boolean, full: boolean, 
+/**
+ * Writing to the file failed (a full disk, a lost drive) since the log
+ * was last turned on: the file may end early, and nothing more is
+ * written until the log is turned off and on again.
+ */
+failed: boolean, available: boolean, path: string | null, };
+
 export type HomeserverFound = { homeserver: string, fromWellKnown: boolean, };
 
 export type NewSession = { deviceId: string, displayName: string | null, };

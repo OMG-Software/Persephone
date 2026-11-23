@@ -492,6 +492,17 @@ impl CoreTransport for FakeCore {
                 _ => Err(CoreError::Core(ErrorCode::NotFound)),
             },
             Call::ProxySetting {} => Ok(serde_json::json!({"proxy": "127.0.0.1:9050"})),
+            Call::DiagnosticsStatus {} => Ok(serde_json::json!({
+                "on": false, "full": false, "failed": false, "available": true, "path": null
+            })),
+            Call::SetDiagnostics { on } => Ok(serde_json::Value::Bool(on)),
+            // A page's records always arrive as the page's.
+            Call::DiagnosticRecords { source, .. } => match source {
+                persephone_core_protocol::RecordSource::Page => Ok(serde_json::Value::Null),
+                persephone_core_protocol::RecordSource::Ui => {
+                    Err(CoreError::Core(ErrorCode::InvalidArgument))
+                }
+            },
             Call::SetProxySetting { proxy } => match proxy.as_deref() {
                 None | Some("127.0.0.1:9050") => Ok(serde_json::Value::Null),
                 Some(_) => Err(CoreError::Core(ErrorCode::InvalidArgument)),
@@ -924,7 +935,9 @@ fn given_shell_config_then_security_settings_are_restrictive() {
     assert_eq!(capability["windows"], serde_json::json!([MAIN_WINDOW]));
     assert_eq!(
         capability["permissions"],
-        serde_json::json!([
+        // A plain vector: `json!` with this many items hits the macro
+        // recursion limit.
+        serde_json::Value::from(vec![
             "allow-app-status",
             "allow-room-list",
             "allow-room-draft",
@@ -955,6 +968,9 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-discover-homeserver",
             "allow-proxy-setting",
             "allow-set-proxy-setting",
+            "allow-diagnostics-status",
+            "allow-set-diagnostics",
+            "allow-diagnostic-records",
             "allow-call-devices",
             "allow-set-call-devices",
             "allow-register",
@@ -1045,7 +1061,7 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-set-notification-level",
             "allow-profile-list",
             "allow-add-profile",
-            "allow-switch-profile"
+            "allow-switch-profile",
         ])
     );
     assert!(capability.get("remote").is_none(), "no remote origins");
@@ -1311,7 +1327,12 @@ fn given_a_session_change_then_room_channels_drop_and_the_session_channel_is_tol
     subscriptions.dispatch(Event::CallChanged {});
     subscriptions.dispatch(Event::CallVideo {});
     subscriptions.dispatch(Event::ModulesChanged {});
+    subscriptions.dispatch(Event::DiagnosticsChanged { on: false });
     let delivered = delivered.lock().unwrap().clone();
+    assert!(
+        delivered.contains(&(3, r#""diagnostics""#.into())),
+        "{delivered:?}"
+    );
     assert!(
         delivered.contains(&(3, r#""security""#.into())),
         "{delivered:?}"
@@ -2337,6 +2358,40 @@ fn given_account_change_commands_then_only_non_secret_arguments_cross() {
         .unwrap_err(),
         "invalid_argument"
     );
+    assert_eq!(core.calls.load(Ordering::SeqCst), calls);
+    // The diagnostic log (ADR-0058): the switch and status relay; the page's
+    // records go as the page's, and too many or too long never reach the
+    // core.
+    assert_eq!(
+        invoke("diagnostics_status", serde_json::json!({})).unwrap()["available"],
+        true
+    );
+    assert_eq!(
+        invoke("set_diagnostics", serde_json::json!({"on": true})),
+        Ok(serde_json::Value::Bool(true))
+    );
+    let record = serde_json::json!({"level": "info", "target": "bridge", "message": "ok"});
+    assert_eq!(
+        invoke(
+            "diagnostic_records",
+            serde_json::json!({"records": [record]})
+        ),
+        Ok(serde_json::Value::Null)
+    );
+    let calls = core.calls.load(Ordering::SeqCst);
+    let many = vec![record.clone(); 65];
+    let long =
+        serde_json::json!({"level": "info", "target": "bridge", "message": "m".repeat(1025)});
+    for records in [serde_json::json!(many), serde_json::json!([long])] {
+        assert_eq!(
+            invoke(
+                "diagnostic_records",
+                serde_json::json!({ "records": records })
+            )
+            .unwrap_err(),
+            "invalid_argument"
+        );
+    }
     assert_eq!(core.calls.load(Ordering::SeqCst), calls);
     assert_eq!(
         invoke("call_devices", serde_json::json!({})).unwrap()["recording"][0]["id"],

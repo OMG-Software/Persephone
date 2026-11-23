@@ -1170,6 +1170,25 @@ pub struct ProxySetting {
     pub proxy: Option<String>,
 }
 
+/// Reply of `diagnostics_status` (ADR-0058): whether the diagnostic log is
+/// on, whether its file reached the size limit (it then writes nothing more
+/// until the next start), whether this run can write one (a profile with a
+/// folder; not `--demo`), and the log file's full path once it was on in
+/// this run. The file stays until the next start, also after the log is
+/// turned off.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct DiagnosticsStatus {
+    pub on: bool,
+    pub full: bool,
+    /// Writing to the file failed (a full disk, a lost drive) since the log
+    /// was last turned on: the file may end early, and nothing more is
+    /// written until the log is turned off and on again.
+    pub failed: bool,
+    pub available: bool,
+    pub path: Option<String>,
+}
+
 /// Reply of `discover_homeserver`: the homeserver found for a server name,
 /// confirmed to speak Matrix, and whether a `.well-known` file named it
 /// (ADR-0027). The page shows it before signing in to it.
@@ -2657,6 +2676,7 @@ pub fn generated_typescript() -> String {
         format!("export {}", DeviceSummary::decl(&config)),
         format!("export {}", DeviceList::decl(&config)),
         format!("export {}", ProxySetting::decl(&config)),
+        format!("export {}", DiagnosticsStatus::decl(&config)),
         format!("export {}", HomeserverFound::decl(&config)),
         format!("export {}", NewSession::decl(&config)),
         format!("export {}", NewSessions::decl(&config)),
@@ -2774,6 +2794,18 @@ mod personal_contract_tests {
         fixture::<PinnedMessages>(include_str!("../fixtures/pinned-messages.json"));
         fixture::<AttachmentPage>(include_str!("../fixtures/attachment-page.json"));
         fixture::<ConnectionHealth>(include_str!("../fixtures/connection-health.json"));
+        fixture::<DiagnosticsStatus>(include_str!("../fixtures/diagnostics-status.json"));
+        // No file yet (never turned on in this run): the path is explicit
+        // null, and a missing field is refused.
+        let unused = r#"{"on":false,"full":false,"failed":false,"available":true,"path":null}"#;
+        fixture::<DiagnosticsStatus>(unused);
+        assert!(
+            serde_json::from_str::<DiagnosticsStatus>(
+                r#"{"on":false,"full":false,"available":true,"path":null}"#
+            )
+            .is_err(),
+            "`failed` is required"
+        );
         fixture::<CallReadiness>(include_str!("../fixtures/call-readiness.json"));
         fixture::<CallStatus>(include_str!("../fixtures/call-status.json"));
         fixture::<CallRings>(include_str!("../fixtures/call-rings.json"));

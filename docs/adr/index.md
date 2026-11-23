@@ -64,6 +64,7 @@
 * [0054 - Connect to call members on other SFUs](0054-connect-to-call-members-on-other-sfus.md)
 * [0055 - Add deafen and a call volume to calls](0055-add-deafen-and-a-call-volume-to-calls.md)
 * [0057 - Share presence at most once a second and show contacts' presence](0057-share-presence-at-most-once-a-second-and-show-contacts-presence.md)
+* [0058 - Write a diagnostic log only when the user turns it on](0058-write-a-diagnostic-log-only-when-the-user-turns-it-on.md)
 
 ## Superseded Records
 
