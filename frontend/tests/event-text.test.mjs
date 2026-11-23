@@ -78,6 +78,13 @@ test('GIVEN switches off WHEN items are filtered THEN only those kinds go, and e
   const on = DEFAULT_SETTINGS.timelineEvents;
   assert.equal(itemShown(other('poll_started', true), on), true);
   assert.equal(itemShown(other('poll_started', true), { ...on, polls: false }), false);
+  // GIVEN other events switched off THEN the kinds with no text of their
+  // own, and any kind this build does not know, go; named kinds stay.
+  const noOther = { ...on, otherEvents: false };
+  for (const event of ['event', 'state', 'message', 'teleport']) {
+    assert.equal(itemShown(other(event), noOther), false, event);
+  }
+  assert.equal(itemShown(other('sticker'), noOther), true);
   assert.equal(itemShown(other('poll_started', true), { ...on, deletedMessages: false }), false);
   assert.equal(itemShown(other('poll_started'), { ...on, deletedMessages: false }), true);
   assert.equal(itemShown(notice('deleted'), events), false);

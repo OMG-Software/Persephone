@@ -349,17 +349,17 @@ fn other_item(
             (found, kind.as_str())
         }
     } else {
-        let other = event_kind(&kind);
-        // A message names its `msgtype`, when it has one.
-        let shown = match other {
-            OtherEvent::Message => content
-                .as_ref()
-                .and_then(|content| content.get("msgtype"))
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or(&kind),
-            _ => &kind,
-        };
-        (other, shown)
+        let msgtype = content
+            .as_ref()
+            .and_then(|content| content.get("msgtype"))
+            .and_then(serde_json::Value::as_str);
+        // A message names its `msgtype`. One with no readable `msgtype` is a
+        // generic event, named by its type.
+        match (event_kind(&kind), msgtype) {
+            (OtherEvent::Message, Some(msgtype)) => (OtherEvent::Message, msgtype),
+            (OtherEvent::Message, None) => (OtherEvent::Event, kind.as_str()),
+            (other, _) => (other, kind.as_str()),
+        }
     };
     Some(TimelineItem::Other {
         event_id,
@@ -1618,6 +1618,15 @@ mod tests {
                 "{kind}"
             );
         }
+        // GIVEN a message with no readable `msgtype` THEN it is a generic
+        // event named by its type, not a message of type m.room.message.
+        assert_eq!(
+            other_of(&raw_event(serde_json::json!({
+                "type": "m.room.message", "event_id": "$m", "sender": "@alice:example.org",
+                "origin_server_ts": 1, "content": { "body": "hi" },
+            }))),
+            Some((OtherEvent::Event, "m.room.message".into()))
+        );
     }
 
     /// A decrypted event, as the SDK gives one from an encrypted room.

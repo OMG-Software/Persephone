@@ -1477,6 +1477,15 @@ test('GIVEN other events with hostile types WHEN the timeline shows THEN each li
   for (const kept of ['$call', '$custom', '$state', '$message']) {
     assert.match(some, new RegExp(`data-event-id="\\${kept}"`));
   }
+  // GIVEN other events switched off THEN the lines named by their type go.
+  const noOther = Object.fromEntries(ALL_KEYS.map((key) => [key, key !== 'otherEvents']));
+  const named = render(Timeline, { props: { ...props, items, events: noOther } }).body;
+  for (const hidden of ['$custom', '$state', '$message']) {
+    assert.doesNotMatch(named, new RegExp(`data-event-id="\\${hidden}"`));
+  }
+  for (const kept of ['$verify', '$call', '$poll']) {
+    assert.match(named, new RegExp(`data-event-id="\\${kept}"`));
+  }
 });
 
 test('GIVEN the preferences WHEN they show THEN each kind of other event has its own switch, set as saved', () => {

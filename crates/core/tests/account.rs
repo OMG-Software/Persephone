@@ -1333,6 +1333,11 @@ fn given_valid_credentials_then_rooms_and_history_come_from_the_homeserver_and_s
                 TimelineItem::Redaction {
                     event_id, redacts, ..
                 } => format!("{event_id}:redacts:{redacts}"),
+                TimelineItem::Other {
+                    event_id,
+                    event_type,
+                    ..
+                } => format!("{event_id}:other:{event_type}"),
             })
             .collect();
         assert_eq!(
