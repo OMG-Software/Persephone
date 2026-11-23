@@ -200,6 +200,10 @@ so.
   queue drops records and counts them, before they are redacted or built.
   The next written line reports the count; when no line follows, the writer
   writes the count before it stops.
+* While the log is off, each process keeps the `log` crate's level at
+  `Off`, so a library's `log::debug!` costs one atomic read and never
+  reaches the logger. Turning the log on sets `Debug`; turning it off sets
+  `Off` again.
 * An "off" waits for the writer, so it runs off the serving loop, but only
   when the log is on: an "off" for a log that is off is answered at once.
   One drain runs at a time, and a second "off" meanwhile is refused before
@@ -221,9 +225,12 @@ so.
   and report the count.
 * The call worker keeps at most 256 records, sends at most 200 records each
   second and drops the rest, with a count. A message is at most 2 KiB and a
-  target at most 64 bytes. It sends at most 8 records after each round of
-  control messages, so records never delay calls or pictures. The call
-  protocol version is 8.
+  target at most 64 bytes. Each writer round sends the waiting control
+  messages, then a waiting picture, then at most 8 records, so records
+  never go before a control message or a picture that waits, and a
+  steady stream of pictures does not stop them. A record that the full
+  queue refuses does not use the second's budget. The call protocol
+  version is 8.
 
 ### Positive Consequences
 

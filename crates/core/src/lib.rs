@@ -815,14 +815,16 @@ impl Core {
     }
 
     /// Asks in the core's own window, then turns the log on: `true` when
-    /// on, `false` when the user said no. One question at a time.
-    fn diagnostics_on(&self) -> Result<LongCall<'_>, ErrorCode> {
+    /// on, `false` when the user said no. One question at a time. An "on"
+    /// for a log that is already on is answered at once (`Ok(None)`), with
+    /// no thread, so repeated "on" requests cannot start threads.
+    fn diagnostics_on(&self) -> Result<Option<LongCall<'_>>, ErrorCode> {
         let path = self
             .diagnostics_path
             .clone()
             .ok_or(ErrorCode::Unavailable)?;
         if diagnostics::global().is_on() {
-            return Ok(Box::new(|| Outcome::Ok(serde_json::Value::Bool(true))));
+            return Ok(None);
         }
         if self.diagnostics_asking.swap(true, Ordering::SeqCst) {
             return Err(ErrorCode::LimitExceeded);
@@ -832,7 +834,7 @@ impl Core {
         let asking = ClearOnDrop(&self.diagnostics_asking);
         // An "off" sent while the question is open wins over the "yes".
         let epoch = diagnostics::global().epoch();
-        Ok(Box::new(move || {
+        Ok(Some(Box::new(move || {
             let answer = self.credentials.confirm_diagnostics();
             drop(asking);
             match answer {
@@ -852,7 +854,7 @@ impl Core {
             }
             self.hub.diagnostics_changed();
             Outcome::Ok(serde_json::Value::Bool(true))
-        }))
+        })))
     }
 
     /// Turns the log off. Every "off" cancels an "on" that waits for the
@@ -1025,7 +1027,11 @@ impl Core {
                 Err(code) => error(code),
             },
             Call::SetDiagnostics { on: true } => match self.diagnostics_on() {
-                Ok(call) => Answer::Later(id, call),
+                Ok(Some(call)) => Answer::Later(id, call),
+                Ok(None) => Answer::Reply(Reply {
+                    id,
+                    outcome: Outcome::Ok(serde_json::Value::Bool(true)),
+                }),
                 Err(code) => error(code),
             },
             Call::SetDiagnostics { on: false } => match self.diagnostics_off() {
@@ -3843,7 +3849,8 @@ impl Drop for ClearOnDrop<'_> {
 
 /// Commands sent many times each second (video pictures, image bands) or
 /// that only feed the log (record batches): only their failures are noted,
-/// as the page does (ADR-0058).
+/// as the page does (ADR-0058). The page's `QUIET_CALLS` is the same list;
+/// tests hold both equal to `crates/contracts/fixtures/quiet-requests.json`.
 const QUIET_REQUESTS: &[&str] = &["call_video_frame", "image_band", "diagnostic_records"];
 
 /// One command for the diagnostic log: its name, its request ID, how it
@@ -5330,7 +5337,7 @@ mod tests {
         let no = Core::default()
             .with_credentials(Arc::new(DiagnosticsAnswer(false)))
             .with_diagnostics(Some(path.clone()));
-        let answer = no.diagnostics_on().unwrap()();
+        let answer = no.diagnostics_on().unwrap().unwrap()();
         assert_eq!(answer, Outcome::Ok(serde_json::Value::Bool(false)));
         assert!(!no.diagnostics_status().on);
         assert!(!path.exists());
@@ -5350,13 +5357,23 @@ mod tests {
         };
         page("before on");
         assert_eq!(
-            core.diagnostics_on().unwrap()(),
+            core.diagnostics_on().unwrap().unwrap()(),
             Outcome::Ok(serde_json::Value::Bool(true))
         );
         assert_eq!(
             core.take_events(),
             Some(vec![Event::DiagnosticsChanged { on: true }])
         );
+        // A second "on" while on is answered at once, with no long call,
+        // so a UI that repeats it cannot start threads.
+        let again = core.answer(&Request {
+            id: 8,
+            call: Call::SetDiagnostics { on: true },
+        });
+        let Answer::Reply(Reply { id: 8, outcome }) = again else {
+            panic!("an \"on\" while on must be answered at once");
+        };
+        assert_eq!(outcome, Outcome::Ok(serde_json::Value::Bool(true)));
         let status = core.diagnostics_status();
         assert!(status.on && status.available);
         assert_eq!(status.path, Some(path.display().to_string()));
@@ -5387,6 +5404,17 @@ mod tests {
             core.diagnostics_status().path,
             Some(path.display().to_string())
         );
+    }
+
+    /// GIVEN the shared list of quiet commands THEN the core's list is the
+    /// same, in the same order, so the core and the page leave out the same
+    /// successes (the page's test reads the same file).
+    #[test]
+    fn given_the_shared_quiet_list_then_the_core_uses_it() {
+        let shared: Vec<String> =
+            serde_json::from_str(include_str!("../../contracts/fixtures/quiet-requests.json"))
+                .unwrap();
+        assert_eq!(shared, QUIET_REQUESTS);
     }
 
     /// GIVEN too many records, or one over its limits THEN the call is
@@ -5473,6 +5501,29 @@ mod tests {
         assert_eq!(drain(), Outcome::Ok(serde_json::Value::Bool(false)));
         assert!(!diagnostics::global().is_on());
         assert!(at_once(off(11)));
+    }
+
+    /// GIVEN the process's log WHEN it is turned on and off THEN the `log`
+    /// crate's level follows it, so a library's `log::debug!` costs nothing
+    /// while the log is off; a log a test makes leaves the level alone.
+    #[test]
+    fn given_the_switch_then_the_log_level_follows_it() {
+        let _global = global_log_test();
+        let dir = tempfile::tempdir().unwrap();
+        diagnostics::global().turn_off();
+        assert_eq!(log::max_level(), log::LevelFilter::Off);
+        diagnostics::global()
+            .turn_on(&diagnostics::path_in(dir.path()))
+            .unwrap();
+        assert_eq!(log::max_level(), log::LevelFilter::Debug);
+        let other = diagnostics::Log::default();
+        other
+            .turn_on(&diagnostics::path_in(&dir.path().join("other")))
+            .unwrap();
+        other.turn_off();
+        assert_eq!(log::max_level(), log::LevelFilter::Debug);
+        diagnostics::global().turn_off();
+        assert_eq!(log::max_level(), log::LevelFilter::Off);
     }
 
     /// GIVEN the log on and a UI that stops reading WHEN it sends many "off"

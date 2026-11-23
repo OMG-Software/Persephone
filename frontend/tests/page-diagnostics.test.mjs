@@ -233,3 +233,11 @@ test('GIVEN the page hooks WHEN an error and rejections happen THEN each is note
     ]
   );
 });
+
+test('GIVEN the shared list of quiet commands THEN the page uses the same list as the core', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const shared = JSON.parse(
+    await readFile(new URL('../../crates/contracts/fixtures/quiet-requests.json', import.meta.url), 'utf8')
+  );
+  assert.deepEqual([...page.QUIET_CALLS], shared);
+});

@@ -8,7 +8,8 @@
 //! Bounded: at most [`QUEUE_RECORDS`] wait, at most [`RECORDS_PER_SECOND`]
 //! are taken each second, and the rest are counted and reported as one
 //! record. Records wait apart from the control queue, and the writer takes
-//! them only after every waiting control message, so they never delay one.
+//! them only after every waiting control message and a waiting picture, so
+//! they never go before one.
 //! Control characters become spaces, and each string is cut to the protocol
 //! limits. The core redacts every record again.
 
@@ -86,6 +87,7 @@ impl Diagnostics {
     pub fn set_on(&self, on: bool) {
         let mut queue = lock(&self.queue);
         self.on.store(on, Ordering::SeqCst);
+        follow_switch(std::ptr::eq(self, global()), on);
         if !on {
             queue.clear();
             self.dropped.store(0, Ordering::Relaxed);
@@ -116,7 +118,9 @@ impl Diagnostics {
         if !self.is_on() {
             return false;
         }
-        if !self.take_budget(Instant::now()) || lock(&self.queue).len() >= QUEUE_RECORDS {
+        // Room first: a record refused for a full queue does not spend the
+        // second's budget.
+        if lock(&self.queue).len() >= QUEUE_RECORDS || !self.take_budget(Instant::now()) {
             self.dropped.fetch_add(1, Ordering::Relaxed);
             return false;
         }
@@ -295,8 +299,23 @@ impl log::Log for Logger {
 /// Makes the queue the process's `log` logger. Records are made only while
 /// the switch is on.
 pub fn install() {
+    // Off until the core turns the log on (see `follow_switch`).
     if log::set_logger(&LOGGER).is_ok() {
-        log::set_max_level(log::LevelFilter::Debug);
+        log::set_max_level(log::LevelFilter::Off);
+    }
+}
+
+/// The `log` crate's level follows this process's switch: `Off` while off,
+/// so a library's `log::debug!` costs one atomic read, not a call into the
+/// logger (ADR-0058). Only the process's own instance sets it, not one a
+/// test makes.
+fn follow_switch(is_global: bool, on: bool) {
+    if is_global {
+        log::set_max_level(if on {
+            log::LevelFilter::Debug
+        } else {
+            log::LevelFilter::Off
+        });
     }
 }
 
@@ -430,5 +449,43 @@ mod tests {
         }
         assert!(!diagnostics.admit());
         assert_eq!(diagnostics.dropped.load(Ordering::Relaxed), 1);
+    }
+
+    /// GIVEN the installed logger THEN the `log` level is `Off`; WHEN the
+    /// process's switch goes on, then off THEN it is `Debug`, then `Off`;
+    /// GIVEN another instance WHEN it goes on THEN the level stays. The only
+    /// test that changes the process's switch.
+    #[test]
+    fn given_the_switch_then_the_log_level_follows_it() {
+        install();
+        assert_eq!(log::max_level(), log::LevelFilter::Off);
+        global().set_on(true);
+        assert_eq!(log::max_level(), log::LevelFilter::Debug);
+        global().set_on(false);
+        assert_eq!(log::max_level(), log::LevelFilter::Off);
+        let other = Diagnostics::default();
+        other.set_on(true);
+        assert_eq!(log::max_level(), log::LevelFilter::Off);
+    }
+
+    /// GIVEN a full queue WHEN records are refused for lack of room THEN
+    /// they do not spend the second's budget: once the writer has taken
+    /// the queue, the whole budget is left.
+    #[test]
+    fn given_full_queue_then_refused_records_keep_the_budget() {
+        let diagnostics = Diagnostics::default();
+        diagnostics.set_on(true);
+        lock(&diagnostics.queue).extend((0..QUEUE_RECORDS).map(|_| FromWorker::Diagnostic {
+            level: INFO,
+            target: "t".into(),
+            message: "waits".into(),
+        }));
+        for _ in 0..RECORDS_PER_SECOND {
+            assert!(!diagnostics.admit());
+        }
+        lock(&diagnostics.queue).clear();
+        for _ in 0..RECORDS_PER_SECOND {
+            assert!(diagnostics.admit(), "the refusals spent the budget");
+        }
     }
 }

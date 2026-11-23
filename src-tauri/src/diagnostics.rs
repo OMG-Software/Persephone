@@ -124,12 +124,21 @@ impl Forwarder {
     pub fn set_on(&self, on: bool) {
         let mut queue = lock(&self.queue);
         self.on.store(on, Ordering::SeqCst);
+        follow_switch(std::ptr::eq(self, global()), on);
         if !on {
             queue.clear();
             self.dropped.store(0, Ordering::Relaxed);
         }
         drop(queue);
         self.waiting.notify_all();
+    }
+
+    /// Sets the `log` level from the switch as it is now, under the lock
+    /// `set_on` holds: a switch that came before this keeps its level, and
+    /// one after it sets the level itself.
+    fn match_level(&self) {
+        let _queue = lock(&self.queue);
+        follow_switch(std::ptr::eq(self, global()), self.is_on());
     }
 
     /// Queues one record, cut to the protocol's limits, while on.
@@ -264,8 +273,11 @@ impl log::Log for Logger {
 /// Makes the forwarder the `log` logger and starts the thread that sends
 /// its batches to the core. Nothing is sent until the core turns it on.
 pub fn install(core: CoreLink) {
+    // Off until the core turns the log on (see `follow_switch`). The core
+    // link already reads, so a `DiagnosticsChanged` may have come first:
+    // the level follows the switch as it is, not a fixed `Off`.
     if log::set_logger(&LOGGER).is_ok() {
-        log::set_max_level(log::LevelFilter::Debug);
+        global().match_level();
     }
     let _ = std::thread::Builder::new()
         .name("diagnostics".into())
@@ -288,6 +300,20 @@ pub fn install(core: CoreLink) {
         });
 }
 
+/// The `log` crate's level follows this process's switch: `Off` while off,
+/// so a library's `log::debug!` costs one atomic read, not a call into the
+/// logger (ADR-0058). Only the process's own instance sets it, not one a
+/// test makes.
+fn follow_switch(is_global: bool, on: bool) {
+    if is_global {
+        log::set_max_level(if on {
+            log::LevelFilter::Debug
+        } else {
+            log::LevelFilter::Off
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -295,6 +321,35 @@ mod tests {
     static FORWARDER: std::sync::OnceLock<Forwarder> = std::sync::OnceLock::new();
     fn forwarder() -> &'static Forwarder {
         FORWARDER.get_or_init(Forwarder::default)
+    }
+
+    /// GIVEN the process's switch WHEN it goes on, then off THEN the `log`
+    /// level is `Debug`, then `Off`; GIVEN another forwarder WHEN it goes on
+    /// THEN the level stays. GIVEN an "on" that came before `install` WHEN
+    /// `install` sets the level (`match_level`; `install` itself needs a core
+    /// link) THEN the level is `Debug`, and after an "off" it is `Off`. The
+    /// only test that changes the process's switch.
+    #[test]
+    fn given_the_switch_then_the_log_level_follows_it() {
+        log::set_max_level(log::LevelFilter::Off);
+        global().set_on(true);
+        assert_eq!(log::max_level(), log::LevelFilter::Debug);
+        global().set_on(false);
+        assert_eq!(log::max_level(), log::LevelFilter::Off);
+        let other = Forwarder::default();
+        other.set_on(true);
+        assert_eq!(log::max_level(), log::LevelFilter::Off);
+
+        // The core's "on" came before `install`; the level a fixed `Off`
+        // would leave is stale.
+        global().set_on(true);
+        log::set_max_level(log::LevelFilter::Off);
+        global().match_level();
+        assert_eq!(log::max_level(), log::LevelFilter::Debug);
+        global().set_on(false);
+        log::set_max_level(log::LevelFilter::Debug);
+        global().match_level();
+        assert_eq!(log::max_level(), log::LevelFilter::Off);
     }
 
     /// GIVEN the logger on its own forwarder WHEN records arrive off, then on

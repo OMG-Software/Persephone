@@ -116,6 +116,9 @@ pub struct Log {
     /// Held for the whole of [`Log::turn_on`] and [`Log::turn_off`], so an
     /// "on" waits until an "off" has drained the old writer: two writers on
     /// one file could split each other's lines. Never taken by `record`.
+    /// It also keeps `on` and the `log` crate's level (`follow_switch`)
+    /// together: only these two calls change them after `install`, so an
+    /// "on" and an "off" cannot interleave their changes.
     lifecycle: Mutex<()>,
     /// Goes up with each "off" request (see [`Log::epoch`]).
     epoch: AtomicU64,
@@ -221,6 +224,7 @@ impl Log {
         *writer = Some(Writer { queue, thread });
         *lock(&self.path) = Some(path.to_owned());
         self.on.store(true, Ordering::SeqCst);
+        follow_switch(std::ptr::eq(self, global()), true);
         drop(writer);
         self.switch.send_replace(true);
         self.record(
@@ -252,6 +256,7 @@ impl Log {
             &[],
         );
         self.on.store(false, Ordering::SeqCst);
+        follow_switch(std::ptr::eq(self, global()), false);
         self.switch.send_replace(false);
         let writer = lock(&self.writer).take();
         if let Some(Writer { queue, thread }) = writer {
@@ -757,8 +762,23 @@ fn guarded(write: impl FnOnce()) {
 /// once, early in `main`. Nothing is written until the log is turned on.
 pub fn install() {
     let _ = tracing::subscriber::set_global_default(Subscriber::new(global));
+    // Off until the user turns the log on (see `follow_switch`).
     if log::set_logger(&LOGGER).is_ok() {
-        log::set_max_level(log::LevelFilter::Debug);
+        log::set_max_level(log::LevelFilter::Off);
+    }
+}
+
+/// The `log` crate's level follows this process's switch: `Off` while off,
+/// so a library's `log::debug!` costs one atomic read, not a call into the
+/// logger (ADR-0058). Only the process's own instance sets it, not one a
+/// test makes.
+fn follow_switch(is_global: bool, on: bool) {
+    if is_global {
+        log::set_max_level(if on {
+            log::LevelFilter::Debug
+        } else {
+            log::LevelFilter::Off
+        });
     }
 }
 
