@@ -18,7 +18,7 @@ use persephone_contracts::{
 /// Whether the timeline shows `item` with these switches.
 pub fn shown(item: &TimelineItem, events: &TimelineEvents) -> bool {
     match item {
-        TimelineItem::State { change, .. } => change_switch(change).is_none_or(|on| on(events)),
+        TimelineItem::State { change, .. } => change_switch(change)(events),
         TimelineItem::Other { event, deleted, .. } => {
             other_switch(*event).is_none_or(|on| on(events))
                 && (!*deleted || events.deleted_messages)
@@ -39,9 +39,10 @@ pub fn shown(item: &TimelineItem, events: &TimelineEvents) -> bool {
 /// A switch, read from the settings.
 type Switch = fn(&TimelineEvents) -> bool;
 
-/// The switch for a room change, or `None` for one no switch hides.
-fn change_switch(change: &StateChange) -> Option<Switch> {
-    Some(match change {
+/// The switch for a room change. Every room change has one: a new kind
+/// needs its own switch, not a way past them.
+fn change_switch(change: &StateChange) -> Switch {
+    match change {
         StateChange::Member { membership, .. } => match membership {
             MembershipChange::Joined => |e| e.joins,
             MembershipChange::Left => |e| e.leaves,
@@ -70,7 +71,7 @@ fn change_switch(change: &StateChange) -> Option<Switch> {
         StateChange::ServerAcl {} => |e| e.server_access,
         StateChange::Created {} => |e| e.creation,
         StateChange::Upgraded {} => |e| e.upgrades,
-    })
+    }
 }
 
 /// The switch for an other event's kind, or `None` for a message, which no
