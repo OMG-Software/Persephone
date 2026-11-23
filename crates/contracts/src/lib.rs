@@ -321,7 +321,7 @@ pub enum OtherEvent {
     CallStarted,
     /// `m.call.answer` or `m.call.select_answer`.
     CallAnswered,
-    /// `m.call.reject`, or a declined call notification.
+    /// `m.call.reject`, or `m.rtc.decline` for a declined call notification.
     CallDeclined,
     /// `m.call.hangup`.
     CallEnded,

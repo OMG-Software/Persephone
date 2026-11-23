@@ -452,6 +452,7 @@ fn project(event: &TimelineEvent) -> Option<TimelineItem> {
                     origin_server_ts,
                     change,
                 }),
+                None if member_unchanged(&state) => None,
                 None => other_item(event, event_id, sender, origin_server_ts),
             };
         }
@@ -637,6 +638,16 @@ pub(crate) async fn page_names(
 }
 
 /// What a state event changed, or `None` for a change not shown.
+/// Whether a member event changes nothing: a membership sent again with the
+/// same content. It is not a line of its own, because nothing happened.
+fn member_unchanged(event: &AnySyncStateEvent) -> bool {
+    matches!(
+        event,
+        AnySyncStateEvent::RoomMember(SyncStateEvent::Original(member))
+            if matches!(member.membership_change(), Change::None)
+    )
+}
+
 fn state_change(event: &AnySyncStateEvent) -> Option<StateChange> {
     use crate::room_settings::{history_visibility, join_rule};
     Some(match event {
@@ -1733,16 +1744,17 @@ mod tests {
                 "{kind}"
             );
         }
-        // A member event that changes nothing shows as a room state event.
-        assert_eq!(
-            other_of(&state_event(
+        // A member event that changes nothing is not a line: nothing
+        // happened. A deleted one still shows as room state.
+        assert!(
+            project(&state_event(
                 "m.room.member",
                 A,
                 A,
                 serde_json::json!({ "membership": "join" }),
                 Some(serde_json::json!({ "membership": "join" })),
-            )),
-            Some((OtherEvent::State, "m.room.member".into()))
+            ))
+            .is_none()
         );
     }
 
@@ -1786,6 +1798,7 @@ mod tests {
             ("m.room.third_party_invite", OtherEvent::State),
             ("m.beacon_info", OtherEvent::State),
             ("m.room.name", OtherEvent::State),
+            ("m.room.member", OtherEvent::State),
         ] {
             let item = project(&raw_event(serde_json::json!({
                 "type": kind, "event_id": "$s", "sender": "@alice:example.org",
