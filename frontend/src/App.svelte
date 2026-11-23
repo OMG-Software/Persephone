@@ -2460,8 +2460,11 @@
    * on shows lines the loaded pages never had.
    */
   async function changeSettings(patch: SettingsPatch) {
+    // A change that finishes after the session changed must not reload
+    // the new session's timeline.
+    const generation = sessionGeneration;
     await settingsKeeper.change(patch);
-    if (patch.timelineEvents) await reloadTimeline();
+    if (patch.timelineEvents && generation === sessionGeneration) await reloadTimeline();
   }
 
   /**

@@ -354,9 +354,10 @@ impl wiremock::Respond for LazyHistory {
 /// `/messages` for `ROOM` during a call: each chunk is one message, then as
 /// many call candidates as the request's `limit` leaves room for. A chunk
 /// from `t<n>` ends at `t<n+1>`; with `chunks` set, history starts after
-/// that many chunks. It counts the requests.
+/// that many chunks. It counts the requests and answers each after `delay`.
 struct CallBurst {
     chunks: Option<usize>,
+    delay: Duration,
     requests: Arc<AtomicUsize>,
 }
 
@@ -389,10 +390,12 @@ impl wiremock::Respond for CallBurst {
             "event_id":format!("$candidate{at}_{n}"),"origin_server_ts":time - n as u64,
             "content":{"call_id":"c","party_id":"p","version":"1","candidates":[]}})
         }));
-        ResponseTemplate::new(200).set_body_json(json!({
-            "start":format!("t{at}"),"end":format!("t{}", at + 1),
-            "chunk":in_room(ROOM, Value::Array(chunk)),"state":[]
-        }))
+        ResponseTemplate::new(200)
+            .set_body_json(json!({
+                "start":format!("t{at}"),"end":format!("t{}", at + 1),
+                "chunk":in_room(ROOM, Value::Array(chunk)),"state":[]
+            }))
+            .set_delay(self.delay)
     }
 }
 
@@ -401,6 +404,7 @@ fn core_with_call_burst(
     server: &Homeserver,
     dir: &Path,
     chunks: Option<usize>,
+    delay: Duration,
 ) -> (Core, Arc<AtomicUsize>) {
     let requests = Arc::new(AtomicUsize::new(0));
     server.runtime.block_on(
@@ -408,6 +412,7 @@ fn core_with_call_burst(
             .and(path_regex(r"^/_matrix/client/v3/rooms/[^/]+/messages$"))
             .respond_with(CallBurst {
                 chunks,
+                delay,
                 requests: Arc::clone(&requests),
             })
             .with_priority(1)
@@ -2250,7 +2255,7 @@ fn given_call_details_switched_off_then_a_page_skips_them_and_reaches_older_mess
         true,
     );
     let dir = TempDir::new().unwrap();
-    let (core, requests) = core_with_call_burst(&server, dir.path(), Some(3));
+    let (core, requests) = core_with_call_burst(&server, dir.path(), Some(3), Duration::ZERO);
     let _locked = LockOnDrop(&core);
     let page = |core: &Core| -> TimelinePage {
         value(call(
@@ -2287,11 +2292,10 @@ fn given_call_details_switched_off_then_a_page_skips_them_and_reaches_older_mess
     assert_eq!(requests.load(Ordering::SeqCst), 4);
 }
 
-/// GIVEN a history of call connection details with no end WHEN they are
-/// switched off THEN one page makes at most `MAX_PAGE_FETCHES` requests and
-/// keeps a cursor for the rest.
-#[test]
-fn given_endless_hidden_events_then_a_page_stops_after_its_fetch_limit() {
+/// A page of a call history with no end, whose `/messages` answers after
+/// `delay`, with call connection details switched off: the page, how many
+/// requests it sent and how long it took.
+fn endless_hidden_page(delay: Duration) -> (TimelinePage, usize, Duration) {
     let server = Homeserver::start(
         (
             200,
@@ -2301,7 +2305,7 @@ fn given_endless_hidden_events_then_a_page_stops_after_its_fetch_limit() {
         true,
     );
     let dir = TempDir::new().unwrap();
-    let (core, requests) = core_with_call_burst(&server, dir.path(), None);
+    let (core, requests) = core_with_call_burst(&server, dir.path(), None, delay);
     let _locked = LockOnDrop(&core);
     let saved = call(
         &core,
@@ -2317,6 +2321,7 @@ fn given_endless_hidden_events_then_a_page_stops_after_its_fetch_limit() {
     );
     assert!(matches!(saved, Outcome::Ok(_)), "{saved:?}");
     requests.store(0, Ordering::SeqCst);
+    let started = Instant::now();
     let page: TimelinePage = value(call(
         &core,
         Call::TimelinePage {
@@ -2324,15 +2329,35 @@ fn given_endless_hidden_events_then_a_page_stops_after_its_fetch_limit() {
             cursor: None,
         },
     ));
-    assert_eq!(
-        requests.load(Ordering::SeqCst),
-        persephone_core::matrix_views::MAX_PAGE_FETCHES
-    );
-    assert_eq!(
-        page.items.len(),
-        persephone_core::matrix_views::MAX_PAGE_FETCHES
-    );
+    (page, requests.load(Ordering::SeqCst), started.elapsed())
+}
+
+/// GIVEN a history of call connection details with no end WHEN they are
+/// switched off THEN one page sends at most `MAX_PAGE_REQUESTS` requests and
+/// keeps a cursor for the rest.
+#[test]
+fn given_endless_hidden_events_then_a_page_stops_after_its_request_limit() {
+    use persephone_core::matrix_views::MAX_PAGE_REQUESTS;
+    let (page, requests, _) = endless_hidden_page(Duration::ZERO);
+    assert_eq!(requests, MAX_PAGE_REQUESTS);
+    assert_eq!(page.items.len(), MAX_PAGE_REQUESTS, "one message a chunk");
     assert!(page.next_cursor.is_some(), "the rest stays reachable");
+}
+
+/// GIVEN a slow homeserver and a history of call connection details with no
+/// end WHEN they are switched off THEN the page starts no later chunk after
+/// `PAGE_TIME_BUDGET`: it returns the messages it has, with a cursor, instead
+/// of holding the core for every allowed request.
+#[test]
+fn given_a_slow_homeserver_then_a_page_stops_fetching_after_its_time_budget() {
+    use persephone_core::matrix_views::PAGE_TIME_BUDGET;
+    // Two answers fit in the budget; a third request would start after it.
+    let delay = PAGE_TIME_BUDGET * 3 / 5;
+    let (page, requests, took) = endless_hidden_page(delay);
+    assert_eq!(requests, 2, "took {took:?}");
+    assert_eq!(page_ids(&page), ["$said1", "$said0"]);
+    assert!(page.next_cursor.is_some(), "the rest stays reachable");
+    assert!(took < delay * 3, "took {took:?}");
 }
 
 /// GIVEN Sliding Sync, which sends other people's member events only in

@@ -25,7 +25,10 @@
 //!   nothing new is trusted.
 //! * Items the account's switches hide are left out before a page fills
 //!   (`timeline_filter`). While a page has room, older chunks are fetched,
-//!   at most `MAX_PAGE_FETCHES`, so hidden events do not crowd out messages.
+//!   so hidden events do not crowd out messages. A later chunk starts only
+//!   while the page has sent fewer than `MAX_PAGE_REQUESTS` requests and is
+//!   younger than `PAGE_TIME_BUDGET`; the page then returns what it has,
+//!   with a cursor for the rest.
 //! * An edit (`m.replace`) of a text message is an `edit` item only when its
 //!   sender sent the edited message, compared by full user ID: anyone can
 //!   send an edit naming someone else's message. The edited message's sender
@@ -77,6 +80,7 @@ use persephone_core_protocol::{ErrorCode, MAX_CURSOR_BYTES, MAX_ROOM_ID_BYTES};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     sync::{Mutex, MutexGuard},
+    time::{Duration, Instant},
 };
 
 /// Most pagination tokens kept at once, across all rooms.
@@ -95,10 +99,17 @@ pub const MAX_KNOWN_SENDERS: usize = 512;
 /// Most edited messages a page reads from the homeserver to check an edit's
 /// sender; an edit beyond them is left out of that page.
 pub const MAX_EDIT_LOOKUPS: usize = 8;
-/// Most chunks one timeline page fetches while switched-off events leave it
-/// with room: at most this many requests and `MAX_PAGE_ITEMS` times this
-/// many events a page, however many events the switches hide.
-pub const MAX_PAGE_FETCHES: usize = 5;
+/// Most `/messages` requests a timeline page sends before a later chunk,
+/// counting each smaller retry of a chunk over the byte budget. The first
+/// chunk always loads, as before switches hid anything; a later chunk, which
+/// only switched-off events make the page fetch, starts a request only while
+/// the page has sent fewer than this many.
+pub const MAX_PAGE_REQUESTS: usize = 5;
+/// How long a page may go on fetching later chunks. A request for one starts
+/// only before this time, so hidden events make a page take at most this plus
+/// one request's timeout longer than its first chunk. The page returns what it
+/// has, with a cursor for the rest.
+pub const PAGE_TIME_BUDGET: Duration = Duration::from_secs(5);
 
 #[derive(Default)]
 pub struct MatrixViews {
@@ -1098,8 +1109,8 @@ impl MatrixViews {
     /// Refuse unreadable ignore state before fetching and filter ignored
     /// message content while preserving state events and redactions. Items
     /// the account's switches (`events`) hide are left out before the page
-    /// fills, so the core fetches older chunks, at most `MAX_PAGE_FETCHES`,
-    /// while the page has room left (`timeline_filter`).
+    /// fills, so the core fetches older chunks while the page has room left
+    /// (`timeline_filter`), within `MAX_PAGE_REQUESTS` and `PAGE_TIME_BUDGET`.
     pub async fn timeline_page(
         &self,
         client: &Client,
@@ -1115,7 +1126,9 @@ impl MatrixViews {
         let mut state = Vec::new();
         let mut names = Vec::new();
         let mut lookups = 0;
-        'fetches: for fetch in 0..MAX_PAGE_FETCHES {
+        let started = Instant::now();
+        let mut requests = 0;
+        'fetches: for fetch in 0usize.. {
             let room_left = MAX_PAGE_ITEMS - items.len();
             // After the first chunk, no token is the start of the room.
             if room_left == 0 || (fetch > 0 && token.is_none()) {
@@ -1123,6 +1136,14 @@ impl MatrixViews {
             }
             let mut limit = room_left;
             loop {
+                // A later chunk keeps the page within its budgets; the page
+                // ends at the token it has, which stays valid.
+                if fetch > 0
+                    && (requests >= MAX_PAGE_REQUESTS || started.elapsed() >= PAGE_TIME_BUDGET)
+                {
+                    break 'fetches;
+                }
+                requests += 1;
                 let chunk = self
                     .fetch_chunk(
                         &joined,
