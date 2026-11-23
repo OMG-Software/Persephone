@@ -3,8 +3,10 @@
 //! One process runs one call. It checks its own containment, reports the
 //! result in `Ready`, and then reads core messages from stdin and writes
 //! worker messages to stdout, both as media-protocol Control frames. The
-//! first message must be `Join` or `ListDevices`. Stdout is the frame channel: nothing else
-//! may write to it, and the worker writes nothing to stderr.
+//! first message must be `Join` or `ListDevices`, after any number of
+//! `SetDiagnostics`. Stdout is the frame channel: nothing else may write to
+//! it, and the worker writes nothing to stderr. Diagnostic records go to the
+//! core over stdout only while the core has turned them on (ADR-0058).
 //!
 //! Three bounded queues connect the parts: the stdin reader thread, the
 //! call task, and the stdout writer thread. Video pictures do not use the
@@ -14,6 +16,7 @@ mod args;
 mod camera;
 mod camera_channel;
 mod containment;
+mod diagnostics;
 mod mapping;
 #[cfg(test)]
 mod native_volume_tests;
@@ -63,6 +66,8 @@ fn main() -> ExitCode {
     if !arguments_ok {
         bits |= containment::CHECK_FAILED;
     }
+    // Records only after the core turns them on.
+    diagnostics::install();
     let (output, writer_queue) = Output::new();
     let writer = std::thread::spawn(move || output::write_stdout(writer_queue));
     let Ok(runtime) = build_runtime() else {
@@ -109,7 +114,13 @@ async fn run(bits: u32, output: Output) -> u8 {
     // Input is read only after the containment check passed.
     let (input_tx, mut input) = mpsc::channel::<Input>(INPUT_CAPACITY);
     std::thread::spawn(move || read_loop(input_tx));
-    match input.recv().await {
+    // The switch may come first, so the join's own records are kept.
+    let mut first = input.recv().await;
+    while let Some(Input::Message(ToWorker::SetDiagnostics { on })) = first {
+        diagnostics::global().set_on(on);
+        first = input.recv().await;
+    }
+    match first {
         Some(Input::Message(ToWorker::ListDevices)) => session::list_devices(&output).await,
         Some(Input::Message(first)) if mapping::is_first_message_allowed(&first) => {
             session::run(first, &mut input, &output).await

@@ -40,6 +40,7 @@ pub mod calls;
 pub mod contacts;
 pub mod conversations;
 pub mod credentials;
+pub mod diagnostics;
 pub mod directory;
 pub mod discovery;
 pub mod files;
@@ -162,6 +163,8 @@ struct Notifications {
     video_taken: Option<Instant>,
     /// The report of third-party modules changed since the last notification.
     modules_changed: bool,
+    /// The diagnostic log was turned on or off since the last notification.
+    diagnostics_changed: bool,
     /// The latest desktop notification waiting to be sent (ADR-0022): room
     /// and sender names. A newer one replaces it.
     toast: Option<(String, String)>,
@@ -206,6 +209,15 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Hub {
+    /// Queues one `diagnostics_changed` event.
+    fn diagnostics_changed(&self) {
+        let mut notifications = lock(&self.notifications);
+        if !notifications.diagnostics_changed {
+            notifications.diagnostics_changed = true;
+            self.changed.notify_all();
+        }
+    }
+
     /// Queues one content-free `modules_changed` event.
     fn modules_changed(&self) {
         let mut notifications = lock(&self.notifications);
@@ -493,6 +505,11 @@ pub struct Core {
     /// Serializes reading and writing the reviewed ids in the store, so two
     /// acknowledgements do not overwrite each other. The scan never takes it.
     modules_store: Mutex<()>,
+    /// Where this run's diagnostic log goes (ADR-0058); `None` for
+    /// synthetic data or a profile without a directory.
+    diagnostics_path: Option<std::path::PathBuf>,
+    /// The question to turn the log on is shown: a second one is refused.
+    diagnostics_asking: AtomicBool,
 }
 
 /// Counts one running long call until it is dropped, with its thread or with
@@ -730,6 +747,8 @@ impl Core {
             long_calls: AtomicUsize::new(0),
             modules: Mutex::new(modules::Modules::default()),
             modules_store: Mutex::new(()),
+            diagnostics_path: None,
+            diagnostics_asking: AtomicBool::new(false),
         }
     }
 
@@ -770,6 +789,92 @@ impl Core {
     pub fn with_credentials(mut self, source: Arc<dyn CredentialSource>) -> Self {
         self.credentials = source;
         self
+    }
+
+    /// Where the diagnostic log goes when the user turns it on (ADR-0058);
+    /// `None` leaves it unavailable.
+    pub fn with_diagnostics(mut self, path: Option<std::path::PathBuf>) -> Self {
+        self.diagnostics_path = path;
+        self
+    }
+
+    fn diagnostics_status(&self) -> persephone_contracts::DiagnosticsStatus {
+        let log = diagnostics::global();
+        persephone_contracts::DiagnosticsStatus {
+            on: log.is_on(),
+            available: self.diagnostics_path.is_some(),
+            path: log.path().map(|path| path.display().to_string()),
+        }
+    }
+
+    /// Asks in the core's own window, then turns the log on: `true` when
+    /// on, `false` when the user said no. One question at a time.
+    fn diagnostics_on(&self) -> Result<LongCall<'_>, ErrorCode> {
+        let path = self
+            .diagnostics_path
+            .clone()
+            .ok_or(ErrorCode::Unavailable)?;
+        if diagnostics::global().is_on() {
+            return Ok(Box::new(|| Outcome::Ok(serde_json::Value::Bool(true))));
+        }
+        if self.diagnostics_asking.swap(true, Ordering::SeqCst) {
+            return Err(ErrorCode::LimitExceeded);
+        }
+        Ok(Box::new(move || {
+            let answer = self.credentials.confirm_diagnostics();
+            self.diagnostics_asking.store(false, Ordering::SeqCst);
+            match answer {
+                Ok(true) => {}
+                Ok(false) | Err(credentials::PromptError::Cancelled) => {
+                    return Outcome::Ok(serde_json::Value::Bool(false));
+                }
+                Err(credentials::PromptError::Unsupported) => {
+                    return Outcome::Error(ErrorCode::Unavailable);
+                }
+                Err(_) => return Outcome::Error(ErrorCode::Internal),
+            }
+            if diagnostics::global().turn_on(&path).is_err() {
+                return Outcome::Error(ErrorCode::Unavailable);
+            }
+            self.hub.diagnostics_changed();
+            Outcome::Ok(serde_json::Value::Bool(true))
+        }))
+    }
+
+    fn diagnostics_off(&self) -> Outcome {
+        diagnostics::global().turn_off();
+        self.hub.diagnostics_changed();
+        Outcome::Ok(serde_json::Value::Bool(false))
+    }
+
+    /// The UI host's or the page's records, checked against the protocol's
+    /// limits. Ignored while the log is off.
+    fn diagnostic_records(
+        source: persephone_core_protocol::RecordSource,
+        records: &[persephone_core_protocol::DiagnosticRecord],
+    ) -> Outcome {
+        use persephone_core_protocol::{MAX_DIAGNOSTIC_RECORDS, RecordLevel, RecordSource};
+        if records.len() > MAX_DIAGNOSTIC_RECORDS || !records.iter().all(|r| r.within_bounds()) {
+            return Outcome::Error(ErrorCode::LimitExceeded);
+        }
+        let log = diagnostics::global();
+        if !log.is_on() {
+            return Outcome::Ok(serde_json::Value::Null);
+        }
+        let source = match source {
+            RecordSource::Ui => diagnostics::Source::Ui,
+            RecordSource::Page => diagnostics::Source::Page,
+        };
+        for record in records {
+            let level = match record.level {
+                RecordLevel::Error => diagnostics::Level::Error,
+                RecordLevel::Warn => diagnostics::Level::Warn,
+                RecordLevel::Info => diagnostics::Level::Info,
+                RecordLevel::Debug => diagnostics::Level::Debug,
+            };
+            log.record(source, level, &record.target, &record.message, &[]);
+        }
+        Outcome::Ok(serde_json::Value::Null)
     }
 
     pub fn session(&self) -> &Session {
@@ -877,6 +982,10 @@ impl Core {
                 Err(code) => error(code),
             },
             Call::CallDevices {} => match self.call_devices() {
+                Ok(call) => Answer::Later(id, call),
+                Err(code) => error(code),
+            },
+            Call::SetDiagnostics { on: true } => match self.diagnostics_on() {
                 Ok(call) => Answer::Later(id, call),
                 Err(code) => error(code),
             },
@@ -1146,6 +1255,13 @@ impl Core {
                         Err(_) => Outcome::Error(ErrorCode::Locked),
                     }
                 }
+            }
+            Call::DiagnosticsStatus {} => ok(&self.diagnostics_status()),
+            // Turning on asks first, so only `answer` runs it.
+            Call::SetDiagnostics { on: true } => Outcome::Error(ErrorCode::Unavailable),
+            Call::SetDiagnostics { on: false } => self.diagnostics_off(),
+            Call::DiagnosticRecords { source, records } => {
+                Self::diagnostic_records(*source, records)
             }
             Call::ProxySetting {} => match self.proxy_setting() {
                 Ok(socks) => ok(&persephone_contracts::ProxySetting {
@@ -3528,6 +3644,7 @@ impl Core {
                 && !notifications.calls_changed
                 && !notifications.rings_changed
                 && !notifications.modules_changed
+                && !notifications.diagnostics_changed
                 && notifications.toast.is_none()
                 && !video_due
                 && !notifications.closed;
@@ -3577,6 +3694,11 @@ impl Core {
             std::mem::take(&mut notifications.rings_changed).then_some(Event::RingsChanged {});
         let modules =
             std::mem::take(&mut notifications.modules_changed).then_some(Event::ModulesChanged {});
+        let diagnostics = std::mem::take(&mut notifications.diagnostics_changed).then(|| {
+            Event::DiagnosticsChanged {
+                on: diagnostics::global().is_on(),
+            }
+        });
         let for_call = std::mem::take(&mut notifications.toast_call);
         let toast = notifications
             .toast
@@ -3596,6 +3718,7 @@ impl Core {
                 .chain(rings)
                 .chain(video)
                 .chain(modules)
+                .chain(diagnostics)
                 .chain(toast)
                 .chain(
                     rooms
@@ -3644,6 +3767,46 @@ impl Core {
 /// Serves requests from `input` until the UI closes the stream or violates the
 /// protocol, while a second thread writes notifications. Replies and events
 /// share `output` and are written whole, one frame at a time.
+/// One command for the diagnostic log: its name, its request ID, how it
+/// ended (`ok`, an error code, or `running` for a long call that reports
+/// again when it ends) and how long it took.
+fn note_request(id: u32, name: &str, outcome: String, started: Instant) {
+    diagnostics::global().record(
+        diagnostics::Source::Core,
+        diagnostics::Level::Debug,
+        "persephone::request",
+        name,
+        &[
+            ("id", serde_json::Value::from(id)),
+            ("outcome", serde_json::Value::from(outcome)),
+            (
+                "ms",
+                serde_json::Value::from(
+                    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                ),
+            ),
+        ],
+    );
+}
+
+fn outcome_kind(outcome: &Outcome) -> String {
+    match outcome {
+        Outcome::Ok(_) => "ok".into(),
+        Outcome::Error(code) => serde_json::to_value(code)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .unwrap_or_else(|| "error".into()),
+    }
+}
+
+fn answer_kind(answer: &Answer<'_>) -> String {
+    match answer {
+        Answer::Reply(reply) => outcome_kind(&reply.outcome),
+        Answer::Pixels(..) | Answer::Video(..) => "ok".into(),
+        Answer::Later(..) => "running".into(),
+    }
+}
+
 pub fn serve<R: Read, W: Write + Send>(core: &Core, mut input: R, output: W) -> ServeEnd {
     let budgets = core.budgets.clone();
     let output = Mutex::new(output);
@@ -3677,6 +3840,19 @@ pub fn serve<R: Read, W: Write + Send>(core: &Core, mut input: R, output: W) -> 
                         ready = true;
                         lock(&core.hub.notifications).ready = true;
                     }
+                    // The diagnostic log gets each command's name, outcome
+                    // and time, never its arguments (ADR-0058).
+                    let started = Instant::now();
+                    let named = diagnostics::global()
+                        .is_on()
+                        .then(|| match &incoming {
+                            ToCore::Request(request)
+                            | ToCore::Paste(request, _)
+                            | ToCore::PasteRefused(request) => {
+                                request.call.command().map(|name| (request.id, name))
+                            }
+                        })
+                        .flatten();
                     let answer = match incoming {
                         ToCore::Request(request) => core.answer(&request),
                         ToCore::Paste(request, image) => core.answer_paste(&request, image),
@@ -3687,6 +3863,9 @@ pub fn serve<R: Read, W: Write + Send>(core: &Core, mut input: R, output: W) -> 
                             outcome: Outcome::Error(ErrorCode::LimitExceeded),
                         }),
                     };
+                    if let Some((id, name)) = &named {
+                        note_request(*id, name, answer_kind(&answer), started);
+                    }
                     let written = match answer {
                         Answer::Reply(reply) => {
                             send(&mut *lock(&output), &CoreMessage::Reply(reply))
@@ -3738,10 +3917,11 @@ pub fn serve<R: Read, W: Write + Send>(core: &Core, mut input: R, output: W) -> 
                                 .stack_size(LONG_CALL_STACK_BYTES)
                                 .spawn_scoped(scope, move || {
                                     let _running = running;
-                                    let reply = CoreMessage::Reply(Reply {
-                                        id,
-                                        outcome: call(),
-                                    });
+                                    let outcome = call();
+                                    if let Some((id, name)) = &named {
+                                        note_request(*id, name, outcome_kind(&outcome), started);
+                                    }
+                                    let reply = CoreMessage::Reply(Reply { id, outcome });
                                     if send(&mut *lock(output), &reply).is_err() {
                                         core.close();
                                     }
@@ -5009,5 +5189,116 @@ mod tests {
         let notifications = lock(&hub.notifications);
         assert!(notifications.room_list_changed);
         assert!(notifications.pending.is_empty(), "no room content changed");
+    }
+
+    /// Answers the diagnostic log's question with a fixed answer.
+    struct DiagnosticsAnswer(bool);
+
+    impl CredentialSource for DiagnosticsAnswer {
+        fn ask(&self, _: &str) -> Result<credentials::Credentials, credentials::PromptError> {
+            Err(credentials::PromptError::Unsupported)
+        }
+
+        fn confirm_open_link(
+            &self,
+            caption: &str,
+            _: &str,
+        ) -> Result<bool, credentials::PromptError> {
+            assert_eq!(caption, prompt_text::DIAGNOSTICS.0);
+            Ok(self.0)
+        }
+    }
+
+    /// GIVEN a core with a log path WHEN the user says no, then yes, then
+    /// turns the log off THEN it is on only after the yes, each change
+    /// raises one event, the page's records are written only while on, and
+    /// the file stays after off. The only test that uses the process's log.
+    #[test]
+    fn given_the_switch_when_answered_then_the_log_follows_the_user() {
+        use persephone_core_protocol::{DiagnosticRecord, RecordLevel, RecordSource};
+        let dir = tempfile::tempdir().unwrap();
+        let path = diagnostics::path_in(dir.path());
+        let no = Core::default()
+            .with_credentials(Arc::new(DiagnosticsAnswer(false)))
+            .with_diagnostics(Some(path.clone()));
+        let answer = no.diagnostics_on().unwrap()();
+        assert_eq!(answer, Outcome::Ok(serde_json::Value::Bool(false)));
+        assert!(!no.diagnostics_status().on);
+        assert!(!path.exists());
+
+        let core = Core::default()
+            .with_credentials(Arc::new(DiagnosticsAnswer(true)))
+            .with_diagnostics(Some(path.clone()));
+        let page = |message: &str| {
+            Core::diagnostic_records(
+                RecordSource::Page,
+                &[DiagnosticRecord {
+                    level: RecordLevel::Info,
+                    target: "bridge".into(),
+                    message: message.into(),
+                }],
+            )
+        };
+        page("before on");
+        assert_eq!(
+            core.diagnostics_on().unwrap()(),
+            Outcome::Ok(serde_json::Value::Bool(true))
+        );
+        assert_eq!(
+            core.take_events(),
+            Some(vec![Event::DiagnosticsChanged { on: true }])
+        );
+        let status = core.diagnostics_status();
+        assert!(status.on && status.available);
+        assert_eq!(status.path, Some(path.display().to_string()));
+        page("while on");
+        assert_eq!(
+            core.diagnostics_off(),
+            Outcome::Ok(serde_json::Value::Bool(false))
+        );
+        assert_eq!(
+            core.take_events(),
+            Some(vec![Event::DiagnosticsChanged { on: false }])
+        );
+        page("after off");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("while on"), "{text}");
+        assert!(
+            !text.contains("before on") && !text.contains("after off"),
+            "{text}"
+        );
+        assert!(!core.diagnostics_status().on);
+        assert_eq!(
+            core.diagnostics_status().path,
+            Some(path.display().to_string())
+        );
+    }
+
+    /// GIVEN too many records, or one over its limits THEN the call is
+    /// refused; GIVEN no log path THEN turning on is unavailable.
+    #[test]
+    fn given_bad_records_or_no_path_then_refused() {
+        use persephone_core_protocol::{
+            DiagnosticRecord, MAX_DIAGNOSTIC_MESSAGE_BYTES, MAX_DIAGNOSTIC_RECORDS, RecordLevel,
+            RecordSource,
+        };
+        let record = |message: String| DiagnosticRecord {
+            level: RecordLevel::Debug,
+            target: "t".into(),
+            message,
+        };
+        let many = vec![record("m".into()); MAX_DIAGNOSTIC_RECORDS + 1];
+        assert_eq!(
+            Core::diagnostic_records(RecordSource::Ui, &many),
+            Outcome::Error(ErrorCode::LimitExceeded)
+        );
+        let long = [record("m".repeat(MAX_DIAGNOSTIC_MESSAGE_BYTES + 1))];
+        assert_eq!(
+            Core::diagnostic_records(RecordSource::Ui, &long),
+            Outcome::Error(ErrorCode::LimitExceeded)
+        );
+        let core = Core::default();
+        assert!(matches!(core.diagnostics_on(), Err(ErrorCode::Unavailable)));
+        assert!(!core.diagnostics_status().available);
     }
 }

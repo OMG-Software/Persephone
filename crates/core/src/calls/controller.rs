@@ -619,7 +619,10 @@ impl View {
 
     fn apply(&mut self, event: &FromWorker) -> Applied {
         match event {
-            FromWorker::Ready { .. } | FromWorker::ParticipantJoined { .. } => Applied::Same,
+            // A record goes to the diagnostic log, never to the view.
+            FromWorker::Ready { .. }
+            | FromWorker::ParticipantJoined { .. }
+            | FromWorker::Diagnostic { .. } => Applied::Same,
             FromWorker::Camera { state } => self.set_camera(match state {
                 CameraState::Off => CallCamera::Off,
                 CameraState::On => CallCamera::On,
@@ -824,6 +827,19 @@ pub(crate) fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// Writes one call worker record to the diagnostic log (ADR-0058). The
+/// text is the worker's, untrusted: the log redacts it like any other.
+fn worker_record(level: u8, target: &str, message: &str) {
+    use crate::diagnostics::{Level, Source, global};
+    let level = match level {
+        1 => Level::Error,
+        2 => Level::Warn,
+        3 => Level::Info,
+        _ => Level::Debug,
+    };
+    global().record(Source::CallWorker, level, target, message, &[]);
 }
 
 fn turn_for_worker(turn: Option<TurnServers>) -> Vec<TurnServer> {
@@ -1560,6 +1576,11 @@ impl CallController {
             camera_on: scope.video && !portal_camera,
             volume: scope.devices.volume(),
         };
+        // Before the join, so the worker's connection records are kept
+        // (ADR-0058). The call task sends the switch again when it starts.
+        if crate::diagnostics::global().is_on() {
+            let _ = link.send(ToWorker::SetDiagnostics { on: true });
+        }
         if link.send(join).is_err() {
             setup.link = Some(link);
             return Err(CallError::Worker(StartError::NotReady));
@@ -2838,6 +2859,15 @@ impl Call {
     /// picture of a new stream shows under the old participant, even on a
     /// page whose status is older.
     fn worker_event(&mut self, inner: &Inner, event: &FromWorker) -> Result<(), EndReason> {
+        if let FromWorker::Diagnostic {
+            level,
+            target,
+            message,
+        } = event
+        {
+            worker_record(*level, target, message);
+            return Ok(());
+        }
         // A camera that is not on has no capture left: its remote is used up.
         // An `On` after a remote went (and no off since) is a capture over it.
         if let FromWorker::Camera { state } = event {
@@ -3219,6 +3249,9 @@ impl Call {
         // there was none, the worker gets the Join's volume again.
         let mut volume = self.volume.subscribe();
         volume.mark_changed();
+        // The diagnostic log's switch, sent at once and on each change.
+        let mut diagnostics = crate::diagnostics::global().watch();
+        diagnostics.mark_changed();
         self.start_keys(inner).await?;
         // A video join on the portal path asks for the camera now (the join
         // sent `camera_on: false`).
@@ -3252,6 +3285,10 @@ impl Call {
                 Ok(()) = volume.changed() => {
                     let percent = *volume.borrow_and_update();
                     self.volume_changed(inner, percent)?;
+                }
+                Ok(()) = diagnostics.changed() => {
+                    let on = *diagnostics.borrow_and_update();
+                    self.send_worker(ToWorker::SetDiagnostics { on })?;
                 }
                 remote = portal_done(&mut self.portal) => self.portal_finished(inner, remote)?,
                 (picked, cancelled) = screen_pick_done(&mut self.screen_pick) => {

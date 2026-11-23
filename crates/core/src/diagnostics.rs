@@ -1,0 +1,840 @@
+//! The opt-in diagnostic log (ADR-0058).
+//!
+//! * Off at every start. Only [`Log::turn_on`], after the user said yes in
+//!   the core's own window, starts it. Nothing stores the choice.
+//! * One file, `diagnostics/persephone.jsonl` in the profile's directory, one
+//!   JSON object for each line. At start, [`erase`] writes random bytes over
+//!   an old file, flushes, truncates and removes it. This is best effort: an
+//!   SSD or a copy-on-write file system can keep the old blocks.
+//! * Every string goes through [`redact`] before it is written.
+//! * Bounded: a queue of [`QUEUE_LINES`] lines, [`MAX_LINE_BYTES`] for each
+//!   line and [`MAX_FILE_BYTES`] for the file. A full queue drops lines and
+//!   counts them.
+//!
+//! The core's own `tracing` events and `log` records come in through
+//! [`install`]; the other processes send theirs to the core, which calls
+//! [`Log::record`] with their [`Source`].
+
+use serde::Serialize;
+use serde_json::{Map, Value};
+use std::{
+    fs::{self, File, OpenOptions},
+    io::{self, BufWriter, Write},
+    path::{Path, PathBuf},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        mpsc::{self, Receiver, SyncSender, TrySendError},
+    },
+    thread::JoinHandle,
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+pub mod events;
+pub mod redact;
+
+/// The log's folder in the profile's directory.
+pub const DIR_NAME: &str = "diagnostics";
+/// The log's file name.
+pub const FILE_NAME: &str = "persephone.jsonl";
+/// The file stops growing here; one `log_full` line marks the end.
+pub const MAX_FILE_BYTES: u64 = 256 * 1024 * 1024;
+/// One line at most, after redaction.
+pub const MAX_LINE_BYTES: usize = 16 * 1024;
+/// One string at most, after redaction.
+pub const MAX_STRING_BYTES: usize = 4 * 1024;
+/// Lines waiting for the writer thread.
+pub const QUEUE_LINES: usize = 4096;
+/// The overwrite is written in pieces of this size.
+const ERASE_CHUNK: usize = 64 * 1024;
+
+/// The process that reported a record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Source {
+    Core,
+    Ui,
+    Page,
+    CallWorker,
+}
+
+/// How much a record matters, the same five steps as `tracing` and `log`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Level {
+    Error,
+    Warn,
+    Info,
+    Debug,
+    Trace,
+}
+
+/// The log's path in a profile's directory.
+pub fn path_in(profile_dir: &Path) -> PathBuf {
+    profile_dir.join(DIR_NAME).join(FILE_NAME)
+}
+
+/// The process's one log. The `tracing` subscriber and the `log` logger
+/// write here.
+pub fn global() -> &'static Log {
+    static LOG: OnceLock<Log> = OnceLock::new();
+    LOG.get_or_init(Log::default)
+}
+
+/// State shared with the writer thread.
+#[derive(Default)]
+struct Shared {
+    /// The next line's number in this run.
+    seq: AtomicU64,
+    /// Lines lost to a full queue since the last written line.
+    dropped: AtomicU64,
+    /// The file reached [`MAX_FILE_BYTES`] in this run.
+    full: AtomicBool,
+}
+
+struct Writer {
+    queue: SyncSender<String>,
+    thread: JoinHandle<()>,
+}
+
+/// A diagnostic log. Off until [`Log::turn_on`].
+pub struct Log {
+    on: AtomicBool,
+    shared: Arc<Shared>,
+    writer: Mutex<Option<Writer>>,
+    /// The file of this run, once it was turned on.
+    path: Mutex<Option<PathBuf>>,
+    /// The switch for processes that send their records to the core: a
+    /// call task tells its worker (ADR-0058).
+    switch: tokio::sync::watch::Sender<bool>,
+}
+
+impl Default for Log {
+    fn default() -> Self {
+        Self {
+            on: AtomicBool::new(false),
+            shared: Arc::default(),
+            writer: Mutex::new(None),
+            path: Mutex::new(None),
+            switch: tokio::sync::watch::channel(false).0,
+        }
+    }
+}
+
+impl Log {
+    /// Follows the switch: the newest value only.
+    pub fn watch(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.switch.subscribe()
+    }
+
+    /// Whether records are written now.
+    pub fn is_on(&self) -> bool {
+        self.on.load(Ordering::Relaxed) && !self.shared.full.load(Ordering::Relaxed)
+    }
+
+    /// The file this run wrote to, if the log was ever on in this run. The
+    /// file stays until the next start, also after the log is turned off.
+    pub fn path(&self) -> Option<PathBuf> {
+        lock(&self.path).clone()
+    }
+
+    /// Opens `path` for appending (owner-only on Unix, never through a
+    /// link) and starts writing. A second call while on does nothing.
+    pub fn turn_on(&self, path: &Path) -> io::Result<()> {
+        let mut writer = lock(&self.writer);
+        if writer.is_some() {
+            return Ok(());
+        }
+        let file = open_for_append(path)?;
+        let written = file.metadata()?.len();
+        let (queue, lines) = mpsc::sync_channel(QUEUE_LINES);
+        let shared = self.shared.clone();
+        let thread = std::thread::Builder::new()
+            .name("diagnostics".into())
+            .spawn(move || write_lines(file, written, &lines, &shared))?;
+        *writer = Some(Writer { queue, thread });
+        *lock(&self.path) = Some(path.to_owned());
+        self.on.store(true, Ordering::SeqCst);
+        drop(writer);
+        self.switch.send_replace(true);
+        self.record(
+            Source::Core,
+            Level::Info,
+            "persephone::diagnostics",
+            "diagnostic log on",
+            &[("version", Value::from(env!("CARGO_PKG_VERSION")))],
+        );
+        Ok(())
+    }
+
+    /// Stops writing. Lines in the queue are written and flushed first. The
+    /// file stays until the next start.
+    pub fn turn_off(&self) {
+        if !self.on.load(Ordering::SeqCst) {
+            return;
+        }
+        self.record(
+            Source::Core,
+            Level::Info,
+            "persephone::diagnostics",
+            "diagnostic log off",
+            &[],
+        );
+        self.on.store(false, Ordering::SeqCst);
+        self.switch.send_replace(false);
+        let writer = lock(&self.writer).take();
+        if let Some(Writer { queue, thread }) = writer {
+            drop(queue);
+            let _ = thread.join();
+        }
+    }
+
+    /// Writes one record, if the log is on. Every string is redacted and
+    /// cut to [`MAX_STRING_BYTES`]; a field with a secret's name is written
+    /// as `[redacted]`.
+    pub fn record(
+        &self,
+        source: Source,
+        level: Level,
+        target: &str,
+        message: &str,
+        fields: &[(&str, Value)],
+    ) {
+        if !self.is_on() {
+            return;
+        }
+        let seq = self.shared.seq.fetch_add(1, Ordering::Relaxed);
+        let line = line(seq, source, level, target, message, fields);
+        let sent = match &*lock(&self.writer) {
+            Some(writer) => writer.queue.try_send(line),
+            None => return,
+        };
+        if let Err(TrySendError::Full(_)) = sent {
+            self.shared.dropped.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// One JSON line, without its line break.
+fn line(
+    seq: u64,
+    source: Source,
+    level: Level,
+    target: &str,
+    message: &str,
+    fields: &[(&str, Value)],
+) -> String {
+    let mut object = Map::new();
+    object.insert("ts".into(), Value::from(now_ms()));
+    object.insert("seq".into(), Value::from(seq));
+    object.insert(
+        "source".into(),
+        serde_json::to_value(source).unwrap_or(Value::Null),
+    );
+    object.insert(
+        "level".into(),
+        serde_json::to_value(level).unwrap_or(Value::Null),
+    );
+    object.insert("target".into(), Value::from(redact::text(target, 256)));
+    object.insert(
+        "message".into(),
+        Value::from(redact::text(message, MAX_STRING_BYTES)),
+    );
+    if !fields.is_empty() {
+        let mut map = Map::new();
+        for (name, value) in fields {
+            let name = redact::text(name, 128);
+            let value = if redact::is_secret_name(&name) {
+                Value::from(redact::REDACTED)
+            } else {
+                redact::value(value, 0)
+            };
+            map.insert(name, value);
+        }
+        object.insert("fields".into(), Value::Object(map));
+    }
+    let mut text = Value::Object(object).to_string();
+    if text.len() > MAX_LINE_BYTES {
+        // Too long even with each string cut: the fields go.
+        let mut object = Map::new();
+        object.insert("ts".into(), Value::from(now_ms()));
+        object.insert("seq".into(), Value::from(seq));
+        object.insert(
+            "source".into(),
+            serde_json::to_value(source).unwrap_or(Value::Null),
+        );
+        object.insert(
+            "level".into(),
+            serde_json::to_value(level).unwrap_or(Value::Null),
+        );
+        object.insert("target".into(), Value::from(redact::text(target, 256)));
+        object.insert(
+            "message".into(),
+            Value::from(redact::text(message, MAX_STRING_BYTES)),
+        );
+        object.insert("truncated".into(), Value::Bool(true));
+        text = Value::Object(object).to_string();
+    }
+    text
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |time| {
+            u64::try_from(time.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
+/// The writer thread: writes queued lines until the queue closes, flushing
+/// whenever the queue is empty.
+fn write_lines(file: File, mut written: u64, lines: &Receiver<String>, shared: &Shared) {
+    let mut out = BufWriter::new(file);
+    let put = |out: &mut BufWriter<File>, text: &str, written: &mut u64| -> bool {
+        if shared.full.load(Ordering::Relaxed) {
+            return false;
+        }
+        // Room is kept for the closing `log_full` line.
+        let reserve = 256;
+        if *written + text.len() as u64 + 1 + reserve > MAX_FILE_BYTES {
+            shared.full.store(true, Ordering::Relaxed);
+            let seq = shared.seq.fetch_add(1, Ordering::Relaxed);
+            let end = line(
+                seq,
+                Source::Core,
+                Level::Warn,
+                "persephone::diagnostics",
+                "log_full",
+                &[],
+            );
+            let _ = writeln!(out, "{end}");
+            return false;
+        }
+        if writeln!(out, "{text}").is_err() {
+            return false;
+        }
+        *written += text.len() as u64 + 1;
+        true
+    };
+    while let Ok(first) = lines.recv() {
+        let mut next = Some(first);
+        while let Some(text) = next {
+            let dropped = shared.dropped.swap(0, Ordering::Relaxed);
+            if dropped > 0 {
+                let seq = shared.seq.fetch_add(1, Ordering::Relaxed);
+                let note = line(
+                    seq,
+                    Source::Core,
+                    Level::Warn,
+                    "persephone::diagnostics",
+                    "records dropped: queue full",
+                    &[("count", Value::from(dropped))],
+                );
+                put(&mut out, &note, &mut written);
+            }
+            put(&mut out, &text, &mut written);
+            next = lines.try_recv().ok();
+        }
+        let _ = out.flush();
+    }
+    let _ = out.flush();
+    let _ = out.get_ref().sync_all();
+}
+
+/// Opens the log for appending: creates its folder (owner-only on Unix) and
+/// the file (owner-only on Unix); refuses a link or anything that is not a
+/// plain file.
+fn open_for_append(path: &Path) -> io::Result<File> {
+    let folder = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(folder)?;
+    if fs::symlink_metadata(folder)?.file_type().is_symlink() {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    let mut options = OpenOptions::new();
+    options.append(true).create(true);
+    no_follow(&mut options);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(path)?;
+    plain_file(&file)?;
+    Ok(file)
+}
+
+#[cfg(unix)]
+fn no_follow(options: &mut OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+    options.custom_flags(libc::O_NOFOLLOW);
+}
+
+#[cfg(windows)]
+fn no_follow(options: &mut OpenOptions) {
+    use std::os::windows::fs::OpenOptionsExt;
+    options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
+}
+
+#[cfg(not(any(unix, windows)))]
+fn no_follow(_: &mut OpenOptions) {}
+
+/// The open file is a plain file, not a link, folder or device.
+fn plain_file(file: &File) -> io::Result<()> {
+    let metadata = file.metadata()?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+    }
+    if !metadata.is_file() {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    Ok(())
+}
+
+/// Deletes an old log at start: random bytes over its whole length, a flush
+/// to disk, truncation, a second flush, then removal. A link at the path is
+/// removed itself; what it points at is not touched. Returns whether
+/// anything was there. Best effort: see the module notes.
+pub fn erase(path: &Path) -> io::Result<bool> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if !metadata.file_type().is_file() {
+        if metadata.file_type().is_dir() {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        fs::remove_file(path)?;
+        return Ok(true);
+    }
+    let overwritten = overwrite(path);
+    // Removed also when the overwrite failed: the file must not stay.
+    fs::remove_file(path)?;
+    overwritten.map(|()| true)
+}
+
+fn overwrite(path: &Path) -> io::Result<()> {
+    let mut options = OpenOptions::new();
+    options.write(true);
+    no_follow(&mut options);
+    let mut file = options.open(path)?;
+    plain_file(&file)?;
+    let length = file.metadata()?.len();
+    let mut chunk = vec![0u8; ERASE_CHUNK];
+    let mut left = length;
+    while left > 0 {
+        let size = usize::try_from(left.min(ERASE_CHUNK as u64)).unwrap_or(ERASE_CHUNK);
+        getrandom::fill(&mut chunk[..size]).map_err(|_| io::Error::other("no random bytes"))?;
+        file.write_all(&chunk[..size])?;
+        left -= size as u64;
+    }
+    file.sync_all()?;
+    file.set_len(0)?;
+    file.sync_all()
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+// --- The core's own `tracing` events and `log` records ------------------------
+
+/// Targets that are too busy at `debug`: only `info` and above from them.
+const QUIET_TARGETS: &[&str] = &[
+    "h2",
+    "hyper",
+    "hyper_util",
+    "mio",
+    "reqwest",
+    "rustls",
+    "tokio",
+    "tokio_util",
+    "tungstenite",
+    "tokio_tungstenite",
+    "want",
+];
+
+/// Whether a record at `level` from `target` is kept.
+pub fn wanted(target: &str, level: Level) -> bool {
+    if level == Level::Trace {
+        return false;
+    }
+    let root = target.split("::").next().unwrap_or(target);
+    level <= Level::Info || !QUIET_TARGETS.contains(&root)
+}
+
+thread_local! {
+    /// Set while this thread writes a record, so a record made while
+    /// recording is dropped rather than recursing.
+    static RECORDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn guarded(write: impl FnOnce()) {
+    let entered = RECORDING.with(|flag| !flag.replace(true));
+    if entered {
+        write();
+        RECORDING.with(|flag| flag.set(false));
+    }
+}
+
+/// Makes the log the process's `tracing` subscriber and `log` logger. Call
+/// once, early in `main`. Nothing is written until the log is turned on.
+pub fn install() {
+    let _ = tracing::subscriber::set_global_default(Subscriber::default());
+    if log::set_logger(&LOGGER).is_ok() {
+        log::set_max_level(log::LevelFilter::Debug);
+    }
+}
+
+fn from_tracing(level: tracing::Level) -> Level {
+    match level {
+        tracing::Level::ERROR => Level::Error,
+        tracing::Level::WARN => Level::Warn,
+        tracing::Level::INFO => Level::Info,
+        tracing::Level::DEBUG => Level::Debug,
+        tracing::Level::TRACE => Level::Trace,
+    }
+}
+
+/// From a `log` level, also used for the other processes' records.
+pub fn from_log(level: log::Level) -> Level {
+    match level {
+        log::Level::Error => Level::Error,
+        log::Level::Warn => Level::Warn,
+        log::Level::Info => Level::Info,
+        log::Level::Debug => Level::Debug,
+        log::Level::Trace => Level::Trace,
+    }
+}
+
+/// A minimal `tracing` subscriber: events only. Spans get an ID, so code
+/// that enters spans works, but their fields are not kept.
+#[derive(Default)]
+struct Subscriber {
+    next_span: AtomicU64,
+}
+
+impl tracing::Subscriber for Subscriber {
+    fn register_callsite(
+        &self,
+        metadata: &'static tracing::Metadata<'static>,
+    ) -> tracing::subscriber::Interest {
+        if wanted(metadata.target(), from_tracing(*metadata.level())) {
+            // Asked again each time: the switch can change at any moment.
+            tracing::subscriber::Interest::sometimes()
+        } else {
+            tracing::subscriber::Interest::never()
+        }
+    }
+
+    fn max_level_hint(&self) -> Option<tracing::level_filters::LevelFilter> {
+        Some(tracing::level_filters::LevelFilter::DEBUG)
+    }
+
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        global().is_on() && wanted(metadata.target(), from_tracing(*metadata.level()))
+    }
+
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(self.next_span.fetch_add(1, Ordering::Relaxed) + 1)
+    }
+
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+    fn event(&self, event: &tracing::Event<'_>) {
+        guarded(|| {
+            let metadata = event.metadata();
+            let mut fields = Fields::default();
+            event.record(&mut fields);
+            let named: Vec<(&str, Value)> = fields
+                .named
+                .iter()
+                .map(|(name, value)| (*name, value.clone()))
+                .collect();
+            global().record(
+                Source::Core,
+                from_tracing(*metadata.level()),
+                metadata.target(),
+                &fields.message,
+                &named,
+            );
+        });
+    }
+
+    fn enter(&self, _: &tracing::span::Id) {}
+
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+/// An event's `message` and its other fields.
+#[derive(Default)]
+struct Fields {
+    message: String,
+    named: Vec<(&'static str, Value)>,
+}
+
+/// At most this many fields of one event are kept.
+const MAX_FIELDS: usize = 32;
+
+impl Fields {
+    fn put(&mut self, field: &tracing::field::Field, value: Value) {
+        if field.name() == "message" {
+            self.message = match value {
+                Value::String(text) => text,
+                other => other.to_string(),
+            };
+        } else if self.named.len() < MAX_FIELDS {
+            self.named.push((field.name(), value));
+        }
+    }
+}
+
+impl tracing::field::Visit for Fields {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        let mut text = format!("{value:?}");
+        cut(&mut text, MAX_STRING_BYTES);
+        self.put(field, Value::String(text));
+    }
+
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        let mut text = value.to_owned();
+        cut(&mut text, MAX_STRING_BYTES);
+        self.put(field, Value::String(text));
+    }
+
+    fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
+        self.put(field, Value::from(value));
+    }
+
+    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+        self.put(field, Value::from(value));
+    }
+
+    fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
+        self.put(field, Value::Bool(value));
+    }
+}
+
+/// Cuts `text` to at most `limit` bytes, on a character boundary.
+pub fn cut(text: &mut String, limit: usize) {
+    if text.len() > limit {
+        let mut end = limit;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+        text.push('…');
+    }
+}
+
+struct Logger;
+
+static LOGGER: Logger = Logger;
+
+impl log::Log for Logger {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        global().is_on() && wanted(metadata.target(), from_log(metadata.level()))
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        if !self.enabled(record.metadata()) {
+            return;
+        }
+        guarded(|| {
+            let mut message = record.args().to_string();
+            cut(&mut message, MAX_STRING_BYTES);
+            global().record(
+                Source::Core,
+                from_log(record.level()),
+                record.target(),
+                &message,
+                &[],
+            );
+        });
+    }
+
+    fn flush(&self) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lines(path: &Path) -> Vec<Value> {
+        fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    /// GIVEN a new log WHEN nothing turned it on THEN it records nothing and
+    /// names no file.
+    #[test]
+    fn given_new_log_then_it_is_off() {
+        let log = Log::default();
+        assert!(!log.is_on());
+        log.record(Source::Core, Level::Error, "t", "m", &[]);
+        assert_eq!(log.path(), None);
+    }
+
+    /// GIVEN a log turned on WHEN records arrive and it is turned off THEN
+    /// each is one JSON line with its source, level and target, and the file
+    /// stays.
+    #[test]
+    fn given_log_on_when_recorded_then_lines_are_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = path_in(dir.path());
+        let log = Log::default();
+        log.turn_on(&path).unwrap();
+        assert!(log.is_on());
+        log.record(
+            Source::Page,
+            Level::Debug,
+            "bridge",
+            "room_list ok",
+            &[("ms", Value::from(3))],
+        );
+        log.turn_off();
+        assert!(!log.is_on());
+        log.record(Source::Core, Level::Error, "t", "after off", &[]);
+        let lines = lines(&path);
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert_eq!(lines[0]["message"], "diagnostic log on");
+        assert_eq!(lines[1]["source"], "page");
+        assert_eq!(lines[1]["level"], "debug");
+        assert_eq!(lines[1]["target"], "bridge");
+        assert_eq!(lines[1]["fields"]["ms"], 3);
+        assert_eq!(lines[2]["message"], "diagnostic log off");
+        assert!(lines[0]["seq"].as_u64() < lines[1]["seq"].as_u64());
+        assert_eq!(log.path(), Some(path));
+    }
+
+    /// GIVEN a log turned off and on again in one run THEN the second part is
+    /// added to the same file.
+    #[test]
+    fn given_log_on_again_then_it_appends() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = path_in(dir.path());
+        let log = Log::default();
+        log.turn_on(&path).unwrap();
+        log.turn_off();
+        log.turn_on(&path).unwrap();
+        log.turn_off();
+        assert_eq!(lines(&path).len(), 4);
+    }
+
+    /// GIVEN secrets in the message and in fields WHEN recorded THEN none of
+    /// them reaches the file.
+    #[test]
+    fn given_secrets_when_recorded_then_file_has_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = path_in(dir.path());
+        let log = Log::default();
+        log.turn_on(&path).unwrap();
+        log.record(
+            Source::CallWorker,
+            Level::Info,
+            "livekit",
+            "connecting to wss://sfu.example/rtc?access_token=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.c2ln&auto_subscribe=1",
+            &[
+                ("password", Value::from("hunter2")),
+                ("request", Value::from(r#"{"access_token":"syt_YWxpY2U_abcdefghijk_0Z1y2X"}"#)),
+                ("state_key", Value::from("_@alice:example.org_DEVICE")),
+            ],
+        );
+        log.turn_off();
+        let text = fs::read_to_string(&path).unwrap();
+        for secret in ["hunter2", "eyJhbGciOiJIUzI1NiJ9", "syt_YWxpY2U", "c2ln&"] {
+            assert!(!text.contains(secret), "{secret} in {text}");
+        }
+        assert!(text.contains("auto_subscribe=1"));
+        assert!(text.contains("_@alice:example.org_DEVICE"));
+    }
+
+    /// GIVEN a record far over the line limit THEN its line stays within it.
+    #[test]
+    fn given_huge_record_then_line_is_bounded() {
+        let big = "x".repeat(MAX_LINE_BYTES * 2);
+        let fields: Vec<(&str, Value)> = (0..8).map(|_| ("f", Value::from(big.as_str()))).collect();
+        let text = line(1, Source::Core, Level::Info, "t", &big, &fields);
+        assert!(text.len() <= MAX_LINE_BYTES, "{}", text.len());
+    }
+
+    /// GIVEN an old log WHEN erased THEN it is gone; GIVEN none THEN nothing
+    /// happens.
+    #[test]
+    fn given_old_log_when_erased_then_it_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = path_in(dir.path());
+        assert!(!erase(&path).unwrap());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, vec![b'a'; ERASE_CHUNK * 2 + 17]).unwrap();
+        assert!(erase(&path).unwrap());
+        assert!(!path.exists());
+    }
+
+    /// GIVEN a link at the log's path WHEN erased THEN only the link goes;
+    /// the file it pointed at keeps its content.
+    #[cfg(unix)]
+    #[test]
+    fn given_link_when_erased_then_target_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = path_in(dir.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let target = dir.path().join("other");
+        fs::write(&target, b"keep").unwrap();
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        assert!(erase(&path).unwrap());
+        assert_eq!(fs::read(&target).unwrap(), b"keep");
+        assert!(fs::symlink_metadata(&path).is_err());
+    }
+
+    /// GIVEN a link at the log's path WHEN turned on THEN it is refused.
+    #[cfg(unix)]
+    #[test]
+    fn given_link_when_turned_on_then_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = path_in(dir.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let target = dir.path().join("other");
+        fs::write(&target, b"").unwrap();
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        assert!(Log::default().turn_on(&path).is_err());
+    }
+
+    /// GIVEN busy network crates THEN only their `info` and above is kept;
+    /// GIVEN any target THEN `trace` is never kept.
+    #[test]
+    fn given_targets_then_levels_are_filtered() {
+        assert!(wanted("matrix_sdk::sync", Level::Debug));
+        assert!(wanted("libwebrtc", Level::Debug));
+        assert!(!wanted("hyper_util::client", Level::Debug));
+        assert!(wanted("hyper_util::client", Level::Info));
+        assert!(!wanted("matrix_sdk", Level::Trace));
+    }
+
+    /// GIVEN multi-byte text WHEN cut THEN it ends on a character boundary.
+    #[test]
+    fn given_multibyte_when_cut_then_valid() {
+        let mut text = "ééé".to_owned();
+        cut(&mut text, 3);
+        assert_eq!(text, "é…");
+    }
+}

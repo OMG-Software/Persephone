@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-diagnostic-records"
+description = "Enables the diagnostic_records command without any pre-configured scope."
+commands.allow = ["diagnostic_records"]
+
+[[permission]]
+identifier = "deny-diagnostic-records"
+description = "Denies the diagnostic_records command without any pre-configured scope."
+commands.deny = ["diagnostic_records"]

@@ -209,6 +209,10 @@ button:disabled {
   font-family: var(--mono);
 }
 
+.diagnostics-path {
+  overflow-wrap: anywhere;
+}
+
 .visually-hidden {
   position: absolute;
   width: 1px;

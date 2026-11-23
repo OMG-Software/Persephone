@@ -36,6 +36,7 @@
 
 pub mod capture;
 pub mod core_link;
+mod diagnostics;
 #[cfg(windows)]
 mod harden;
 pub mod launcher;
@@ -43,22 +44,23 @@ pub mod launcher;
 use core_link::{Band, CoreError, CoreLink, Video};
 use persephone_contracts::{
     AccountChange, AccountSettings, AccountStatus, AppStatus, CallDevices, CallReadiness,
-    CallRings, CallStatus, ContactStatus, ConversationStart, DeviceList, DisplayName,
-    HomeserverFound, ImagePick, ImageView, InviteList, JoinedRoom, NewSessions, NotificationLevel,
-    NotificationSettings, PendingMessage, ProfileList, ProxySetting, PublicRoomPage, RoomActivity,
-    RoomChange, RoomCreation, RoomIdentityChanges, RoomInvite, RoomList, RoomMembers, RoomPicture,
-    RoomReaders, RoomServers, RoomSettings, SecurityStatus, StoreState, ThreePidList,
-    ThreePidMedium, TimelinePage, UserSearch,
+    CallRings, CallStatus, ContactStatus, ConversationStart, DeviceList, DiagnosticsStatus,
+    DisplayName, HomeserverFound, ImagePick, ImageView, InviteList, JoinedRoom, NewSessions,
+    NotificationLevel, NotificationSettings, PendingMessage, ProfileList, ProxySetting,
+    PublicRoomPage, RoomActivity, RoomChange, RoomCreation, RoomIdentityChanges, RoomInvite,
+    RoomList, RoomMembers, RoomPicture, RoomReaders, RoomServers, RoomSettings, SecurityStatus,
+    StoreState, ThreePidList, ThreePidMedium, TimelinePage, UserSearch,
 };
 use persephone_core_protocol::{
-    CALL_VIDEO_TILES, COUNTRY_CODE_BYTES, Call, ErrorCode, Event, IMAGE_HANDLE_BYTES,
-    MAX_CALL_DEVICE_ID_BYTES, MAX_CURSOR_BYTES, MAX_DEVICE_ID_BYTES, MAX_DIRECTORY_FILTER_BYTES,
-    MAX_DIRECTORY_TOKEN_BYTES, MAX_DISPLAY_NAME_BYTES, MAX_EMAIL_BYTES, MAX_EVENT_ID_BYTES,
-    MAX_FLOW_ID_BYTES, MAX_HOMESERVER_URL_BYTES, MAX_INVITEES, MAX_LINK_BYTES,
-    MAX_MEMBER_FILTER_BYTES, MAX_MESSAGE_BYTES, MAX_NEW_SESSION_IDS, MAX_NOTIFICATION_NAME_BYTES,
-    MAX_PASTED_IMAGE_BYTES, MAX_PHONE_NUMBER_BYTES, MAX_PROFILES, MAX_PROXY_BYTES,
-    MAX_REACTION_KEY_BYTES, MAX_ROOM_ID_BYTES, MAX_ROOM_NAME_BYTES, MAX_SEARCH_TERM_BYTES,
-    MAX_SERVER_NAME_BYTES, MAX_THREE_PID_ADDRESS_BYTES, MAX_USER_ID_BYTES, MAX_USERNAME_BYTES,
+    CALL_VIDEO_TILES, COUNTRY_CODE_BYTES, Call, DiagnosticRecord, ErrorCode, Event,
+    IMAGE_HANDLE_BYTES, MAX_CALL_DEVICE_ID_BYTES, MAX_CURSOR_BYTES, MAX_DEVICE_ID_BYTES,
+    MAX_DIAGNOSTIC_RECORDS, MAX_DIRECTORY_FILTER_BYTES, MAX_DIRECTORY_TOKEN_BYTES,
+    MAX_DISPLAY_NAME_BYTES, MAX_EMAIL_BYTES, MAX_EVENT_ID_BYTES, MAX_FLOW_ID_BYTES,
+    MAX_HOMESERVER_URL_BYTES, MAX_INVITEES, MAX_LINK_BYTES, MAX_MEMBER_FILTER_BYTES,
+    MAX_MESSAGE_BYTES, MAX_NEW_SESSION_IDS, MAX_NOTIFICATION_NAME_BYTES, MAX_PASTED_IMAGE_BYTES,
+    MAX_PHONE_NUMBER_BYTES, MAX_PROFILES, MAX_PROXY_BYTES, MAX_REACTION_KEY_BYTES,
+    MAX_ROOM_ID_BYTES, MAX_ROOM_NAME_BYTES, MAX_SEARCH_TERM_BYTES, MAX_SERVER_NAME_BYTES,
+    MAX_THREE_PID_ADDRESS_BYTES, MAX_USER_ID_BYTES, MAX_USERNAME_BYTES, RecordSource,
     call_video_within_limits, room_change_within_limits,
 };
 use serde::de::DeserializeOwned;
@@ -459,6 +461,14 @@ impl Subscriptions {
             Event::ModulesChanged {} => {
                 if let Some(channel) = self.session().as_ref() {
                     let _ = channel.send("modules");
+                }
+            }
+            // The UI host's own records follow the switch; the page asks for
+            // `diagnostics_status` (ADR-0058).
+            Event::DiagnosticsChanged { on } => {
+                diagnostics::global().set_on(on);
+                if let Some(channel) = self.session().as_ref() {
+                    let _ = channel.send("diagnostics");
                 }
             }
             // Names only; the core bounds them, and so does this check.
@@ -1605,6 +1615,42 @@ async fn set_proxy_setting(core: State<'_, CoreLink>, proxy: Option<String>) -> 
     relay(core.inner(), Call::SetProxySetting { proxy }).await
 }
 
+/// Whether the diagnostic log is on, and its file (ADR-0058).
+#[tauri::command]
+async fn diagnostics_status(core: State<'_, CoreLink>) -> Result<DiagnosticsStatus, String> {
+    relay(core.inner(), Call::DiagnosticsStatus {}).await
+}
+
+/// Turns the diagnostic log on (after the core's own question) or off; the
+/// reply is whether it is on.
+#[tauri::command]
+async fn set_diagnostics(core: State<'_, CoreLink>, on: bool) -> Result<bool, String> {
+    relay(core.inner(), Call::SetDiagnostics { on }).await
+}
+
+/// The page's records for the diagnostic log. They always count as the
+/// page's, and are checked against the protocol's limits here and in the
+/// core.
+#[tauri::command]
+async fn diagnostic_records(
+    core: State<'_, CoreLink>,
+    records: Vec<DiagnosticRecord>,
+) -> Result<(), String> {
+    if records.len() > MAX_DIAGNOSTIC_RECORDS
+        || !records.iter().all(DiagnosticRecord::within_bounds)
+    {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(
+        core.inner(),
+        Call::DiagnosticRecords {
+            source: RecordSource::Page,
+            records,
+        },
+    )
+    .await
+}
+
 /// The call microphones and speakers now connected, and the saved choice
 /// (ADR-0043). The core lists them through a contained worker.
 #[tauri::command]
@@ -1955,6 +2001,9 @@ pub fn configure<R: Runtime>(
             discover_homeserver,
             proxy_setting,
             set_proxy_setting,
+            diagnostics_status,
+            set_diagnostics,
+            diagnostic_records,
             call_devices,
             set_call_devices,
             acknowledge_sessions,
@@ -2158,6 +2207,8 @@ pub fn run() {
             std::process::exit(2);
         }
     };
+    // Off until the core says the diagnostic log is on (ADR-0058).
+    diagnostics::install(core.clone());
     let app = configure(tauri::Builder::default(), core, subscriptions)
         .build(context())
         .expect("Persephone UI failed to start");

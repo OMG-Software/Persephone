@@ -1170,6 +1170,18 @@ pub struct ProxySetting {
     pub proxy: Option<String>,
 }
 
+/// Reply of `diagnostics_status` (ADR-0058): whether the diagnostic log is
+/// on, whether this run can write one (a profile with a folder; not
+/// `--demo`), and the log file's full path once it was on in this run. The
+/// file stays until the next start, also after the log is turned off.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct DiagnosticsStatus {
+    pub on: bool,
+    pub available: bool,
+    pub path: Option<String>,
+}
+
 /// Reply of `discover_homeserver`: the homeserver found for a server name,
 /// confirmed to speak Matrix, and whether a `.well-known` file named it
 /// (ADR-0027). The page shows it before signing in to it.
@@ -2657,6 +2669,7 @@ pub fn generated_typescript() -> String {
         format!("export {}", DeviceSummary::decl(&config)),
         format!("export {}", DeviceList::decl(&config)),
         format!("export {}", ProxySetting::decl(&config)),
+        format!("export {}", DiagnosticsStatus::decl(&config)),
         format!("export {}", HomeserverFound::decl(&config)),
         format!("export {}", NewSession::decl(&config)),
         format!("export {}", NewSessions::decl(&config)),

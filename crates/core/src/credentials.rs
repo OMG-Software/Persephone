@@ -166,6 +166,15 @@ pub trait CredentialSource: Send + Sync {
         Err(PromptError::Unsupported)
     }
 
+    /// Asks whether to turn on the diagnostic log (ADR-0058), with the
+    /// warning in `prompt_text::DIAGNOSTICS`. `Ok(true)` only for an
+    /// explicit yes. Every source that asks about links asks this the same
+    /// way.
+    fn confirm_diagnostics(&self) -> Result<bool, PromptError> {
+        let (caption, message) = crate::prompt_text::DIAGNOSTICS;
+        self.confirm_open_link(caption, message)
+    }
+
     /// Opens a checked link in the user's default browser (ADR-0024).
     /// Unsupported unless a source provides it.
     fn open_link(&self, _url: &str) -> Result<(), PromptError> {

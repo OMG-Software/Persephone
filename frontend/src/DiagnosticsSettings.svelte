@@ -1,0 +1,91 @@
+<script lang="ts">
+  import { onMount } from 'svelte';
+  import { diagnosticsStatus, onDiagnosticsChange, setDiagnostics } from './bridge';
+
+  // The diagnostic log (ADR-0058). It is off whenever Persephone starts. Turning
+  // it on shows the core's own warning, outside this page, and the user can
+  // refuse there. The core writes the file; the page only shows where it is.
+  let on = $state(false);
+  let available = $state(false);
+  let path = $state<string | null>(null);
+  let loaded = $state(false);
+  let busy = $state(false);
+  let failure = $state<string | null>(null);
+  let turnedOff = $state(false);
+
+  const failures: Record<string, string> = {
+    limit_exceeded: 'The diagnostic log warning is already open.',
+    core_unavailable: 'The diagnostic log cannot be turned on now.',
+    core_internal: 'The diagnostic log file could not be opened.'
+  };
+
+  async function load() {
+    try {
+      const status = await diagnosticsStatus();
+      on = status.on;
+      available = status.available;
+      path = status.path;
+      loaded = true;
+    } catch {
+      failure = 'The diagnostic log state could not be read.';
+    }
+  }
+
+  onMount(() => {
+    load();
+    // The core can change it too (for example a refusal in the warning).
+    return onDiagnosticsChange(() => load());
+  });
+
+  async function change(value: boolean) {
+    if (busy) return;
+    busy = true;
+    failure = null;
+    try {
+      on = await setDiagnostics(value);
+      if (!value) turnedOff = true;
+    } catch (reason) {
+      failure = failures[String(reason)] ?? 'The diagnostic log could not be changed.';
+    } finally {
+      busy = false;
+    }
+  }
+</script>
+
+<div class="diagnostics-settings">
+  <p class="note">
+    For finding faults. While it is on, Persephone writes what it does to a file on this computer:
+    server, room, user and device names and IDs, the type and time of each event, call and
+    connection steps, and errors. It never writes message text, and it is made to never write
+    passwords, access tokens or keys, but no filter can be complete. Share the file only with
+    someone you trust. It is off each time Persephone starts.
+  </p>
+  {#if loaded && !available}
+    <p class="note">Not available: this start has no profile folder for the file.</p>
+  {:else}
+    <div class="actions">
+      {#if on}
+        <button type="button" class="secondary" disabled={busy} onclick={() => change(false)}
+          >Turn off diagnostic log</button
+        >
+      {:else}
+        <button type="button" class="secondary" disabled={!loaded || busy} onclick={() => change(true)}
+          >Turn on diagnostic log…</button
+        >
+      {/if}
+    </div>
+  {/if}
+  {#if path && (on || turnedOff)}
+    <p class="note">File: <span class="mono diagnostics-path">{path}</span></p>
+  {/if}
+  {#if on || turnedOff}
+    <p class="note">
+      {on ? 'On.' : 'Off. The file keeps what was written.'} When Persephone next starts, it overwrites
+      the file and deletes it. On SSDs and some file systems, overwriting cannot guarantee that the old
+      data is gone from the disk.
+    </p>
+  {/if}
+  {#if failure}
+    <p role="alert" class="error">{failure}</p>
+  {/if}
+</div>

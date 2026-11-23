@@ -503,6 +503,9 @@ and ephemeral correlation ID. Never log event bodies, stable room/user IDs,
 credentials, recovery material, or unrestricted Debug dumps. Failure cases and
 support exports need the same review as normal operation; disable automatic
 crash uploading and inspect local crash artifacts.
+The opt-in diagnostic log of ADR-0058 is the one exception: while the user has
+turned it on in this run, it holds stable IDs and event metadata, never event
+content, credentials or keys, and it is deleted at the next start.
 
 Commit Rust/frontend locks, audit exact production and build-time graphs per
 target, minimize enabled features, review new dependencies and unmaintained

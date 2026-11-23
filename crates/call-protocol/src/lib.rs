@@ -12,8 +12,14 @@ use persephone_media_protocol::{
 };
 use zeroize::Zeroizing;
 
-pub const VERSION: u8 = 7;
+pub const VERSION: u8 = 8;
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
+/// Longest diagnostic record target (ADR-0058).
+pub const MAX_DIAGNOSTIC_TARGET_BYTES: usize = 64;
+/// Longest diagnostic record message (ADR-0058).
+pub const MAX_DIAGNOSTIC_MESSAGE_BYTES: usize = 2048;
+/// Highest diagnostic level: 1 error, 2 warn, 3 info, 4 debug.
+pub const MAX_DIAGNOSTIC_LEVEL: u8 = 4;
 pub const MAX_URL_BYTES: usize = 2048;
 pub const MAX_JWT_BYTES: usize = 8192;
 pub const MAX_IDENTITY_BYTES: usize = 512;
@@ -292,6 +298,11 @@ pub enum ToWorker {
     SetVolume {
         percent: u8,
     },
+    /// Start or stop sending [`FromWorker::Diagnostic`] records (ADR-0058).
+    /// Off when the worker starts. No answer.
+    SetDiagnostics {
+        on: bool,
+    },
 }
 
 impl std::fmt::Debug for ToWorker {
@@ -360,6 +371,9 @@ impl std::fmt::Debug for ToWorker {
                 .debug_struct("SetVolume")
                 .field("percent", percent)
                 .finish(),
+            Self::SetDiagnostics { on } => {
+                f.debug_struct("SetDiagnostics").field("on", on).finish()
+            }
         }
     }
 }
@@ -552,6 +566,17 @@ pub enum FromWorker {
         connection: u8,
         up: bool,
     },
+    /// One record for the diagnostic log, sent only while
+    /// [`ToWorker::SetDiagnostics`] is on (ADR-0058). The one free-text
+    /// message: it is untrusted, has no control characters, is at most
+    /// [`MAX_DIAGNOSTIC_MESSAGE_BYTES`], and the core only redacts it and
+    /// writes it to the log, never to the UI. `level` is 1 (error) to
+    /// [`MAX_DIAGNOSTIC_LEVEL`] (debug).
+    Diagnostic {
+        level: u8,
+        target: String,
+        message: String,
+    },
 }
 
 // Tags of core to worker messages.
@@ -567,6 +592,7 @@ const TO_SET_SCREEN: u8 = 9;
 const TO_SUBSCRIBE: u8 = 10;
 const TO_SET_DEAFENED: u8 = 11;
 const TO_SET_VOLUME: u8 = 12;
+const TO_SET_DIAGNOSTICS: u8 = 13;
 
 // Tags of worker to core messages.
 const FROM_READY: u8 = 1;
@@ -586,6 +612,7 @@ const FROM_SCREEN: u8 = 14;
 const FROM_SCREEN_SHARER: u8 = 15;
 const FROM_CONNECTION: u8 = 16;
 const FROM_DEAFENED: u8 = 17;
+const FROM_DIAGNOSTIC: u8 = 18;
 
 #[derive(Clone, Copy)]
 enum CharRule {
@@ -900,6 +927,10 @@ impl ToWorker {
                 out.push(TO_SET_VOLUME);
                 out.push(*percent);
             }
+            Self::SetDiagnostics { on } => {
+                out.push(TO_SET_DIAGNOSTICS);
+                out.push(u8::from(*on));
+            }
         }
         out
     }
@@ -1009,6 +1040,7 @@ impl ToWorker {
             TO_SET_VOLUME => Self::SetVolume {
                 percent: reader.volume()?,
             },
+            TO_SET_DIAGNOSTICS => Self::SetDiagnostics { on: reader.bool()? },
             _ => return Err(DecodeError::UnknownTag),
         };
         reader.finish()?;
@@ -1144,6 +1176,16 @@ impl FromWorker {
                 out.push(*connection);
                 out.push(u8::from(*up));
             }
+            Self::Diagnostic {
+                level,
+                target,
+                message,
+            } => {
+                out.push(FROM_DIAGNOSTIC);
+                out.push(*level);
+                put_str(&mut out, target);
+                put_str(&mut out, message);
+            }
             Self::VideoStopped { tile } => {
                 out.push(FROM_VIDEO_STOPPED);
                 out.push(*tile);
@@ -1213,6 +1255,21 @@ impl FromWorker {
                 connection: reader.other_connection()?,
                 up: reader.bool()?,
             },
+            FROM_DIAGNOSTIC => {
+                let level = reader.u8()?;
+                if !(1..=MAX_DIAGNOSTIC_LEVEL).contains(&level) {
+                    return Err(DecodeError::InvalidValue);
+                }
+                Self::Diagnostic {
+                    level,
+                    target: reader
+                        .str(MAX_DIAGNOSTIC_TARGET_BYTES, CharRule::NoControl, false)?
+                        .to_owned(),
+                    message: reader
+                        .str(MAX_DIAGNOSTIC_MESSAGE_BYTES, CharRule::NoControl, true)?
+                        .to_owned(),
+                }
+            }
             FROM_VIDEO_STOPPED => Self::VideoStopped {
                 tile: reader.tile(0)?,
             },
@@ -1608,6 +1665,8 @@ mod tests {
             ToWorker::SetVolume {
                 percent: MAX_VOLUME_PERCENT,
             },
+            ToWorker::SetDiagnostics { on: true },
+            ToWorker::SetDiagnostics { on: false },
         ]
     }
 
@@ -1726,6 +1785,16 @@ mod tests {
             FromWorker::Connection {
                 connection: 3,
                 up: false,
+            },
+            FromWorker::Diagnostic {
+                level: 4,
+                target: "livekit::room".to_owned(),
+                message: "track subscribed: TR_x from 1qaz".to_owned(),
+            },
+            FromWorker::Diagnostic {
+                level: 1,
+                target: "t".to_owned(),
+                message: String::new(),
             },
             FromWorker::VideoStopped { tile: 0 },
             FromWorker::VideoStopped { tile: 4 },
@@ -1946,11 +2015,11 @@ mod tests {
             Err(DecodeError::UnknownTag)
         );
         assert_eq!(
-            ToWorker::decode(&[VERSION, 13]),
+            ToWorker::decode(&[VERSION, 14]),
             Err(DecodeError::UnknownTag)
         );
         assert_eq!(
-            FromWorker::decode(&[VERSION, 18]),
+            FromWorker::decode(&[VERSION, 19]),
             Err(DecodeError::UnknownTag)
         );
         assert_eq!(FromWorker::decode(&[]), Err(DecodeError::Truncated));
@@ -2566,7 +2635,7 @@ mod tests {
     /// 640x360 at 15 per second.
     #[test]
     fn given_tiles_when_limits_asked_then_screen_differs_from_camera() {
-        assert_eq!((VIDEO_TILES, SCREEN_TILE, VERSION), (6, 5, 7));
+        assert_eq!((VIDEO_TILES, SCREEN_TILE, VERSION), (6, 5, 8));
         assert_eq!(MAX_SCREEN_BYTES, 3_686_400);
         assert_eq!(MAX_SCREEN_PIXELS, 921_600);
         for tile in 0..SCREEN_TILE {
@@ -2936,20 +3005,22 @@ mod tests {
         );
     }
 
-    /// GIVEN a message of the previous wire version (6)
+    /// GIVEN a message of the previous wire versions (6 and 7)
     /// WHEN it is decoded in either direction
     /// THEN the version is refused.
     #[test]
-    fn given_wire_version_6_when_decoded_then_it_is_refused() {
-        assert_eq!(VERSION, 7);
-        assert_eq!(
-            ToWorker::decode(&[6, TO_LEAVE]),
-            Err(DecodeError::UnknownVersion)
-        );
-        assert_eq!(
-            FromWorker::decode(&[6, FROM_CONNECTED]),
-            Err(DecodeError::UnknownVersion)
-        );
+    fn given_older_wire_versions_when_decoded_then_they_are_refused() {
+        assert_eq!(VERSION, 8);
+        for old in [6, 7] {
+            assert_eq!(
+                ToWorker::decode(&[old, TO_LEAVE]),
+                Err(DecodeError::UnknownVersion)
+            );
+            assert_eq!(
+                FromWorker::decode(&[old, FROM_CONNECTED]),
+                Err(DecodeError::UnknownVersion)
+            );
+        }
     }
 
     /// GIVEN a volume over 100 percent, a bad deafen flag, or a truncated
@@ -3000,5 +3071,35 @@ mod tests {
         assert_eq!(volume, 65);
         *body.last_mut().expect("volume byte") = MAX_VOLUME_PERCENT + 1;
         assert_eq!(ToWorker::decode(&body), Err(DecodeError::InvalidValue));
+    }
+
+    /// GIVEN diagnostic records with a bad level, an empty or long target, a
+    /// long message or a control character WHEN decoded THEN each is
+    /// rejected.
+    #[test]
+    fn given_bad_diagnostic_records_when_decoded_then_rejected() {
+        let record = |level: u8, target: &str, message: &str| {
+            FromWorker::Diagnostic {
+                level,
+                target: target.to_owned(),
+                message: message.to_owned(),
+            }
+            .encode()
+        };
+        let long_target = "t".repeat(MAX_DIAGNOSTIC_TARGET_BYTES + 1);
+        let long_message = "m".repeat(MAX_DIAGNOSTIC_MESSAGE_BYTES + 1);
+        for (body, error) in [
+            (record(0, "t", "m"), DecodeError::InvalidValue),
+            (
+                record(MAX_DIAGNOSTIC_LEVEL + 1, "t", "m"),
+                DecodeError::InvalidValue,
+            ),
+            (record(1, "", "m"), DecodeError::TooShort),
+            (record(1, &long_target, "m"), DecodeError::TooLarge),
+            (record(1, "t", &long_message), DecodeError::TooLarge),
+            (record(1, "t", "line\nbreak"), DecodeError::InvalidCharacter),
+        ] {
+            assert_eq!(FromWorker::decode(&body), Err(error));
+        }
     }
 }

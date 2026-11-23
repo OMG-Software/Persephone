@@ -2,8 +2,11 @@
 // functions; nothing else may import @tauri-apps/api (enforced by a test).
 // Types come from the generated public contracts. They describe the reply but
 // do not validate it; the Rust side checks reply shapes and owns authorization.
-import { Channel, invoke } from '@tauri-apps/api/core';
+import { Channel, invoke as hostInvoke } from '@tauri-apps/api/core';
+import type { InvokeArgs, InvokeOptions } from '@tauri-apps/api/core';
+import { installPageDiagnostics, noteCall, outcomeCode, setPageDiagnostics } from './diagnostics.ts';
 import type {
+  DiagnosticsStatus,
   AccountChange,
   AccountSettings,
   AccountStatus,
@@ -94,6 +97,23 @@ import type {
 } from '../../../crates/contracts/generated/contracts';
 import { MAX_PASTED_IMAGE_BYTES, parseBand, type Band } from '../image.ts';
 import { parseVideoPicture, type VideoPicture } from '../video.ts';
+
+/**
+ * Every host call goes through here. While the diagnostic log is on, it notes
+ * the command's name, its outcome code and its time, never its arguments or
+ * reply (ADR-0058).
+ */
+async function invoke<T>(command: string, args?: InvokeArgs, options?: InvokeOptions): Promise<T> {
+  const started = performance.now();
+  try {
+    const reply = await hostInvoke<T>(command, args, options);
+    noteCall(command, 'ok', started);
+    return reply;
+  } catch (reason) {
+    noteCall(command, outcomeCode(reason), started);
+    throw reason;
+  }
+}
 
 export type { VideoPicture };
 
@@ -334,9 +354,25 @@ export async function watchSession(
               ? onCallVideo()
               : message === 'rings'
                 ? onRings()
-                : onSession()
+                : message === 'diagnostics'
+                  ? void followDiagnostics()
+                  : onSession()
   );
+  if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+    installPageDiagnostics(window);
+  }
   await invoke<null>('watch_session', { onChange: channel });
+  // The log may already be on (a reloaded page): follow it from now.
+  await followDiagnostics();
+}
+
+/** Sets the page's records to follow the core's diagnostic log switch. */
+async function followDiagnostics(): Promise<void> {
+  try {
+    setPageDiagnostics((await diagnosticsStatus()).on);
+  } catch {
+    setPageDiagnostics(false);
+  }
 }
 
 /** Locks the session; `locking` means work is still finishing (call again). */
@@ -984,6 +1020,25 @@ export function proxySetting(): Promise<ProxySetting> {
 export function setProxySetting(proxy: string | null): Promise<void> {
   return invoke<void>('set_proxy_setting', { proxy });
 }
+
+/**
+ * Whether the diagnostic log is on, whether this start can have one, and its
+ * file (ADR-0058). It is always off when Persephone starts.
+ */
+export function diagnosticsStatus(): Promise<DiagnosticsStatus> {
+  return invoke<DiagnosticsStatus>('diagnostics_status');
+}
+
+/**
+ * Turns the diagnostic log on or off; resolves to whether it is on. On shows
+ * the core's own warning first, and the user can refuse there (`false`).
+ * Rejects with `limit_exceeded` while that warning is already open.
+ */
+export function setDiagnostics(on: boolean): Promise<boolean> {
+  return invoke<boolean>('set_diagnostics', { on });
+}
+
+export { diagnosticsOn, onDiagnosticsChange } from './diagnostics.ts';
 
 /**
  * Finds the homeserver of a server name such as `example.org`, through its

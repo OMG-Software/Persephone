@@ -12,6 +12,9 @@ persephone-call-protocol = { path = "../call-protocol" }
 persephone-media-protocol = { path = "../media-protocol" }
 livekit = { version = "=0.11.0", default-features = false, features = ["native", "rustls-tls-native-roots"] }
 livekit-signaling = { version = "=0.2.0", default-features = false }
+# The diagnostic log (ADR-0058): LiveKit and libwebrtc report through `log`.
+# Already in the lock through livekit at this version.
+log = { version = "=0.4.34", default-features = false }
 tokio = { version = "=1.53.3", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 tokio-stream = { version = "=0.1.19", default-features = false }
 zeroize = "=1.9.1"
