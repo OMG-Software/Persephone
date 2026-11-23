@@ -410,20 +410,34 @@ pub fn sound_level(linear: f64) -> u8 {
     level
 }
 
-/// Lets a sound level through only when it differs from the last one sent.
-/// It starts at silence, so a call with no sound sends nothing.
+/// How often an unchanged sound level above silence is sent again. A page
+/// that attaches during a call (a reload, or a call started before the
+/// page) starts at silence and gets no earlier level, so steady sound would
+/// otherwise show as silence there.
+pub const SOUND_LEVEL_REPEAT: Duration = Duration::from_secs(1);
+
+/// Lets a sound level through when it differs from the last one sent, and
+/// an unchanged level above silence again after [`SOUND_LEVEL_REPEAT`]. It
+/// starts at silence, so a call with no sound sends nothing.
 #[derive(Debug, Default)]
 pub struct LevelGate {
     last: u8,
+    sent: Option<Instant>,
 }
 
 impl LevelGate {
-    /// The message for `level`, or `None` when the core already has it.
-    pub fn next(&mut self, level: u8) -> Option<FromWorker> {
-        if level == self.last {
+    /// The message for `level` at `now`, or `None` when the core already
+    /// has it and it is not yet due again.
+    pub fn next(&mut self, level: u8, now: Instant) -> Option<FromWorker> {
+        let due = level > 0
+            && self
+                .sent
+                .is_none_or(|at| now.saturating_duration_since(at) >= SOUND_LEVEL_REPEAT);
+        if level == self.last && !due {
             return None;
         }
         self.last = level;
+        self.sent = Some(now);
         Some(FromWorker::SoundLevel { level })
     }
 }
@@ -1037,20 +1051,43 @@ mod tests {
         assert_eq!(sound_level(f64::INFINITY), MAX_SOUND_LEVEL);
     }
 
-    /// GIVEN a run of levels with repeats
+    /// GIVEN a run of levels with repeats within a second
     /// WHEN each goes through the gate
     /// THEN only changes are sent, and a call that stays silent sends none.
     #[test]
     fn given_levels_when_gated_then_only_changes_are_sent() {
         let mut gate = LevelGate::default();
+        let start = Instant::now();
         let sent: Vec<u8> = [0, 0, 40, 40, 41, 0, 0]
             .into_iter()
-            .filter_map(|level| match gate.next(level) {
-                Some(FromWorker::SoundLevel { level }) => Some(level),
-                Some(other) => panic!("not a level: {other:?}"),
-                None => None,
-            })
+            .zip(0..)
+            .filter_map(
+                |(level, tick)| match gate.next(level, at(start, tick * 100)) {
+                    Some(FromWorker::SoundLevel { level }) => Some(level),
+                    Some(other) => panic!("not a level: {other:?}"),
+                    None => None,
+                },
+            )
             .collect();
         assert_eq!(sent, [40, 41, 0]);
+    }
+
+    /// GIVEN a steady level above silence WHEN it stays the same THEN it is
+    /// sent again once a second, so a page that attached later learns it;
+    /// GIVEN steady silence THEN it is never sent again.
+    #[test]
+    fn given_a_steady_level_when_gated_then_it_is_repeated_each_second() {
+        let mut gate = LevelGate::default();
+        let start = Instant::now();
+        let repeat = u64::try_from(SOUND_LEVEL_REPEAT.as_millis()).expect("short");
+        assert!(gate.next(60, start).is_some());
+        assert!(gate.next(60, at(start, repeat - 1)).is_none());
+        assert_eq!(
+            gate.next(60, at(start, repeat)),
+            Some(FromWorker::SoundLevel { level: 60 })
+        );
+        assert!(gate.next(60, at(start, repeat + 100)).is_none());
+        assert!(gate.next(0, at(start, repeat + 200)).is_some());
+        assert!(gate.next(0, at(start, 10 * repeat)).is_none());
     }
 }

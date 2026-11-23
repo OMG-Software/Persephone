@@ -548,7 +548,8 @@ impl SoundProbe {
     /// the next one.
     fn end(&mut self, linear: Option<f64>) -> Option<FromWorker> {
         self.task = None;
-        self.gate.next(sound_level(linear?))
+        self.gate
+            .next(sound_level(linear?), std::time::Instant::now())
     }
 }
 
@@ -1642,7 +1643,7 @@ impl Call<'_> {
         }
         let tracks = self.remote_audio();
         if tracks.is_empty() {
-            return self.sound.gate.next(0);
+            return self.sound.gate.next(0, std::time::Instant::now());
         }
         self.sound
             .start(loudest_level(tracks), SOUND_MEASURE_TIMEOUT);

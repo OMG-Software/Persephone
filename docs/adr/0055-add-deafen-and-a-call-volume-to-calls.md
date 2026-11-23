@@ -140,8 +140,12 @@ their level after the warm-up. macOS runs the workload without the count.
     every 100 ms on its own task, at most one at a time and at most 500 ms
     long, and takes the loudest. It maps it to 0 (-60 dBFS or quieter) to
     100 (0 dBFS), 0.6 dB a step, and sends `SoundLevel { level }` (call
-    protocol version 9, tag 19) only when the number changes. The core
-    refuses a level over 100 when decoded.
+    protocol version 9, tag 19) when the number changes, and an unchanged
+    level above 0 again once a second. The repeat lets a page that attaches
+    during a call (a reload, or a call started before the page) show the
+    sound within a second: the page starts at 0 and nobody keeps the level
+    for it. Silence is never repeated, so a quiet call sends nothing. The
+    core refuses a level over 100 when decoded.
   * The level is not call state. The core passes it to the hub, which keeps
     only the newest and sends `CallSoundLevel { level }` at most once every
     100 ms. The host forwards the number on a second channel of
