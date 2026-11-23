@@ -111,7 +111,9 @@ Each line has `ts` (Unix milliseconds), `seq` (a counter for this run),
 * Every Matrix event that the SDK hands to the client (timeline, state,
   stripped state, ephemeral, account data and to-device), as metadata only:
   kind, room ID, event ID, type, sender, state key, server time and content
-  size. For an encrypted event that was decrypted, also the decrypted type.
+  size. For an encrypted event that was decrypted, also that it was
+  decrypted and the sender's device. The type is the one sent
+  (`m.room.encrypted`); the decrypted type is not kept.
   The content is never written (owner's choice). Message text, media
   information, frame keys and room keys are content. This covers the core's
   own event records only: a library's own `tracing` or `log` text is

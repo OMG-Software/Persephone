@@ -520,9 +520,7 @@ fn open_for_append(path: &Path) -> io::Result<File> {
         builder.mode(0o700);
     }
     builder.create(folder)?;
-    if fs::symlink_metadata(folder)?.file_type().is_symlink() {
-        return Err(io::ErrorKind::InvalidInput.into());
-    }
+    refuse_linked_folder(folder)?;
     let mut options = OpenOptions::new();
     options.append(true).create(true);
     no_follow(&mut options);
@@ -534,6 +532,16 @@ fn open_for_append(path: &Path) -> io::Result<File> {
     let file = options.open(path)?;
     plain_file(&file)?;
     Ok(file)
+}
+
+/// Refuses a log folder that is a link (a symbolic link, or a junction on
+/// Windows): `O_NOFOLLOW` and its Windows match guard only the last part of
+/// a path, so a linked folder would lead the log, or its erasure, elsewhere.
+fn refuse_linked_folder(folder: &Path) -> io::Result<()> {
+    if fs::symlink_metadata(folder)?.file_type().is_symlink() {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -570,9 +578,15 @@ fn plain_file(file: &File) -> io::Result<()> {
 
 /// Deletes an old log at start: random bytes over its whole length, a flush
 /// to disk, truncation, a second flush, then removal. A link at the path is
-/// removed itself; what it points at is not touched. Returns whether
+/// removed itself; what it points at is not touched. A log folder that is a
+/// link is refused, and nothing behind it is touched. Returns whether
 /// anything was there. Best effort: see the module notes.
 pub fn erase(path: &Path) -> io::Result<bool> {
+    let folder = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
+    match refuse_linked_folder(folder) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        other => other?,
+    }
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
@@ -1229,6 +1243,43 @@ mod tests {
         fs::write(&path, vec![b'a'; ERASE_CHUNK * 2 + 17]).unwrap();
         assert!(erase(&path).unwrap());
         assert!(!path.exists());
+    }
+
+    /// GIVEN a log folder that is a link to another folder with a log file
+    /// in it WHEN erased or turned on THEN both refuse, and the file behind
+    /// the link keeps its content.
+    #[test]
+    fn given_linked_folder_when_erased_then_nothing_behind_it_is_touched() {
+        let dir = tempfile::tempdir().unwrap();
+        let elsewhere = dir.path().join("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        fs::write(elsewhere.join(FILE_NAME), b"keep").unwrap();
+        let path = path_in(dir.path());
+        #[cfg(unix)]
+        let linked = std::os::unix::fs::symlink(&elsewhere, path.parent().unwrap());
+        // A junction: it needs no special right, unlike a symbolic link.
+        #[cfg(windows)]
+        let linked = std::process::Command::new("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(path.parent().unwrap())
+            .arg(&elsewhere)
+            .output()
+            .map(|_| ());
+        #[cfg(not(any(unix, windows)))]
+        let linked: io::Result<()> = Err(io::ErrorKind::Unsupported.into());
+        linked.unwrap();
+        assert!(
+            fs::symlink_metadata(path.parent().unwrap())
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the folder is a link"
+        );
+        assert!(erase(&path).is_err());
+        assert!(Log::default().turn_on(&path).is_err());
+        assert_eq!(fs::read(elsewhere.join(FILE_NAME)).unwrap(), b"keep");
     }
 
     /// GIVEN a link at the log's path WHEN erased THEN only the link goes;

@@ -393,6 +393,33 @@ test('GIVEN session channel messages WHEN delivered THEN each reaches its own ca
   assert.deepEqual(asked, ['watch_session', 'diagnostics_status', 'diagnostics_status']);
 });
 
+test('GIVEN the diagnostic log on WHEN a status read fails THEN the page keeps following it; WHEN a later read says off THEN it stops', async () => {
+  let channel;
+  let status = { on: true, full: false, available: true, path: null };
+  mockIPC((command, args) => {
+    if (command === 'watch_session') {
+      channel = args.onChange;
+      return null;
+    }
+    if (command === 'diagnostics_status') {
+      if (status === null) throw 'core_unavailable';
+      return status;
+    }
+    return null;
+  });
+  const nothing = () => {};
+  await bridge.watchSession(nothing, nothing, nothing, nothing, nothing, nothing, nothing);
+  assert.equal(bridge.diagnosticsOn(), true);
+  status = null;
+  channel.onmessage('diagnostics');
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(bridge.diagnosticsOn(), true, 'an unreadable state is not off');
+  status = { on: false, full: false, available: true, path: null };
+  channel.onmessage('diagnostics');
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(bridge.diagnosticsOn(), false);
+});
+
 test('GIVEN the diagnostic log WHEN it is on THEN host calls are noted by name and outcome only, and off notes nothing', async () => {
   const records = [];
   let on = true;

@@ -376,13 +376,14 @@ let diagnosticsLookup = 0;
 async function followDiagnostics(): Promise<void> {
   diagnosticsLookup += 1;
   const lookup = diagnosticsLookup;
-  let on = false;
   try {
-    on = (await diagnosticsStatus()).on;
+    const on = (await diagnosticsStatus()).on;
+    if (lookup === diagnosticsLookup) setPageDiagnostics(on);
   } catch {
-    on = false;
+    // Left as it is: an unreadable state is not "off", and "off" would
+    // drop the waiting records uncounted. The core ignores records while
+    // its log is off, and the next change event reads the state again.
   }
-  if (lookup === diagnosticsLookup) setPageDiagnostics(on);
 }
 
 /** Locks the session; `locking` means work is still finishing (call again). */
