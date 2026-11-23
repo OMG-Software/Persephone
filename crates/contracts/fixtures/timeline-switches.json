@@ -1,0 +1,890 @@
+[
+  {
+    "item": {
+      "kind": "other",
+      "event_id": "$verification_request",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "event": "verification_request",
+      "event_type": "org.example.type",
+      "state": false,
+      "deleted": false
+    },
+    "hiddenBy": [
+      "verification"
+    ]
+  },
+  {
+    "item": {
+      "kind": "other",
+      "event_id": "$verification_ready",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "event": "verification_ready",
+      "event_type": "org.example.type",
+      "state": false,
+      "deleted": false
+    },
+    "hiddenBy": [
+      "verification"
+    ]
+  },
+  {
+    "item": {
+      "kind": "other",
+      "event_id": "$verification_start",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "event": "verification_start",
+      "event_type": "org.example.type",
+      "state": false,
+      "deleted": false
+    },
+    "hiddenBy": [
+      "verification"
+    ]
+  },
+  {
+    "item": {
+      "kind": "other",
+      "event_id": "$verification_step",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "event": "verification_step",
+      "event_type": "org.example.type",
+      "state": false,
+      "deleted": false
+    },
+    "hiddenBy": [
+      "verification"
+    ]
+  },
+  {
+    "item": {
+      "kind": "other",
+      "event_id": "$verification_cancelled",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "event": "verification_cancelled",
+      "event_type": "org.example.type",
+      "state": false,
+      "deleted": false
+    },
+    "hiddenBy": [
+      "verification"
+    ]
+  },
+  {
+    "item": {
+      "kind": "other",
+      "event_id": "$verification_done",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "event": "verification_done",
+      "event_type": "org.example.type",
+      "state": false,
+      "deleted": false
+    },
+    "hiddenBy": [
+      "verification"
+    ]
+  },
+  {
+    "item": {
+      "kind": "other",
+      "event_id": "$call_started",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "event": "call_started",
+      "event_type": "org.example.type",
+      "state": false,
+      "deleted": false
+    },
+    "hiddenBy": [
+      "calls"
+    ]
+  },
+  {
+    "item": {
+      "kind": "other",
+      "event_id": "$call_answered",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "event": "call_answered",
+      "event_type": "org.example.type",
+      "state": false,
+      "deleted": false
+    },
+    "hiddenBy": [
+      "calls"
+    ]
+  },
+  {
+    "item": {
+      "kind": "other",
+      "event_id": "$call_declined",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "event": "call_declined",
+      "event_type": "org.example.type",
+      "state": false,
+      "deleted": false
+    },
+    "hiddenBy": [
+      "calls"
+    ]
+  },
+  {
+    "item": {
+      "kind": "other",
+      "event_id": "$call_ended",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "event": "call_ended",
+      "event_type": "org.example.type",
+      "state": false,
+      "deleted": false
+    },
+    "hiddenBy": [
+      "calls"
+    ]
+  },
+  {
+    "item": {
+      "kind": "other",
+      "event_id": "$call_joined",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "event": "call_joined",
+      "event_type": "org.example.type",
+      "state": false,
+      "deleted": false
+    },
+    "hiddenBy": [
+      "calls"
+    ]
+  },
+  {
+    "item": {
+      "kind": "other",
+      "event_id": "$call_left",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "event": "call_left",
+      "event_type": "org.example.type",
+      "state": false,
+      "deleted": false
+    },
+    "hiddenBy": [
+      "calls"
+    ]
+  },
+  {
+    "item": {
+      "kind": "other",
+      "event_id": "$call_signalling",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "event": "call_signalling",
+      "event_type": "org.example.type",
+      "state": false,
+      "deleted": false
+    },
+    "hiddenBy": [
+      "callSignalling"
+    ]
+  },
+  {
+    "item": {
+      "kind": "other",
+      "event_id": "$call_updated",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "event": "call_updated",
+      "event_type": "org.example.type",
+      "state": false,
+      "deleted": false
+    },
+    "hiddenBy": [
+      "callSignalling"
+    ]
+  },
+  {
+    "item": {
+      "kind": "other",
+      "event_id": "$poll_started",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "event": "poll_started",
+      "event_type": "org.example.type",
+      "state": false,
+      "deleted": false
+    },
+    "hiddenBy": [
+      "polls"
+    ]
+  },
+  {
+    "item": {
+      "kind": "other",
+      "event_id": "$poll_vote",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "event": "poll_vote",
+      "event_type": "org.example.type",
+      "state": false,
+      "deleted": false
+    },
+    "hiddenBy": [
+      "polls"
+    ]
+  },
+  {
+    "item": {
+      "kind": "other",
+      "event_id": "$poll_ended",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "event": "poll_ended",
+      "event_type": "org.example.type",
+      "state": false,
+      "deleted": false
+    },
+    "hiddenBy": [
+      "polls"
+    ]
+  },
+  {
+    "item": {
+      "kind": "other",
+      "event_id": "$sticker",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "event": "sticker",
+      "event_type": "org.example.type",
+      "state": false,
+      "deleted": false
+    },
+    "hiddenBy": [
+      "stickers"
+    ]
+  },
+  {
+    "item": {
+      "kind": "other",
+      "event_id": "$location",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "event": "location",
+      "event_type": "org.example.type",
+      "state": false,
+      "deleted": false
+    },
+    "hiddenBy": [
+      "locations"
+    ]
+  },
+  {
+    "item": {
+      "kind": "other",
+      "event_id": "$location_stopped",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "event": "location_stopped",
+      "event_type": "org.example.type",
+      "state": false,
+      "deleted": false
+    },
+    "hiddenBy": [
+      "locations"
+    ]
+  },
+  {
+    "item": {
+      "kind": "other",
+      "event_id": "$space_child",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "event": "space_child",
+      "event_type": "org.example.type",
+      "state": false,
+      "deleted": false
+    },
+    "hiddenBy": [
+      "spaces"
+    ]
+  },
+  {
+    "item": {
+      "kind": "other",
+      "event_id": "$space_parent",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "event": "space_parent",
+      "event_type": "org.example.type",
+      "state": false,
+      "deleted": false
+    },
+    "hiddenBy": [
+      "spaces"
+    ]
+  },
+  {
+    "item": {
+      "kind": "other",
+      "event_id": "$widget",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "event": "widget",
+      "event_type": "org.example.type",
+      "state": false,
+      "deleted": false
+    },
+    "hiddenBy": [
+      "widgets"
+    ]
+  },
+  {
+    "item": {
+      "kind": "other",
+      "event_id": "$third_party_invite",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "event": "third_party_invite",
+      "event_type": "org.example.type",
+      "state": false,
+      "deleted": false
+    },
+    "hiddenBy": [
+      "invitations"
+    ]
+  },
+  {
+    "item": {
+      "kind": "other",
+      "event_id": "$event",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "event": "event",
+      "event_type": "org.example.type",
+      "state": false,
+      "deleted": false
+    },
+    "hiddenBy": [
+      "otherEvents"
+    ]
+  },
+  {
+    "item": {
+      "kind": "other",
+      "event_id": "$state",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "event": "state",
+      "event_type": "org.example.type",
+      "state": false,
+      "deleted": false
+    },
+    "hiddenBy": [
+      "otherEvents"
+    ]
+  },
+  {
+    "item": {
+      "kind": "other",
+      "event_id": "$message_unknown_type",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "event": "message",
+      "event_type": "org.example.type",
+      "state": false,
+      "deleted": false
+    },
+    "hiddenBy": []
+  },
+  {
+    "item": {
+      "kind": "other",
+      "event_id": "$deleted_sticker",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "event": "sticker",
+      "event_type": "m.sticker",
+      "state": false,
+      "deleted": true
+    },
+    "hiddenBy": [
+      "stickers",
+      "deletedMessages"
+    ]
+  },
+  {
+    "item": {
+      "kind": "other",
+      "event_id": "$deleted_unknown",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "event": "message",
+      "event_type": "m.room.message",
+      "state": false,
+      "deleted": true
+    },
+    "hiddenBy": [
+      "deletedMessages"
+    ]
+  },
+  {
+    "item": {
+      "kind": "state",
+      "event_id": "$member_joined",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "change": {
+        "type": "member",
+        "target": "@bob:server.invalid",
+        "membership": "joined"
+      }
+    },
+    "hiddenBy": [
+      "joins"
+    ]
+  },
+  {
+    "item": {
+      "kind": "state",
+      "event_id": "$member_left",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "change": {
+        "type": "member",
+        "target": "@bob:server.invalid",
+        "membership": "left"
+      }
+    },
+    "hiddenBy": [
+      "leaves"
+    ]
+  },
+  {
+    "item": {
+      "kind": "state",
+      "event_id": "$member_invited",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "change": {
+        "type": "member",
+        "target": "@bob:server.invalid",
+        "membership": "invited"
+      }
+    },
+    "hiddenBy": [
+      "invitations"
+    ]
+  },
+  {
+    "item": {
+      "kind": "state",
+      "event_id": "$member_invite_rejected",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "change": {
+        "type": "member",
+        "target": "@bob:server.invalid",
+        "membership": "invite_rejected"
+      }
+    },
+    "hiddenBy": [
+      "invitations"
+    ]
+  },
+  {
+    "item": {
+      "kind": "state",
+      "event_id": "$member_invite_withdrawn",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "change": {
+        "type": "member",
+        "target": "@bob:server.invalid",
+        "membership": "invite_withdrawn"
+      }
+    },
+    "hiddenBy": [
+      "invitations"
+    ]
+  },
+  {
+    "item": {
+      "kind": "state",
+      "event_id": "$member_kicked",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "change": {
+        "type": "member",
+        "target": "@bob:server.invalid",
+        "membership": "kicked"
+      }
+    },
+    "hiddenBy": [
+      "removals"
+    ]
+  },
+  {
+    "item": {
+      "kind": "state",
+      "event_id": "$member_banned",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "change": {
+        "type": "member",
+        "target": "@bob:server.invalid",
+        "membership": "banned"
+      }
+    },
+    "hiddenBy": [
+      "removals"
+    ]
+  },
+  {
+    "item": {
+      "kind": "state",
+      "event_id": "$member_unbanned",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "change": {
+        "type": "member",
+        "target": "@bob:server.invalid",
+        "membership": "unbanned"
+      }
+    },
+    "hiddenBy": [
+      "removals"
+    ]
+  },
+  {
+    "item": {
+      "kind": "state",
+      "event_id": "$member_knocked",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "change": {
+        "type": "member",
+        "target": "@bob:server.invalid",
+        "membership": "knocked"
+      }
+    },
+    "hiddenBy": [
+      "joinRequests"
+    ]
+  },
+  {
+    "item": {
+      "kind": "state",
+      "event_id": "$member_knock_withdrawn",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "change": {
+        "type": "member",
+        "target": "@bob:server.invalid",
+        "membership": "knock_withdrawn"
+      }
+    },
+    "hiddenBy": [
+      "joinRequests"
+    ]
+  },
+  {
+    "item": {
+      "kind": "state",
+      "event_id": "$member_knock_denied",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "change": {
+        "type": "member",
+        "target": "@bob:server.invalid",
+        "membership": "knock_denied"
+      }
+    },
+    "hiddenBy": [
+      "joinRequests"
+    ]
+  },
+  {
+    "item": {
+      "kind": "state",
+      "event_id": "$display_name",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "change": {
+        "type": "display_name",
+        "target": "@bob:server.invalid",
+        "name": "Bob"
+      }
+    },
+    "hiddenBy": [
+      "displayNames"
+    ]
+  },
+  {
+    "item": {
+      "kind": "state",
+      "event_id": "$profile_picture",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "change": {
+        "type": "profile_picture",
+        "target": "@bob:server.invalid"
+      }
+    },
+    "hiddenBy": [
+      "profilePictures"
+    ]
+  },
+  {
+    "item": {
+      "kind": "state",
+      "event_id": "$name",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "change": {
+        "type": "name",
+        "name": "Room"
+      }
+    },
+    "hiddenBy": [
+      "roomName"
+    ]
+  },
+  {
+    "item": {
+      "kind": "state",
+      "event_id": "$topic",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "change": {
+        "type": "topic",
+        "topic": null
+      }
+    },
+    "hiddenBy": [
+      "topic"
+    ]
+  },
+  {
+    "item": {
+      "kind": "state",
+      "event_id": "$avatar",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "change": {
+        "type": "avatar"
+      }
+    },
+    "hiddenBy": [
+      "roomPicture"
+    ]
+  },
+  {
+    "item": {
+      "kind": "state",
+      "event_id": "$encryption",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "change": {
+        "type": "encryption"
+      }
+    },
+    "hiddenBy": [
+      "encryption"
+    ]
+  },
+  {
+    "item": {
+      "kind": "state",
+      "event_id": "$join_rule",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "change": {
+        "type": "join_rule",
+        "rule": "public"
+      }
+    },
+    "hiddenBy": [
+      "joinRule"
+    ]
+  },
+  {
+    "item": {
+      "kind": "state",
+      "event_id": "$history_visibility",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "change": {
+        "type": "history_visibility",
+        "visibility": "shared"
+      }
+    },
+    "hiddenBy": [
+      "historyVisibility"
+    ]
+  },
+  {
+    "item": {
+      "kind": "state",
+      "event_id": "$power_levels",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "change": {
+        "type": "power_levels"
+      }
+    },
+    "hiddenBy": [
+      "permissions"
+    ]
+  },
+  {
+    "item": {
+      "kind": "state",
+      "event_id": "$addresses",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "change": {
+        "type": "addresses"
+      }
+    },
+    "hiddenBy": [
+      "addresses"
+    ]
+  },
+  {
+    "item": {
+      "kind": "state",
+      "event_id": "$created",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "change": {
+        "type": "created"
+      }
+    },
+    "hiddenBy": [
+      "creation"
+    ]
+  },
+  {
+    "item": {
+      "kind": "state",
+      "event_id": "$server_acl",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "change": {
+        "type": "server_acl"
+      }
+    },
+    "hiddenBy": [
+      "serverAccess"
+    ]
+  },
+  {
+    "item": {
+      "kind": "state",
+      "event_id": "$upgraded",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "change": {
+        "type": "upgraded"
+      }
+    },
+    "hiddenBy": [
+      "upgrades"
+    ]
+  },
+  {
+    "item": {
+      "kind": "state",
+      "event_id": "$pinned_messages",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "change": {
+        "type": "pinned_messages"
+      }
+    },
+    "hiddenBy": [
+      "pinnedMessages"
+    ]
+  },
+  {
+    "item": {
+      "kind": "state",
+      "event_id": "$guest_access",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258000000,
+      "change": {
+        "type": "guest_access",
+        "allowed": true
+      }
+    },
+    "hiddenBy": [
+      "guestAccess"
+    ]
+  },
+  {
+    "item": {
+      "kind": "notice",
+      "event_id": "$undecryptable",
+      "sender": "@alice:server.invalid",
+      "notice": "undecryptable",
+      "origin_server_ts": null
+    },
+    "hiddenBy": []
+  },
+  {
+    "item": {
+      "kind": "notice",
+      "event_id": "$withheld",
+      "sender": "@alice:server.invalid",
+      "notice": "withheld",
+      "origin_server_ts": null
+    },
+    "hiddenBy": []
+  },
+  {
+    "item": {
+      "kind": "notice",
+      "event_id": "$untrusted_sender",
+      "sender": "@alice:server.invalid",
+      "notice": "untrusted_sender",
+      "origin_server_ts": null
+    },
+    "hiddenBy": []
+  },
+  {
+    "item": {
+      "kind": "notice",
+      "event_id": "$deleted",
+      "sender": "@alice:server.invalid",
+      "notice": "deleted",
+      "origin_server_ts": null
+    },
+    "hiddenBy": [
+      "deletedMessages"
+    ]
+  },
+  {
+    "item": {
+      "kind": "message",
+      "event_id": "$said",
+      "sender": "@alice:server.invalid",
+      "body": "hi",
+      "origin_server_ts": null,
+      "reply_to": null
+    },
+    "hiddenBy": []
+  },
+  {
+    "item": {
+      "kind": "gap",
+      "next_cursor": null
+    },
+    "hiddenBy": []
+  }
+]

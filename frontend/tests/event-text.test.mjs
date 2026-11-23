@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { DEFAULT_SETTINGS } from '../src/preferences.ts';
 import { OTHER_SWITCHES, deletedParts, itemShown, otherParts, otherSwitch } from '../src/eventText.ts';
@@ -156,4 +157,26 @@ test('GIVEN deletions of other events WHEN applied THEN a message-like event sho
     ]
   );
   assert.deepEqual(quoteOf(shown, '$space'), { sender: A, text: 'An event that is not a message' });
+});
+
+/** Cases the core's test (`crates/core/src/timeline_filter.rs`) also reads. */
+const SWITCH_CASES = JSON.parse(
+  readFileSync(new URL('../../crates/contracts/fixtures/timeline-switches.json', import.meta.url), 'utf8')
+);
+
+test('GIVEN the shared switch cases WHEN each hiding switch is off alone THEN the page agrees with the core', () => {
+  const keys = Object.keys(DEFAULT_SETTINGS.timelineEvents);
+  const switches = (on) => Object.fromEntries(keys.map((key) => [key, on(key)]));
+  for (const { item, hiddenBy } of SWITCH_CASES) {
+    const name = JSON.stringify(item);
+    assert.equal(itemShown(item, DEFAULT_SETTINGS.timelineEvents), true, name);
+    for (const key of hiddenBy) {
+      assert.ok(keys.includes(key), `${key} is not a switch`);
+      assert.equal(itemShown(item, switches((k) => k !== key)), false, `${key}: ${name}`);
+    }
+    assert.equal(itemShown(item, switches((k) => hiddenBy.includes(k))), true, `another switch hides ${name}`);
+  }
+  for (const key of keys) {
+    assert.ok(SWITCH_CASES.some((c) => c.hiddenBy.includes(key)), `no case for ${key}`);
+  }
 });

@@ -242,6 +242,57 @@ mod tests {
         }
     }
 
+    /// Switches set by name: on where `on` says so.
+    fn switches(on: impl Fn(&str) -> bool) -> TimelineEvents {
+        let mut value = serde_json::to_value(TimelineEvents::default()).unwrap();
+        for (key, switch) in value.as_object_mut().unwrap() {
+            *switch = serde_json::Value::Bool(on(key));
+        }
+        serde_json::from_value(value).unwrap()
+    }
+
+    /// GIVEN the cases in `timeline-switches.json`, which the page's test
+    /// (`frontend/tests/event-text.test.mjs`) also reads, WHEN each switch
+    /// that hides an item is off alone THEN the item is hidden, and with
+    /// every other switch off it still shows. The two copies of the rules
+    /// cannot drift apart on a listed case, and every switch has a case.
+    #[test]
+    fn given_the_shared_switch_cases_then_the_core_agrees_with_the_page() {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields, rename_all = "camelCase")]
+        struct Case {
+            item: TimelineItem,
+            hidden_by: Vec<String>,
+        }
+        let cases: Vec<Case> = serde_json::from_str(include_str!(
+            "../../contracts/fixtures/timeline-switches.json"
+        ))
+        .unwrap();
+        let keys: Vec<String> = serde_json::to_value(TimelineEvents::default())
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        for case in &cases {
+            let item = &case.item;
+            assert!(shown(item, &TimelineEvents::default()), "{item:?}");
+            for key in &case.hidden_by {
+                assert!(keys.contains(key), "{key} is not a switch");
+                assert!(!shown(item, &switches(|k| k != key)), "{key}: {item:?}");
+            }
+            let rest_off = switches(|k| case.hidden_by.iter().any(|h| h == k));
+            assert!(shown(item, &rest_off), "another switch hides {item:?}");
+        }
+        for key in &keys {
+            assert!(
+                cases.iter().any(|case| case.hidden_by.contains(key)),
+                "no case for {key}"
+            );
+        }
+    }
+
     /// GIVEN every switch off THEN messages, encryption notices, gaps,
     /// relations and messages of an unknown type still pass.
     #[test]
