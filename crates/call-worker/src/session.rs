@@ -517,6 +517,39 @@ impl SoundProbe {
             gate: LevelGate::default(),
         }
     }
+
+    /// Whether a measurement runs: its report has not reached [`Self::end`].
+    fn is_busy(&self) -> bool {
+        self.task.is_some()
+    }
+
+    /// Starts `measure` on its own task, stopped after `limit`, unless a
+    /// measurement runs. Its report comes back through `done` exactly once:
+    /// the level, or `None` when it timed out or unwound.
+    fn start<F>(&mut self, measure: F, limit: Duration) -> bool
+    where
+        F: std::future::Future<Output = f64> + Send + 'static,
+    {
+        if self.is_busy() {
+            return false;
+        }
+        let done = self.done.clone();
+        self.task = Some(tokio::spawn(async move {
+            // Reports when dropped, also if the measurement unwinds, so the
+            // slot is always freed. A timeout reports `None`, not silence.
+            let mut report = SoundReport { done, level: None };
+            report.level = tokio::time::timeout(limit, measure).await.ok();
+        }));
+        true
+    }
+
+    /// A measurement's report arrived: the slot is free. One that did not
+    /// finish (`None`) changes nothing, so the meter keeps its level until
+    /// the next one.
+    fn end(&mut self, linear: Option<f64>) -> Option<FromWorker> {
+        self.task = None;
+        self.gate.next(sound_level(linear?))
+    }
 }
 
 /// The loudest `audioLevel` (0.0 to 1.0) of the tracks' inbound streams.
@@ -1604,31 +1637,16 @@ impl Call<'_> {
     /// Starts a measurement of the received sound, unless one runs. With no
     /// remote audio the level is silence at once.
     fn measure_sound(&mut self) -> Option<FromWorker> {
-        if self.sound.task.is_some() {
+        if self.sound.is_busy() {
             return None;
         }
         let tracks = self.remote_audio();
         if tracks.is_empty() {
             return self.sound.gate.next(0);
         }
-        let done = self.sound.done.clone();
-        self.sound.task = Some(tokio::spawn(async move {
-            // Reports when dropped, also if the measurement unwinds, so the
-            // slot is always freed. A timeout reports `None`, not silence.
-            let mut report = SoundReport { done, level: None };
-            report.level = tokio::time::timeout(SOUND_MEASURE_TIMEOUT, loudest_level(tracks))
-                .await
-                .ok();
-        }));
+        self.sound
+            .start(loudest_level(tracks), SOUND_MEASURE_TIMEOUT);
         None
-    }
-
-    /// A measurement ended with the loudest linear level.
-    /// A measurement ended. One that did not finish (`None`) frees the slot
-    /// and changes nothing: the meter keeps its level until the next one.
-    fn sound_measured(&mut self, linear: Option<f64>) -> Option<FromWorker> {
-        self.sound.task = None;
-        self.sound.gate.next(sound_level(linear?))
     }
 
     /// Gives every subscribed remote audio track the call's playout.
@@ -2150,7 +2168,7 @@ async fn event_loop(
                 }
             }
             Some(linear) = sound_done.recv() => {
-                outgoing.extend(call.sound_measured(linear));
+                outgoing.extend(call.sound.end(linear));
             }
             _ = tick.tick() => {
                 outgoing.extend(call.measure_sound());
@@ -2707,6 +2725,44 @@ mod tests {
         assert!(unwound.await.is_err());
         assert_eq!(rx.recv().await, Some(None));
         assert!(rx.try_recv().is_err(), "one report each");
+    }
+
+    /// GIVEN a sound probe WHEN measurements start and end THEN at most one
+    /// runs; each report frees the slot; a level goes out only when it
+    /// changes; and a timed-out or unwound measurement frees the slot
+    /// without a message.
+    #[tokio::test]
+    async fn given_sound_measurements_then_one_runs_and_every_end_frees_it() {
+        let (tx, mut rx) = mpsc::channel::<Option<f64>>(1);
+        let mut probe = SoundProbe::new(tx);
+        let long = Duration::from_secs(5);
+
+        assert!(probe.start(async { 0.5 }, long));
+        assert!(!probe.start(async { 1.0 }, long), "one runs at a time");
+        let report = rx.recv().await.expect("a report");
+        assert_eq!(report, Some(0.5));
+        assert!(probe.is_busy(), "busy until the report is taken");
+        let first = probe.end(report);
+        assert!(matches!(first, Some(FromWorker::SoundLevel { level }) if level > 0));
+        assert!(!probe.is_busy());
+
+        assert!(probe.start(async { 0.5 }, long));
+        let same = rx.recv().await.expect("a report");
+        assert_eq!(probe.end(same), None, "an unchanged level is not sent");
+
+        assert!(probe.start(std::future::pending::<f64>(), Duration::from_millis(1)));
+        let timed_out = rx.recv().await.expect("a report");
+        assert_eq!(timed_out, None);
+        assert_eq!(probe.end(timed_out), None, "a timeout is not silence");
+        assert!(!probe.is_busy());
+
+        assert!(probe.start(async { panic!("statistics read failed") }, long));
+        let unwound = rx.recv().await.expect("a report");
+        assert_eq!(unwound, None);
+        assert_eq!(probe.end(unwound), None);
+        assert!(probe.start(async { 0.0 }, long), "the slot is free again");
+        let silent = rx.recv().await.expect("a report");
+        assert_eq!(probe.end(silent), Some(FromWorker::SoundLevel { level: 0 }));
     }
 
     /// GIVEN room events that need no participant WHEN described THEN each
