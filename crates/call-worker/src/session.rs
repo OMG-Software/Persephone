@@ -504,8 +504,13 @@ impl SoundProbe {
 }
 
 /// The loudest `audioLevel` (0.0 to 1.0) of the tracks' inbound streams.
-/// WebRTC measures it on the audio as it is played, after the call volume.
-/// A track whose statistics cannot be read counts as silent.
+/// WebRTC measures it on the audio as it is played, after the call volume:
+/// `ChannelReceive::GetAudioFrameWithInfo` scales the frame by the output
+/// gain (`set_volume`) before `output_audio_level_.ComputeLevel`, and a
+/// disabled (deafened) track sets that gain to 0
+/// (`AudioRtpReceiver::Reconfigure`). So the meter follows the slider and is
+/// empty while deafened. A track whose statistics cannot be read counts as
+/// silent.
 async fn loudest_level(tracks: Vec<RemoteAudioTrack>) -> f64 {
     let mut loudest = 0.0_f64;
     for track in tracks {
@@ -2385,7 +2390,12 @@ fn note_room_event(connection: u8, event: &RoomEvent) {
         return;
     }
     if let Some((level, text)) = describe_room_event(connection, event) {
-        diagnostics.push_admitted(level, "persephone::call_worker::room", &text);
+        diagnostics.push_admitted(
+            crate::diagnostics::Source::Note,
+            level,
+            "persephone::call_worker::room",
+            &text,
+        );
     }
 }
 

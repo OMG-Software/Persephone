@@ -140,7 +140,7 @@ impl Diagnostics {
     #[cfg(test)]
     pub fn push(&self, source: Source, level: u8, target: &str, message: &str) {
         if self.admit(source) {
-            self.push_admitted(level, target, message);
+            self.push_admitted(source, level, target, message);
         }
     }
 
@@ -164,8 +164,10 @@ impl Diagnostics {
         true
     }
 
-    /// Queues a record that [`Diagnostics::admit`] took.
-    pub(crate) fn push_admitted(&self, level: u8, target: &str, message: &str) {
+    /// Queues a record from `source` that [`Diagnostics::admit`] took. The
+    /// queue's limit for `source` is checked again under the lock, so records
+    /// admitted at the same time never take more than their share.
+    pub(crate) fn push_admitted(&self, source: Source, level: u8, target: &str, message: &str) {
         let mut target = clean(target, MAX_DIAGNOSTIC_TARGET_BYTES);
         if target.is_empty() {
             target.push('?');
@@ -181,7 +183,7 @@ impl Diagnostics {
             if !self.is_on() {
                 return;
             }
-            if queue.len() >= QUEUE_RECORDS {
+            if queue.len() >= source.queue_limit() {
                 self.dropped.fetch_add(1, Ordering::Relaxed);
                 return;
             }
@@ -330,7 +332,7 @@ impl log::Log for Logger {
             log::Level::Debug | log::Level::Trace => DEBUG,
         };
         let message = format_bounded(*record.args(), MAX_DIAGNOSTIC_MESSAGE_BYTES);
-        global().push_admitted(level, record.target(), &message);
+        global().push_admitted(Source::Library, level, record.target(), &message);
     }
 
     fn flush(&self) {}
@@ -477,6 +479,30 @@ mod tests {
         assert!(queued.admit(Source::Note), "the queue keeps room for notes");
     }
 
+    /// GIVEN one library place left WHEN two library records are both
+    /// admitted before either is queued THEN only one is queued and the other
+    /// is counted, so the notes keep their places; a note still fits.
+    #[test]
+    fn given_two_admitted_library_records_then_the_last_place_is_not_overrun() {
+        let diagnostics = Diagnostics::default();
+        diagnostics.set_on(true);
+        lock(&diagnostics.queue).extend((1..LIBRARY_QUEUE_RECORDS).map(|_| {
+            FromWorker::Diagnostic {
+                level: DEBUG,
+                target: "libwebrtc".into(),
+                message: "waits".into(),
+            }
+        }));
+        assert!(diagnostics.admit(Source::Library));
+        assert!(diagnostics.admit(Source::Library));
+        diagnostics.push_admitted(Source::Library, DEBUG, "libwebrtc", "first");
+        diagnostics.push_admitted(Source::Library, DEBUG, "libwebrtc", "second");
+        assert_eq!(lock(&diagnostics.queue).len(), LIBRARY_QUEUE_RECORDS);
+        assert_eq!(diagnostics.dropped.load(Ordering::Relaxed), 1);
+        diagnostics.push(Source::Note, INFO, "persephone::call_worker::room", "note");
+        assert_eq!(lock(&diagnostics.queue).len(), LIBRARY_QUEUE_RECORDS + 1);
+    }
+
     /// GIVEN long or multi-byte text THEN it is cut within the limit on a
     /// character boundary.
     #[test]
@@ -509,7 +535,7 @@ mod tests {
         diagnostics.set_on(true);
         assert!(diagnostics.admit(Source::Library));
         diagnostics.set_on(false);
-        diagnostics.push_admitted(INFO, "livekit", "before off");
+        diagnostics.push_admitted(Source::Library, INFO, "livekit", "before off");
         diagnostics.set_on(true);
         assert!(diagnostics.take().is_none());
     }
