@@ -990,6 +990,11 @@ impl Core {
                 Ok(call) => Answer::Later(id, call),
                 Err(code) => error(code),
             },
+            // Off waits for the writer to drain and flush, so it runs off
+            // the serving loop too.
+            Call::SetDiagnostics { on: false } => {
+                Answer::Later(id, Box::new(|| self.diagnostics_off()))
+            }
             Call::AcceptInvite { .. }
             | Call::DeclineInvite { .. }
             | Call::DeleteMessage { .. }
@@ -1258,9 +1263,9 @@ impl Core {
                 }
             }
             Call::DiagnosticsStatus {} => ok(&self.diagnostics_status()),
-            // Turning on asks first, so only `answer` runs it.
-            Call::SetDiagnostics { on: true } => Outcome::Error(ErrorCode::Unavailable),
-            Call::SetDiagnostics { on: false } => self.diagnostics_off(),
+            // Turning on asks first and turning off waits for the writer,
+            // so only `answer` runs them, as long calls.
+            Call::SetDiagnostics { .. } => Outcome::Error(ErrorCode::Unavailable),
             Call::DiagnosticRecords { source, records } => {
                 Self::diagnostic_records(*source, records)
             }
@@ -5273,10 +5278,16 @@ mod tests {
         assert!(status.on && status.available);
         assert_eq!(status.path, Some(path.display().to_string()));
         page("while on");
-        assert_eq!(
-            core.diagnostics_off(),
-            Outcome::Ok(serde_json::Value::Bool(false))
-        );
+        // Off drains and flushes the writer, so it is a long call, run off
+        // the serving loop.
+        let off = core.answer(&Request {
+            id: 9,
+            call: Call::SetDiagnostics { on: false },
+        });
+        let Answer::Later(9, off) = off else {
+            panic!("turning off must be a long call");
+        };
+        assert_eq!(off(), Outcome::Ok(serde_json::Value::Bool(false)));
         assert_eq!(
             core.take_events(),
             Some(vec![Event::DiagnosticsChanged { on: false }])

@@ -50,7 +50,10 @@ pub fn is_secret_name(name: &str) -> bool {
 static NAMED: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(concat!(
         r#"(?i)([A-Za-z0-9_.\-]*(?:password|passphrase|passwd|secret|token|jwt|credential|authorization|cookie|recovery|private|key)[A-Za-z0-9_.\-]*)"#,
-        r#"(\\{0,2}["']?\s*[:=]\s*(?:Some\()?(?:bearer\s+)?)"#,
+        // An HTTP authentication scheme word stays and the credential after
+        // it goes. Only the registered schemes: any word would also take
+        // the first word of a value such as a passphrase with spaces.
+        r#"(\\{0,2}["']?\s*[:=]\s*(?:Some\()?(?:(?:bearer|basic|digest|negotiate|ntlm|token|mac|hoba|mutual|aws4-hmac-sha256)\s+)?)"#,
         r#"(\\{1,2}"(?:[^"\\]|\\[^"])*\\{1,2}"|"(?:[^"\\]|\\.)*"|'[^']*'|[^\s"'&,;}\])]+)"#,
     ))
     .expect("valid pattern")
@@ -214,6 +217,22 @@ mod tests {
                 concat!("header Authorization: Bear", "er abc.def-ghi"),
                 "abc.def-ghi",
                 "header",
+            ),
+            (
+                concat!("Authorization: Bas", "ic dXNlcjpwYXNz next"),
+                "dXNlcjpwYXNz",
+                "next",
+            ),
+            (
+                concat!("Proxy-Authorization: Tok", "en abc123def end"),
+                "abc123def",
+                "end",
+            ),
+            (
+                // A value with spaces: its first word goes, not a scheme.
+                "password: correct horse",
+                "correct",
+                "horse",
             ),
             (
                 "jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJAYTpiIn0.sig_part ok",

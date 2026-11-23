@@ -110,6 +110,10 @@ pub struct Log {
     on: AtomicBool,
     shared: Arc<Shared>,
     writer: Mutex<Option<Writer>>,
+    /// Held for the whole of [`Log::turn_on`] and [`Log::turn_off`], so an
+    /// "on" waits until an "off" has drained the old writer: two writers on
+    /// one file could split each other's lines. Never taken by `record`.
+    lifecycle: Mutex<()>,
     /// Each other process's records in the current second.
     rates: Mutex<[Window; 3]>,
     /// The file of this run, once it was turned on.
@@ -125,6 +129,7 @@ impl Default for Log {
             on: AtomicBool::new(false),
             shared: Arc::default(),
             writer: Mutex::new(None),
+            lifecycle: Mutex::new(()),
             rates: Mutex::default(),
             path: Mutex::new(None),
             switch: tokio::sync::watch::channel(false).0,
@@ -160,6 +165,7 @@ impl Log {
     /// Opens `path` for appending (owner-only on Unix, never through a
     /// link) and starts writing. A second call while on does nothing.
     pub fn turn_on(&self, path: &Path) -> io::Result<()> {
+        let _lifecycle = lock(&self.lifecycle);
         let mut writer = lock(&self.writer);
         if writer.is_some() {
             return Ok(());
@@ -186,9 +192,11 @@ impl Log {
         Ok(())
     }
 
-    /// Stops writing. Lines in the queue are written and flushed first. The
+    /// Stops writing. Lines in the queue are written and flushed first, so
+    /// this can take a while: the core runs it off its serving loop. The
     /// file stays until the next start.
     pub fn turn_off(&self) {
+        let _lifecycle = lock(&self.lifecycle);
         if !self.on.load(Ordering::SeqCst) {
             return;
         }

@@ -121,7 +121,10 @@ async function flush(): Promise<void> {
 
 let installed = false;
 
-/** Notes the page's uncaught errors and rejections while on. Call once. */
+/**
+ * Notes the page's uncaught errors (message and place) and rejections (a
+ * short code only) while on. Call once.
+ */
 export function installPageDiagnostics(target: Window = window): void {
   if (installed) return;
   installed = true;
@@ -129,8 +132,9 @@ export function installPageDiagnostics(target: Window = window): void {
     const where = event.filename ? ` at ${event.filename}:${event.lineno}:${event.colno}` : '';
     note('error', 'page::error', `${event.message}${where}`);
   });
+  // A rejection's reason is the page's own free text (an Error's message can
+  // hold a URL or an ID), so only a short code is kept, as for host calls.
   target.addEventListener('unhandledrejection', (event) => {
-    const reason = event.reason instanceof Error ? event.reason.message : outcomeCode(event.reason);
-    note('error', 'page::rejection', reason);
+    note('error', 'page::rejection', outcomeCode(event.reason));
   });
 }

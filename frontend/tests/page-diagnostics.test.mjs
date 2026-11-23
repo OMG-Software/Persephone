@@ -93,7 +93,7 @@ test('GIVEN the log on WHEN records wait a second THEN one batch goes to diagnos
   }
 });
 
-test('GIVEN the page hooks WHEN an error and a rejection happen THEN each is noted once, with free text only from an Error', () => {
+test('GIVEN the page hooks WHEN an error and rejections happen THEN each is noted once, and a rejection only as a code', () => {
   const target = new EventTarget();
   page.installPageDiagnostics(target);
   page.installPageDiagnostics(target);
@@ -105,7 +105,7 @@ test('GIVEN the page hooks WHEN an error and a rejection happen THEN each is not
   Object.assign(rejection, { reason: 'password: hunter2' });
   target.dispatchEvent(rejection);
   const thrown = new Event('unhandledrejection');
-  Object.assign(thrown, { reason: new Error('failed to load') });
+  Object.assign(thrown, { reason: new Error('failed to load https://example.org/?id=1') });
   target.dispatchEvent(thrown);
   const batch = page.takeBatch();
   page.setPageDiagnostics(false);
@@ -114,7 +114,7 @@ test('GIVEN the page hooks WHEN an error and a rejection happen THEN each is not
     [
       ['page::error', 'boom at app.js:3:7'],
       ['page::rejection', 'error'],
-      ['page::rejection', 'failed to load']
+      ['page::rejection', 'error']
     ]
   );
 });

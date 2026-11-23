@@ -103,7 +103,11 @@ Each line has `ts` (Unix milliseconds), `seq` (a counter for this run),
 `message`, and optional `fields`.
 
 * Every `tracing` event and every `log` record of the core at `debug` level
-  or higher, from Persephone and from every library.
+  or higher, from Persephone and from every library, except the transport
+  crates, which are too busy at `debug`: `h2`, `hyper`, `hyper_util`, `mio`,
+  `reqwest`, `rustls`, `tokio`, `tokio_util`, `tungstenite`,
+  `tokio_tungstenite` and `want` are kept only from `info`. `trace` is never
+  kept.
 * Every Matrix event that the SDK hands to the client (timeline, state,
   stripped state, ephemeral, account data and to-device), as metadata only:
   kind, room ID, event ID, type, sender, state key, server time and content
@@ -118,13 +122,15 @@ Each line has `ts` (Unix milliseconds), `seq` (a counter for this run),
   `image_band` requests are not noted, as on the page.
 * The UI host's `log` records: its own at `debug`, other crates at `info`.
 * The page's records: the name, outcome code and duration of each bridge
-  call, and uncaught errors and rejections. Never arguments or replies. An
-  error is kept only as a short lowercase code; any other rejection is
-  written as `error`. Successful `call_video_frame` and `image_band` calls
+  call, and uncaught errors and rejections. Never arguments or replies. A
+  failed call or a rejection is kept only as a short lowercase code, and
+  anything else, an `Error`'s message included, as `error`. An uncaught
+  error keeps its message and place, which the filter removes credentials
+  from. Successful `call_video_frame` and `image_band` calls
   are not noted, because they run many times each second.
 * The call worker's `log` records (LiveKit and libwebrtc) at `debug`, the
-  transport crates under them (TLS, HTTP, WebSocket, tokio) only from
-  `info`, the same list as the core's, and one
+  transport crates under them only from `info` (the same list as the
+  core's, above), and one
   record for each LiveKit room event that matters for media: participant,
   track published, subscribed, unsubscribed and subscription failed, frame
   decryption state, connection state and quality. Identities and track IDs

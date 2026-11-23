@@ -14,9 +14,11 @@
   let failure = $state<string | null>(null);
 
   const failures: Record<string, string> = {
+    // The host sends these two codes (`page_error` in src-tauri); the core's
+    // `internal`, such as a file that could not be opened, arrives as
+    // `core_unavailable` too.
     limit_exceeded: 'The diagnostic log warning is already open.',
-    core_unavailable: 'The diagnostic log cannot be turned on now.',
-    core_internal: 'The diagnostic log file could not be opened.'
+    core_unavailable: 'The diagnostic log cannot be changed now, or its file could not be opened.'
   };
 
   async function load() {
