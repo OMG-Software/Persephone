@@ -60,6 +60,7 @@ test('GIVEN each other kind WHEN its switch is read THEN it is a listed switch, 
   }
   assert.equal(otherSwitch('third_party_invite'), 'invitations');
   assert.equal(otherSwitch('call_signalling'), 'callSignalling');
+  assert.equal(otherSwitch('message'), null);
   assert.equal(otherSwitch('teleport'), 'otherEvents');
   assert.equal(otherSwitch('__proto__'), 'otherEvents');
   // Every switch the settings have is offered once.
@@ -79,12 +80,17 @@ test('GIVEN switches off WHEN items are filtered THEN only those kinds go, and e
   assert.equal(itemShown(other('poll_started', true), on), true);
   assert.equal(itemShown(other('poll_started', true), { ...on, polls: false }), false);
   // GIVEN other events switched off THEN the kinds with no text of their
-  // own, and any kind this build does not know, go; named kinds stay.
+  // own, and any kind this build does not know, go; named kinds stay, and
+  // a message of an unknown type is still a message.
   const noOther = { ...on, otherEvents: false };
-  for (const event of ['event', 'state', 'message', 'teleport']) {
+  for (const event of ['event', 'state', 'teleport']) {
     assert.equal(itemShown(other(event), noOther), false, event);
   }
   assert.equal(itemShown(other('sticker'), noOther), true);
+  assert.equal(itemShown(other('message'), noOther), true);
+  // GIVEN deleted lines switched off THEN a deleted message of an unknown
+  // type goes too.
+  assert.equal(itemShown(other('message', true), { ...on, deletedMessages: false }), false);
   assert.equal(itemShown(other('poll_started', true), { ...on, deletedMessages: false }), false);
   assert.equal(itemShown(other('poll_started'), { ...on, deletedMessages: false }), true);
   assert.equal(itemShown(notice('deleted'), events), false);

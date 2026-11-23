@@ -1595,9 +1595,11 @@ pub struct TimelineEvents {
     /// The rooms of a space, and the spaces of a room.
     pub spaces: bool,
     pub widgets: bool,
-    /// Messages and events of a type this build has no text for.
+    /// Events of a type this build has no text for. A message of such a
+    /// type always shows.
     pub other_events: bool,
-    /// Deleted messages, shown as "Message deleted."
+    /// Deleted messages and events, shown as "Message deleted.", "Poll
+    /// deleted." and so on.
     pub deleted_messages: bool,
 }
 

@@ -504,11 +504,13 @@ polls: boolean, stickers: boolean, locations: boolean,
  */
 spaces: boolean, widgets: boolean, 
 /**
- * Messages and events of a type this build has no text for.
+ * Events of a type this build has no text for. A message of such a
+ * type always shows.
  */
 otherEvents: boolean, 
 /**
- * Deleted messages, shown as "Message deleted."
+ * Deleted messages and events, shown as "Message deleted.", "Poll
+ * deleted." and so on.
  */
 deletedMessages: boolean, };
 

@@ -95,7 +95,11 @@ export function deletedParts(sender: string, event: OtherEvent, eventType: strin
   return [{ person: sender }, { text: ': Event of type ' }, { name: eventType }, { text: ' deleted.' }];
 }
 
-const OTHER_SWITCH: Record<OtherEvent, keyof TimelineEvents> = {
+/**
+ * The switch for each kind. A message has none: a message of a type this
+ * build has no text for is still a message, and messages always show.
+ */
+const OTHER_SWITCH: Record<OtherEvent, keyof TimelineEvents | null> = {
   verification_request: 'verification',
   verification_ready: 'verification',
   verification_start: 'verification',
@@ -118,13 +122,16 @@ const OTHER_SWITCH: Record<OtherEvent, keyof TimelineEvents> = {
   space_parent: 'spaces',
   widget: 'widgets',
   third_party_invite: 'invitations',
-  message: 'otherEvents',
+  message: null,
   event: 'otherEvents',
   state: 'otherEvents'
 };
 
-/** The settings switch that shows or hides an other event of this kind. */
-export function otherSwitch(event: OtherEvent): keyof TimelineEvents {
+/**
+ * The settings switch that shows or hides an other event of this kind, or
+ * `null` for a message, which no switch hides.
+ */
+export function otherSwitch(event: OtherEvent): keyof TimelineEvents | null {
   return Object.hasOwn(OTHER_SWITCH, event) ? OTHER_SWITCH[event] : 'otherEvents';
 }
 
@@ -137,12 +144,12 @@ export function itemShown(item: ShownItem, events: TimelineEvents): boolean {
   switch (item.kind) {
     case 'state':
       return changeShown(item.change, events);
-    case 'other':
-      // A deleted one shows only while its kind and deleted messages show.
-      return (
-        events[otherSwitch(item.event)] !== false &&
-        (!item.deleted || events.deletedMessages !== false)
-      );
+    case 'other': {
+      // A deleted one shows only while its kind and deleted lines show.
+      const key = otherSwitch(item.event);
+      const kindShown = key === null || events[key] !== false;
+      return kindShown && (!item.deleted || events.deletedMessages !== false);
+    }
     case 'notice':
       return item.notice !== 'deleted' || events.deletedMessages !== false;
     default:
@@ -160,6 +167,6 @@ export const OTHER_SWITCHES: readonly { key: keyof TimelineEvents; label: string
   { key: 'locations', label: 'Shared locations' },
   { key: 'spaces', label: 'Space changes' },
   { key: 'widgets', label: 'Widget changes' },
-  { key: 'deletedMessages', label: 'Deleted messages' },
+  { key: 'deletedMessages', label: 'Deleted messages and events' },
   { key: 'otherEvents', label: 'Other kinds of events, shown by their type' }
 ];

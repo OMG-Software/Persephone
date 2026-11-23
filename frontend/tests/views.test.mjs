@@ -1477,13 +1477,14 @@ test('GIVEN other events with hostile types WHEN the timeline shows THEN each li
   for (const kept of ['$call', '$custom', '$state', '$message']) {
     assert.match(some, new RegExp(`data-event-id="\\${kept}"`));
   }
-  // GIVEN other events switched off THEN the lines named by their type go.
+  // GIVEN other events switched off THEN the lines named by their type go,
+  // but a message of an unknown type stays.
   const noOther = Object.fromEntries(ALL_KEYS.map((key) => [key, key !== 'otherEvents']));
   const named = render(Timeline, { props: { ...props, items, events: noOther } }).body;
-  for (const hidden of ['$custom', '$state', '$message']) {
+  for (const hidden of ['$custom', '$state']) {
     assert.doesNotMatch(named, new RegExp(`data-event-id="\\${hidden}"`));
   }
-  for (const kept of ['$verify', '$call', '$poll']) {
+  for (const kept of ['$verify', '$call', '$poll', '$message']) {
     assert.match(named, new RegExp(`data-event-id="\\${kept}"`));
   }
 });
