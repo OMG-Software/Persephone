@@ -1094,6 +1094,11 @@ pub const MAX_DIAGNOSTIC_RECORDS: usize = 64;
 pub const MAX_DIAGNOSTIC_MESSAGE_BYTES: usize = 1024;
 /// Longest record target, in bytes.
 pub const MAX_DIAGNOSTIC_TARGET_BYTES: usize = 64;
+/// Most bytes of one call's records as JSON. JSON escaping can make a
+/// control character six bytes, so records within their own limits can
+/// still exceed the control frame; this keeps the call well under it. A
+/// full batch of plain records at their limits (about 72 KiB) fits.
+pub const MAX_DIAGNOSTIC_BATCH_BYTES: usize = 96 * 1024;
 
 /// The process a `diagnostic_records` call speaks for.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -1128,6 +1133,21 @@ impl DiagnosticRecord {
     pub fn within_bounds(&self) -> bool {
         self.target.len() <= MAX_DIAGNOSTIC_TARGET_BYTES
             && self.message.len() <= MAX_DIAGNOSTIC_MESSAGE_BYTES
+    }
+
+    /// This record's size as JSON, with escapes.
+    pub fn encoded_len(&self) -> usize {
+        serde_json::to_vec(self).map_or(usize::MAX, |bytes| bytes.len())
+    }
+
+    /// Whether `records` may go in one call: at most
+    /// [`MAX_DIAGNOSTIC_RECORDS`], each within its bounds, and at most
+    /// [`MAX_DIAGNOSTIC_BATCH_BYTES`] as JSON.
+    pub fn batch_fits(records: &[Self]) -> bool {
+        records.len() <= MAX_DIAGNOSTIC_RECORDS
+            && records.iter().all(Self::within_bounds)
+            && serde_json::to_vec(records)
+                .is_ok_and(|bytes| bytes.len() <= MAX_DIAGNOSTIC_BATCH_BYTES)
     }
 }
 
@@ -3890,5 +3910,31 @@ mod timeline_events_wire_tests {
         assert!(record(MAX_DIAGNOSTIC_TARGET_BYTES, MAX_DIAGNOSTIC_MESSAGE_BYTES).within_bounds());
         assert!(!record(MAX_DIAGNOSTIC_TARGET_BYTES + 1, 1).within_bounds());
         assert!(!record(1, MAX_DIAGNOSTIC_MESSAGE_BYTES + 1).within_bounds());
+    }
+
+    /// GIVEN a full batch of plain records THEN it fits; GIVEN the same
+    /// count of records within their limits but made of control characters,
+    /// which JSON escapes to six bytes THEN it does not, and it would also
+    /// have broken the control frame limit.
+    #[test]
+    fn given_escaped_records_then_the_batch_size_is_checked() {
+        let record = |message: String| DiagnosticRecord {
+            level: RecordLevel::Debug,
+            target: "t".into(),
+            message,
+        };
+        let plain = vec![record("m".repeat(MAX_DIAGNOSTIC_MESSAGE_BYTES)); MAX_DIAGNOSTIC_RECORDS];
+        assert!(DiagnosticRecord::batch_fits(&plain));
+        let escaped =
+            vec![record("\u{0}".repeat(MAX_DIAGNOSTIC_MESSAGE_BYTES)); MAX_DIAGNOSTIC_RECORDS];
+        assert!(escaped.iter().all(DiagnosticRecord::within_bounds));
+        assert!(!DiagnosticRecord::batch_fits(&escaped));
+        assert!(serde_json::to_vec(&escaped).unwrap().len() > 128 * 1024);
+        assert!(!DiagnosticRecord::batch_fits(&vec![
+            record("m".into());
+            MAX_DIAGNOSTIC_RECORDS
+                + 1
+        ]));
+        assert!(record("\u{0}".into()).encoded_len() > record("m".into()).encoded_len());
     }
 }

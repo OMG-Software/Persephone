@@ -366,13 +366,23 @@ export async function watchSession(
   await followDiagnostics();
 }
 
-/** Sets the page's records to follow the core's diagnostic log switch. */
+let diagnosticsLookup = 0;
+
+/**
+ * Sets the page's records to follow the core's diagnostic log switch. Host
+ * calls run at the same time, so an older lookup can end after a newer one:
+ * only the answer of the latest lookup is used.
+ */
 async function followDiagnostics(): Promise<void> {
+  diagnosticsLookup += 1;
+  const lookup = diagnosticsLookup;
+  let on = false;
   try {
-    setPageDiagnostics((await diagnosticsStatus()).on);
+    on = (await diagnosticsStatus()).on;
   } catch {
-    setPageDiagnostics(false);
+    on = false;
   }
+  if (lookup === diagnosticsLookup) setPageDiagnostics(on);
 }
 
 /** Locks the session; `locking` means work is still finishing (call again). */

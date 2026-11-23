@@ -97,13 +97,28 @@ impl Diagnostics {
     /// budget and the queue have room. It never blocks for long: one short
     /// lock for the budget and one for the queue.
     pub fn push(&self, level: u8, target: &str, message: &str) {
+        if self.admit() {
+            self.push_admitted(level, target, message);
+        }
+    }
+
+    /// Whether one more record is taken now: the log is on, the second's
+    /// budget has room (taken here) and the queue is not full. A record that
+    /// is not taken is counted. The logger asks before it formats a record,
+    /// so a flood costs a count, not the formatting.
+    fn admit(&self) -> bool {
         if !self.is_on() {
-            return;
+            return false;
         }
-        if !self.take_budget(Instant::now()) {
+        if !self.take_budget(Instant::now()) || lock(&self.queue).len() >= QUEUE_RECORDS {
             self.dropped.fetch_add(1, Ordering::Relaxed);
-            return;
+            return false;
         }
+        true
+    }
+
+    /// Queues a record that [`Diagnostics::admit`] took.
+    fn push_admitted(&self, level: u8, target: &str, message: &str) {
         let mut target = clean(target, MAX_DIAGNOSTIC_TARGET_BYTES);
         if target.is_empty() {
             target.push('?');
@@ -177,6 +192,37 @@ fn clean(text: &str, limit: usize) -> String {
     out
 }
 
+/// `args` formatted into at most `limit` bytes, on a character boundary.
+/// The formatting stops at the limit, so a huge value is never built whole.
+fn format_bounded(args: std::fmt::Arguments<'_>, limit: usize) -> String {
+    struct Bounded {
+        out: String,
+        limit: usize,
+    }
+    impl std::fmt::Write for Bounded {
+        fn write_str(&mut self, text: &str) -> std::fmt::Result {
+            let room = self.limit - self.out.len();
+            if text.len() <= room {
+                self.out.push_str(text);
+                return Ok(());
+            }
+            let mut end = room;
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            self.out.push_str(&text[..end]);
+            // Stops the formatting: nothing more is wanted.
+            Err(std::fmt::Error)
+        }
+    }
+    let mut bounded = Bounded {
+        out: String::new(),
+        limit,
+    };
+    let _ = std::fmt::write(&mut bounded, args);
+    bounded.out
+}
+
 /// Transport crates under LiveKit that are too busy at `debug` (TLS and
 /// socket handshakes on every connect): only `info` and above from them, so
 /// they do not spend the budget the room event notes need. The core keeps
@@ -213,7 +259,7 @@ impl log::Log for Logger {
     }
 
     fn log(&self, record: &log::Record<'_>) {
-        if !self.enabled(record.metadata()) {
+        if !self.enabled(record.metadata()) || !global().admit() {
             return;
         }
         let level = match record.level() {
@@ -222,7 +268,8 @@ impl log::Log for Logger {
             log::Level::Info => INFO,
             log::Level::Debug | log::Level::Trace => DEBUG,
         };
-        global().push(level, record.target(), &record.args().to_string());
+        let message = format_bounded(*record.args(), MAX_DIAGNOSTIC_MESSAGE_BYTES);
+        global().push_admitted(level, record.target(), &message);
     }
 
     fn flush(&self) {}
@@ -326,5 +373,29 @@ mod tests {
             clean(&"a".repeat(5000), MAX_DIAGNOSTIC_MESSAGE_BYTES).len(),
             2048
         );
+    }
+
+    /// GIVEN a value whose text is far over the limit WHEN it is formatted
+    /// THEN the formatting stops at the limit, on a character boundary.
+    #[test]
+    fn given_huge_value_then_formatting_stops_at_the_limit() {
+        let value = vec!["é"; 10_000];
+        let text = format_bounded(format_args!("{value:?}"), 101);
+        assert!(text.len() <= 101 && text.len() > 90, "{}", text.len());
+        assert_eq!(format_bounded(format_args!("{}", 42), 101), "42");
+    }
+
+    /// GIVEN a spent budget WHEN a record is asked for THEN it is refused
+    /// and counted before anything is formatted.
+    #[test]
+    fn given_spent_budget_then_admit_refuses_and_counts() {
+        let diagnostics = Diagnostics::default();
+        assert!(!diagnostics.admit(), "off");
+        diagnostics.set_on(true);
+        for _ in 0..RECORDS_PER_SECOND {
+            assert!(diagnostics.admit());
+        }
+        assert!(!diagnostics.admit());
+        assert_eq!(diagnostics.dropped.load(Ordering::Relaxed), 1);
     }
 }

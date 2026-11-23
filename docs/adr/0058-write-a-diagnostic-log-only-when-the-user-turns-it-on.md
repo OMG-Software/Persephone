@@ -174,10 +174,14 @@ so.
   rest are counted the same way, so a flood from one process cannot fill the
   queue or the file.
 * The UI host and the page send at most 64 records for each call, each
-  message at most 1 KiB and each target at most 64 bytes. The UI host and
-  the core refuse more. The page keeps at most 256 records and sends at most
-  one batch each second. The UI host keeps at most 1024 records and waits
-  200 ms between batches. Both count what they drop and report the count.
+  message at most 1 KiB and each target at most 64 bytes, and at most
+  96 KiB of records as JSON (escaping can make a control character six
+  bytes, and the control frame is 128 KiB). The UI host and the core refuse
+  more. The page keeps at most 256 records and sends at most one batch each
+  second. The UI host keeps at most 1024 records and waits 250 ms between
+  batches, so it stays within the core's 256 records each second. Both
+  count what they drop, also a batch that the host or the core refused,
+  and report the count.
 * The call worker keeps at most 256 records, sends at most 200 records each
   second and drops the rest, with a count. A message is at most 2 KiB and a
   target at most 64 bytes. It sends at most 8 records after each round of

@@ -13,16 +13,18 @@ use std::sync::{Condvar, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
 use persephone_core_protocol::{
-    Call, DiagnosticRecord, MAX_DIAGNOSTIC_MESSAGE_BYTES, MAX_DIAGNOSTIC_RECORDS,
-    MAX_DIAGNOSTIC_TARGET_BYTES, RecordLevel, RecordSource,
+    Call, DiagnosticRecord, MAX_DIAGNOSTIC_BATCH_BYTES, MAX_DIAGNOSTIC_MESSAGE_BYTES,
+    MAX_DIAGNOSTIC_RECORDS, MAX_DIAGNOSTIC_TARGET_BYTES, RecordLevel, RecordSource,
 };
 
 use crate::core_link::CoreLink;
 
 /// Records that wait for the sender thread.
 pub const QUEUE_RECORDS: usize = 1024;
-/// The pause between two batches, so at most five go out each second.
-const BATCH_GAP: Duration = Duration::from_millis(200);
+/// The pause between two batches, so at most four go out each second: four
+/// of [`MAX_DIAGNOSTIC_RECORDS`] are the core's 256 records a second for the
+/// UI host.
+const BATCH_GAP: Duration = Duration::from_millis(250);
 
 #[derive(Default)]
 pub struct Forwarder {
@@ -54,18 +56,49 @@ fn cut(text: &str, limit: usize) -> String {
     text[..end].to_owned()
 }
 
+/// `args` formatted into at most `limit` bytes, on a character boundary.
+/// The formatting stops at the limit, so a huge value is never built whole.
+fn format_bounded(args: std::fmt::Arguments<'_>, limit: usize) -> String {
+    struct Bounded {
+        out: String,
+        limit: usize,
+    }
+    impl std::fmt::Write for Bounded {
+        fn write_str(&mut self, text: &str) -> std::fmt::Result {
+            let room = self.limit - self.out.len();
+            if text.len() <= room {
+                self.out.push_str(text);
+                return Ok(());
+            }
+            self.out.push_str(&cut(text, room));
+            // Stops the formatting: nothing more is wanted.
+            Err(std::fmt::Error)
+        }
+    }
+    let mut bounded = Bounded {
+        out: String::new(),
+        limit,
+    };
+    let _ = std::fmt::write(&mut bounded, args);
+    bounded.out
+}
+
 impl Forwarder {
     pub fn is_on(&self) -> bool {
         self.on.load(Ordering::Relaxed)
     }
 
-    /// Follows the core's switch. Off drops the records that wait.
+    /// Follows the core's switch. Off drops the records that wait. The
+    /// switch changes under the queue's lock, and `push` checks it under the
+    /// same lock, so no record is added after an "off" cleared the queue.
     pub fn set_on(&self, on: bool) {
+        let mut queue = lock(&self.queue);
         self.on.store(on, Ordering::SeqCst);
         if !on {
-            lock(&self.queue).clear();
+            queue.clear();
             self.dropped.store(0, Ordering::Relaxed);
         }
+        drop(queue);
         self.waiting.notify_all();
     }
 
@@ -80,6 +113,10 @@ impl Forwarder {
             message: cut(message, MAX_DIAGNOSTIC_MESSAGE_BYTES),
         };
         let mut queue = lock(&self.queue);
+        // Again under the lock: an "off" may have come since the check above.
+        if !self.is_on() {
+            return;
+        }
         if queue.len() >= QUEUE_RECORDS {
             self.dropped.fetch_add(1, Ordering::Relaxed);
             return;
@@ -88,12 +125,24 @@ impl Forwarder {
         self.waiting.notify_one();
     }
 
-    /// The next batch, at most [`MAX_DIAGNOSTIC_RECORDS`]: a count of dropped
-    /// records first, if any. Waits up to `wait` for a record; empty when
-    /// off or when none came.
+    /// Counts a batch the core refused or never got, so the next batch
+    /// reports it. Nothing is counted while off.
+    pub fn count_refused(&self, records: u64) {
+        let queue = lock(&self.queue);
+        if self.is_on() {
+            self.dropped.fetch_add(records, Ordering::Relaxed);
+            self.waiting.notify_one();
+        }
+        drop(queue);
+    }
+
+    /// The next batch, at most [`MAX_DIAGNOSTIC_RECORDS`] and
+    /// [`MAX_DIAGNOSTIC_BATCH_BYTES`] as JSON: a count of dropped records
+    /// first, if any. Waits up to `wait` for a record while the queue is
+    /// empty or the log is off; empty when off or when none came.
     pub fn take_batch(&self, wait: Duration) -> Vec<DiagnosticRecord> {
         let mut queue = lock(&self.queue);
-        if queue.is_empty() {
+        if queue.is_empty() || !self.is_on() {
             queue = self
                 .waiting
                 .wait_timeout(queue, wait)
@@ -104,19 +153,28 @@ impl Forwarder {
             return Vec::new();
         }
         let mut batch = Vec::new();
+        // The brackets of the JSON array.
+        let mut bytes = 2;
         let dropped = self.dropped.swap(0, Ordering::Relaxed);
         if dropped > 0 {
-            batch.push(DiagnosticRecord {
+            let count = DiagnosticRecord {
                 level: RecordLevel::Warn,
                 target: "persephone_desktop".into(),
                 message: format!("{dropped} records dropped: over the limit"),
-            });
+            };
+            bytes += count.encoded_len() + 1;
+            batch.push(count);
         }
         while batch.len() < MAX_DIAGNOSTIC_RECORDS {
-            let Some(record) = queue.pop_front() else {
+            let Some(size) = queue.front().map(DiagnosticRecord::encoded_len) else {
                 break;
             };
-            batch.push(record);
+            // One comma each, counted generously.
+            if bytes + size + 1 > MAX_DIAGNOSTIC_BATCH_BYTES {
+                break;
+            }
+            bytes += size + 1;
+            batch.extend(queue.pop_front());
         }
         batch
     }
@@ -156,7 +214,8 @@ impl log::Log for Logger {
             log::Level::Info => RecordLevel::Info,
             log::Level::Debug | log::Level::Trace => RecordLevel::Debug,
         };
-        (self.forwarder)().push(level, record.target(), &record.args().to_string());
+        let message = format_bounded(*record.args(), MAX_DIAGNOSTIC_MESSAGE_BYTES);
+        (self.forwarder)().push(level, record.target(), &message);
     }
 
     fn flush(&self) {}
@@ -176,12 +235,15 @@ pub fn install(core: CoreLink) {
                 if records.is_empty() {
                     continue;
                 }
+                let count = records.len() as u64;
                 let call = Call::DiagnosticRecords {
                     source: RecordSource::Ui,
                     records,
                 };
-                // A refused or failed batch is dropped: the log is best effort.
-                let _ = core.call(call);
+                // Best effort, but counted: the next batch reports the loss.
+                if core.call(call).is_err() {
+                    global().count_refused(count);
+                }
                 std::thread::sleep(BATCH_GAP);
             }
         });
@@ -251,14 +313,68 @@ mod tests {
         for _ in 0..MAX_DIAGNOSTIC_RECORDS + 3 {
             forwarder.push(RecordLevel::Debug, &"x".repeat(100), &long);
         }
-        let first = forwarder.take_batch(Duration::ZERO);
-        assert_eq!(first.len(), MAX_DIAGNOSTIC_RECORDS);
-        assert!(first.iter().all(DiagnosticRecord::within_bounds));
-        assert_eq!(forwarder.take_batch(Duration::ZERO).len(), 3);
+        let mut sent = 0;
+        loop {
+            let batch = forwarder.take_batch(Duration::ZERO);
+            if batch.is_empty() {
+                break;
+            }
+            assert!(DiagnosticRecord::batch_fits(&batch));
+            sent += batch.len();
+        }
+        assert_eq!(sent, MAX_DIAGNOSTIC_RECORDS + 3);
         forwarder.push(RecordLevel::Info, "t", "waits");
         forwarder.set_on(false);
         forwarder.set_on(true);
         assert!(forwarder.take_batch(Duration::ZERO).is_empty());
+    }
+
+    /// GIVEN records of control characters, within their own limits but six
+    /// bytes each as JSON WHEN batches are taken THEN each fits the call's
+    /// byte limit, and none is lost.
+    #[test]
+    fn given_escaped_records_then_each_batch_fits() {
+        let forwarder = Forwarder::default();
+        forwarder.set_on(true);
+        let control = "\u{1}".repeat(MAX_DIAGNOSTIC_MESSAGE_BYTES);
+        for _ in 0..MAX_DIAGNOSTIC_RECORDS {
+            forwarder.push(RecordLevel::Debug, "t", &control);
+        }
+        let mut sent = 0;
+        loop {
+            let batch = forwarder.take_batch(Duration::ZERO);
+            if batch.is_empty() {
+                break;
+            }
+            assert!(batch.len() < MAX_DIAGNOSTIC_RECORDS);
+            assert!(DiagnosticRecord::batch_fits(&batch));
+            sent += batch.len();
+        }
+        assert_eq!(sent, MAX_DIAGNOSTIC_RECORDS);
+    }
+
+    /// GIVEN a refused batch WHEN it is counted THEN the next batch reports
+    /// it; GIVEN the log off THEN nothing is counted.
+    #[test]
+    fn given_refused_batch_then_the_next_batch_reports_it() {
+        let forwarder = Forwarder::default();
+        forwarder.count_refused(5);
+        forwarder.set_on(true);
+        assert!(forwarder.take_batch(Duration::ZERO).is_empty());
+        forwarder.count_refused(3);
+        let batch = forwarder.take_batch(Duration::ZERO);
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].message, "3 records dropped: over the limit");
+    }
+
+    /// GIVEN a value whose text is far over the limit WHEN it is formatted
+    /// THEN the formatting stops at the limit, on a character boundary.
+    #[test]
+    fn given_huge_value_then_formatting_stops_at_the_limit() {
+        let value = vec!["é"; 10_000];
+        let text = format_bounded(format_args!("{value:?}"), 101);
+        assert!(text.len() <= 101 && text.len() > 90, "{}", text.len());
+        assert_eq!(format_bounded(format_args!("{}", 42), 101), "42");
     }
 
     /// GIVEN a full queue WHEN more arrive THEN they are counted and the

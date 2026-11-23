@@ -114,6 +114,8 @@ pub struct Log {
     /// "on" waits until an "off" has drained the old writer: two writers on
     /// one file could split each other's lines. Never taken by `record`.
     lifecycle: Mutex<()>,
+    /// Goes up with each "off" request (see [`Log::epoch`]).
+    epoch: AtomicU64,
     /// Each other process's records in the current second.
     rates: Mutex<[Window; 3]>,
     /// The file of this run, once it was turned on.
@@ -130,6 +132,7 @@ impl Default for Log {
             shared: Arc::default(),
             writer: Mutex::new(None),
             lifecycle: Mutex::new(()),
+            epoch: AtomicU64::new(0),
             rates: Mutex::default(),
             path: Mutex::new(None),
             switch: tokio::sync::watch::channel(false).0,
@@ -165,10 +168,28 @@ impl Log {
     /// Opens `path` for appending (owner-only on Unix, never through a
     /// link) and starts writing. A second call while on does nothing.
     pub fn turn_on(&self, path: &Path) -> io::Result<()> {
+        self.turn_on_unless_off_since(path, self.epoch())
+            .map(|_| ())
+    }
+
+    /// Counts the "off" requests of this run. Code that asks the user before
+    /// turning the log on reads it before asking, and passes it to
+    /// [`Log::turn_on_unless_off_since`].
+    pub fn epoch(&self) -> u64 {
+        self.epoch.load(Ordering::SeqCst)
+    }
+
+    /// Like [`Log::turn_on`], but does nothing and returns `false` when the
+    /// log was turned off (or asked to be off) after `epoch` was read: an
+    /// "off" sent while the question was open wins over the "yes".
+    pub fn turn_on_unless_off_since(&self, path: &Path, epoch: u64) -> io::Result<bool> {
         let _lifecycle = lock(&self.lifecycle);
+        if self.epoch() != epoch {
+            return Ok(false);
+        }
         let mut writer = lock(&self.writer);
         if writer.is_some() {
-            return Ok(());
+            return Ok(true);
         }
         let file = open_for_append(path)?;
         let written = file.metadata()?.len();
@@ -189,14 +210,17 @@ impl Log {
             "diagnostic log on",
             &[("version", Value::from(env!("CARGO_PKG_VERSION")))],
         );
-        Ok(())
+        Ok(true)
     }
 
     /// Stops writing. Lines in the queue are written and flushed first, so
     /// this can take a while: the core runs it off its serving loop. The
-    /// file stays until the next start.
+    /// file stays until the next start. It also cancels an "on" that is
+    /// still waiting for the user (see [`Log::epoch`]), even when the log
+    /// is already off.
     pub fn turn_off(&self) {
         let _lifecycle = lock(&self.lifecycle);
+        self.epoch.fetch_add(1, Ordering::SeqCst);
         if !self.on.load(Ordering::SeqCst) {
             return;
         }
@@ -227,12 +251,12 @@ impl Log {
         message: &str,
         fields: &[(&str, Value)],
     ) {
-        if !self.is_on() || self.is_full() {
-            return;
-        }
         // Checked before the record is redacted and built, so a flood or a
         // slow writer costs a count, not the work of a line nobody keeps.
-        if !self.admit(source) || self.shared.queued.load(Ordering::Relaxed) >= QUEUE_LINES {
+        if !self.accepts() {
+            return;
+        }
+        if !self.admit(source) {
             self.shared.dropped.fetch_add(1, Ordering::Relaxed);
             return;
         }
@@ -251,6 +275,21 @@ impl Log {
                 self.shared.dropped.fetch_add(1, Ordering::Relaxed);
             }
         }
+    }
+
+    /// Whether a record would be kept now: the log is on, its file is not
+    /// full and the writer's queue has room. Code that gathers a record's
+    /// fields (events, `tracing`, `log`) asks first, so a dropped record
+    /// costs no work. A full queue counts the record as dropped here.
+    pub fn accepts(&self) -> bool {
+        if !self.is_on() || self.is_full() {
+            return false;
+        }
+        if self.shared.queued.load(Ordering::Relaxed) >= QUEUE_LINES {
+            self.shared.dropped.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+        true
     }
 
     /// Whether one more record from `source` fits its rate: the core's own
@@ -336,7 +375,65 @@ fn line(
         object.insert("truncated".into(), Value::Bool(true));
         written = text(&object);
     }
+    if written.len() > MAX_LINE_BYTES {
+        // Still too long: JSON escaping can make a control character six
+        // bytes (`\u0001`). A message of an eighth of the line fits even
+        // then.
+        object.insert(
+            "message".into(),
+            Value::from(redact::text(message, MAX_LINE_BYTES / 8)),
+        );
+        written = text(&object);
+    }
     written
+}
+
+/// The longest start of `text` that is at most `limit` bytes, on a
+/// character boundary. Nothing is copied.
+pub fn prefix(text: &str, limit: usize) -> &str {
+    if text.len() <= limit {
+        return text;
+    }
+    let mut end = limit;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+/// `args` formatted into at most `limit` bytes, with `…` when cut. The
+/// formatting stops at the limit, so a huge `Debug` value is never built
+/// whole.
+pub fn format_bounded(args: std::fmt::Arguments<'_>, limit: usize) -> String {
+    struct Bounded {
+        out: String,
+        limit: usize,
+        cut: bool,
+    }
+    impl std::fmt::Write for Bounded {
+        fn write_str(&mut self, text: &str) -> std::fmt::Result {
+            let room = self.limit - self.out.len();
+            if text.len() <= room {
+                self.out.push_str(text);
+                Ok(())
+            } else {
+                self.out.push_str(prefix(text, room));
+                self.cut = true;
+                // Stops the formatting: nothing more is wanted.
+                Err(std::fmt::Error)
+            }
+        }
+    }
+    let mut bounded = Bounded {
+        out: String::new(),
+        limit,
+        cut: false,
+    };
+    let _ = std::fmt::write(&mut bounded, args);
+    if bounded.cut {
+        bounded.out.push('…');
+    }
+    bounded.out
 }
 
 fn now_ms() -> u64 {
@@ -638,6 +735,11 @@ impl tracing::Subscriber for Subscriber {
 
     fn event(&self, event: &tracing::Event<'_>) {
         guarded(|| {
+            // Asked before the fields are gathered: a dropped record costs
+            // no formatting.
+            if !(self.log)().accepts() {
+                return;
+            }
             let metadata = event.metadata();
             let mut fields = Fields::default();
             event.record(&mut fields);
@@ -686,14 +788,15 @@ impl Fields {
 
 impl tracing::field::Visit for Fields {
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        let mut text = format!("{value:?}");
-        cut(&mut text, MAX_STRING_BYTES);
+        let text = format_bounded(format_args!("{value:?}"), MAX_STRING_BYTES);
         self.put(field, Value::String(text));
     }
 
     fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-        let mut text = value.to_owned();
-        cut(&mut text, MAX_STRING_BYTES);
+        let mut text = prefix(value, MAX_STRING_BYTES).to_owned();
+        if text.len() < value.len() {
+            text.push('…');
+        }
         self.put(field, Value::String(text));
     }
 
@@ -713,10 +816,7 @@ impl tracing::field::Visit for Fields {
 /// Cuts `text` to at most `limit` bytes, on a character boundary.
 pub fn cut(text: &mut String, limit: usize) {
     if text.len() > limit {
-        let mut end = limit;
-        while !text.is_char_boundary(end) {
-            end -= 1;
-        }
+        let end = prefix(text, limit).len();
         text.truncate(end);
         text.push('…');
     }
@@ -735,12 +835,11 @@ impl log::Log for Logger {
     }
 
     fn log(&self, record: &log::Record<'_>) {
-        if !self.enabled(record.metadata()) {
+        if !self.enabled(record.metadata()) || !(self.log)().accepts() {
             return;
         }
         guarded(|| {
-            let mut message = record.args().to_string();
-            cut(&mut message, MAX_STRING_BYTES);
+            let message = format_bounded(*record.args(), MAX_STRING_BYTES);
             (self.log)().record(
                 Source::Core,
                 from_log(record.level()),
@@ -822,6 +921,23 @@ mod tests {
         assert_eq!(lines(&path).len(), 4);
     }
 
+    /// GIVEN an "on" that read the epoch before asking WHEN an "off" comes
+    /// while it waits, with the log already off THEN the "on" does nothing;
+    /// a fresh epoch turns it on.
+    #[test]
+    fn given_off_while_asking_then_the_on_is_cancelled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = path_in(dir.path());
+        let log = Log::default();
+        let asked_at = log.epoch();
+        log.turn_off();
+        assert!(!log.turn_on_unless_off_since(&path, asked_at).unwrap());
+        assert!(!log.is_on() && !path.exists());
+        assert!(log.turn_on_unless_off_since(&path, log.epoch()).unwrap());
+        assert!(log.is_on());
+        log.turn_off();
+    }
+
     /// GIVEN a log whose file is full WHEN records arrive and it is turned
     /// off and on again THEN it still reports on and full, and writes nothing
     /// more in this run.
@@ -889,6 +1005,27 @@ mod tests {
         assert_eq!(line["target"], "t");
     }
 
+    /// GIVEN a message of control characters, which JSON writes as six
+    /// bytes each WHEN the line is built THEN it still fits the limit.
+    #[test]
+    fn given_escaped_message_then_line_is_bounded() {
+        let message = "\u{1}".repeat(MAX_STRING_BYTES);
+        let text = line(1, Source::Core, Level::Info, "t", &message, &[]);
+        assert!(text.len() <= MAX_LINE_BYTES, "{}", text.len());
+        assert!(serde_json::from_str::<Value>(&text).is_ok());
+    }
+
+    /// GIVEN a value whose text is far over the limit WHEN it is formatted
+    /// bounded THEN the result stops at the limit, on a character boundary.
+    #[test]
+    fn given_huge_debug_value_then_formatting_stops_at_the_limit() {
+        let value = vec!["é"; 10_000];
+        let text = format_bounded(format_args!("{value:?}"), 101);
+        assert!(text.len() <= 101 + '…'.len_utf8(), "{}", text.len());
+        assert!(text.ends_with('…'));
+        assert_eq!(format_bounded(format_args!("{}", 42), 101), "42");
+    }
+
     /// GIVEN a writer near the size limit with dropped records counted WHEN
     /// lines arrive THEN the count is written, then one `log_full` line, and
     /// nothing after it.
@@ -950,7 +1087,7 @@ mod tests {
         let page = lines.iter().filter(|line| line["source"] == "page").count();
         // The window may roll over once on a slow machine.
         assert!(
-            (MAX_RECORDS_PER_SECOND as usize..flood).contains(&page),
+            (MAX_RECORDS_PER_SECOND as usize..=flood).contains(&page),
             "{page}"
         );
         let counted: u64 = lines

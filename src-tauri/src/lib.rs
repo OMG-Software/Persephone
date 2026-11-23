@@ -54,14 +54,13 @@ use persephone_contracts::{
 use persephone_core_protocol::{
     CALL_VIDEO_TILES, COUNTRY_CODE_BYTES, Call, DiagnosticRecord, ErrorCode, Event,
     IMAGE_HANDLE_BYTES, MAX_CALL_DEVICE_ID_BYTES, MAX_CURSOR_BYTES, MAX_DEVICE_ID_BYTES,
-    MAX_DIAGNOSTIC_RECORDS, MAX_DIRECTORY_FILTER_BYTES, MAX_DIRECTORY_TOKEN_BYTES,
-    MAX_DISPLAY_NAME_BYTES, MAX_EMAIL_BYTES, MAX_EVENT_ID_BYTES, MAX_FLOW_ID_BYTES,
-    MAX_HOMESERVER_URL_BYTES, MAX_INVITEES, MAX_LINK_BYTES, MAX_MEMBER_FILTER_BYTES,
-    MAX_MESSAGE_BYTES, MAX_NEW_SESSION_IDS, MAX_NOTIFICATION_NAME_BYTES, MAX_PASTED_IMAGE_BYTES,
-    MAX_PHONE_NUMBER_BYTES, MAX_PROFILES, MAX_PROXY_BYTES, MAX_REACTION_KEY_BYTES,
-    MAX_ROOM_ID_BYTES, MAX_ROOM_NAME_BYTES, MAX_SEARCH_TERM_BYTES, MAX_SERVER_NAME_BYTES,
-    MAX_THREE_PID_ADDRESS_BYTES, MAX_USER_ID_BYTES, MAX_USERNAME_BYTES, RecordSource,
-    call_video_within_limits, room_change_within_limits,
+    MAX_DIRECTORY_FILTER_BYTES, MAX_DIRECTORY_TOKEN_BYTES, MAX_DISPLAY_NAME_BYTES, MAX_EMAIL_BYTES,
+    MAX_EVENT_ID_BYTES, MAX_FLOW_ID_BYTES, MAX_HOMESERVER_URL_BYTES, MAX_INVITEES, MAX_LINK_BYTES,
+    MAX_MEMBER_FILTER_BYTES, MAX_MESSAGE_BYTES, MAX_NEW_SESSION_IDS, MAX_NOTIFICATION_NAME_BYTES,
+    MAX_PASTED_IMAGE_BYTES, MAX_PHONE_NUMBER_BYTES, MAX_PROFILES, MAX_PROXY_BYTES,
+    MAX_REACTION_KEY_BYTES, MAX_ROOM_ID_BYTES, MAX_ROOM_NAME_BYTES, MAX_SEARCH_TERM_BYTES,
+    MAX_SERVER_NAME_BYTES, MAX_THREE_PID_ADDRESS_BYTES, MAX_USER_ID_BYTES, MAX_USERNAME_BYTES,
+    RecordSource, call_video_within_limits, room_change_within_limits,
 };
 use serde::de::DeserializeOwned;
 use std::{
@@ -1636,9 +1635,10 @@ async fn diagnostic_records(
     core: State<'_, CoreLink>,
     records: Vec<DiagnosticRecord>,
 ) -> Result<(), String> {
-    if records.len() > MAX_DIAGNOSTIC_RECORDS
-        || !records.iter().all(DiagnosticRecord::within_bounds)
-    {
+    // The encoded size too: escaping can take records within their own
+    // limits over the control frame, and an oversized frame would break the
+    // core link for every caller.
+    if !DiagnosticRecord::batch_fits(&records) {
         return Err(INVALID_ARGUMENT.to_string());
     }
     relay(

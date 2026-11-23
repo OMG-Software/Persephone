@@ -54,7 +54,9 @@ static NAMED: LazyLock<Regex> = LazyLock::new(|| {
         // it goes. Only the registered schemes: any word would also take
         // the first word of a value such as a passphrase with spaces.
         r#"(\\{0,2}["']?\s*[:=]\s*(?:Some\()?(?:(?:bearer|basic|digest|negotiate|ntlm|token|mac|hoba|mutual|aws4-hmac-sha256)\s+)?)"#,
-        r#"(\\{1,2}"(?:[^"\\]|\\[^"])*\\{1,2}"|"(?:[^"\\]|\\.)*"|'[^']*'|[^\s"'&,;}\])]+)"#,
+        // A quoted value, escaped or not; then one whose closing quote a cut
+        // removed, taken to the end of the text; then a bare word.
+        r#"(\\{1,2}"(?:[^"\\]|\\[^"])*\\{1,2}"|"(?:[^"\\]|\\.)*"|'[^']*'|\\{1,2}"(?:[^"\\]|\\[^"])*\z|"(?:[^"\\]|\\.)*\z|'[^']*\z|[^\s"'&,;}\])]+)"#,
     ))
     .expect("valid pattern")
 });
@@ -85,9 +87,13 @@ static SHAPES: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
 
 /// `text` with every credential it holds replaced, cut to `limit` bytes.
 pub fn text(text: &str, limit: usize) -> String {
-    // Bounded before the patterns run; the cut below is the real limit.
-    let mut bounded = text.to_owned();
-    super::cut(&mut bounded, limit.saturating_mul(2));
+    // Bounded before the patterns run (only a prefix is copied); the cut
+    // below is the real limit. A value whose closing quote this removes is
+    // still matched, to the end of the text.
+    let mut bounded = super::prefix(text, limit.saturating_mul(2)).to_owned();
+    if bounded.len() < text.len() {
+        bounded.push('…');
+    }
     let mut clean = NAMED
         .replace_all(&bounded, |found: &Captures<'_>| {
             let (name, between, value) = (&found[1], &found[2], &found[3]);
@@ -283,6 +289,22 @@ mod tests {
         assert_eq!(output["user_id"], "@a:b");
         assert_eq!(output["nested"][0]["refresh_token"], REDACTED);
         assert_eq!(output["nested"][0]["note"], "Bearer [redacted]");
+    }
+
+    /// GIVEN a quoted secret whose closing quote lies past the cut, plain or
+    /// escaped as in Debug text WHEN the text is cleaned THEN no part of the
+    /// secret is kept.
+    #[test]
+    fn given_cut_quoted_secret_then_replaced() {
+        let secret = "s".repeat(5000);
+        for input in [
+            format!("access_token: \"{secret}\" end"),
+            format!(r#"body: "{{\"access_token\":\"{secret}\"}}""#),
+        ] {
+            let output = text(&input, 100);
+            assert!(!output.contains("sss"), "{output}");
+            assert!(output.contains(REDACTED), "{output}");
+        }
     }
 
     /// GIVEN long text THEN the result is cut to the limit.

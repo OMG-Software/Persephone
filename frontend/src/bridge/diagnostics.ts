@@ -18,6 +18,8 @@ export const MAX_BATCH = 64;
 export const MAX_TARGET_BYTES = 64;
 export const MAX_MESSAGE_BYTES = 1024;
 export const MAX_WAITING = 256;
+/** `MAX_DIAGNOSTIC_BATCH_BYTES`: one batch's records as JSON, with escapes. */
+export const MAX_BATCH_BYTES = 96 * 1024;
 const FLUSH_MS = 1000;
 
 /** Calls whose success is too frequent to note: only failures are kept. */
@@ -95,16 +97,40 @@ export function noteCall(command: string, outcome: string, started: number): voi
   note(outcome === 'ok' ? 'debug' : 'warn', 'page::bridge', `${command} ${outcome} ${ms} ms`);
 }
 
-/** The next batch, with a count of dropped records first. */
+/** One record's size as JSON, with escapes, and a comma. */
+function encodedSize(record: PageRecord): number {
+  return encoder.encode(JSON.stringify(record)).length + 1;
+}
+
+/**
+ * The next batch, with a count of dropped records first: at most MAX_BATCH
+ * records and MAX_BATCH_BYTES as JSON. Escaping can make a record within its
+ * own limits six times its length, and the host refuses a batch over the
+ * byte limit.
+ */
 export function takeBatch(): PageRecord[] {
   const batch: PageRecord[] = [];
+  // The brackets of the JSON array.
+  let bytes = 2;
   if (dropped > 0) {
-    batch.push({ level: 'warn', target: 'page', message: `${dropped} records dropped: over the limit` });
+    const count: PageRecord = {
+      level: 'warn',
+      target: 'page',
+      message: `${dropped} records dropped: over the limit`
+    };
+    batch.push(count);
+    bytes += encodedSize(count);
     dropped = 0;
   }
-  const room = MAX_BATCH - batch.length;
-  batch.push(...waiting.slice(0, room));
-  waiting = waiting.slice(room);
+  let taken = 0;
+  while (batch.length < MAX_BATCH && taken < waiting.length) {
+    const size = encodedSize(waiting[taken]);
+    if (bytes + size > MAX_BATCH_BYTES) break;
+    bytes += size;
+    batch.push(waiting[taken]);
+    taken += 1;
+  }
+  waiting = waiting.slice(taken);
   return batch;
 }
 
@@ -113,10 +139,16 @@ async function flush(): Promise<void> {
   if (!on) return;
   const records = takeBatch();
   if (records.length > 0) {
-    // Best effort: a refused batch is dropped.
-    await invoke('diagnostic_records', { records }).catch(() => {});
+    try {
+      await invoke('diagnostic_records', { records });
+    } catch {
+      // Best effort, but counted: the next batch reports the loss.
+      if (on) dropped += records.length;
+    }
   }
-  if (on && waiting.length > 0 && timer === null) timer = setTimeout(flush, FLUSH_MS);
+  if (on && (waiting.length > 0 || dropped > 0) && timer === null) {
+    timer = setTimeout(flush, FLUSH_MS);
+  }
 }
 
 let installed = false;

@@ -75,7 +75,9 @@ fn fields(
 
 fn note(section: &str, room: Option<&Room>, json: &str, encryption: Option<&EncryptionInfo>) {
     let log = global();
-    if !log.is_on() {
+    // Asked before the event's JSON is parsed: a dropped record costs no
+    // work.
+    if !log.accepts() {
         return;
     }
     log.record(

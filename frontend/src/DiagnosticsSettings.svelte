@@ -40,6 +40,16 @@
     return onDiagnosticsChange(() => load());
   });
 
+  // The file can reach its size limit while the log stays on, and the core
+  // sends no change for that: read the state again while it is on and not
+  // full, so the panel shows when writing stopped.
+  const FULL_CHECK_MS = 10_000;
+  $effect(() => {
+    if (!on || full) return;
+    const timer = setInterval(load, FULL_CHECK_MS);
+    return () => clearInterval(timer);
+  });
+
   async function change(value: boolean) {
     if (busy) return;
     busy = true;

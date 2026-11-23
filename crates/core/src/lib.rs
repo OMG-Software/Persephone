@@ -821,9 +821,14 @@ impl Core {
         if self.diagnostics_asking.swap(true, Ordering::SeqCst) {
             return Err(ErrorCode::LimitExceeded);
         }
+        // Clears the flag when the call ends in any way, also when it is
+        // dropped unrun or the prompt panics.
+        let asking = DiagnosticsAsking(&self.diagnostics_asking);
+        // An "off" sent while the question is open wins over the "yes".
+        let epoch = diagnostics::global().epoch();
         Ok(Box::new(move || {
             let answer = self.credentials.confirm_diagnostics();
-            self.diagnostics_asking.store(false, Ordering::SeqCst);
+            drop(asking);
             match answer {
                 Ok(true) => {}
                 Ok(false) | Err(credentials::PromptError::Cancelled) => {
@@ -834,8 +839,10 @@ impl Core {
                 }
                 Err(_) => return Outcome::Error(ErrorCode::Internal),
             }
-            if diagnostics::global().turn_on(&path).is_err() {
-                return Outcome::Error(ErrorCode::Unavailable);
+            match diagnostics::global().turn_on_unless_off_since(&path, epoch) {
+                Ok(true) => {}
+                Ok(false) => return Outcome::Ok(serde_json::Value::Bool(false)),
+                Err(_) => return Outcome::Error(ErrorCode::Unavailable),
             }
             self.hub.diagnostics_changed();
             Outcome::Ok(serde_json::Value::Bool(true))
@@ -854,8 +861,8 @@ impl Core {
         source: persephone_core_protocol::RecordSource,
         records: &[persephone_core_protocol::DiagnosticRecord],
     ) -> Outcome {
-        use persephone_core_protocol::{MAX_DIAGNOSTIC_RECORDS, RecordLevel, RecordSource};
-        if records.len() > MAX_DIAGNOSTIC_RECORDS || !records.iter().all(|r| r.within_bounds()) {
+        use persephone_core_protocol::{DiagnosticRecord, RecordLevel, RecordSource};
+        if !DiagnosticRecord::batch_fits(records) {
             return Outcome::Error(ErrorCode::LimitExceeded);
         }
         let log = diagnostics::global();
@@ -3767,6 +3774,16 @@ impl Core {
         self.hub.closing.store(true, Ordering::SeqCst);
         lock(&self.hub.notifications).closed = true;
         self.hub.changed.notify_all();
+    }
+}
+
+/// Holds the core's "one diagnostics question at a time" flag; it is
+/// cleared when this is dropped.
+struct DiagnosticsAsking<'a>(&'a AtomicBool);
+
+impl Drop for DiagnosticsAsking<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
     }
 }
 
