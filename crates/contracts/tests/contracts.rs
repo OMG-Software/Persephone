@@ -62,6 +62,23 @@ fn serde_rejects_unknown_fields_and_variants() {
         );
     }
 
+    // GIVEN an other event WHEN read THEN a known kind with its type reads,
+    // and an unknown kind, a missing type, an extra field or the removed
+    // `unsupported` notice is refused.
+    let other = r#"{"kind":"other","event_id":"$e","sender":"@a:s","origin_server_ts":null,"event":"verification_request","event_type":"m.key.verification.request"}"#;
+    assert!(serde_json::from_str::<persephone_contracts::TimelineItem>(other).is_ok());
+    for invalid in [
+        r#"{"kind":"other","event_id":"$e","sender":"@a:s","origin_server_ts":null,"event":"teleport","event_type":"x"}"#,
+        r#"{"kind":"other","event_id":"$e","sender":"@a:s","origin_server_ts":null,"event":"event"}"#,
+        r#"{"kind":"other","event_id":"$e","sender":"@a:s","origin_server_ts":null,"event":"event","event_type":"x","content":{}}"#,
+        r#"{"kind":"notice","event_id":"$e","sender":"@a:s","origin_server_ts":null,"notice":"unsupported"}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<persephone_contracts::TimelineItem>(invalid).is_err(),
+            "{invalid}"
+        );
+    }
+
     let unknown_nested_field = r#"{"roomId":"!r:s","items":[{"kind":"gap","next_cursor":null,"extra":true}],"nextCursor":null}"#;
     assert!(
         serde_json::from_str::<persephone_contracts::TimelinePage>(unknown_nested_field).is_err()
@@ -529,7 +546,7 @@ fn room_account_and_profile_replies_keep_their_documented_shape() {
             ..defaults
         })
         .unwrap(),
-        r#"{"enterSends":false,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":false,"sendReadReceipts":false,"idleLockMinutes":0,"notificationNames":true,"loadRoomPictures":false,"captureProtection":true,"timelineEvents":{"joins":true,"leaves":true,"invitations":true,"removals":true,"joinRequests":true,"displayNames":true,"profilePictures":true,"roomName":true,"topic":true,"roomPicture":true,"encryption":true,"joinRule":true,"historyVisibility":true,"permissions":true,"addresses":true,"pinnedMessages":true,"guestAccess":true,"serverAccess":true,"creation":true,"upgrades":true},"theme":"orange"}"#
+        r#"{"enterSends":false,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":false,"sendReadReceipts":false,"idleLockMinutes":0,"notificationNames":true,"loadRoomPictures":false,"captureProtection":true,"timelineEvents":{"joins":true,"leaves":true,"invitations":true,"removals":true,"joinRequests":true,"displayNames":true,"profilePictures":true,"roomName":true,"topic":true,"roomPicture":true,"encryption":true,"joinRule":true,"historyVisibility":true,"permissions":true,"addresses":true,"pinnedMessages":true,"guestAccess":true,"serverAccess":true,"creation":true,"upgrades":true,"verification":true,"calls":true,"callSignalling":true,"polls":true,"stickers":true,"locations":true,"spaces":true,"widgets":true,"otherEvents":true,"deletedMessages":true},"theme":"orange"}"#
     );
     // Every kind of room change shows by default.
     assert_eq!(defaults.timeline_events, TimelineEvents::default());
@@ -584,8 +601,8 @@ fn room_account_and_profile_replies_keep_their_documented_shape() {
         // not know are each refused.
         r#"{"enterSends":true,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":false,"sendReadReceipts":false,"idleLockMinutes":0,"notificationNames":true}"#,
         r#"{"enterSends":true,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":false,"sendReadReceipts":false,"idleLockMinutes":0,"notificationNames":true,"timelineEvents":{"joins":true}}"#,
-        r#"{"enterSends":true,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":false,"sendReadReceipts":false,"idleLockMinutes":0,"notificationNames":true,"timelineEvents":{"joins":true,"leaves":"no","invitations":true,"removals":true,"joinRequests":true,"displayNames":true,"profilePictures":true,"roomName":true,"topic":true,"roomPicture":true,"encryption":true,"joinRule":true,"historyVisibility":true,"permissions":true,"addresses":true,"pinnedMessages":true,"guestAccess":true,"serverAccess":true,"creation":true,"upgrades":true}}"#,
-        r#"{"enterSends":true,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":false,"sendReadReceipts":false,"idleLockMinutes":0,"notificationNames":true,"timelineEvents":{"joins":true,"leaves":true,"invitations":true,"removals":true,"joinRequests":true,"displayNames":true,"profilePictures":true,"roomName":true,"topic":true,"roomPicture":true,"encryption":true,"joinRule":true,"historyVisibility":true,"permissions":true,"addresses":true,"pinnedMessages":true,"guestAccess":true,"serverAccess":true,"creation":true,"upgrades":true,"polls":false}}"#,
+        r#"{"enterSends":true,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":false,"sendReadReceipts":false,"idleLockMinutes":0,"notificationNames":true,"timelineEvents":{"joins":true,"leaves":"no","invitations":true,"removals":true,"joinRequests":true,"displayNames":true,"profilePictures":true,"roomName":true,"topic":true,"roomPicture":true,"encryption":true,"joinRule":true,"historyVisibility":true,"permissions":true,"addresses":true,"pinnedMessages":true,"guestAccess":true,"serverAccess":true,"creation":true,"upgrades":true,"verification":true,"calls":true,"callSignalling":true,"polls":true,"stickers":true,"locations":true,"spaces":true,"widgets":true,"otherEvents":true,"deletedMessages":true}}"#,
+        r#"{"enterSends":true,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":false,"sendReadReceipts":false,"idleLockMinutes":0,"notificationNames":true,"timelineEvents":{"joins":true,"leaves":true,"invitations":true,"removals":true,"joinRequests":true,"displayNames":true,"profilePictures":true,"roomName":true,"topic":true,"roomPicture":true,"encryption":true,"joinRule":true,"historyVisibility":true,"permissions":true,"addresses":true,"pinnedMessages":true,"guestAccess":true,"serverAccess":true,"creation":true,"upgrades":true,"verification":true,"calls":true,"callSignalling":true,"polls":true,"stickers":true,"locations":true,"spaces":true,"widgets":true,"otherEvents":true,"deletedMessages":true,"futureKind":false}}"#,
     ] {
         assert!(
             serde_json::from_str::<AccountSettings>(invalid).is_err(),

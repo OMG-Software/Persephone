@@ -194,6 +194,11 @@ fn date_target(items: &[TimelineItem], timestamp: u64, backward: bool) -> Option
                 event_id,
                 origin_server_ts,
                 ..
+            }
+            | TimelineItem::Other {
+                event_id,
+                origin_server_ts,
+                ..
             } => (event_id, origin_server_ts.as_ref()?.get()),
             _ => return None,
         };
@@ -223,7 +228,8 @@ fn item_id(item: &TimelineItem) -> Option<&str> {
         | TimelineItem::Edit { event_id, .. }
         | TimelineItem::Reaction { event_id, .. }
         | TimelineItem::Redaction { event_id, .. }
-        | TimelineItem::State { event_id, .. } => Some(event_id),
+        | TimelineItem::State { event_id, .. }
+        | TimelineItem::Other { event_id, .. } => Some(event_id),
         TimelineItem::Gap { .. } => None,
     }
 }

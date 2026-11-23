@@ -5,6 +5,8 @@ import { DEFAULT_SETTINGS as DEFAULT_PREFERENCES } from '../src/preferences.ts';
 
 // Every timeline switch, in the order the settings list them.
 const EVENT_KEYS = ['joins', 'leaves', 'invitations', 'removals', 'joinRequests', 'displayNames', 'profilePictures', 'roomName', 'topic', 'roomPicture', 'encryption', 'joinRule', 'historyVisibility', 'permissions', 'addresses', 'pinnedMessages', 'guestAccess', 'serverAccess', 'creation', 'upgrades'];
+const OTHER_KEYS = ['verification', 'calls', 'callSignalling', 'polls', 'stickers', 'locations', 'spaces', 'widgets', 'deletedMessages', 'otherEvents'];
+const ALL_KEYS = [...EVENT_KEYS, ...OTHER_KEYS];
 
 let vite;
 let RoomList;
@@ -145,7 +147,7 @@ test('notices render as fixed text with an isolated sender, never as content', (
       title: 'Room',
       items: [
         { kind: 'notice', event_id: '$1', sender: hostileName, notice: 'undecryptable' },
-        { kind: 'notice', event_id: '$2', sender: '@b:example.invalid', notice: 'unsupported' },
+        { kind: 'notice', event_id: '$2', sender: '@b:example.invalid', notice: 'deleted' },
         { kind: 'notice', event_id: '$3', sender: '@c:example.invalid', notice: 'withheld' },
         { kind: 'notice', event_id: '$4', sender: '@d:example.invalid', notice: 'untrusted_sender' }
       ],
@@ -158,7 +160,8 @@ test('notices render as fixed text with an isolated sender, never as content', (
   assert.doesNotMatch(html, /<img/);
   assert.match(html, /<bdi>&lt;img/);
   assert.match(html, /Encrypted message\. This device has no key for it\./);
-  assert.match(html, /A kind of message Persephone does not show yet\./);
+  assert.match(html, /Message deleted\./);
+  assert.doesNotMatch(html, /does not show yet/);
   assert.match(html, /The sender did not share its key with this device\./);
   assert.match(html, /from a device its owner has not verified/);
 });
@@ -1165,7 +1168,7 @@ test('GIVEN the preferences WHEN they show THEN the sizes, the level and desktop
     notificationNames: true,
     loadRoomPictures: false,
     captureProtection: true,
-    timelineEvents: Object.fromEntries(EVENT_KEYS.map((key) => [key, key !== 'leaves'])),
+    timelineEvents: Object.fromEntries(ALL_KEYS.map((key) => [key, key !== 'leaves'])),
     theme: 'orange'
   };
   const html = render(Preferences, {
@@ -1257,7 +1260,7 @@ test('GIVEN the preferences WHEN they show THEN a theme drop-down offers the thr
 });
 
 test('GIVEN the preferences WHEN they show THEN each kind of room change has its own switch, set as saved', () => {
-  const events = Object.fromEntries(EVENT_KEYS.map((key) => [key, key !== 'leaves']));
+  const events = Object.fromEntries(ALL_KEYS.map((key) => [key, key !== 'leaves']));
   const html = render(Preferences, {
     props: {
       settings: {
@@ -1277,7 +1280,7 @@ test('GIVEN the preferences WHEN they show THEN each kind of room change has its
       onchange: () => {}
     }
   }).body;
-  const group = html.slice(html.indexOf('Room changes in the timeline'), html.indexOf('Text size'));
+  const group = html.slice(html.indexOf('Room changes in the timeline'), html.indexOf('Other events in the timeline'));
   const switches = [...group.matchAll(/<input type="checkbox" role="switch"( checked(?:="")?)?/g)];
   assert.equal(switches.length, EVENT_KEYS.length);
   assert.match(group, /<input type="checkbox" role="switch"\/?> <span>Someone leaves<\/span>/);
@@ -1349,11 +1352,67 @@ test('GIVEN a kind of room change switched off WHEN the timeline shows THEN its 
   const all = render(Timeline, { props }).body.replace(/<!--.*?-->/g, '');
   assert.match(all, /<bdi>@bob:example\.invalid<\/bdi> joined/);
   assert.match(all, /<bdi>@bob:example\.invalid<\/bdi> left/);
-  const events = Object.fromEntries(EVENT_KEYS.map((key) => [key, key !== 'leaves']));
+  const events = Object.fromEntries(ALL_KEYS.map((key) => [key, key !== 'leaves']));
   const some = render(Timeline, { props: { ...props, events } }).body.replace(/<!--.*?-->/g, '');
   assert.match(some, /<bdi>@bob:example\.invalid<\/bdi> joined/);
   assert.doesNotMatch(some, / left/);
   assert.doesNotMatch(some, /data-event-id="\$leave"/);
+});
+
+test('GIVEN other events with hostile types WHEN the timeline shows THEN each line is fixed text or its type, isolated and inert', () => {
+  const other = (id, event, type) => ({
+    kind: 'other', event_id: id, sender: '@user:matrix.invalid', origin_server_ts: null, event, event_type: type
+  });
+  const items = [
+    other('$verify', 'verification_request', 'm.key.verification.request'),
+    other('$call', 'call_started', 'm.call.invite'),
+    other('$poll', 'poll_started', 'm.poll.start'),
+    other('$custom', 'event', '<img src=x onerror=alert(1)>‮'),
+    other('$state', 'state', 'org.example.setting'),
+    other('$message', 'message', 'org.example.msg')
+  ];
+  const props = { title: 'Room', items, hasOlder: false, loading: false, error: null, onolder: () => {} };
+  const html = render(Timeline, { props }).body.replace(/<!--.*?-->/g, '');
+  assert.match(html, /<bdi>@user:matrix\.invalid<\/bdi> sent a verification request/);
+  assert.match(html, /<bdi>@user:matrix\.invalid<\/bdi> started a call/);
+  assert.match(html, /<bdi>@user:matrix\.invalid<\/bdi> started a poll/);
+  assert.match(html, / sent an event of type <bdi>&lt;img src=x onerror=alert\(1\)>‮<\/bdi>/);
+  assert.match(html, / changed room state of type <bdi>org\.example\.setting<\/bdi>/);
+  assert.match(html, / sent a message of type <bdi>org\.example\.msg<\/bdi>/);
+  assert.doesNotMatch(html, /<img/);
+  assert.doesNotMatch(html, /does not show yet/);
+  // GIVEN verification, polls and deleted messages switched off THEN only
+  // their lines go.
+  const deleted = { kind: 'notice', event_id: '$gone', sender: '@b:s', notice: 'deleted', origin_server_ts: null };
+  const off = new Set(['verification', 'polls', 'deletedMessages']);
+  const events = Object.fromEntries(ALL_KEYS.map((key) => [key, !off.has(key)]));
+  const some = render(Timeline, {
+    props: { ...props, items: [...items, deleted], events }
+  }).body.replace(/<!--.*?-->/g, '');
+  for (const hidden of ['$verify', '$poll', '$gone']) {
+    assert.doesNotMatch(some, new RegExp(`data-event-id="\\${hidden}"`));
+  }
+  for (const kept of ['$call', '$custom', '$state', '$message']) {
+    assert.match(some, new RegExp(`data-event-id="\\${kept}"`));
+  }
+});
+
+test('GIVEN the preferences WHEN they show THEN each kind of other event has its own switch, set as saved', () => {
+  const events = Object.fromEntries(ALL_KEYS.map((key) => [key, key !== 'polls']));
+  const html = render(Preferences, {
+    props: {
+      settings: { ...DEFAULT_PREFERENCES, timelineEvents: events },
+      failure: null,
+      mac: false,
+      onchange: () => {}
+    }
+  }).body;
+  const group = html.slice(html.indexOf('Other events in the timeline'), html.indexOf('Text size'));
+  const switches = [...group.matchAll(/<input type="checkbox" role="switch"( checked(?:="")?)?/g)];
+  assert.equal(switches.length, OTHER_KEYS.length);
+  assert.match(group, /<input type="checkbox" role="switch"\/?> <span>Polls and votes<\/span>/);
+  assert.match(group, /<input type="checkbox" role="switch" checked(?:="")?\/?> <span>Verification requests and steps<\/span>/);
+  assert.equal(switches.filter((entry) => entry[1]).length, OTHER_KEYS.length - 1);
 });
 
 test('GIVEN the account page WHEN it shows THEN passwords are never asked on the page and other sessions are signed out by default', () => {

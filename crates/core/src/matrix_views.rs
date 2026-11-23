@@ -6,21 +6,23 @@
 //!   (`contacts.rs`), and is named after them when it has no name.
 //! * Each item carries the event's `origin_server_ts`: the time the sender's
 //!   homeserver claims, unchecked. An event without a usable one has none.
-//! * Text messages (text, notice, emote) are shown as messages, and images
-//!   as image items without fetching anything (`media.rs`). Other
-//!   `m.room.message` types become an `unsupported` notice, so nothing
-//!   disappears. An encrypted event that cannot be shown becomes a notice
-//!   saying why: `withheld` (the sender withheld the key from this device),
-//!   `untrusted_sender` (the sending device is not signed by its owner, which
-//!   the decryption settings refuse; ADR-0005) or `undecryptable`.
+//! * Text messages (text, notice, emote, server notice) are shown as
+//!   messages, images as image items and files as file items, without
+//!   fetching anything (`media.rs`, `files.rs`). An encrypted event that
+//!   cannot be shown becomes a notice saying why: `withheld` (the sender
+//!   withheld the key from this device), `untrusted_sender` (the sending
+//!   device is not signed by its owner, which the decryption settings refuse;
+//!   ADR-0005) or `undecryptable`.
 //! * Membership changes and changes to the room's name, topic, picture,
 //!   encryption, access, history visibility, power levels, addresses, server
 //!   ACL and version are `state` items (`state_change`): who joined or was
 //!   removed, and who changed what, matters most in an encrypted room. A
-//!   change of picture alone, a redacted state event, and other state are not
-//!   shown. A reaction is a `reaction` item naming the event it reacts to,
-//!   with its key projected like a name; other non-message events are not
-//!   shown.
+//!   reaction is a `reaction` item naming the event it reacts to, with its
+//!   key projected like a name.
+//! * Every other event is an `other` item (`other_item`): its kind, such as
+//!   a verification step, a call, a poll or a sticker, and its type projected
+//!   like a name. Nothing from its content is sent, so nothing disappears and
+//!   nothing new is trusted. The page decides which kinds to show.
 //! * An edit (`m.replace`) of a text message is an `edit` item only when its
 //!   sender sent the edited message, compared by full user ID: anyone can
 //!   send an edit naming someone else's message. The edited message's sender
@@ -65,8 +67,8 @@ use matrix_sdk::{
     },
 };
 use persephone_contracts::{
-    ContactStatus, MembershipChange, NoticeKind, RoomEncryption, RoomList, RoomSummary, SenderName,
-    StateChange, TimelineItem, TimelinePage, UnixMillis,
+    ContactStatus, MembershipChange, NoticeKind, OtherEvent, RoomEncryption, RoomList, RoomSummary,
+    SenderName, StateChange, TimelineItem, TimelinePage, UnixMillis,
 };
 use persephone_core_protocol::{ErrorCode, MAX_CURSOR_BYTES, MAX_ROOM_ID_BYTES};
 use std::{
@@ -207,11 +209,32 @@ fn edit_claim(event: &TimelineEvent) -> Option<EditClaim> {
     })
 }
 
+/// Whether the event is a state event: it has a `state_key`.
+fn is_state(event: &TimelineEvent) -> bool {
+    event
+        .raw()
+        .get_field::<serde_json::Value>("state_key")
+        .ok()
+        .flatten()
+        .is_some()
+}
+
+/// Whether the event was deleted: the homeserver keeps the deletion in
+/// `unsigned`.
+fn redacted(event: &TimelineEvent) -> bool {
+    event
+        .raw()
+        .get_field::<serde_json::Value>("unsigned")
+        .ok()
+        .flatten()
+        .is_some_and(|unsigned| unsigned.get("redacted_because").is_some())
+}
+
 /// Whether the event is a message (plain, encrypted or a sticker) that was
-/// deleted: the homeserver keeps the deletion in `unsigned`.
+/// deleted.
 fn deleted_message(event: &TimelineEvent) -> bool {
-    let raw = event.raw();
-    let is_message = raw
+    let is_message = event
+        .raw()
         .get_field::<String>("type")
         .ok()
         .flatten()
@@ -221,17 +244,126 @@ fn deleted_message(event: &TimelineEvent) -> bool {
                 "m.room.message" | "m.room.encrypted" | "m.sticker"
             )
         });
-    let state = raw
-        .get_field::<serde_json::Value>("state_key")
-        .ok()
-        .flatten()
-        .is_some();
-    let redacted = raw
-        .get_field::<serde_json::Value>("unsigned")
-        .ok()
-        .flatten()
-        .is_some_and(|unsigned| unsigned.get("redacted_because").is_some());
-    is_message && !state && redacted
+    is_message && !is_state(event) && redacted(event)
+}
+
+/// The kind of a message-like event that has no other form, by its type.
+fn event_kind(kind: &str) -> OtherEvent {
+    match kind {
+        "m.key.verification.request" => OtherEvent::VerificationRequest,
+        "m.key.verification.ready" => OtherEvent::VerificationReady,
+        "m.key.verification.start" => OtherEvent::VerificationStart,
+        "m.key.verification.accept" | "m.key.verification.key" | "m.key.verification.mac" => {
+            OtherEvent::VerificationStep
+        }
+        "m.key.verification.cancel" => OtherEvent::VerificationCancelled,
+        "m.key.verification.done" => OtherEvent::VerificationDone,
+        "m.call.invite"
+        | "m.call.notify"
+        | "org.matrix.msc4075.call.notify"
+        | "m.rtc.notification"
+        | "org.matrix.msc4075.rtc.notification" => OtherEvent::CallStarted,
+        "m.call.answer" | "m.call.select_answer" => OtherEvent::CallAnswered,
+        "m.call.reject" | "m.rtc.decline" | "org.matrix.msc4310.rtc.decline" => {
+            OtherEvent::CallDeclined
+        }
+        "m.call.hangup" => OtherEvent::CallEnded,
+        "m.call.candidates"
+        | "m.call.negotiate"
+        | "m.call.replaces"
+        | "m.call.sdp_stream_metadata_changed"
+        | "org.matrix.call.sdp_stream_metadata_changed"
+        | "m.call.asserted_identity"
+        | "org.matrix.call.asserted_identity"
+        | "io.element.call.encryption_keys" => OtherEvent::CallSignalling,
+        "m.poll.start" | "org.matrix.msc3381.poll.start" => OtherEvent::PollStarted,
+        "m.poll.response" | "org.matrix.msc3381.poll.response" => OtherEvent::PollVote,
+        "m.poll.end" | "org.matrix.msc3381.poll.end" => OtherEvent::PollEnded,
+        "m.sticker" => OtherEvent::Sticker,
+        "m.beacon" | "org.matrix.msc3672.beacon" => OtherEvent::Location,
+        "m.room.message" => OtherEvent::Message,
+        _ => OtherEvent::Event,
+    }
+}
+
+/// The kind of a state event that is not a shown room change, by its type.
+/// A call member event with a membership in its content is a join; an empty
+/// one, or one with no memberships, is a leave.
+fn state_kind(kind: &str, content: Option<&serde_json::Value>) -> OtherEvent {
+    match kind {
+        "m.call.member" | "org.matrix.msc3401.call.member" => {
+            let joined = content
+                .and_then(serde_json::Value::as_object)
+                .is_some_and(|content| match content.get("memberships") {
+                    Some(memberships) => {
+                        memberships.as_array().is_some_and(|list| !list.is_empty())
+                    }
+                    None => !content.is_empty(),
+                });
+            if joined {
+                OtherEvent::CallJoined
+            } else {
+                OtherEvent::CallLeft
+            }
+        }
+        "m.beacon_info" | "org.matrix.msc3672.beacon_info" => OtherEvent::Location,
+        "m.space.child" => OtherEvent::SpaceChild,
+        "m.space.parent" => OtherEvent::SpaceParent,
+        "im.vector.modular.widgets" | "m.widget" | "io.element.widgets.layout" => {
+            OtherEvent::Widget
+        }
+        "m.room.third_party_invite" => OtherEvent::ThirdPartyInvite,
+        _ => OtherEvent::State,
+    }
+}
+
+/// An event with no other form, as an `other` item: its kind and its type,
+/// read from the raw event so that a type this build cannot parse still
+/// shows. A reaction or deletion that could not be read stays out: neither
+/// is a line of its own. A deleted message-like event is a `deleted` notice.
+fn other_item(
+    event: &TimelineEvent,
+    event_id: String,
+    sender: String,
+    origin_server_ts: Option<UnixMillis>,
+) -> Option<TimelineItem> {
+    let raw = event.raw();
+    let kind = raw.get_field::<String>("type").ok().flatten()?;
+    let state = is_state(event);
+    if !state && matches!(kind.as_str(), "m.reaction" | "m.room.redaction") {
+        return None;
+    }
+    if !state && redacted(event) {
+        return Some(TimelineItem::Notice {
+            event_id,
+            sender,
+            notice: NoticeKind::Deleted,
+            origin_server_ts,
+        });
+    }
+    let content = raw.get_field::<serde_json::Value>("content").ok().flatten();
+    let (event_kind, event_type) = if state {
+        (state_kind(&kind, content.as_ref()), kind.as_str())
+    } else {
+        let other = event_kind(&kind);
+        // A message names its `msgtype`, when it has one.
+        let shown = match other {
+            OtherEvent::Message => content
+                .as_ref()
+                .and_then(|content| content.get("msgtype"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(&kind),
+            _ => &kind,
+        };
+        (other, shown)
+    };
+    Some(TimelineItem::Other {
+        event_id,
+        sender,
+        origin_server_ts,
+        event: event_kind,
+        event_type: project_name(event_type),
+    })
 }
 
 /// The visible form of one event, or `None` for events not shown. An edit
@@ -308,14 +440,17 @@ fn project(event: &TimelineEvent) -> Option<TimelineItem> {
             });
         }
         Ok(AnySyncTimelineEvent::State(state)) => {
-            return state_change(&state).map(|change| TimelineItem::State {
-                event_id,
-                sender,
-                origin_server_ts,
-                change,
-            });
+            return match state_change(&state) {
+                Some(change) => Some(TimelineItem::State {
+                    event_id,
+                    sender,
+                    origin_server_ts,
+                    change,
+                }),
+                None => other_item(event, event_id, sender, origin_server_ts),
+            };
         }
-        _ => return None,
+        _ => return other_item(event, event_id, sender, origin_server_ts),
     };
     // A reply's quoted fallback is the sender's copy of another event: it
     // can say anything, so it is dropped and the page quotes the event
@@ -354,20 +489,48 @@ fn project(event: &TimelineEvent) -> Option<TimelineItem> {
             origin_server_ts,
             reply_to,
         },
+        MessageType::ServerNotice(notice) => TimelineItem::Message {
+            event_id,
+            sender,
+            body: text(&notice.body),
+            origin_server_ts,
+            reply_to,
+        },
         MessageType::Image(image) => {
             crate::media::timeline_item(event_id, sender, origin_server_ts, image)
         }
         MessageType::File(_) | MessageType::Audio(_) | MessageType::Video(_) => {
-            let file = crate::files::file_parts(&message.content.msgtype)?;
-            crate::files::timeline_item(event_id, sender, origin_server_ts, &file)
+            match crate::files::file_parts(&message.content.msgtype) {
+                Some(file) => {
+                    crate::files::timeline_item(event_id, sender, origin_server_ts, &file)
+                }
+                None => other_message(event_id, sender, origin_server_ts, &message.content.msgtype),
+            }
         }
-        _ => TimelineItem::Notice {
-            event_id,
-            sender,
-            notice: NoticeKind::Unsupported,
-            origin_server_ts,
-        },
+        msgtype => other_message(event_id, sender, origin_server_ts, msgtype),
     })
+}
+
+/// A message this build does not show as text, an image or a file, as an
+/// `other` item named by its `msgtype`. Its body is never sent.
+fn other_message(
+    event_id: String,
+    sender: String,
+    origin_server_ts: Option<UnixMillis>,
+    msgtype: &MessageType,
+) -> TimelineItem {
+    let event = match msgtype {
+        MessageType::VerificationRequest(_) => OtherEvent::VerificationRequest,
+        MessageType::Location(_) => OtherEvent::Location,
+        _ => OtherEvent::Message,
+    };
+    TimelineItem::Other {
+        event_id,
+        sender,
+        origin_server_ts,
+        event,
+        event_type: project_name(msgtype.msgtype()),
+    }
 }
 
 /// A name or topic as shown: projected, and `None` when empty.
@@ -392,7 +555,8 @@ fn named_users(items: &[TimelineItem]) -> BTreeSet<&str> {
             | TimelineItem::File { sender, .. }
             | TimelineItem::Edit { sender, .. }
             | TimelineItem::Reaction { sender, .. }
-            | TimelineItem::Redaction { sender, .. } => sender,
+            | TimelineItem::Redaction { sender, .. }
+            | TimelineItem::Other { sender, .. } => sender,
             TimelineItem::State { sender, change, .. } => {
                 if let StateChange::Member { target, .. }
                 | StateChange::DisplayName { target, .. }
@@ -796,7 +960,8 @@ impl MatrixViews {
                 TimelineItem::Message { event_id, .. }
                 | TimelineItem::Image { event_id, .. }
                 | TimelineItem::File { event_id, .. }
-                | TimelineItem::Notice { event_id, .. } => event_id == id.as_str(),
+                | TimelineItem::Notice { event_id, .. }
+                | TimelineItem::Other { event_id, .. } => event_id == id.as_str(),
                 _ => false,
             })
             .cloned();
@@ -1302,11 +1467,240 @@ mod tests {
         )
     }
 
+    /// The room change an event shows, or `None` when it is no room change:
+    /// nothing, or a generic `other` state item.
     fn change_of(event: &TimelineEvent) -> Option<StateChange> {
         match project(event) {
             Some(TimelineItem::State { change, .. }) => Some(change),
-            None => None,
+            None
+            | Some(TimelineItem::Other {
+                event: OtherEvent::State,
+                ..
+            }) => None,
             Some(other) => panic!("a state item or nothing: {other:?}"),
+        }
+    }
+
+    /// The kind and shown type of an `other` item, or `None` for anything else.
+    fn other_of(event: &TimelineEvent) -> Option<(OtherEvent, String)> {
+        match project(event) {
+            Some(TimelineItem::Other {
+                event, event_type, ..
+            }) => Some((event, event_type)),
+            _ => None,
+        }
+    }
+
+    fn message_like(kind: &str, content: serde_json::Value) -> TimelineEvent {
+        raw_event(serde_json::json!({
+            "type": kind, "event_id": "$e", "sender": "@alice:example.org",
+            "origin_server_ts": 1, "content": content,
+        }))
+    }
+
+    /// GIVEN the message types this build shows no text, image or file for
+    /// WHEN projected THEN each is an `other` item named by its `msgtype`, an
+    /// in-room verification request and a location have their own kind, and
+    /// no body is sent; a server notice is a message.
+    #[test]
+    fn given_other_message_types_then_each_is_named_and_its_body_is_not_sent() {
+        let message = |content| other_of(&plain_event(content));
+        assert_eq!(
+            message(serde_json::json!({
+                "msgtype": "m.key.verification.request", "body": "secret body",
+                "to": "@bob:example.org", "from_device": "D",
+                "methods": ["m.sas.v1"],
+            })),
+            Some((
+                OtherEvent::VerificationRequest,
+                "m.key.verification.request".into()
+            ))
+        );
+        assert_eq!(
+            message(serde_json::json!({
+                "msgtype": "m.location", "body": "here", "geo_uri": "geo:51.5,0.1",
+            })),
+            Some((OtherEvent::Location, "m.location".into()))
+        );
+        let hostile = format!("org.example\u{202E}<b>{}", "x".repeat(300));
+        let Some((OtherEvent::Message, shown)) =
+            message(serde_json::json!({ "msgtype": hostile, "body": "secret body" }))
+        else {
+            panic!("an other message");
+        };
+        assert!(shown.starts_with("org.example") && !shown.contains('\u{202E}'));
+        assert!(shown.chars().count() <= crate::views::MAX_DISPLAY_NAME_CHARS + 1);
+        let item = project(&plain_event(serde_json::json!({
+            "msgtype": "org.example.custom", "body": "secret body",
+        })));
+        assert!(
+            !serde_json::to_string(&item)
+                .unwrap()
+                .contains("secret body"),
+            "{item:?}"
+        );
+        let Some(TimelineItem::Message { body, .. }) = project(&plain_event(serde_json::json!({
+            "msgtype": "m.server_notice", "body": "Server maintenance",
+            "server_notice_type": "m.server_notice.usage_limit_reached",
+        }))) else {
+            panic!("a server notice is a message");
+        };
+        assert_eq!(body, "Server maintenance");
+    }
+
+    /// GIVEN message-like events of each known type and an unknown one WHEN
+    /// projected THEN each is an `other` item of its kind with its type.
+    #[test]
+    fn given_other_message_like_events_then_each_has_its_kind() {
+        for (kind, expected) in [
+            ("m.key.verification.ready", OtherEvent::VerificationReady),
+            ("m.key.verification.start", OtherEvent::VerificationStart),
+            ("m.key.verification.key", OtherEvent::VerificationStep),
+            ("m.key.verification.mac", OtherEvent::VerificationStep),
+            (
+                "m.key.verification.cancel",
+                OtherEvent::VerificationCancelled,
+            ),
+            ("m.key.verification.done", OtherEvent::VerificationDone),
+            ("m.call.invite", OtherEvent::CallStarted),
+            (
+                "org.matrix.msc4075.rtc.notification",
+                OtherEvent::CallStarted,
+            ),
+            ("m.call.answer", OtherEvent::CallAnswered),
+            ("m.call.reject", OtherEvent::CallDeclined),
+            ("m.call.hangup", OtherEvent::CallEnded),
+            ("m.call.candidates", OtherEvent::CallSignalling),
+            (
+                "io.element.call.encryption_keys",
+                OtherEvent::CallSignalling,
+            ),
+            ("org.matrix.msc3381.poll.start", OtherEvent::PollStarted),
+            ("m.poll.response", OtherEvent::PollVote),
+            ("m.poll.end", OtherEvent::PollEnded),
+            ("m.sticker", OtherEvent::Sticker),
+            ("m.beacon", OtherEvent::Location),
+            ("org.example.custom", OtherEvent::Event),
+        ] {
+            assert_eq!(
+                other_of(&message_like(kind, serde_json::json!({ "body": "x" }))),
+                Some((expected, kind.into())),
+                "{kind}"
+            );
+        }
+    }
+
+    /// GIVEN state events that are no shown room change WHEN projected THEN
+    /// each is an `other` item of its kind; a call member event is a join
+    /// with a membership and a leave without one.
+    #[test]
+    fn given_other_state_events_then_each_has_its_kind() {
+        const A: &str = "@alice:example.org";
+        let state = |kind: &str, content: serde_json::Value| {
+            other_of(&state_event(kind, A, "key", content, None))
+        };
+        for (kind, content, expected) in [
+            (
+                "m.space.child",
+                serde_json::json!({ "via": ["s"] }),
+                OtherEvent::SpaceChild,
+            ),
+            (
+                "m.space.parent",
+                serde_json::json!({}),
+                OtherEvent::SpaceParent,
+            ),
+            (
+                "im.vector.modular.widgets",
+                serde_json::json!({ "type": "x" }),
+                OtherEvent::Widget,
+            ),
+            (
+                "m.room.third_party_invite",
+                serde_json::json!({ "display_name": "a…" }),
+                OtherEvent::ThirdPartyInvite,
+            ),
+            ("m.beacon_info", serde_json::json!({}), OtherEvent::Location),
+            (
+                "m.call.member",
+                serde_json::json!({ "application": "m.call", "call_id": "" }),
+                OtherEvent::CallJoined,
+            ),
+            (
+                "org.matrix.msc3401.call.member",
+                serde_json::json!({ "memberships": [{ "call_id": "" }] }),
+                OtherEvent::CallJoined,
+            ),
+            ("m.call.member", serde_json::json!({}), OtherEvent::CallLeft),
+            (
+                "org.matrix.msc3401.call.member",
+                serde_json::json!({ "memberships": [] }),
+                OtherEvent::CallLeft,
+            ),
+            (
+                "org.example.custom",
+                serde_json::json!({ "x": 1 }),
+                OtherEvent::State,
+            ),
+        ] {
+            assert_eq!(
+                state(kind, content),
+                Some((expected, kind.into())),
+                "{kind}"
+            );
+        }
+        // A member event that changes nothing shows as a room state event.
+        assert_eq!(
+            other_of(&state_event(
+                "m.room.member",
+                A,
+                A,
+                serde_json::json!({ "membership": "join" }),
+                Some(serde_json::json!({ "membership": "join" })),
+            )),
+            Some((OtherEvent::State, "m.room.member".into()))
+        );
+    }
+
+    /// GIVEN deleted events that are not messages WHEN projected THEN a
+    /// message-like one is a `deleted` notice, a state one is an `other`
+    /// state item, and an unreadable reaction or deletion stays out.
+    #[test]
+    fn given_deleted_or_unreadable_other_events_then_they_show_as_deleted_or_not_at_all() {
+        let unsigned = serde_json::json!({ "redacted_because": {
+            "type": "m.room.redaction", "sender": "@mod:example.org",
+            "event_id": "$why", "origin_server_ts": 2, "content": {}
+        }});
+        let poll = project(&raw_event(serde_json::json!({
+            "type": "m.poll.start", "event_id": "$p", "sender": "@alice:example.org",
+            "origin_server_ts": 1, "content": {}, "unsigned": unsigned,
+        })));
+        assert!(
+            matches!(
+                poll,
+                Some(TimelineItem::Notice {
+                    notice: NoticeKind::Deleted,
+                    ..
+                })
+            ),
+            "{poll:?}"
+        );
+        let mut widget = serde_json::json!({
+            "type": "m.widget", "event_id": "$w", "sender": "@alice:example.org",
+            "state_key": "w", "origin_server_ts": 1, "content": {}, "unsigned": unsigned,
+        });
+        assert_eq!(
+            other_of(&raw_event(widget.clone())),
+            Some((OtherEvent::Widget, "m.widget".into()))
+        );
+        widget["type"] = "m.room.name".into();
+        assert_eq!(
+            other_of(&raw_event(widget)),
+            Some((OtherEvent::State, "m.room.name".into()))
+        );
+        for kind in ["m.reaction", "m.room.redaction"] {
+            let item = project(&message_like(kind, serde_json::json!({ "broken": true })));
+            assert!(item.is_none(), "{kind}: {item:?}");
         }
     }
 
@@ -1362,7 +1756,7 @@ mod tests {
                 "{sender} {prev:?} -> {membership}"
             );
         }
-        // No change at all is not shown.
+        // No change at all is no member change.
         assert_eq!(member(B, B, "join", Some("join")), None);
     }
 
@@ -1386,7 +1780,8 @@ mod tests {
             change(MembershipChange::Kicked)
         );
         assert_eq!(member(B, B, "join", None), change(MembershipChange::Joined));
-        // A leave after a leave that the event does say is still no change.
+        // A leave after a leave that the event does say is still no member
+        // change.
         assert_eq!(member(B, B, "leave", Some("leave")), None);
     }
 
@@ -1483,7 +1878,7 @@ mod tests {
 
     /// GIVEN changes to the room's state WHEN projected THEN each security-
     /// relevant one is shown, names and topics are projected and empty ones
-    /// are `None`, and an unknown state type is not shown.
+    /// are `None`, and an unknown state type is no room change.
     #[test]
     fn given_room_state_events_then_known_changes_are_shown() {
         const A: &str = "@alice:example.org";

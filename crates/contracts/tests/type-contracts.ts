@@ -82,6 +82,25 @@ const unknownNotice: TimelineItem = {
   origin_server_ts: null,
 };
 
+const removedNotice: TimelineItem = {
+  kind: "notice",
+  event_id: "$e",
+  sender: "@a:s",
+  // @ts-expect-error the core no longer sends an unsupported notice
+  notice: "unsupported",
+  origin_server_ts: null,
+};
+
+const unknownOtherEvent: TimelineItem = {
+  kind: "other",
+  event_id: "$e",
+  sender: "@a:s",
+  origin_server_ts: null,
+  // @ts-expect-error only the core's other-event kinds are valid
+  event: "teleport",
+  event_type: "x",
+};
+
 const bigTime: TimelineItem = {
   kind: "message",
   event_id: "$e",
@@ -158,6 +177,8 @@ void missingStore;
 void missingRevision;
 void unknownAccountState;
 void unknownNotice;
+void removedNotice;
+void unknownOtherEvent;
 void bigTime;
 void bigImageSize;
 void unknownMime;

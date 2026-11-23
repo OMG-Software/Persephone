@@ -435,7 +435,7 @@ impl CoreTransport for FakeCore {
                 "desktopNotifications": true, "sendTyping": false, "sendReadReceipts": false,
                 "idleLockMinutes": 0, "notificationNames": true, "loadRoomPictures": false,
                 "captureProtection": self.capture_protection.load(Ordering::SeqCst),
-                "timelineEvents": {"joins": true, "leaves": true, "invitations": true, "removals": true, "joinRequests": true, "displayNames": true, "profilePictures": true, "roomName": true, "topic": true, "roomPicture": true, "encryption": true, "joinRule": true, "historyVisibility": true, "permissions": true, "addresses": true, "pinnedMessages": true, "guestAccess": true, "serverAccess": true, "creation": true, "upgrades": true},
+                "timelineEvents": all_timeline_events(),
                 "theme": "red"
             })),
             Call::SetAccountSettings { settings } => match settings.enter_sends {
@@ -640,6 +640,12 @@ impl CoreTransport for FakeCore {
 
 /// A well-formed image handle the fake core knows.
 /// The call status when no call exists.
+/// Every timeline switch on, in its wire form; the contracts crate checks
+/// the spelling of each.
+fn all_timeline_events() -> serde_json::Value {
+    serde_json::to_value(persephone_contracts::TimelineEvents::default()).unwrap()
+}
+
 fn call_idle() -> serde_json::Value {
     serde_json::json!({"phase": "idle", "roomId": null, "muted": false, "participants": [], "ended": null, "joinError": null})
 }
@@ -1924,7 +1930,7 @@ fn given_room_account_and_profile_commands_then_bounded_arguments_cross() {
         serde_json::json!({"settings": {"enterSends": enter_sends, "chatTextPercent": 100,
             "interfaceTextPercent": 100, "desktopNotifications": false,
             "sendTyping": false, "sendReadReceipts": false, "idleLockMinutes": 0,
-            "notificationNames": true, "loadRoomPictures": false, "captureProtection": true, "timelineEvents": {"joins": true, "leaves": true, "invitations": true, "removals": true, "joinRequests": true, "displayNames": true, "profilePictures": true, "roomName": true, "topic": true, "roomPicture": true, "encryption": true, "joinRule": true, "historyVisibility": true, "permissions": true, "addresses": true, "pinnedMessages": true, "guestAccess": true, "serverAccess": true, "creation": true, "upgrades": true},
+            "notificationNames": true, "loadRoomPictures": false, "captureProtection": true, "timelineEvents": all_timeline_events(),
             "theme": theme}})
     };
     let settings = |enter_sends: bool| settings_with(enter_sends, "orange");
@@ -3230,7 +3236,7 @@ fn given_account_settings_then_capture_protection_follows_only_successful_calls(
             "sendTyping": false, "sendReadReceipts": false, "idleLockMinutes": 0,
             "notificationNames": true, "loadRoomPictures": false,
             "captureProtection": capture_protection,
-            "timelineEvents": {"joins": true, "leaves": true, "invitations": true, "removals": true, "joinRequests": true, "displayNames": true, "profilePictures": true, "roomName": true, "topic": true, "roomPicture": true, "encryption": true, "joinRule": true, "historyVisibility": true, "permissions": true, "addresses": true, "pinnedMessages": true, "guestAccess": true, "serverAccess": true, "creation": true, "upgrades": true},
+            "timelineEvents": all_timeline_events(),
             "theme": "orange"}})
     };
     assert!(invoke("set_account_settings", saved(true, false)).is_ok());

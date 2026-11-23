@@ -244,6 +244,77 @@ pub enum TimelineItem {
         origin_server_ts: Option<UnixMillis>,
         change: StateChange,
     },
+    /// Any other event, shown as a line of its own with fixed text for
+    /// `event`. Nothing from its content is shown. `event_type` is the
+    /// event's type, or a message's `msgtype`, projected like a name; the
+    /// page shows it for the kinds it has no text for (`message`, `event`
+    /// and `state`).
+    Other {
+        event_id: String,
+        sender: String,
+        /// As for messages.
+        #[ts(type = "number | null")]
+        origin_server_ts: Option<UnixMillis>,
+        event: OtherEvent,
+        event_type: String,
+    },
+}
+
+/// The kind of an [`TimelineItem::Other`] event. Each is the sender's claim:
+/// a verification step, for example, says nothing about whom this account
+/// trusts.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OtherEvent {
+    /// An in-room verification request (`m.key.verification.request`).
+    VerificationRequest,
+    /// `m.key.verification.ready`.
+    VerificationReady,
+    /// `m.key.verification.start`.
+    VerificationStart,
+    /// `m.key.verification.accept`, `.key` or `.mac`.
+    VerificationStep,
+    /// `m.key.verification.cancel`.
+    VerificationCancelled,
+    /// `m.key.verification.done`.
+    VerificationDone,
+    /// A call invitation or call notification.
+    CallStarted,
+    /// `m.call.answer` or `m.call.select_answer`.
+    CallAnswered,
+    /// `m.call.reject`, or a declined call notification.
+    CallDeclined,
+    /// `m.call.hangup`.
+    CallEnded,
+    /// Call connection details: candidates, negotiation, stream metadata and
+    /// call encryption keys.
+    CallSignalling,
+    /// A call member state event with a membership.
+    CallJoined,
+    /// A call member state event without a membership.
+    CallLeft,
+    PollStarted,
+    PollVote,
+    PollEnded,
+    /// `m.sticker`. The sticker image is not fetched.
+    Sticker,
+    /// A shared location or live location (`m.location`, `m.beacon_info`,
+    /// `m.beacon`).
+    Location,
+    /// `m.space.child`.
+    SpaceChild,
+    /// `m.space.parent`.
+    SpaceParent,
+    /// A widget or widget layout state event.
+    Widget,
+    /// `m.room.third_party_invite`.
+    ThirdPartyInvite,
+    /// An `m.room.message` with a `msgtype` this build does not show.
+    Message,
+    /// Any other message-like event.
+    Event,
+    /// Any other state event, or a deleted state event.
+    State,
 }
 
 /// What a state event changed. Names, topics and user IDs come from the
@@ -396,8 +467,6 @@ pub enum NoticeKind {
     /// Not shown: the sender's device is not signed by its owner's identity,
     /// so it could be a device the sender never added.
     UntrustedSender,
-    /// A kind of event this client does not display yet.
-    Unsupported,
     /// The message was deleted (redacted) by its sender or a moderator.
     Deleted,
 }
@@ -1410,8 +1479,9 @@ impl<'de> Deserialize<'de> for Theme {
     }
 }
 
-/// Which kinds of room changes the timeline shows, one switch each. Only
-/// the page reads them: the core sends every change either way.
+/// Which kinds of room changes and other events the timeline shows, one
+/// switch each. Only the page reads them: the core sends every event either
+/// way. Messages, images, files and encryption notices have no switch.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct TimelineEvents {
@@ -1440,6 +1510,24 @@ pub struct TimelineEvents {
     pub server_access: bool,
     pub creation: bool,
     pub upgrades: bool,
+    /// Verification requests and their steps.
+    pub verification: bool,
+    /// Calls started, answered, declined and ended, and members joining or
+    /// leaving a call.
+    pub calls: bool,
+    /// Call connection details ([`OtherEvent::CallSignalling`]).
+    pub call_signalling: bool,
+    /// Polls started and ended, and votes.
+    pub polls: bool,
+    pub stickers: bool,
+    pub locations: bool,
+    /// The rooms of a space, and the spaces of a room.
+    pub spaces: bool,
+    pub widgets: bool,
+    /// Messages and events of a type this build has no text for.
+    pub other_events: bool,
+    /// Deleted messages, shown as "Message deleted."
+    pub deleted_messages: bool,
 }
 
 impl Default for TimelineEvents {
@@ -1465,6 +1553,16 @@ impl Default for TimelineEvents {
             server_access: true,
             creation: true,
             upgrades: true,
+            verification: true,
+            calls: true,
+            call_signalling: true,
+            polls: true,
+            stickers: true,
+            locations: true,
+            spaces: true,
+            widgets: true,
+            other_events: true,
+            deleted_messages: true,
         }
     }
 }
@@ -2288,6 +2386,13 @@ pub fn sample_timeline_page() -> TimelinePage {
                     membership: MembershipChange::Joined,
                 },
             },
+            TimelineItem::Other {
+                event_id: "$custom".into(),
+                sender: "@bob:server.invalid".into(),
+                origin_server_ts: UnixMillis::new(1_767_258_120_000),
+                event: OtherEvent::Event,
+                event_type: "org.example <b>custom</b>".into(),
+            },
             TimelineItem::Gap { next_cursor: None },
         ],
         next_cursor: Some("cursor-2".into()),
@@ -2457,6 +2562,7 @@ pub fn generated_typescript() -> String {
         format!("export {}", NoticeKind::decl(&config)),
         format!("export {}", MembershipChange::decl(&config)),
         format!("export {}", StateChange::decl(&config)),
+        format!("export {}", OtherEvent::decl(&config)),
         format!("export {}", TimelineItem::decl(&config)),
         format!("export {}", SenderName::decl(&config)),
         format!("export {}", TimelinePage::decl(&config)),

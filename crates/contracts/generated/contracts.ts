@@ -405,7 +405,36 @@ permissions: boolean, addresses: boolean, pinnedMessages: boolean, guestAccess: 
 /**
  * Which homeservers may take part (server ACL).
  */
-serverAccess: boolean, creation: boolean, upgrades: boolean, };
+serverAccess: boolean, creation: boolean, upgrades: boolean, 
+/**
+ * Verification requests and their steps.
+ */
+verification: boolean, 
+/**
+ * Calls started, answered, declined and ended, and members joining or
+ * leaving a call.
+ */
+calls: boolean, 
+/**
+ * Call connection details ([`OtherEvent::CallSignalling`]).
+ */
+callSignalling: boolean, 
+/**
+ * Polls started and ended, and votes.
+ */
+polls: boolean, stickers: boolean, locations: boolean, 
+/**
+ * The rooms of a space, and the spaces of a room.
+ */
+spaces: boolean, widgets: boolean, 
+/**
+ * Messages and events of a type this build has no text for.
+ */
+otherEvents: boolean, 
+/**
+ * Deleted messages, shown as "Message deleted."
+ */
+deletedMessages: boolean, };
 
 export type Theme = "orange" | "red" | "blue";
 
@@ -575,11 +604,13 @@ total: number | null, };
 
 export type JoinedRoom = { roomId: string, };
 
-export type NoticeKind = "undecryptable" | "withheld" | "untrusted_sender" | "unsupported" | "deleted";
+export type NoticeKind = "undecryptable" | "withheld" | "untrusted_sender" | "deleted";
 
 export type MembershipChange = "joined" | "left" | "invited" | "invite_rejected" | "invite_withdrawn" | "kicked" | "banned" | "unbanned" | "knocked" | "knock_withdrawn" | "knock_denied";
 
 export type StateChange = { "type": "member", target: string, membership: MembershipChange, } | { "type": "display_name", target: string, name: string | null, } | { "type": "profile_picture", target: string, } | { "type": "name", name: string | null, } | { "type": "topic", topic: string | null, } | { "type": "avatar", } | { "type": "encryption", } | { "type": "join_rule", rule: JoinRule, } | { "type": "history_visibility", visibility: HistoryVisibility, } | { "type": "power_levels", } | { "type": "addresses", } | { "type": "created", } | { "type": "server_acl", } | { "type": "upgraded", } | { "type": "pinned_messages", } | { "type": "guest_access", allowed: boolean, };
+
+export type OtherEvent = "verification_request" | "verification_ready" | "verification_start" | "verification_step" | "verification_cancelled" | "verification_done" | "call_started" | "call_answered" | "call_declined" | "call_ended" | "call_signalling" | "call_joined" | "call_left" | "poll_started" | "poll_vote" | "poll_ended" | "sticker" | "location" | "space_child" | "space_parent" | "widget" | "third_party_invite" | "message" | "event" | "state";
 
 export type TimelineItem = { "kind": "message", event_id: string, sender: string, 
 /**
@@ -637,7 +668,11 @@ origin_server_ts: number | null, redacts: string, } | { "kind": "state", event_i
 /**
  * As for messages.
  */
-origin_server_ts: number | null, change: StateChange, };
+origin_server_ts: number | null, change: StateChange, } | { "kind": "other", event_id: string, sender: string, 
+/**
+ * As for messages.
+ */
+origin_server_ts: number | null, event: OtherEvent, event_type: string, };
 
 export type SenderName = { userId: string, 
 /**
@@ -719,6 +754,14 @@ export const timelinePageFixture = {
         "target": "@bob:server.invalid",
         "membership": "joined"
       }
+    },
+    {
+      "kind": "other",
+      "event_id": "$custom",
+      "sender": "@bob:server.invalid",
+      "origin_server_ts": 1767258120000,
+      "event": "event",
+      "event_type": "org.example <b>custom</b>"
     },
     {
       "kind": "gap",

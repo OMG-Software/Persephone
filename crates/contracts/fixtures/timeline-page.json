@@ -39,6 +39,14 @@
       }
     },
     {
+      "kind": "other",
+      "event_id": "$custom",
+      "sender": "@bob:server.invalid",
+      "origin_server_ts": 1767258120000,
+      "event": "event",
+      "event_type": "org.example <b>custom</b>"
+    },
+    {
       "kind": "gap",
       "next_cursor": null
     }

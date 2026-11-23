@@ -79,7 +79,29 @@ export function quoteOf(items: ShownItem[], eventId: string): Quote | null {
       return { sender: item.sender, text: 'A message that is not shown' };
     case 'state':
       return { sender: item.sender, text: 'A change to the room' };
+    case 'other':
+      return { sender: item.sender, text: 'An event that is not a message' };
   }
+}
+
+/**
+ * Other events that are state events. A deletion of a state event does not
+ * undo the change, so, like a room change, its line stays.
+ */
+const OTHER_STATE = new Set<string>([
+  'call_joined',
+  'call_left',
+  'space_child',
+  'space_parent',
+  'widget',
+  'third_party_invite',
+  'state'
+]);
+
+/** Whether a deletion of `item` shows it as a deleted message. */
+function deletable(item: TimelineItem): boolean {
+  if (item.kind === 'gap' || item.kind === 'state') return false;
+  return item.kind !== 'other' || !OTHER_STATE.has(item.event);
 }
 
 /** Most different reactions shown under one message; the most used first. */
@@ -159,7 +181,7 @@ export function applyRelations(items: TimelineItem[], ownUserId: string | null =
   const shown: ShownItem[] = [];
   for (const item of items) {
     if (item.kind === 'edit' || item.kind === 'redaction' || item.kind === 'reaction') continue;
-    if (item.kind !== 'gap' && item.kind !== 'state' && deleted.has(item.event_id)) {
+    if (deletable(item) && item.kind !== 'gap' && deleted.has(item.event_id)) {
       shown.push({
         kind: 'notice',
         event_id: item.event_id,
