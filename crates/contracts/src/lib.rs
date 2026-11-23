@@ -340,6 +340,9 @@ pub enum OtherEvent {
     /// A shared location or live location (`m.location`, `m.beacon_info`,
     /// `m.beacon`).
     Location,
+    /// An `m.beacon_info` with `live: false`: the sender stopped sharing
+    /// their live location.
+    LocationStopped,
     /// `m.space.child`.
     SpaceChild,
     /// `m.space.parent`.

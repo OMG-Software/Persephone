@@ -303,7 +303,18 @@ fn state_kind(kind: &str, content: Option<&serde_json::Value>) -> OtherEvent {
                 OtherEvent::CallLeft
             }
         }
-        "m.beacon_info" | "org.matrix.msc3672.beacon_info" => OtherEvent::Location,
+        "m.beacon_info" | "org.matrix.msc3672.beacon_info" => {
+            // A live share ends with the same event, marked not live.
+            let live = content
+                .and_then(|content| content.get("live"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true);
+            if live {
+                OtherEvent::Location
+            } else {
+                OtherEvent::LocationStopped
+            }
+        }
         "m.space.child" => OtherEvent::SpaceChild,
         "m.space.parent" => OtherEvent::SpaceParent,
         "im.vector.modular.widgets" | "m.widget" | "io.element.widgets.layout" => {
@@ -1724,6 +1735,16 @@ mod tests {
                 OtherEvent::ThirdPartyInvite,
             ),
             ("m.beacon_info", serde_json::json!({}), OtherEvent::Location),
+            (
+                "m.beacon_info",
+                serde_json::json!({ "live": true }),
+                OtherEvent::Location,
+            ),
+            (
+                "org.matrix.msc3672.beacon_info",
+                serde_json::json!({ "live": false }),
+                OtherEvent::LocationStopped,
+            ),
             (
                 "m.call.member",
                 serde_json::json!({ "application": "m.call", "call_id": "" }),

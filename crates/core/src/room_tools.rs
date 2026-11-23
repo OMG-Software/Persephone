@@ -240,13 +240,21 @@ async fn focused_context(
     }
 }
 
+/// How much farther from the date a line no setting hides may be than the
+/// nearest line of any kind, and still be the target.
+const MAX_PREFERRED_SKEW_MS: u64 = 10 * 60 * 1000;
+
 /// Skip hidden messages and relation-only events that have no timeline row.
 /// Prefer a line no setting hides (a message, image, file or encryption
 /// notice): a room change, other event or deleted line can be switched off
-/// on the page, so it is the target only when nothing else is near.
+/// on the page, so it is the target only when no such line is within
+/// `MAX_PREFERRED_SKEW_MS` of it.
 fn date_target(items: &[TimelineItem], timestamp: u64, backward: bool) -> Option<&str> {
-    date_candidate(items, timestamp, backward, true)
-        .or_else(|| date_candidate(items, timestamp, backward, false))
+    let nearest = date_candidate(items, timestamp, backward, false)?;
+    let fixed = date_candidate(items, timestamp, backward, true).filter(|(_, time)| {
+        time.abs_diff(timestamp) <= nearest.1.abs_diff(timestamp) + MAX_PREFERRED_SKEW_MS
+    });
+    Some(fixed.unwrap_or(nearest).0)
 }
 
 /// The nearest item to `timestamp`; with `fixed`, only one no setting hides.
@@ -255,7 +263,7 @@ fn date_candidate(
     timestamp: u64,
     backward: bool,
     fixed: bool,
-) -> Option<&str> {
+) -> Option<(&str, u64)> {
     let redacted: std::collections::BTreeSet<&str> = items
         .iter()
         .filter_map(|item| {
@@ -319,7 +327,6 @@ fn date_candidate(
     } else {
         candidates.min_by_key(|(_, time)| *time)
     }
-    .map(|(id, _)| id)
 }
 
 /// Extract the event reference from projected content; gaps have no event ID.
@@ -608,9 +615,10 @@ pub async fn attachments(
 mod tests {
     use super::*;
 
-    /// GIVEN a call's other lines nearer the date than a message WHEN a date
-    /// target is chosen THEN it is the message, which no setting hides; with
-    /// only other lines near, the nearest of them is the target.
+    /// GIVEN a call's other lines a little nearer the date than a message
+    /// WHEN a date target is chosen THEN it is the message, which no setting
+    /// hides; with only other lines, or the message much farther, the
+    /// nearest other line is the target.
     #[test]
     fn given_hideable_lines_near_a_date_then_a_message_is_the_target() {
         use persephone_contracts::{OtherEvent, UnixMillis};
@@ -635,6 +643,17 @@ mod tests {
         assert_eq!(date_target(&items, 35, true), Some("$message"));
         assert_eq!(date_target(&items[..2], 15, false), Some("$near"));
         assert_eq!(date_target(&items, 5, true), None);
+        // GIVEN the message far beyond a nearer other line THEN the nearer
+        // line is the target: a date jump does not go weeks away.
+        let far = TimelineItem::Message {
+            event_id: "$far".into(),
+            sender: "@a:example.org".into(),
+            body: "hi".into(),
+            origin_server_ts: Some(UnixMillis::new(20 + MAX_PREFERRED_SKEW_MS + 1).unwrap()),
+            reply_to: None,
+        };
+        let spread = [other("$near", 20), far];
+        assert_eq!(date_target(&spread, 15, false), Some("$near"));
     }
 
     #[test]

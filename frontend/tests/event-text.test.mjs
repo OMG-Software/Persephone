@@ -16,6 +16,7 @@ test('GIVEN other events with fixed text WHEN described THEN the line names the 
     ['verification_done', `${A} says they finished verification`],
     ['call_started', `${A} started a call`],
     ['call_left', `${A} left the call`],
+    ['location_stopped', `${A} stopped sharing their location`],
     ['poll_vote', `${A} voted in a poll`],
     ['sticker', `${A} sent a sticker`],
     ['third_party_invite', `${A} invited someone by email or phone`]
@@ -56,7 +57,7 @@ test('GIVEN deleted other events WHEN described THEN each names what was deleted
 
 test('GIVEN each other kind WHEN its switch is read THEN it is a listed switch, and an unknown kind is other events', () => {
   const listed = new Set([...EVENT_SWITCHES, ...OTHER_SWITCHES].map((entry) => entry.key));
-  for (const event of ['verification_step', 'call_joined', 'call_signalling', 'poll_ended', 'location', 'space_parent', 'widget', 'state']) {
+  for (const event of ['verification_step', 'call_joined', 'call_signalling', 'poll_ended', 'location', 'location_stopped', 'space_parent', 'widget', 'state']) {
     assert.ok(listed.has(otherSwitch(event)), event);
   }
   assert.equal(otherSwitch('third_party_invite'), 'invitations');
