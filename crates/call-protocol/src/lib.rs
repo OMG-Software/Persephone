@@ -20,6 +20,22 @@ pub const MAX_DIAGNOSTIC_TARGET_BYTES: usize = 64;
 pub const MAX_DIAGNOSTIC_MESSAGE_BYTES: usize = 2048;
 /// Highest diagnostic level: 1 error, 2 warn, 3 info, 4 debug.
 pub const MAX_DIAGNOSTIC_LEVEL: u8 = 4;
+/// Transport crates that are too busy at `debug` (TLS and socket steps on
+/// every connect): the core and the worker keep their records only from
+/// `info` (ADR-0058). One list for both; it is not on the wire.
+pub const QUIET_LOG_TARGETS: &[&str] = &[
+    "h2",
+    "hyper",
+    "hyper_util",
+    "mio",
+    "reqwest",
+    "rustls",
+    "tokio",
+    "tokio_util",
+    "tungstenite",
+    "tokio_tungstenite",
+    "want",
+];
 pub const MAX_URL_BYTES: usize = 2048;
 pub const MAX_JWT_BYTES: usize = 8192;
 pub const MAX_IDENTITY_BYTES: usize = 512;

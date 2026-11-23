@@ -79,11 +79,15 @@ impl Diagnostics {
         self.on.load(Ordering::Relaxed)
     }
 
-    /// Starts or stops the records. Off drops the records that wait.
+    /// Starts or stops the records. Off drops the records that wait. The
+    /// switch changes under the queue's lock, and `push_admitted` checks it
+    /// under the same lock, so no record is added after an "off" cleared
+    /// the queue.
     pub fn set_on(&self, on: bool) {
+        let mut queue = lock(&self.queue);
         self.on.store(on, Ordering::SeqCst);
         if !on {
-            lock(&self.queue).clear();
+            queue.clear();
             self.dropped.store(0, Ordering::Relaxed);
         }
     }
@@ -130,6 +134,10 @@ impl Diagnostics {
         };
         {
             let mut queue = lock(&self.queue);
+            // Again under the lock: an "off" may have come since `admit`.
+            if !self.is_on() {
+                return;
+            }
             if queue.len() >= QUEUE_RECORDS {
                 self.dropped.fetch_add(1, Ordering::Relaxed);
                 return;
@@ -225,21 +233,9 @@ fn format_bounded(args: std::fmt::Arguments<'_>, limit: usize) -> String {
 
 /// Transport crates under LiveKit that are too busy at `debug` (TLS and
 /// socket handshakes on every connect): only `info` and above from them, so
-/// they do not spend the budget the room event notes need. The core keeps
-/// the same list.
-const QUIET_TARGETS: &[&str] = &[
-    "h2",
-    "hyper",
-    "hyper_util",
-    "mio",
-    "reqwest",
-    "rustls",
-    "tokio",
-    "tokio_util",
-    "tungstenite",
-    "tokio_tungstenite",
-    "want",
-];
+/// they do not spend the budget the room event notes need. The core uses
+/// the same list, from the call protocol.
+use persephone_call_protocol::QUIET_LOG_TARGETS as QUIET_TARGETS;
 
 /// Whether a record at `level` from `target` is taken: never `trace`, and
 /// from a quiet target only `info` and above.
@@ -383,6 +379,19 @@ mod tests {
         let text = format_bounded(format_args!("{value:?}"), 101);
         assert!(text.len() <= 101 && text.len() > 90, "{}", text.len());
         assert_eq!(format_bounded(format_args!("{}", 42), 101), "42");
+    }
+
+    /// GIVEN a record admitted while on WHEN the log is turned off before it
+    /// is queued THEN it is not queued, and the next "on" starts empty.
+    #[test]
+    fn given_off_between_admit_and_push_then_the_record_is_dropped() {
+        let diagnostics = Diagnostics::default();
+        diagnostics.set_on(true);
+        assert!(diagnostics.admit());
+        diagnostics.set_on(false);
+        diagnostics.push_admitted(INFO, "livekit", "before off");
+        diagnostics.set_on(true);
+        assert!(diagnostics.take().is_none());
     }
 
     /// GIVEN a spent budget WHEN a record is asked for THEN it is refused

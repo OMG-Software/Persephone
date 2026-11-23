@@ -634,19 +634,8 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 // --- The core's own `tracing` events and `log` records ------------------------
 
 /// Targets that are too busy at `debug`: only `info` and above from them.
-const QUIET_TARGETS: &[&str] = &[
-    "h2",
-    "hyper",
-    "hyper_util",
-    "mio",
-    "reqwest",
-    "rustls",
-    "tokio",
-    "tokio_util",
-    "tungstenite",
-    "tokio_tungstenite",
-    "want",
-];
+/// The worker uses the same list.
+use persephone_call_protocol::QUIET_LOG_TARGETS as QUIET_TARGETS;
 
 /// Whether a record at `level` from `target` is kept.
 pub fn wanted(target: &str, level: Level) -> bool {

@@ -132,7 +132,8 @@ Each line has `ts` (Unix milliseconds), `seq` (a counter for this run),
   are not noted, because they run many times each second.
 * The call worker's `log` records (LiveKit and libwebrtc) at `debug`, the
   transport crates under them only from `info` (the same list as the
-  core's, above), and one
+  core's, above: one constant, `QUIET_LOG_TARGETS` in the call protocol
+  crate, used by both), and one
   record for each LiveKit room event that matters for media: participant,
   track published, subscribed, unsubscribed and subscription failed, frame
   decryption state, connection state and quality. Identities and track IDs

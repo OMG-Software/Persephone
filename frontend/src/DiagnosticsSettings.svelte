@@ -34,6 +34,11 @@
     }
   }
 
+  function retry() {
+    failure = null;
+    load();
+  }
+
   onMount(() => {
     load();
     // The core can change it too (for example a refusal in the warning).
@@ -108,5 +113,11 @@
   {/if}
   {#if failure}
     <p role="alert" class="error">{failure}</p>
+    {#if !loaded}
+      <!-- Nothing else reads the state again until it changes. -->
+      <div class="actions">
+        <button type="button" class="secondary" onclick={retry}>Try again</button>
+      </div>
+    {/if}
   {/if}
 </div>
