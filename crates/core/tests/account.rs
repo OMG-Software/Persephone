@@ -2360,6 +2360,153 @@ fn given_a_slow_homeserver_then_a_page_stops_fetching_after_its_time_budget() {
     assert!(took < delay * 3, "took {took:?}");
 }
 
+/// `/messages` for `ROOM`: the newest chunk is a message and call
+/// candidates, the next (from `t1`) is `edits` edits of messages the page has
+/// not seen, then history starts.
+struct EditsLater {
+    edits: usize,
+}
+
+impl wiremock::Respond for EditsLater {
+    fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+        let from = request
+            .url
+            .query_pairs()
+            .find(|(key, _)| key == "from")
+            .map(|(_, value)| value.into_owned());
+        let (chunk, end) = match from.as_deref() {
+            None => {
+                let mut chunk = vec![text("$said0", "message 0")];
+                chunk.extend((1..20).map(|n| {
+                    json!({"type":"m.call.candidates","sender":USER,
+                    "event_id":format!("$candidate{n}"),"origin_server_ts":10,
+                    "content":{"call_id":"c","party_id":"p","version":"1","candidates":[]}})
+                }));
+                (chunk, Some("t1"))
+            }
+            Some("t1") => (
+                (0..self.edits)
+                    .map(|n| edit_of(&format!("$edit{n}"), USER, &format!("$old{n}"), "new"))
+                    .collect(),
+                Some("t2"),
+            ),
+            _ => (Vec::new(), None),
+        };
+        ResponseTemplate::new(200).set_body_json(json!({
+            "start":from.unwrap_or_default(),"end":end,
+            "chunk":in_room(ROOM, Value::Array(chunk)),"state":[]
+        }))
+    }
+}
+
+/// `GET /rooms/{roomId}/event/{eventId}`: a text message by `USER` with the
+/// asked ID, after `delay`. It counts the requests.
+struct SlowEvent {
+    delay: Duration,
+    requests: Arc<AtomicUsize>,
+}
+
+impl wiremock::Respond for SlowEvent {
+    fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+        self.requests.fetch_add(1, Ordering::SeqCst);
+        let id = request
+            .url
+            .path_segments()
+            .and_then(|mut segments| segments.next_back())
+            .unwrap_or_default()
+            .replace("%24", "$");
+        let mut event = text(&id, "old");
+        event["room_id"] = json!(ROOM);
+        ResponseTemplate::new(200)
+            .set_body_json(event)
+            .set_delay(self.delay)
+    }
+}
+
+/// GIVEN a later chunk whose edits each need a slow read of the edited
+/// message WHEN call connection details are switched off THEN no read starts
+/// after `PAGE_TIME_BUDGET`: the page drops that chunk and ends before it,
+/// and the next page loads it whole, so no edit is lost.
+#[test]
+fn given_slow_edit_reads_in_a_later_chunk_then_the_page_ends_before_it_and_the_next_has_it() {
+    use persephone_core::matrix_views::PAGE_TIME_BUDGET;
+    let server = Homeserver::start(
+        (
+            200,
+            json!({"user_id":USER,"access_token":TOKEN,"device_id":"PERSEPHONE1"}),
+        ),
+        false,
+        true,
+    );
+    let delay = PAGE_TIME_BUDGET * 3 / 5;
+    let reads = Arc::new(AtomicUsize::new(0));
+    server.runtime.block_on(async {
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/_matrix/client/v3/rooms/[^/]+/messages$"))
+            .respond_with(EditsLater { edits: 3 })
+            .with_priority(1)
+            .mount(&server.server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/_matrix/client/v3/rooms/[^/]+/event/[^/]+$"))
+            .respond_with(SlowEvent {
+                delay,
+                requests: Arc::clone(&reads),
+            })
+            .with_priority(1)
+            .mount(&server.server)
+            .await;
+    });
+    let dir = TempDir::new().unwrap();
+    let core = make_core(dir.path(), Fixed::new(Ok(())));
+    sign_in_to_room(&core, &server);
+    let _locked = LockOnDrop(&core);
+    let saved = call(
+        &core,
+        Call::SetAccountSettings {
+            settings: AccountSettings {
+                timeline_events: TimelineEvents {
+                    call_signalling: false,
+                    ..TimelineEvents::default()
+                },
+                ..AccountSettings::default()
+            },
+        },
+    );
+    assert!(matches!(saved, Outcome::Ok(_)), "{saved:?}");
+    let page = |cursor: Option<String>| -> TimelinePage {
+        value(call(
+            &core,
+            Call::TimelinePage {
+                room_id: ROOM.into(),
+                cursor,
+            },
+        ))
+    };
+    let edits = |page: &TimelinePage| {
+        page.items
+            .iter()
+            .filter(|item| matches!(item, TimelineItem::Edit { .. }))
+            .count()
+    };
+    let started = Instant::now();
+    let first = page(None);
+    let took = started.elapsed();
+    // Two reads fit in the budget; the third would start after it.
+    assert_eq!(reads.load(Ordering::SeqCst), 2, "took {took:?}");
+    assert_eq!(page_ids(&first), ["$said0"]);
+    assert_eq!(edits(&first), 0, "the late chunk is left whole");
+    assert!(took < delay * 3, "took {took:?}");
+    let second = page(first.next_cursor.clone());
+    assert_eq!(edits(&second), 3, "the next page has every edit");
+    assert_eq!(
+        reads.load(Ordering::SeqCst),
+        3,
+        "the senders read before are remembered"
+    );
+    assert_eq!(second.next_cursor, None);
+}
+
 /// GIVEN Sliding Sync, which sends other people's member events only in
 /// the timeline, and a member list that shows `CONTACT` as invited WHEN
 /// `CONTACT` accepts the invitation THEN the member list shows them as

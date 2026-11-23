@@ -882,6 +882,7 @@ impl MatrixViews {
     /// which must be a text message that is not an edit itself. The edited
     /// message's sender comes from `chunk`, from those remembered, or, while
     /// `lookups` allows, from the homeserver; otherwise the edit is left out.
+    /// A read that would start after `lookups.until` marks the budget late.
     async fn checked_edit(
         &self,
         joined: &matrix_sdk::Room,
@@ -889,7 +890,7 @@ impl MatrixViews {
         chunk: &[TimelineEvent],
         edit: &TimelineEvent,
         claim: EditClaim,
-        lookups: &mut usize,
+        lookups: &mut EditLookups,
     ) -> Option<TimelineItem> {
         let event_id = edit.event_id()?.to_string();
         let in_chunk = chunk
@@ -899,8 +900,7 @@ impl MatrixViews {
             Some(event) => editable_sender(event),
             None => match self.known_sender(room, &claim.replaces) {
                 Some(sender) => Some(sender),
-                None if *lookups < MAX_EDIT_LOOKUPS => {
-                    *lookups += 1;
+                None if lookups.start() => {
                     let original = joined.event(&claim.replaces, None).await.ok()?;
                     self.remember_sender(room, &original);
                     editable_sender(&original)
@@ -1072,7 +1072,7 @@ impl MatrixViews {
         let ignored = crate::abuse::ignored_set(client).await?;
         let room = joined.room_id().as_str();
         let mut items = Vec::new();
-        let mut lookups = 0;
+        let mut lookups = EditLookups::default();
         for event in chunk {
             if event
                 .event_id()
@@ -1125,7 +1125,7 @@ impl MatrixViews {
         let mut items: Vec<TimelineItem> = Vec::new();
         let mut state = Vec::new();
         let mut names = Vec::new();
-        let mut lookups = 0;
+        let mut lookups = EditLookups::default();
         let started = Instant::now();
         let mut requests = 0;
         'fetches: for fetch in 0usize.. {
@@ -1144,7 +1144,10 @@ impl MatrixViews {
                     break 'fetches;
                 }
                 requests += 1;
-                let chunk = self
+                // Edits of a later chunk read the homeserver only within the
+                // time budget too.
+                lookups.until = (fetch > 0).then(|| started + PAGE_TIME_BUDGET);
+                let Some(chunk) = self
                     .fetch_chunk(
                         &joined,
                         room,
@@ -1154,7 +1157,12 @@ impl MatrixViews {
                         events,
                         &mut lookups,
                     )
-                    .await?;
+                    .await?
+                else {
+                    // Its edits need more time than is left: the next page
+                    // fetches this chunk again, first, with a new budget.
+                    break 'fetches;
+                };
                 // A homeserver that answers a token with the same token did
                 // not move: its chunk would repeat this page's events.
                 if fetch > 0 && chunk.end.is_some() && chunk.end == token {
@@ -1195,7 +1203,8 @@ impl MatrixViews {
     }
 
     /// Up to `limit` events older than `from` (or the newest), projected and
-    /// filtered by `events`, oldest first.
+    /// filtered by `events`, oldest first; `None` when an edit's check would
+    /// read the homeserver after `lookups.until`.
     #[allow(clippy::too_many_arguments)]
     async fn fetch_chunk(
         &self,
@@ -1205,8 +1214,8 @@ impl MatrixViews {
         limit: usize,
         ignored: &std::collections::BTreeSet<OwnedUserId>,
         events: &TimelineEvents,
-        lookups: &mut usize,
-    ) -> Result<Chunk, ErrorCode> {
+        lookups: &mut EditLookups,
+    ) -> Result<Option<Chunk>, ErrorCode> {
         let mut options = MessagesOptions::backward().from(from);
         options.limit = UInt::try_from(limit as u64).unwrap_or(UInt::MIN);
         // The answer then carries the member events of the people the
@@ -1227,8 +1236,13 @@ impl MatrixViews {
             self.remember_sender(room, event);
             let item = match edit_claim(event) {
                 Some(claim) => {
-                    self.checked_edit(joined, room, &messages.chunk, event, claim, lookups)
-                        .await
+                    let item = self
+                        .checked_edit(joined, room, &messages.chunk, event, claim, lookups)
+                        .await;
+                    if lookups.late {
+                        return Ok(None);
+                    }
+                    item
                 }
                 None => project(event),
             };
@@ -1248,7 +1262,32 @@ impl MatrixViews {
             })
             .collect();
         let end = messages.end.filter(|_| !messages.chunk.is_empty());
-        Ok(Chunk { items, state, end })
+        Ok(Some(Chunk { items, state, end }))
+    }
+}
+
+/// The homeserver reads of edited messages that a page may still make: at
+/// most `MAX_EDIT_LOOKUPS`, and none that starts at or after `until`.
+#[derive(Default)]
+struct EditLookups {
+    used: usize,
+    until: Option<Instant>,
+    /// A read was due after `until`.
+    late: bool,
+}
+
+impl EditLookups {
+    /// Whether a read may start now; it then counts.
+    fn start(&mut self) -> bool {
+        if self.used >= MAX_EDIT_LOOKUPS {
+            return false;
+        }
+        if self.until.is_some_and(|until| Instant::now() >= until) {
+            self.late = true;
+            return false;
+        }
+        self.used += 1;
+        true
     }
 }
 
