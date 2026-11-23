@@ -214,7 +214,7 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
     // results can wait.
     let (connect_tx, connect_done) = mpsc::channel::<Connected>(usize::from(MAX_OTHER_CONNECTIONS));
     // At most one sound level measurement runs, so one result can wait.
-    let (sound_tx, mut sound_done) = mpsc::channel::<f64>(1);
+    let (sound_tx, mut sound_done) = mpsc::channel::<Option<f64>>(1);
     let mut others_inbox = OtherInbox {
         events: OtherEvents::default(),
         connected: connect_done,
@@ -487,14 +487,30 @@ struct Call<'a> {
 /// Measures the received sound for the level meter (ADR-0055). At most one
 /// measurement runs, on its own task, so the event loop never waits for it.
 struct SoundProbe {
-    /// A measurement reports the loudest linear level here.
-    done: mpsc::Sender<f64>,
+    /// A measurement reports the loudest linear level here, or `None` when
+    /// it did not finish.
+    done: mpsc::Sender<Option<f64>>,
     task: Option<JoinHandle<()>>,
     gate: LevelGate,
 }
 
+/// One measurement's report. Dropping it sends the level, or `None`, so the
+/// task reports once however it ends: done, timed out or unwound. Only one
+/// measurement runs and the slot is freed only by its report, so the channel
+/// of one place has room.
+struct SoundReport {
+    done: mpsc::Sender<Option<f64>>,
+    level: Option<f64>,
+}
+
+impl Drop for SoundReport {
+    fn drop(&mut self) {
+        let _ = self.done.try_send(self.level.take());
+    }
+}
+
 impl SoundProbe {
-    fn new(done: mpsc::Sender<f64>) -> Self {
+    fn new(done: mpsc::Sender<Option<f64>>) -> Self {
         Self {
             done,
             task: None,
@@ -1597,19 +1613,22 @@ impl Call<'_> {
         }
         let done = self.sound.done.clone();
         self.sound.task = Some(tokio::spawn(async move {
-            let loudest = tokio::time::timeout(SOUND_MEASURE_TIMEOUT, loudest_level(tracks))
+            // Reports when dropped, also if the measurement unwinds, so the
+            // slot is always freed. A timeout reports `None`, not silence.
+            let mut report = SoundReport { done, level: None };
+            report.level = tokio::time::timeout(SOUND_MEASURE_TIMEOUT, loudest_level(tracks))
                 .await
-                .unwrap_or(0.0);
-            // Only this task sends, and it ends here: the slot is free.
-            let _ = done.try_send(loudest);
+                .ok();
         }));
         None
     }
 
     /// A measurement ended with the loudest linear level.
-    fn sound_measured(&mut self, linear: f64) -> Option<FromWorker> {
+    /// A measurement ended. One that did not finish (`None`) frees the slot
+    /// and changes nothing: the meter keeps its level until the next one.
+    fn sound_measured(&mut self, linear: Option<f64>) -> Option<FromWorker> {
         self.sound.task = None;
-        self.sound.gate.next(sound_level(linear))
+        self.sound.gate.next(sound_level(linear?))
     }
 
     /// Gives every subscribed remote audio track the call's playout.
@@ -2048,7 +2067,7 @@ async fn event_loop(
     screens: &mut ScreenInbox,
     others: &mut OtherInbox,
     tracker: &mut SpeakingTracker,
-    sound_done: &mut Receiver<f64>,
+    sound_done: &mut Receiver<Option<f64>>,
 ) -> End {
     let mut tick = interval(SPEAKING_TICK);
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -2654,6 +2673,41 @@ async fn fail(output: &Output, code: FailureCode) -> u8 {
 mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
+
+    /// GIVEN a sound measurement that finishes, one that times out and one
+    /// that unwinds THEN each reports exactly once: the level, then `None`
+    /// twice. So a slow or failed measurement never shows as silence and
+    /// never keeps the slot.
+    #[tokio::test]
+    async fn given_measurement_endings_then_each_reports_once() {
+        let (tx, mut rx) = mpsc::channel::<Option<f64>>(1);
+        drop(SoundReport {
+            done: tx.clone(),
+            level: Some(0.5),
+        });
+        assert_eq!(rx.recv().await, Some(Some(0.5)));
+
+        let done = tx.clone();
+        tokio::spawn(async move {
+            let mut report = SoundReport { done, level: None };
+            report.level =
+                tokio::time::timeout(Duration::from_millis(1), std::future::pending::<f64>())
+                    .await
+                    .ok();
+        })
+        .await
+        .expect("the timed-out measurement ends");
+        assert_eq!(rx.recv().await, Some(None));
+
+        let done = tx.clone();
+        let unwound = tokio::spawn(async move {
+            let _report = SoundReport { done, level: None };
+            panic!("statistics read failed");
+        });
+        assert!(unwound.await.is_err());
+        assert_eq!(rx.recv().await, Some(None));
+        assert!(rx.try_recv().is_err(), "one report each");
+    }
 
     /// GIVEN room events that need no participant WHEN described THEN each
     /// names its connection, its state or reason and its level, and a token
