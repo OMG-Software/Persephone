@@ -3765,10 +3765,18 @@ impl Core {
     }
 }
 
+/// Commands the page sends many times each second (video pictures, image
+/// bands): only their failures are noted, as the page does (ADR-0058).
+const QUIET_REQUESTS: &[&str] = &["call_video_frame", "image_band"];
+
 /// One command for the diagnostic log: its name, its request ID, how it
 /// ended (`ok`, an error code, or `running` for a long call that reports
-/// again when it ends) and how long it took.
+/// again when it ends) and how long it took. A quiet command that succeeded
+/// is not noted.
 fn note_request(log: &diagnostics::Log, id: u32, name: &str, outcome: String, started: Instant) {
+    if outcome == "ok" && QUIET_REQUESTS.contains(&name) {
+        return;
+    }
     log.record(
         diagnostics::Source::Core,
         diagnostics::Level::Debug,
@@ -5340,6 +5348,9 @@ mod tests {
             answer_kind(&reply(Outcome::Error(ErrorCode::LimitExceeded))),
             started,
         );
+        // Frame fetches are noted only when they fail.
+        note_request(&log, 4, "call_video_frame", "ok".into(), started);
+        note_request(&log, 5, "image_band", "core_internal".into(), started);
         note_request(
             &log,
             3,
@@ -5372,6 +5383,7 @@ mod tests {
             [
                 ("room_list".into(), 1, "ok".into()),
                 ("sign_in".into(), 2, "limit_exceeded".into()),
+                ("image_band".into(), 5, "core_internal".into()),
                 ("set_diagnostics".into(), 3, "running".into()),
             ]
         );

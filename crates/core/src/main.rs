@@ -235,7 +235,8 @@ fn run(options: Options) -> ExitCode {
             })
     };
     // An old diagnostic log is erased at every start, before the profile
-    // opens (ADR-0058). A failure is reported by kind only.
+    // opens (ADR-0058). A failure is reported by kind only. `--demo` has no
+    // slots, so it has no log path: no log, and nothing is erased.
     let diagnostics_path = slots
         .as_ref()
         .map(|slots| diagnostics::path_in(&slots.dir()));

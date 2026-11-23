@@ -177,6 +177,31 @@ fn clean(text: &str, limit: usize) -> String {
     out
 }
 
+/// Transport crates under LiveKit that are too busy at `debug` (TLS and
+/// socket handshakes on every connect): only `info` and above from them, so
+/// they do not spend the budget the room event notes need. The core keeps
+/// the same list.
+const QUIET_TARGETS: &[&str] = &[
+    "h2",
+    "hyper",
+    "hyper_util",
+    "mio",
+    "reqwest",
+    "rustls",
+    "tokio",
+    "tokio_util",
+    "tungstenite",
+    "tokio_tungstenite",
+    "want",
+];
+
+/// Whether a record at `level` from `target` is taken: never `trace`, and
+/// from a quiet target only `info` and above.
+fn wanted(target: &str, level: log::Level) -> bool {
+    let root = target.split("::").next().unwrap_or(target);
+    level <= log::Level::Info || (level == log::Level::Debug && !QUIET_TARGETS.contains(&root))
+}
+
 /// LiveKit and libwebrtc log through `log`. Trace is never taken.
 struct Logger;
 
@@ -184,7 +209,7 @@ static LOGGER: Logger = Logger;
 
 impl log::Log for Logger {
     fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
-        global().is_on() && metadata.level() <= log::Level::Debug
+        global().is_on() && wanted(metadata.target(), metadata.level())
     }
 
     fn log(&self, record: &log::Record<'_>) {
@@ -214,6 +239,21 @@ pub fn install() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// GIVEN records from LiveKit, libwebrtc and transport crates THEN
+    /// LiveKit's and libwebrtc's `debug` is taken, a transport crate's only
+    /// from `info`, and `trace` never.
+    #[test]
+    fn given_targets_then_transport_noise_is_left_out() {
+        assert!(wanted("livekit::rtc_engine", log::Level::Debug));
+        assert!(wanted("libwebrtc", log::Level::Debug));
+        assert!(!wanted("rustls::client::hs", log::Level::Debug));
+        assert!(!wanted("tokio_tungstenite", log::Level::Debug));
+        assert!(wanted("rustls", log::Level::Warn));
+        assert!(wanted("hyper_util::client", log::Level::Info));
+        assert!(!wanted("livekit", log::Level::Trace));
+        assert!(!wanted("rustls", log::Level::Trace));
+    }
 
     fn message(record: Option<FromWorker>) -> Option<(u8, String, String)> {
         match record {

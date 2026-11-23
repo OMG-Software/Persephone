@@ -114,14 +114,17 @@ Each line has `ts` (Unix milliseconds), `seq` (a counter for this run),
   filtered for credentials, not for content. `PRIVACY.md`, Settings and the
   warning say so.
 * Every request from the UI: the command name, the outcome or error code and
-  the duration. Never the arguments.
+  the duration. Never the arguments. Successful `call_video_frame` and
+  `image_band` requests are not noted, as on the page.
 * The UI host's `log` records: its own at `debug`, other crates at `info`.
 * The page's records: the name, outcome code and duration of each bridge
   call, and uncaught errors and rejections. Never arguments or replies. An
   error is kept only as a short lowercase code; any other rejection is
   written as `error`. Successful `call_video_frame` and `image_band` calls
   are not noted, because they run many times each second.
-* The call worker's `log` records (LiveKit and libwebrtc) at `debug`, and one
+* The call worker's `log` records (LiveKit and libwebrtc) at `debug`, the
+  transport crates under them (TLS, HTTP, WebSocket, tokio) only from
+  `info`, the same list as the core's, and one
   record for each LiveKit room event that matters for media: participant,
   track published, subscribed, unsubscribed and subscription failed, frame
   decryption state, connection state and quality. Identities and track IDs
