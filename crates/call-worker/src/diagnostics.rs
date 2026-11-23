@@ -451,6 +451,23 @@ mod tests {
         assert_eq!(diagnostics.dropped.load(Ordering::Relaxed), 1);
     }
 
+    /// GIVEN the installed logger THEN the `log` level is `Off`; WHEN the
+    /// process's switch goes on, then off THEN it is `Debug`, then `Off`;
+    /// GIVEN another instance WHEN it goes on THEN the level stays. The only
+    /// test that changes the process's switch.
+    #[test]
+    fn given_the_switch_then_the_log_level_follows_it() {
+        install();
+        assert_eq!(log::max_level(), log::LevelFilter::Off);
+        global().set_on(true);
+        assert_eq!(log::max_level(), log::LevelFilter::Debug);
+        global().set_on(false);
+        assert_eq!(log::max_level(), log::LevelFilter::Off);
+        let other = Diagnostics::default();
+        other.set_on(true);
+        assert_eq!(log::max_level(), log::LevelFilter::Off);
+    }
+
     /// GIVEN a full queue WHEN records are refused for lack of room THEN
     /// they do not spend the second's budget: once the writer has taken
     /// the queue, the whole budget is left.

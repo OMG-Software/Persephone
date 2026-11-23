@@ -313,6 +313,23 @@ mod tests {
         FORWARDER.get_or_init(Forwarder::default)
     }
 
+    /// GIVEN the process's switch WHEN it goes on, then off THEN the `log`
+    /// level is `Debug`, then `Off`; GIVEN another forwarder WHEN it goes on
+    /// THEN the level stays. `install` needs a core link, so this test sets
+    /// the level the way `install` does. The only test that changes the
+    /// process's switch.
+    #[test]
+    fn given_the_switch_then_the_log_level_follows_it() {
+        log::set_max_level(log::LevelFilter::Off);
+        global().set_on(true);
+        assert_eq!(log::max_level(), log::LevelFilter::Debug);
+        global().set_on(false);
+        assert_eq!(log::max_level(), log::LevelFilter::Off);
+        let other = Forwarder::default();
+        other.set_on(true);
+        assert_eq!(log::max_level(), log::LevelFilter::Off);
+    }
+
     /// GIVEN the logger on its own forwarder WHEN records arrive off, then on
     /// THEN nothing waits while off, and on keeps this crate's `debug`, other
     /// crates' `info` and maps `trace` to nothing.
