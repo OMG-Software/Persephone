@@ -580,11 +580,10 @@ fn unlock(connection: &Connection, objects: &[OwnedObjectPath]) -> Result<(), Va
     complete(connection, &prompt).map(drop)
 }
 
-/// Runs the provider's prompt at `prompt`, if there is one, and waits for
-/// it to complete. A dismissed prompt, or one not answered within
-/// [`PROMPT_TIMEOUT`] (then dismissed here), fails.
-/// Runs the provider's prompt `prompt` (`/`: none) and returns its result
-/// (`None` without a prompt). A dismissed or unanswered prompt is `Failed`.
+/// Runs the provider's prompt at `prompt` (`/`: none), waits for it to
+/// complete and returns its result, which [`created_collection`] reads;
+/// `None` when there is no prompt. A dismissed prompt, or one not answered
+/// within [`PROMPT_TIMEOUT`] (then dismissed here), is `Failed`.
 fn complete(
     connection: &Connection,
     prompt: &OwnedObjectPath,
