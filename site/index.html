@@ -8,7 +8,7 @@
   <!-- No external requests: no web fonts, scripts, analytics or embeds. -->
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'">
   <meta name="referrer" content="no-referrer">
-  <meta name="theme-color" content="#151616">
+  <meta name="theme-color" content="#151515">
   <link rel="icon" href="mark.svg" type="image/svg+xml">
   <link rel="stylesheet" href="style.css">
 </head>
@@ -17,7 +17,7 @@
   <header class="site-header">
     <div class="wrap header-row">
       <a class="brand" href="./" aria-label="Persephone home">
-        <img src="mark.svg" alt="" width="28" height="28">
+        <img src="mark.svg" alt="" width="32" height="32">
         <span>Persephone</span>
       </a>
       <nav aria-label="Sections">
@@ -33,7 +33,8 @@
 
   <main id="main">
     <section class="hero">
-      <div class="wrap">
+      <div class="wrap hero-row">
+        <div>
         <p class="eyebrow">Matrix desktop client · Rust · GPL-3.0</p>
         <h1>A Matrix client designed to withstand targeted attacks.</h1>
         <p class="lede">
@@ -49,14 +50,18 @@
         <div class="status" role="note" aria-label="Project status">
           <strong>Not ready for use.</strong>
           Persephone is in active development. On Windows, test builds sign in, sync, start
-          encrypted conversations, send and receive encrypted messages and images, and verify
-          contacts, against test servers. Linux and macOS support is being built. Only unsigned
-          development builds are published; there is no signed release yet, and no security
-          control has had an independent review. Do not use any part of it for real conversations.
+          encrypted conversations, send and receive encrypted messages and images, verify
+          contacts and make encrypted calls, against test servers. Linux and macOS builds exist
+          but have had much less testing. Only unsigned development builds are published; there
+          is no signed release yet, and no security control has had an independent review. Do
+          not use any part of it for real conversations.
         </div>
         <p class="actions">
           <a class="button" href="https://github.com/OMG-Software/Persephone">View the source</a>
+          <a class="button secondary" href="https://github.com/OMG-Software/Persephone/releases/tag/latest">Development builds</a>
         </p>
+        </div>
+        <img class="hero-mark" src="toggle-mark.svg" alt="" width="128" height="128">
       </div>
     </section>
 
@@ -96,6 +101,14 @@
           Search stays on your device. Reports go to your own homeserver after confirmation.
           See the <a href="https://github.com/OMG-Software/Persephone/blob/main/docs/room-tools.md">room tools guide</a>
           for limits and verification status.
+        </p>
+        <p class="note">
+          Calls are outside the first release's scope, but the source now has them: encrypted
+          voice and video calls through MatrixRTC, with device tests, screen sharing and a
+          separate call window. Their designs are still proposed
+          (<a href="https://github.com/OMG-Software/Persephone/blob/main/docs/adr/0043-make-audio-calls-through-matrixrtc-in-a-contained-call-worker.md">ADR-0043</a>
+          and later). One live audio call with Element Call is recorded on Windows.
+          A Diagnostics settings page shows connection health and an opt-in diagnostic log.
         </p>
         <p class="note">
           Persephone is tested against both <strong>Merovingian</strong> and Synapse, including a
@@ -151,7 +164,9 @@
       <div class="wrap">
         <p class="eyebrow">04 / Architecture</p>
         <h2>Architecture</h2>
-        <p class="section-lede">Three trust zones. Arrows are the only paths data takes.</p>
+        <p class="section-lede">Three trust zones. Arrows are the only paths data takes. Calls use a
+        second contained worker in the same way: the core keeps the Matrix token and keys, and the
+        call worker gets only what one call needs.</p>
         <figure class="diagram">
           <svg viewBox="0 0 760 300" role="img" aria-labelledby="arch-title arch-desc">
             <title id="arch-title">Persephone architecture</title>
@@ -219,15 +234,17 @@
       <div class="wrap">
         <p class="eyebrow">06 / Progress</p>
         <h2>Progress</h2>
-        <p class="section-lede">As of 26 October 2026.</p>
+        <p class="section-lede">As of 24 November 2026.</p>
         <div class="grid two">
           <article>
             <h3>Working on Windows</h3>
             <p>In test builds against Merovingian and Synapse test servers: password sign-in, the
             room list and history, encrypted messages, emoji verification of devices and contacts,
             key recovery, the pause on a changed identity, and sending and receiving images.
-            Encrypted messages also work with Element Web. Starting encrypted conversations and
-            answering invitations are new, with automated tests only so far.</p>
+            Encrypted messages also work with Element Web, and an encrypted audio call worked
+            with Element Call. Starting encrypted conversations and answering invitations have
+            automated tests only so far; camera video now opens inside the contained call
+            worker.</p>
           </article>
           <article>
             <h3>Next</h3>
@@ -263,8 +280,9 @@
   </main>
 
   <footer class="site-footer">
-    <div class="wrap">
+    <div class="wrap footer-row">
       <p>Persephone · GPL-3.0 · This page loads nothing from third parties. · <a href="privacy.html">Privacy</a></p>
+      <a class="vendor" href="https://github.com/OMG-Software"><img src="omg-software.svg" alt="OMG Software" width="1305" height="420"></a>
     </div>
   </footer>
 </body>

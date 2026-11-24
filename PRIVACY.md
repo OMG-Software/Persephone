@@ -1,6 +1,6 @@
 # Privacy policy
 
-Last updated: 2 November 2026
+Last updated: 23 November 2026
 
 This policy tells you what data the Persephone project collects, what the
 Persephone app sends and stores, and where other parties process data. It
