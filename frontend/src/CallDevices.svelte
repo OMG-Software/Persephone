@@ -55,6 +55,8 @@
   let testBusy = $state(false);
   // Numbers the test requests, so an older answer never replaces a newer one.
   let testRequest = 0;
+  // Set when the settings close: a start that answers later is stopped.
+  let destroyed = false;
 
   async function readTest() {
     const mine = ++testRequest;
@@ -82,6 +84,12 @@
       } else {
         const menu = kind === 'microphone' ? recording : kind === 'speaker' ? playout : camera;
         const next = await callDeviceTest(kind, deviceChoice(menu));
+        if (destroyed) {
+          if (next.state === 'starting' || next.state === 'running') {
+            void callDeviceTestStop().catch(() => {});
+          }
+          return;
+        }
         if (mine === testRequest) test = next;
       }
     } catch (reason) {
@@ -93,6 +101,7 @@
 
   // Leaving the settings ends a test that runs.
   onDestroy(() => {
+    destroyed = true;
     if (test.state === 'starting' || test.state === 'running') void callDeviceTestStop().catch(() => {});
   });
 

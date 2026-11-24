@@ -372,9 +372,13 @@ struct View {
     /// Other devices only.
     members: Vec<ActiveMember>,
     speaking: HashSet<String>,
-    /// Worker identities whose microphone is muted or absent (ADR-0059),
-    /// current members only, from the connection that speaks for them.
-    mic_muted: HashSet<String>,
+    /// The connection and identity of each remote microphone that is muted
+    /// or absent (ADR-0059), as the worker said with `ParticipantMuted`. A
+    /// display hint only, kept like `sharing`: an identity that is not a
+    /// member yet waits here and shows once the membership is read, and only
+    /// while the connection is the one that speaks for the member. At most
+    /// `MAX_PARTICIPANTS` are kept.
+    mic_muted: HashSet<(u8, String)>,
     keyed: HashSet<String>,
     camera: CallCamera,
     /// The own screen share.
@@ -497,10 +501,10 @@ impl View {
             .flat_map(|m| m.backend_identities.iter().map(String::as_str))
             .collect();
         self.speaking.retain(|id| backends.contains(id.as_str()));
-        self.mic_muted.retain(|id| backends.contains(id.as_str()));
         self.keyed.retain(|id| present.contains(id.as_str()));
-        // `sharing` keeps hints of identities that are not members yet: the
-        // worker can hear of a share before the membership arrives.
+        // `sharing` and `mic_muted` keep hints of identities that are not
+        // members yet: the worker can hear of a share or a muted microphone
+        // before the membership arrives. `ParticipantLeft` removes them.
     }
 
     /// The page asked for the screen share on or off. The state shows
@@ -658,16 +662,15 @@ impl View {
                 identity,
                 muted,
             } => {
-                if !self.accepts(*connection, identity) {
-                    return Applied::Same;
-                }
+                let key = (*connection, identity.clone());
                 let changed = if *muted {
                     self.mic_muted.len() < persephone_call_protocol::MAX_PARTICIPANTS
-                        && self.mic_muted.insert(identity.clone())
+                        && self.mic_muted.insert(key)
                 } else {
-                    self.mic_muted.remove(identity)
+                    self.mic_muted.remove(&key)
                 };
-                if changed {
+                // A hint for someone who is not a member changes no row.
+                if changed && self.accepts(*connection, identity) {
                     Applied::Changed
                 } else {
                     Applied::Same
@@ -788,7 +791,7 @@ impl View {
                 let video = self.forget_video(*connection, identity);
                 let accepted = self.accepts(*connection, identity);
                 let speaking = accepted && self.speaking.remove(identity);
-                let muted = accepted && self.mic_muted.remove(identity);
+                let muted = self.mic_muted.remove(&(*connection, identity.clone())) && accepted;
                 if speaking || video || muted {
                     Applied::Changed
                 } else {
@@ -875,10 +878,9 @@ impl View {
                         .keyed
                         .contains(&participant_identity(&m.user_id, &m.device_id)),
                     sharing: self.is_sharing(m),
-                    muted: m
-                        .backend_identities
-                        .iter()
-                        .any(|id| self.mic_muted.contains(id)),
+                    muted: self.mic_muted.iter().any(|(connection, id)| {
+                        m.backend_identities.contains(id) && self.accepts(*connection, id)
+                    }),
                 })
                 .collect(),
             camera: self.camera,
@@ -1190,6 +1192,18 @@ struct DeviceTestSlot {
     /// The thread of the newest test. The next test waits for it, so two
     /// tests never hold a device at once.
     thread: Option<std::thread::JoinHandle<()>>,
+    /// The test that the newest thread runs once the test before it ended.
+    /// `Some` while that thread still waits: a newer test then replaces
+    /// this job and starts no thread, so at most two test threads exist.
+    job: Option<DeviceTestJob>,
+}
+
+/// A device test that waits for its thread.
+struct DeviceTestJob {
+    generation: u64,
+    test: CallDeviceTestKind,
+    device: Option<String>,
+    stop: Arc<AtomicBool>,
 }
 
 impl Default for DeviceTestSlot {
@@ -1203,6 +1217,7 @@ impl Default for DeviceTestSlot {
             generation: 0,
             stop: Arc::new(AtomicBool::new(true)),
             thread: None,
+            job: None,
         }
     }
 }
@@ -1435,20 +1450,35 @@ impl CallController {
         };
         let stop = Arc::new(AtomicBool::new(false));
         slot.stop = stop.clone();
+        let job = DeviceTestJob {
+            generation: slot.generation,
+            test,
+            device,
+            stop,
+        };
+        // A thread that still waits takes the newest job when it starts.
+        if slot.job.replace(job).is_some() {
+            return slot.status.clone();
+        }
         let previous = slot.thread.take();
         let inner = self.inner.clone();
-        let generation = slot.generation;
         let spawned = std::thread::Builder::new()
             .name("call-device-test".to_owned())
             .spawn(move || {
                 if let Some(previous) = previous {
                     let _ = previous.join();
                 }
-                run_device_test(&inner, generation, test, device, &stop);
+                let job = plain(&inner.device_test).job.take();
+                if let Some(job) = job {
+                    run_device_test(&inner, job.generation, job.test, job.device, &job.stop);
+                }
             });
         match spawned {
             Ok(thread) => slot.thread = Some(thread),
-            Err(_) => slot.status.state = CallDeviceTestState::Failed,
+            Err(_) => {
+                slot.job = None;
+                slot.status.state = CallDeviceTestState::Failed;
+            }
         }
         slot.status.clone()
     }
@@ -1966,11 +1996,11 @@ impl CallController {
         });
         match &*self.inner.slot() {
             Slot::Running(run) => {
-                run.devices.send_replace(choice);
+                offer_devices(&run.devices, choice);
                 Ok(())
             }
             Slot::Joining(join) => {
-                join.devices.send_replace(choice);
+                offer_devices(&join.devices, choice);
                 Ok(())
             }
             Slot::Idle => Err(CallError::NotInCall),
@@ -2118,6 +2148,9 @@ impl CallController {
     /// ends, and the session's client goes with them; the delayed leave ends
     /// the membership within seconds.
     pub fn stop_for_session_end(&self) {
+        // A device test ends too, with or without a call. The test lock is
+        // taken and dropped before the call slot.
+        self.stop_device_test();
         let (room_id, kill) = {
             let mut slot = self.inner.slot();
             match std::mem::replace(&mut *slot, Slot::Idle) {
@@ -2675,6 +2708,20 @@ async fn refine_worker_stop(call: &Call) -> EndReason {
     .await
     .unwrap_or(None);
     stop_reason(exit)
+}
+
+/// Gives the call a microphone and speaker choice. The same choice as the
+/// last one changes nothing, so saving only the camera does not restart the
+/// sound of a running call.
+fn offer_devices(devices: &watch::Sender<Option<SoundDevices>>, choice: Option<SoundDevices>) {
+    devices.send_if_modified(|current| {
+        if *current == choice {
+            false
+        } else {
+            *current = choice;
+            true
+        }
+    });
 }
 
 /// Runs device test `generation` on its own thread (ADR-0059): starts a
@@ -3321,6 +3368,22 @@ impl Call {
         }
     }
 
+    /// Forgets the level of each device that is no longer a member, and
+    /// gives the meters the rest. A departed member's silence is not taken
+    /// (`level_member`), so without this its last level would stay.
+    fn prune_levels(&mut self, inner: &Inner) {
+        let before = self.levels.len();
+        let view = &self.view;
+        self.levels.retain(|(user_id, device_id), _| {
+            view.members
+                .iter()
+                .any(|m| m.user_id.as_str() == user_id && m.device_id.as_str() == device_id)
+        });
+        if self.levels.len() != before {
+            self.send_levels(inner);
+        }
+    }
+
     /// Gives the meters the levels of the members now.
     fn send_levels(&self, inner: &Inner) {
         if let Some(listener) = plain(&inner.sound_listener).clone() {
@@ -3554,6 +3617,25 @@ impl Call {
         Ok(())
     }
 
+    /// Sends the pending device choice (ADR-0059). A full queue keeps it for
+    /// a retry, so a busy worker does not end the call; a newer choice
+    /// replaces it.
+    fn apply_devices(
+        &self,
+        pending: &mut Option<(Instant, SoundDevices)>,
+    ) -> Result<(), EndReason> {
+        if let Some((_, choice)) = pending.take() {
+            let message = ToWorker::SetDevices {
+                recording: choice.recording.clone(),
+                playout: choice.playout.clone(),
+            };
+            if !self.queue_worker(message)? {
+                *pending = Some((Instant::now() + UNSENT_RETRY, choice));
+            }
+        }
+        Ok(())
+    }
+
     /// Queues `message` when the worker's queue has room: `false` when it is
     /// full. Only a closed queue is an error.
     fn queue_worker(&self, message: ToWorker) -> Result<bool, EndReason> {
@@ -3704,6 +3786,8 @@ impl Call {
         let mut diagnostics = crate::diagnostics::global().watch();
         diagnostics.mark_changed();
         let mut pending_diagnostics: Option<(Instant, bool)> = None;
+        // The newest device choice while the worker's queue is full.
+        let mut pending_devices: Option<(Instant, SoundDevices)> = None;
         self.start_keys(inner).await?;
         // A video join on the portal path asks for the camera now (the join
         // sent `camera_on: false`).
@@ -3715,6 +3799,7 @@ impl Call {
             let due = pending_own.as_ref().map(|(at, _)| *at);
             let retry = self.unsent_retry;
             let diagnostics_due = pending_diagnostics.map(|(at, _)| at);
+            let devices_due = pending_devices.as_ref().map(|(at, _)| *at);
             tokio::select! {
                 _ = &mut *stop => return Ok(()),
                 () = wake.notified() => self.take_waiting_stop(inner, u64::MAX)?,
@@ -3742,12 +3827,16 @@ impl Call {
                 Ok(()) = devices.changed() => {
                     let choice = devices.borrow_and_update().clone();
                     if let Some(choice) = choice {
-                        self.send_worker(ToWorker::SetDevices {
-                            recording: choice.recording,
-                            playout: choice.playout,
-                        })?;
+                        pending_devices = Some((Instant::now(), choice));
+                        self.apply_devices(&mut pending_devices)?;
                     }
                 }
+                () = async {
+                    match devices_due {
+                        Some(at) => time::sleep_until(at.into()).await,
+                        None => std::future::pending().await,
+                    }
+                } => self.apply_devices(&mut pending_devices)?,
                 Ok(()) = diagnostics.changed() => {
                     let on = *diagnostics.borrow_and_update();
                     pending_diagnostics = Some((Instant::now(), on));
@@ -3841,6 +3930,7 @@ impl Call {
         // change with a membership (ADR-0056).
         let backends = backend_changes(&self.view.members, &current);
         self.view.set_members(current);
+        self.prune_levels(inner);
         // The video filter follows the members at once, so a later error
         // cannot leave a departed member's picture allowed. A video stream
         // may also have started before its member was known.
@@ -4861,6 +4951,40 @@ mod tests {
         assert_eq!(kept.test, None);
     }
 
+    /// GIVEN a device test thread that still waits for the test before it
+    /// WHEN more tests are asked for THEN no thread starts: the job of the
+    /// waiting thread becomes the newest test, so at most two test threads
+    /// exist, and the stop of the older job is set.
+    #[test]
+    fn given_a_waiting_test_thread_when_tests_are_asked_then_no_thread_starts() {
+        let calls = controller(FakeHost::new(true, None));
+        let first_stop = Arc::new(AtomicBool::new(false));
+        {
+            let mut slot = plain(&calls.inner.device_test);
+            slot.generation = 1;
+            slot.stop = first_stop.clone();
+            slot.job = Some(DeviceTestJob {
+                generation: 1,
+                test: CallDeviceTestKind::Microphone,
+                device: None,
+                stop: first_stop.clone(),
+            });
+        }
+        for _ in 0..3 {
+            let reply =
+                calls.start_device_test(CallDeviceTestKind::Speaker, Some("spk".to_owned()));
+            assert_eq!(reply.state, CallDeviceTestState::Starting);
+        }
+        assert!(first_stop.load(Ordering::SeqCst), "the older job stops");
+        let slot = plain(&calls.inner.device_test);
+        assert!(slot.thread.is_none(), "no thread started");
+        let job = slot.job.as_ref().expect("the newest job waits");
+        assert_eq!(job.generation, 4);
+        assert_eq!(job.generation, slot.generation);
+        assert_eq!(job.test, CallDeviceTestKind::Speaker);
+        assert_eq!(job.device.as_deref(), Some("spk"));
+    }
+
     /// GIVEN a running call whose command queue is full
     /// WHEN mute or deafen is asked for
     /// THEN each is refused as `Busy`, not taken as if there were no call;
@@ -5343,6 +5467,88 @@ mod tests {
             call.apply_diagnostics(&mut pending),
             Err(EndReason::WorkerStopped)
         ));
+    }
+
+    /// GIVEN a device choice and a full worker queue WHEN it is applied
+    /// THEN the call goes on and the choice waits; WHEN the queue has room
+    /// THEN the worker gets it; WHEN the queue is closed THEN the call ends.
+    #[tokio::test]
+    async fn given_a_full_queue_then_a_device_choice_waits() {
+        let fixture = test_call(
+            no_admission(),
+            Arc::new(Flags::default()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let (call, mut to_worker) = (fixture.call, fixture.to_worker);
+        let now = Instant::now();
+        let choice = SoundDevices {
+            recording: Some("mic-2".to_owned()),
+            playout: None,
+        };
+        let mut pending = Some((now, choice.clone()));
+
+        fill_queue(&call, &mut to_worker, 0);
+        call.apply_devices(&mut pending).unwrap();
+        let (retry, waiting) = pending.clone().expect("the choice waits");
+        assert!(retry > now);
+        assert_eq!(waiting, choice);
+
+        while to_worker.try_recv().is_ok() {}
+        call.apply_devices(&mut pending).unwrap();
+        assert_eq!(pending, None);
+        assert!(matches!(
+            to_worker.try_recv(),
+            Ok(ToWorker::SetDevices { recording: Some(id), playout: None }) if id == "mic-2"
+        ));
+
+        let mut pending = Some((now, choice));
+        drop(to_worker);
+        assert!(matches!(
+            call.apply_devices(&mut pending),
+            Err(EndReason::WorkerStopped)
+        ));
+    }
+
+    /// GIVEN two members with a sound level WHEN one leaves the call THEN
+    /// its level goes from the meters at once, and the member that stays
+    /// keeps its level; a prune with no change sends nothing.
+    #[test]
+    fn given_a_member_with_a_level_when_it_leaves_then_its_level_goes() {
+        let mut fixture = test_call(
+            no_admission(),
+            Arc::new(Flags::default()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let calls = controller(FakeHost::new(true, None));
+        let updates = Arc::new(Mutex::new(Vec::new()));
+        let heard = updates.clone();
+        calls.set_sound_listener(Arc::new(move |update| plain(&heard).push(update)));
+        let inner = calls.inner.clone();
+        fixture.call.view = view();
+        fixture.call.view.set_members(vec![
+            member("@a:example.org", "A", "https://sfu.example.org"),
+            member("@c:example.org", "C", "https://sfu.example.org"),
+        ]);
+        let call = &mut fixture.call;
+        let members = call.view.members.clone();
+        let (a, b) = (members[0].clone(), members[1].clone());
+        call.participant_level(&inner, 0, &a.backend_identities[0], 40);
+        call.participant_level(&inner, 0, &b.backend_identities[0], 20);
+        assert_eq!(call.levels.len(), 2);
+        call.view.set_members(vec![b.clone()]);
+        call.prune_levels(&inner);
+        let last = plain(&updates).last().cloned();
+        assert_eq!(
+            last,
+            Some(SoundUpdate::Participants(vec![CallParticipantLevel {
+                user_id: b.user_id.to_string(),
+                device_id: b.device_id.to_string(),
+                level: 20,
+            }]))
+        );
+        let sent = plain(&updates).len();
+        call.prune_levels(&inner);
+        assert_eq!(plain(&updates).len(), sent, "no change sends nothing");
     }
 
     /// Ends a portal request that produced no remote.
@@ -7639,6 +7845,67 @@ mod tests {
             persephone_call_protocol::MAX_PARTICIPANTS
         );
         assert_eq!(sharing(&view), ["@c:example.org:C"], "strangers hidden");
+    }
+
+    /// GIVEN a muted microphone reported before the membership of its
+    /// member arrives WHEN the membership arrives THEN the member shows the
+    /// mute mark; a hint from a connection that does not speak for the
+    /// member does not show; unmuting and leaving remove the mark; hints
+    /// beyond the bound are not kept.
+    #[test]
+    fn given_a_mute_hint_before_the_membership_then_it_shows_once_the_member_arrives() {
+        let mut view = view();
+        view.apply(&FromWorker::Connected);
+        let muted = |connection, identity: &str, muted| FromWorker::ParticipantMuted {
+            connection,
+            identity: identity.to_owned(),
+            muted,
+        };
+        assert_eq!(
+            view.apply(&muted(0, "@c:example.org:C", true)),
+            Applied::Same
+        );
+        assert_eq!(
+            view.apply(&muted(2, "@d:example.org:D", true)),
+            Applied::Same
+        );
+        let marked = |view: &View| {
+            let CallState::Active { participants, .. } = view.state() else {
+                panic!("active");
+            };
+            participants
+                .iter()
+                .filter(|p| p.muted)
+                .map(|p| format!("{}:{}", p.user_id, p.device_id))
+                .collect::<Vec<_>>()
+        };
+        assert!(marked(&view).is_empty());
+        view.set_members(vec![
+            member("@a:example.org", "A", "https://sfu.example.org"),
+            member("@c:example.org", "C", "https://sfu.example.org"),
+            member("@d:example.org", "D", "https://sfu.example.org"),
+        ]);
+        assert_eq!(marked(&view), ["@c:example.org:C"]);
+        assert_eq!(
+            view.apply(&muted(0, "@c:example.org:C", false)),
+            Applied::Changed
+        );
+        assert!(marked(&view).is_empty());
+        view.apply(&muted(0, "@a:example.org:A", true));
+        assert_eq!(marked(&view), ["@a:example.org:A"]);
+        assert_eq!(
+            view.apply(&FromWorker::ParticipantLeft {
+                connection: 0,
+                identity: "@a:example.org:A".to_owned(),
+            }),
+            Applied::Changed
+        );
+        assert!(marked(&view).is_empty());
+
+        for index in 0..persephone_call_protocol::MAX_PARTICIPANTS + 4 {
+            view.apply(&muted(0, &format!("@s{index}:example.org:S"), true));
+        }
+        assert!(view.mic_muted.len() <= persephone_call_protocol::MAX_PARTICIPANTS);
     }
 
     /// GIVEN each worker screen state WHEN applied THEN the page's state

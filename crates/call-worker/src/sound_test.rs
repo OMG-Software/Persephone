@@ -10,6 +10,10 @@
 //! Both tests run on a thread of their own and block it. `stop` ends them
 //! early.
 
+// The tone and level helpers serve the Windows tests; elsewhere only the
+// unit tests use them.
+#![cfg_attr(not(windows), allow(dead_code))]
+
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
@@ -402,7 +406,15 @@ mod tests {
         use persephone_call_protocol::FailureCode;
 
         let no_device =
-            |code| matches!(code, FailureCode::DeviceNotFound | FailureCode::AudioDevice);
+            // No device, or the privacy settings refuse it: both are answers.
+            |code| {
+                matches!(
+                    code,
+                    FailureCode::DeviceNotFound
+                        | FailureCode::AudioDevice
+                        | FailureCode::DeviceDenied
+                )
+            };
         let stop = Arc::new(AtomicBool::new(false));
         let timer = stop.clone();
         let mut levels = 0;

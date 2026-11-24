@@ -1144,14 +1144,71 @@ pub fn levels_within_limits(levels: &[persephone_contracts::CallParticipantLevel
         })
 }
 
+/// Reads a level list and refuses an entry past [`MAX_CALL_LEVELS`], an
+/// overlong ID or a level out of range before it keeps it, so a hostile list
+/// allocates at most the limits.
 fn bounded_levels<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Vec<persephone_contracts::CallParticipantLevel>, D::Error> {
-    let levels = Vec::<persephone_contracts::CallParticipantLevel>::deserialize(deserializer)?;
-    if levels_within_limits(&levels) {
-        Ok(levels)
-    } else {
-        Err(serde::de::Error::custom("call levels out of bounds"))
+    struct Levels;
+    impl<'de> serde::de::Visitor<'de> for Levels {
+        type Value = Vec<persephone_contracts::CallParticipantLevel>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "at most {MAX_CALL_LEVELS} call levels")
+        }
+
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut levels = Vec::new();
+            while let Some(level) = seq.next_element::<WireLevel>()? {
+                if levels.len() == MAX_CALL_LEVELS || level.level > MAX_CALL_SOUND_LEVEL {
+                    return Err(serde::de::Error::custom("call levels out of bounds"));
+                }
+                levels.push(persephone_contracts::CallParticipantLevel {
+                    user_id: level.user_id.0,
+                    device_id: level.device_id.0,
+                    level: level.level,
+                });
+            }
+            Ok(levels)
+        }
+    }
+    deserializer.deserialize_seq(Levels)
+}
+
+/// One entry of a level list as it crosses, with its IDs bounded.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WireLevel {
+    user_id: BoundedText<MAX_USER_ID_BYTES>,
+    device_id: BoundedText<MAX_DEVICE_ID_BYTES>,
+    level: u8,
+}
+
+/// A string of at most `N` bytes, refused before it is copied.
+struct BoundedText<const N: usize>(String);
+
+impl<'de, const N: usize> Deserialize<'de> for BoundedText<N> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Text<const N: usize>;
+        impl<const N: usize> serde::de::Visitor<'_> for Text<N> {
+            type Value = BoundedText<N>;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "a string of at most {N} bytes")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, text: &str) -> Result<Self::Value, E> {
+                if text.len() > N {
+                    return Err(E::custom("text too long"));
+                }
+                Ok(BoundedText(text.to_owned()))
+            }
+        }
+        deserializer.deserialize_str(Text::<N>)
     }
 }
 
@@ -4011,6 +4068,27 @@ mod timeline_events_wire_tests {
             .map(|_| one(1, "@a:example.org"))
             .collect();
         assert!(event(serde_json::Value::Array(many)).is_err());
+        // At the limits, on the byte path that the receiver reads.
+        let full: Vec<_> = (0..MAX_CALL_LEVELS)
+            .map(|_| one(1, "@a:example.org"))
+            .collect();
+        let bytes =
+            serde_json::to_vec(&serde_json::json!({"event": {"call_levels": {"levels": full}}}))
+                .unwrap();
+        assert!(serde_json::from_slice::<CoreMessage>(&bytes).is_ok());
+        let longest = "a".repeat(MAX_USER_ID_BYTES);
+        assert!(event(serde_json::json!([one(1, &longest)])).is_ok());
+        let device = "D".repeat(MAX_DEVICE_ID_BYTES + 1);
+        assert!(
+            event(
+                serde_json::json!([{"userId": "@a:example.org", "deviceId": device, "level": 1}])
+            )
+            .is_err()
+        );
+        assert!(
+            event(serde_json::json!([{"userId": "@a:example.org", "deviceId": "D", "level": 1, "x": 1}]))
+                .is_err()
+        );
         let wire =
             serde_json::to_string(&CoreMessage::Event(Event::CallDeviceTestChanged {})).unwrap();
         assert_eq!(wire, r#"{"event":{"call_device_test_changed":{}}}"#);

@@ -19,8 +19,8 @@ use livekit::{
     options::{TrackPublishOptions, VideoCodec, VideoEncoding},
     prelude::{
         AudioProcessingOptions, LocalAudioTrack, LocalTrack, LocalTrackPublication,
-        LocalVideoTrack, Participant, PlatformAudio, RemoteAudioTrack, RemoteTrack,
-        RemoteTrackPublication, TrackKind, TrackSid, TrackSource,
+        LocalVideoTrack, Participant, PlatformAudio, PlayoutDeviceId, RecordingDeviceId,
+        RemoteAudioTrack, RemoteTrack, RemoteTrackPublication, TrackKind, TrackSid, TrackSource,
     },
     rtc_engine::EngineError,
     webrtc::{
@@ -161,14 +161,14 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
     fn listed(wanted: Option<&str>, path: SoundPath) -> Option<&str> {
         wanted.filter(|_| path == SoundPath::Listed)
     }
-    if let Err(code) = select_devices(
+    let sound_devices = match select_devices(
         &audio,
         listed(recording_device.as_deref(), paths[0]),
         listed(playout_device.as_deref(), paths[1]),
-        Selection::BeforeStart,
     ) {
-        return fail(output, code).await;
-    }
+        Ok(devices) => devices,
+        Err(code) => return fail(output, code).await,
+    };
     // Linux stage 2 (ADR-0049): after the sound server connection and before
     // anything goes to the SFU. A failure ends the call.
     if !containment::apply_stage2() && !cfg!(feature = "dev-uncontained") {
@@ -233,6 +233,7 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
         provider: &provider,
         identity: &own,
         audio: &audio,
+        sound_devices,
         output,
         own_sids,
         publication: &publication,
@@ -400,25 +401,23 @@ async fn sound_paths(
     Ok([SoundPath::Listed; 2])
 }
 
-/// When the devices are chosen: before the sound starts, or during a call,
-/// where recording and playout stop, change and start again.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Selection {
-    BeforeStart,
-    DuringCall,
+/// The microphone and speaker a call uses: the platform IDs it opened, or
+/// `None` where it left libwebrtc's own default (no listed system default).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct SoundDevices {
+    recording: Option<String>,
+    playout: Option<String>,
 }
 
-/// Applies the chosen microphone and speaker. `None` opens the system's
-/// default for media where it is listed (`sound_defaults`); a chosen device
-/// that is missing is `DeviceNotFound`, never another device. Both choices
-/// are checked before either device changes. During a call a `None` whose
-/// default is not listed keeps the device in use.
-fn select_devices(
+/// Resolves the chosen microphone and speaker to listed device IDs. `None`
+/// is the system's default for media where it is listed (`sound_defaults`),
+/// else `None`. A chosen device that is missing is `DeviceNotFound`, never
+/// another device. Nothing changes here.
+fn resolve_devices(
     audio: &PlatformAudio,
     recording: Option<&str>,
     playout: Option<&str>,
-    when: Selection,
-) -> Result<(), FailureCode> {
+) -> Result<SoundDevices, FailureCode> {
     let (default_playout, default_recording) = if recording.is_none() || playout.is_none() {
         sound_defaults::media_defaults()
     } else {
@@ -426,61 +425,124 @@ fn select_devices(
     };
     let recording_devices: Vec<_> = audio.recording_devices().collect();
     let ids = || recording_devices.iter().map(|device| device.id.as_str());
-    let wanted_recording = match recording {
+    let recording = match recording {
         Some(_) => choose_device(recording, ids())?,
         None => system_default(default_recording.as_deref(), ids()),
     };
     let playout_devices: Vec<_> = audio.playout_devices().collect();
     let ids = || playout_devices.iter().map(|device| device.id.as_str());
-    let wanted_playout = match playout {
+    let playout = match playout {
         Some(_) => choose_device(playout, ids())?,
         None => system_default(default_playout.as_deref(), ids()),
     };
-    let recording_device = wanted_recording
-        .map(|wanted| {
-            recording_devices
-                .iter()
-                .find(|device| device.id.as_str() == wanted)
-                .ok_or(FailureCode::DeviceNotFound)
-        })
-        .transpose()?;
-    let playout_device = wanted_playout
-        .map(|wanted| {
-            playout_devices
-                .iter()
-                .find(|device| device.id.as_str() == wanted)
-                .ok_or(FailureCode::DeviceNotFound)
-        })
-        .transpose()?;
-    if let Some(device) = recording_device {
-        match when {
-            Selection::BeforeStart => audio.set_recording_device(&device.id),
-            Selection::DuringCall => audio.switch_recording_device(&device.id),
-        }
-        .map_err(|_| FailureCode::DeviceNotFound)?;
-    }
-    if let Some(device) = playout_device {
-        match when {
-            Selection::BeforeStart => audio.set_playout_device(&device.id),
-            Selection::DuringCall => audio.switch_playout_device(&device.id),
-        }
-        .map_err(|_| FailureCode::DeviceNotFound)?;
-    }
-    Ok(())
+    Ok(SoundDevices { recording, playout })
 }
 
-/// Moves the running call to other devices (`SetDevices`, ADR-0059). On
-/// Linux the sound server stream was chosen when the worker started
-/// (ADR-0049), so a change applies to the next call only.
+/// The listed microphone with this platform ID, as libwebrtc names it.
+/// `resolve_devices` checked it, so `None` means it left since then.
+fn recording_id(audio: &PlatformAudio, id: &str) -> Result<RecordingDeviceId, FailureCode> {
+    audio
+        .recording_devices()
+        .find(|device| device.id.as_str() == id)
+        .map(|device| device.id)
+        .ok_or(FailureCode::DeviceNotFound)
+}
+
+/// The listed speaker with this platform ID; see `recording_id`.
+fn playout_id(audio: &PlatformAudio, id: &str) -> Result<PlayoutDeviceId, FailureCode> {
+    audio
+        .playout_devices()
+        .find(|device| device.id.as_str() == id)
+        .map(|device| device.id)
+        .ok_or(FailureCode::DeviceNotFound)
+}
+
+/// Applies the chosen microphone and speaker before the sound starts. Both
+/// choices are checked before either device changes.
+fn select_devices(
+    audio: &PlatformAudio,
+    recording: Option<&str>,
+    playout: Option<&str>,
+) -> Result<SoundDevices, FailureCode> {
+    let wanted = resolve_devices(audio, recording, playout)?;
+    if let Some(id) = &wanted.recording {
+        audio
+            .set_recording_device(&recording_id(audio, id)?)
+            .map_err(|_| FailureCode::DeviceNotFound)?;
+    }
+    if let Some(id) = &wanted.playout {
+        audio
+            .set_playout_device(&playout_id(audio, id)?)
+            .map_err(|_| FailureCode::DeviceNotFound)?;
+    }
+    Ok(wanted)
+}
+
+/// What a change during a call does, from the devices in use and the
+/// resolved choice: `Ok(None)` changes nothing, `Ok(Some(..))` switches to
+/// those devices. A `None` choice that names no listed device cannot move a
+/// call off a device it opened by ID, so that is `Unsupported`; the choice
+/// then applies to the next call.
+fn device_switch(
+    current: &SoundDevices,
+    wanted: &SoundDevices,
+) -> Result<Option<SoundDevices>, FailureCode> {
+    let stranded =
+        |wanted: &Option<String>, current: &Option<String>| wanted.is_none() && current.is_some();
+    if stranded(&wanted.recording, &current.recording)
+        || stranded(&wanted.playout, &current.playout)
+    {
+        return Err(FailureCode::Unsupported);
+    }
+    Ok((wanted != current).then(|| wanted.clone()))
+}
+
+/// Moves the running call to other devices (`SetDevices`, ADR-0059). Both
+/// choices are checked before either device changes. When the speaker
+/// fails after the microphone moved, the microphone goes back, so a failed
+/// change keeps the call on the devices it had. On Linux the sound server
+/// stream was chosen when the worker started (ADR-0049), so a change
+/// applies to the next call only.
 fn switch_devices(
     audio: &PlatformAudio,
+    current: &mut SoundDevices,
     recording: Option<&str>,
     playout: Option<&str>,
 ) -> Result<(), FailureCode> {
     if cfg!(target_os = "linux") {
         return Err(FailureCode::Unsupported);
     }
-    select_devices(audio, recording, playout, Selection::DuringCall)
+    let wanted = resolve_devices(audio, recording, playout)?;
+    let Some(next) = device_switch(current, &wanted)? else {
+        return Ok(());
+    };
+    // Both IDs are found before either device changes.
+    let recording = match &next.recording {
+        Some(id) if next.recording != current.recording => Some(recording_id(audio, id)?),
+        _ => None,
+    };
+    let playout = match &next.playout {
+        Some(id) if next.playout != current.playout => Some(playout_id(audio, id)?),
+        _ => None,
+    };
+    if let Some(id) = &recording {
+        audio
+            .switch_recording_device(id)
+            .map_err(|_| FailureCode::AudioDevice)?;
+    }
+    if let Some(id) = &playout
+        && audio.switch_playout_device(id).is_err()
+    {
+        if recording.is_some()
+            && let Some(previous) = &current.recording
+            && let Ok(previous) = recording_id(audio, previous)
+        {
+            let _ = audio.switch_recording_device(&previous);
+        }
+        return Err(FailureCode::AudioDevice);
+    }
+    *current = next;
+    Ok(())
 }
 
 /// What a device test's thread reports.
@@ -716,6 +778,8 @@ struct Call<'a> {
     identity: &'a ParticipantIdentity,
     /// The microphone and speaker, for a change during the call.
     audio: &'a PlatformAudio,
+    /// The devices the call uses now (ADR-0059).
+    sound_devices: SoundDevices,
     output: &'a Output,
     /// The microphone's publication.
     publication: &'a LocalTrackPublication,
@@ -2269,7 +2333,13 @@ impl Call<'_> {
             ToWorker::Subscribe { index, url, jwt } => self.begin_other(index, url, jwt),
             // A device change that fails keeps the call on its devices.
             ToWorker::SetDevices { recording, playout } => Ok(vec![FromWorker::DevicesSet {
-                failure: switch_devices(self.audio, recording.as_deref(), playout.as_deref()).err(),
+                failure: switch_devices(
+                    self.audio,
+                    &mut self.sound_devices,
+                    recording.as_deref(),
+                    playout.as_deref(),
+                )
+                .err(),
             }]),
             ToWorker::Join { .. }
             | ToWorker::ListDevices
@@ -3076,6 +3146,37 @@ async fn fail(output: &Output, code: FailureCode) -> u8 {
 mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
+
+    /// GIVEN the devices a call uses and a new choice WHEN a change during
+    /// the call is planned THEN an equal choice changes nothing, a new one
+    /// switches, and a "System default" that names no listed device cannot
+    /// move the call off a device it opened by ID.
+    #[test]
+    fn given_a_change_during_a_call_then_only_a_reachable_choice_switches() {
+        let devices = |recording: Option<&str>, playout: Option<&str>| SoundDevices {
+            recording: recording.map(str::to_owned),
+            playout: playout.map(str::to_owned),
+        };
+        let current = devices(Some("mic-1"), Some("spk-1"));
+        assert_eq!(device_switch(&current, &current), Ok(None));
+        let next = devices(Some("mic-2"), Some("spk-1"));
+        assert_eq!(device_switch(&current, &next), Ok(Some(next.clone())));
+        assert_eq!(
+            device_switch(&current, &devices(None, Some("spk-1"))),
+            Err(FailureCode::Unsupported)
+        );
+        assert_eq!(
+            device_switch(&current, &devices(Some("mic-1"), None)),
+            Err(FailureCode::Unsupported)
+        );
+        // A call on libwebrtc's own defaults stays there for a default choice.
+        let unresolved = devices(None, None);
+        assert_eq!(device_switch(&unresolved, &unresolved), Ok(None));
+        assert_eq!(
+            device_switch(&unresolved, &devices(Some("mic-2"), None)),
+            Ok(Some(devices(Some("mic-2"), None)))
+        );
+    }
 
     /// GIVEN a Windows machine with speakers or microphones WHEN the worker
     /// reads the media defaults THEN each is a device that libwebrtc lists,

@@ -72,8 +72,10 @@ commands.
 ### Tray
 
 * "Minimise to tray" (`minimise_to_tray`, main window only) hides both
-  windows and shows a tray icon with the app's own icon and name. A left
-  click brings the windows back and removes the icon. A call keeps running.
+  windows and shows a tray icon with the app's own icon and name. Its menu
+  item "Show Persephone" brings the windows back and removes the icon. On
+  Windows and macOS a left click does the same. Linux sends no icon clicks
+  (Tauri 2.12.4), so there the menu is the way back. A call keeps running.
 * Where the system has no tray, the command fails with `unavailable` and the
   windows stay shown, so the app is never left with no window and no icon.
 * This needs Tauri's `tray-icon` feature. Its crate was already in the

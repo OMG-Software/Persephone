@@ -2012,6 +2012,8 @@ async fn exit_app<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
 
 /// The ID of the tray icon that brings the app back.
 const TRAY_ID: &str = "persephone";
+/// The tray menu item that shows the windows again.
+const TRAY_SHOW: &str = "show";
 
 /// Hides the app's windows and shows a tray icon; a click on the icon
 /// brings them back. If the platform has no tray (some Linux desktops), the
@@ -2024,9 +2026,23 @@ async fn minimise_to_tray<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
             .default_window_icon()
             .cloned()
             .ok_or_else(|| UNAVAILABLE.to_string())?;
+        // Linux sends no icon clicks (Tauri 2.12.4), so the menu is the way
+        // back there; elsewhere a left click also restores.
+        let show =
+            tauri::menu::MenuItem::with_id(&app, TRAY_SHOW, "Show Persephone", true, None::<&str>)
+                .map_err(|_| UNAVAILABLE.to_string())?;
+        let menu =
+            tauri::menu::Menu::with_items(&app, &[&show]).map_err(|_| UNAVAILABLE.to_string())?;
         tauri::tray::TrayIconBuilder::with_id(TRAY_ID)
             .icon(icon)
             .tooltip("Persephone")
+            .menu(&menu)
+            .show_menu_on_left_click(false)
+            .on_menu_event(|app, event| {
+                if event.id().as_ref() == TRAY_SHOW {
+                    restore_from_tray(app);
+                }
+            })
             .on_tray_icon_event(|tray, event| {
                 if let tauri::tray::TrayIconEvent::Click {
                     button: tauri::tray::MouseButton::Left,

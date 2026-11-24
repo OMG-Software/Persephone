@@ -543,7 +543,8 @@ export class LatestOnly<T> {
 
 export const DEVICES_UNSUPPORTED_TEXT = 'Calls are not available on this system yet.';
 export const DEVICES_UNREADABLE_TEXT = 'The saved call devices could not be read. Choose them again.';
-export const DEVICES_NOTE_TEXT = 'Device changes apply from the next call. The volume changes at once.';
+export const DEVICES_NOTE_TEXT =
+  'A microphone or speaker change applies to a running call at once, except on Linux, where it applies from the next call. A camera change applies from the next camera start. The volume changes at once.';
 
 /** The note under the menus, for a device reply. */
 export function devicesNote(devices: CallDevices): string {

@@ -2453,7 +2453,6 @@ pub enum CallDeviceTestState {
 #[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct CallDeviceTestStatus {
-    #[serde(deserialize_with = "Option::deserialize")]
     pub test: Option<CallDeviceTestKind>,
     pub state: CallDeviceTestState,
     #[serde(deserialize_with = "safe_u64")]

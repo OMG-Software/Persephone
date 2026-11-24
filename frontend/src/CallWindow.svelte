@@ -118,12 +118,11 @@
 
   async function setVolume(percent: number) {
     volumeDraft = percent;
+    const mine = ++request;
     try {
       const next = await callVolume(percent);
-      if (volumeDraft === percent) {
-        volumeDraft = null;
-        take(next);
-      }
+      if (volumeDraft === percent) volumeDraft = null;
+      if (mine === request) take(next);
     } catch {
       if (volumeDraft === percent) volumeDraft = null;
       failure = 'The call volume could not be changed.';
@@ -198,11 +197,20 @@
     untrack(() => fetcher.poke());
   });
 
+  // A kept cell can move to another tile (the worker reuses freed tiles),
+  // so the canvas follows its tile number.
   function canvasRef(node: HTMLCanvasElement, tile: number) {
-    canvases[tile] = node;
+    let current = tile;
+    canvases[current] = node;
     return {
+      update(next: number) {
+        if (next === current) return;
+        if (canvases[current] === node) canvases[current] = undefined;
+        current = next;
+        canvases[current] = node;
+      },
       destroy() {
-        if (canvases[tile] === node) canvases[tile] = undefined;
+        if (canvases[current] === node) canvases[current] = undefined;
       }
     };
   }
@@ -291,16 +299,17 @@
             </div>
           </li>
         {/if}
-        {#each status.participants as person (deviceKey(person.userId, person.deviceId))}
+        {#each status.participants as person, index (deviceKey(person.userId, person.deviceId))}
           {@const level = levels.get(deviceKey(person.userId, person.deviceId)) ?? 0}
+          {@const nameId = `call-roster-name-${index}`}
           <li>
-            <span class="call-roster-name"><PersonName userId={person.userId} /></span>
+            <span class="call-roster-name" id={nameId}><PersonName userId={person.userId} /></span>
             {#if person.muted}<span class="call-muted" role="img" aria-label={PARTICIPANT_MUTED_LABEL}><Icon name="mic-off" /></span>{/if}
             <div
               class="call-level"
               class:loud={level >= SOUND_LEVEL_LOUD}
               role="meter"
-              aria-label="Sound level"
+              aria-labelledby={nameId}
               aria-valuemin="0"
               aria-valuemax={SOUND_LEVEL_MAX}
               aria-valuenow={level}
