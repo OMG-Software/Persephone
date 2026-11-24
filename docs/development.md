@@ -187,15 +187,7 @@ downloads `libspa-0.2-dev` and `libpipewire-0.3-dev` 1.0.5-1 from the Ubuntu
 both architectures, because headers do not depend on it. The call worker still
 links the system's `libpipewire-0.3.so` 0.3.48, so the link fails if the
 worker calls a function that the older library lacks, and the `.deb` and
-`.rpm` packages still depend on the system's `libpipewire-0.3-0`. The
-"Minimise to tray" item (ADR-0060) needs Tauri's `tray-icon` feature. At run
-time, `libappindicator-sys` loads `libayatana-appindicator3.so.1`, or else
-`libappindicator3.so.1`, or else either name without the `.1`; it panics only
-if all four fail. The release jobs install `libayatana-appindicator3-dev`,
-because the Tauri bundler finds the tray library with pkg-config and panics
-if it is missing. The bundler then copies the library into the AppImage and
-adds it to the package dependencies: `libayatana-appindicator3-1` in the
-`.deb` and `libayatana-appindicator3.so.1()(64bit)` in the `.rpm`. Each
+`.rpm` packages still depend on the system's `libpipewire-0.3-0`. Each
 package's SHA-256 in the script is the one in noble's `main/binary-amd64`
 `Packages.xz`, which noble's `InRelease` lists and the Ubuntu Archive
 Automatic Signing Key (2018), fingerprint
@@ -203,6 +195,16 @@ Automatic Signing Key (2018), fingerprint
 with `gpgv` and `sha256sum` on 19 November 2026. The release pocket does not
 change during noble's life; when noble leaves the archive, move the pins to
 another signed release.
+
+The "Minimise to tray" item (ADR-0060) needs Tauri's `tray-icon` feature. At
+run time, `libappindicator-sys` loads `libayatana-appindicator3.so.1`, or else
+`libappindicator3.so.1`, or else either name without the `.1`; it panics only
+if all four fail. The release jobs install `libayatana-appindicator3-dev`
+with `apt-get` (no hash pin, like their other packages), because the Tauri
+bundler finds the tray library with pkg-config and panics if it is missing.
+The bundler then copies the library into the AppImage and adds it to the
+package dependencies: `libayatana-appindicator3-1` in the `.deb` and
+`libayatana-appindicator3.so.1()(64bit)` in the `.rpm` (tauri-cli 2.12.3).
 
 The app's version line shows the build's revision: the first 12 hex digits of
 the checked-out commit, or `unknown` ([`crates/core/build.rs`](../crates/core/build.rs)).
