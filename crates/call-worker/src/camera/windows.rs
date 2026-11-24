@@ -26,6 +26,25 @@ use super::capture_size_ok;
 use super::{CapturedFrame, Format};
 use crate::video::{CaptureMode, pick_capture_mode};
 
+/// A failed COM or Media Foundation step: the step and its HRESULT go to the
+/// diagnostic log (only while it is on; no device name or ID), and the camera
+/// is `Unavailable`. Without this note every failure looks the same.
+fn note(step: &'static str, hresult: i32) -> CameraState {
+    log::warn!("camera {step} failed: HRESULT {:#010x}", hresult as u32);
+    CameraState::Unavailable
+}
+
+/// [`note`] for a `windows` error, as a `map_err` argument.
+fn failed(step: &'static str) -> impl FnOnce(windows::core::Error) -> CameraState {
+    move |error| note(step, error.code().0)
+}
+
+/// A step that succeeded but gave nothing usable.
+fn missing(what: &'static str) -> CameraState {
+    log::warn!("camera {what} missing or invalid");
+    CameraState::Unavailable
+}
+
 /// Balances `CoInitializeEx` and `MFStartup` on the thread that made them.
 struct Platform;
 
@@ -35,14 +54,14 @@ impl Platform {
         // on the same thread. A failure here leaves nothing to undo.
         let com = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
         if com.is_err() {
-            return Err(CameraState::Unavailable);
+            return Err(note("CoInitializeEx", com.0));
         }
         // SAFETY: COM is initialised on this thread. `MFShutdown` is called
         // in `Drop` only after this call succeeded.
-        if unsafe { MFStartup(MF_VERSION, MFSTARTUP_LITE) }.is_err() {
+        if let Err(error) = unsafe { MFStartup(MF_VERSION, MFSTARTUP_LITE) } {
             // SAFETY: Balances the successful `CoInitializeEx` above.
             unsafe { CoUninitialize() };
-            return Err(CameraState::Unavailable);
+            return Err(failed("MFStartup")(error));
         }
         Ok(Self)
     }
@@ -96,8 +115,8 @@ fn list_on_this_thread() -> Result<Vec<(String, String)>, CameraState> {
 fn enum_devices() -> Result<Vec<IMFActivate>, CameraState> {
     let mut attributes: Option<IMFAttributes> = None;
     // SAFETY: `attributes` is a valid out pointer for one interface.
-    unsafe { MFCreateAttributes(&mut attributes, 1) }.map_err(|_| CameraState::Unavailable)?;
-    let attributes = attributes.ok_or(CameraState::Unavailable)?;
+    unsafe { MFCreateAttributes(&mut attributes, 1) }.map_err(failed("MFCreateAttributes"))?;
+    let attributes = attributes.ok_or_else(|| missing("MFCreateAttributes"))?;
     // SAFETY: `attributes` is a live attribute store; both GUID pointers
     // are valid for the call.
     unsafe {
@@ -106,13 +125,13 @@ fn enum_devices() -> Result<Vec<IMFActivate>, CameraState> {
             &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
         )
     }
-    .map_err(|_| CameraState::Unavailable)?;
+    .map_err(failed("SetGUID source type"))?;
     let mut array: *mut Option<IMFActivate> = std::ptr::null_mut();
     let mut count = 0_u32;
     // SAFETY: `array` and `count` are valid out pointers. On success the
     // call allocates `count` interface slots with CoTaskMemAlloc.
     unsafe { MFEnumDeviceSources(&attributes, &mut array, &mut count) }
-        .map_err(|_| CameraState::Unavailable)?;
+        .map_err(failed("MFEnumDeviceSources"))?;
     let mut devices = Vec::new();
     if !array.is_null() {
         // SAFETY: On success `array` points to `count` initialised slots.
@@ -177,10 +196,13 @@ fn open(device_id: &str) -> Result<(Opened, u32), CameraState> {
             )
             .is_some_and(|link| link == device_id)
         })
-        .ok_or(CameraState::NotFound)?;
+        .ok_or_else(|| {
+            log::warn!("camera to open is not listed");
+            CameraState::NotFound
+        })?;
     // SAFETY: `activate` is a live activation object.
     let source: IMFMediaSource =
-        unsafe { activate.ActivateObject() }.map_err(|_| CameraState::Unavailable)?;
+        unsafe { activate.ActivateObject() }.map_err(failed("ActivateObject"))?;
     let mut opened = Opened {
         reader: None,
         source: Some(source.clone()),
@@ -188,14 +210,14 @@ fn open(device_id: &str) -> Result<(Opened, u32), CameraState> {
     };
     let mut attributes: Option<IMFAttributes> = None;
     // SAFETY: `attributes` is a valid out pointer for one interface.
-    unsafe { MFCreateAttributes(&mut attributes, 1) }.map_err(|_| CameraState::Unavailable)?;
-    let attributes = attributes.ok_or(CameraState::Unavailable)?;
+    unsafe { MFCreateAttributes(&mut attributes, 1) }.map_err(failed("MFCreateAttributes"))?;
+    let attributes = attributes.ok_or_else(|| missing("MFCreateAttributes"))?;
     // SAFETY: `attributes` is live; the GUID pointer is valid.
     unsafe { attributes.SetUINT32(&MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, 1) }
-        .map_err(|_| CameraState::Unavailable)?;
+        .map_err(failed("SetUINT32 video processing"))?;
     // SAFETY: `source` and `attributes` are live interfaces.
     let reader = unsafe { MFCreateSourceReaderFromMediaSource(&source, &attributes) }
-        .map_err(|_| CameraState::Unavailable)?;
+        .map_err(failed("MFCreateSourceReaderFromMediaSource"))?;
     drop(source);
     let stride = configure(&reader)?;
     opened.reader = Some(reader);
@@ -207,7 +229,7 @@ fn open(device_id: &str) -> Result<(Opened, u32), CameraState> {
 fn configure(reader: &IMFSourceReader) -> Result<u32, CameraState> {
     // SAFETY: `reader` is a live reader; the stream index is the constant
     // the API defines.
-    unsafe { reader.SetStreamSelection(STREAM, true) }.map_err(|_| CameraState::Unavailable)?;
+    unsafe { reader.SetStreamSelection(STREAM, true) }.map_err(failed("SetStreamSelection"))?;
     let mut types: Vec<IMFMediaType> = Vec::new();
     let mut modes: Vec<CaptureMode> = Vec::new();
     for index in 0..256_u32 {
@@ -226,14 +248,17 @@ fn configure(reader: &IMFSourceReader) -> Result<u32, CameraState> {
         });
         types.push(media_type);
     }
-    let best = pick_capture_mode(&modes).ok_or(CameraState::Unavailable)?;
+    let best = pick_capture_mode(&modes).ok_or_else(|| {
+        log::warn!("camera has no usable format: {} listed", modes.len());
+        CameraState::Unavailable
+    })?;
     let chosen = &types[best];
-    let (width, height) = frame_size(chosen).ok_or(CameraState::Unavailable)?;
+    let (width, height) = frame_size(chosen).ok_or_else(|| missing("frame size"))?;
     // SAFETY: `reader` and `chosen` are live interfaces.
     unsafe { reader.SetCurrentMediaType(STREAM, None, chosen) }
-        .map_err(|_| CameraState::Unavailable)?;
+        .map_err(failed("SetCurrentMediaType native"))?;
     // SAFETY: Creates a media type object that this function owns.
-    let wanted = unsafe { MFCreateMediaType() }.map_err(|_| CameraState::Unavailable)?;
+    let wanted = unsafe { MFCreateMediaType() }.map_err(failed("MFCreateMediaType"))?;
     // SAFETY: `wanted` is live; every GUID pointer is valid for the call.
     unsafe {
         wanted
@@ -246,11 +271,11 @@ fn configure(reader: &IMFSourceReader) -> Result<u32, CameraState> {
                 )
             })
     }
-    .map_err(|_| CameraState::Unavailable)?;
+    .map_err(failed("NV12 media type"))?;
     // SAFETY: `reader` and `wanted` are live interfaces. The reader adds
     // the decoder or converter that NV12 output needs.
     unsafe { reader.SetCurrentMediaType(STREAM, None, &wanted) }
-        .map_err(|_| CameraState::Unavailable)?;
+        .map_err(failed("SetCurrentMediaType NV12"))?;
     current_stride(reader)
 }
 
@@ -272,9 +297,10 @@ fn frame_rate(media_type: &IMFMediaType) -> Option<u32> {
 fn current_stride(reader: &IMFSourceReader) -> Result<u32, CameraState> {
     // SAFETY: `reader` is a live reader.
     let current =
-        unsafe { reader.GetCurrentMediaType(STREAM) }.map_err(|_| CameraState::Unavailable)?;
-    let (width, height) = frame_size(&current).ok_or(CameraState::Unavailable)?;
+        unsafe { reader.GetCurrentMediaType(STREAM) }.map_err(failed("GetCurrentMediaType"))?;
+    let (width, height) = frame_size(&current).ok_or_else(|| missing("output frame size"))?;
     if !capture_size_ok(width, height) {
+        log::warn!("camera output size {width}x{height} is outside the limits");
         return Err(CameraState::Unavailable);
     }
     // SAFETY: `current` is a live attribute store; the GUID is valid.
@@ -284,7 +310,7 @@ fn current_stride(reader: &IMFSourceReader) -> Result<u32, CameraState> {
     u32::try_from(stride)
         .ok()
         .filter(|stride| *stride >= width)
-        .ok_or(CameraState::Unavailable)
+        .ok_or_else(|| missing("output stride"))
 }
 
 /// The thread body of a capture. Reports the result of opening once, then

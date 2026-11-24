@@ -10,8 +10,9 @@
 //! executable, so the measurement uses the code that ships.
 //!
 //! The launch below repeats `LaunchSpec::call()` of
-//! `crates/media-broker/src/windows.rs` (capabilities, mitigations, Job
-//! limits) plus one candidate capability. Keep the two in step.
+//! `crates/media-broker/src/windows.rs` (capabilities, the camera's device
+//! capability SID, mitigations, Job limits) plus one candidate capability.
+//! Keep the two in step.
 //!
 //! Exit status of the parent: 0 when the control captured a frame and every
 //! container run finished (whatever it measured); 1 when the control failed
@@ -32,7 +33,8 @@ use windows_sys::Win32::Security::Isolation::{
     CreateAppContainerProfile, DeleteAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
 };
 use windows_sys::Win32::Security::{
-    DeriveCapabilitySidsFromName, FreeSid, PSID, SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES,
+    AllocateAndInitializeSid, DeriveCapabilitySidsFromName, FreeSid, PSID,
+    SECURITY_APP_PACKAGE_AUTHORITY, SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES,
 };
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
@@ -56,6 +58,10 @@ const PARENT_ARG: &str = "--screen-probe";
 const CHILD_ARG: &str = "--screen-probe-child";
 /// The capabilities the call worker has today (`CALL_CAPABILITIES`).
 const CALL_CAPABILITIES: [&str; 3] = ["internetClient", "microphone", "webcam"];
+/// The call worker's camera device capability (`CALL_DEVICE_CAPABILITIES`):
+/// the RIDs of `S-1-15-3-<webcam device class GUID>`.
+const WEBCAM_DEVICE_CAPABILITY: [u32; 4] =
+    [3_845_273_463, 1_331_427_702, 1_186_551_195, 1_148_109_977];
 /// The candidates tried on top of them.
 const CANDIDATES: [(&str, &[&str]); 3] = [
     (
@@ -541,6 +547,41 @@ impl Drop for CapabilitySids {
     }
 }
 
+/// The camera's device capability SID, freed on drop.
+struct DeviceSid(PSID);
+
+impl DeviceSid {
+    fn webcam() -> Option<Self> {
+        let rids = WEBCAM_DEVICE_CAPABILITY;
+        let mut sid: PSID = null_mut();
+        // SAFETY: the authority outlives the call; `sid` is a valid out
+        // pointer. RID 3 is SECURITY_CAPABILITY_BASE_RID.
+        let ok = unsafe {
+            AllocateAndInitializeSid(
+                &SECURITY_APP_PACKAGE_AUTHORITY,
+                5,
+                3,
+                rids[0],
+                rids[1],
+                rids[2],
+                rids[3],
+                0,
+                0,
+                0,
+                &mut sid,
+            )
+        };
+        (ok != 0).then_some(Self(sid))
+    }
+}
+
+impl Drop for DeviceSid {
+    fn drop(&mut self) {
+        // SAFETY: the SID came from AllocateAndInitializeSid.
+        unsafe { FreeSid(self.0) };
+    }
+}
+
 /// A handle closed when dropped.
 struct Owned(HANDLE);
 
@@ -582,9 +623,11 @@ fn run_in_container(
         .sid()
         .ok_or("DeriveAppContainerSidFromAppContainerName")?;
     let sids = CapabilitySids::derive(capabilities).ok_or("DeriveCapabilitySidsFromName")?;
+    let webcam = DeviceSid::webcam().ok_or("AllocateAndInitializeSid")?;
     let mut list: Vec<SID_AND_ATTRIBUTES> = sids
         .0
         .iter()
+        .chain(std::iter::once(&webcam.0))
         .map(|&sid| SID_AND_ATTRIBUTES {
             Sid: sid,
             Attributes: SE_GROUP_ENABLED,

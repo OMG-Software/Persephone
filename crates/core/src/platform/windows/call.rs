@@ -1,5 +1,6 @@
 //! The Windows call host: the call worker runs in the call AppContainer
-//! (`internetClient` and `microphone` only) under a Job, and the core checks
+//! (`internetClient`, `microphone` and `webcam`, the last also as its device
+//! capability SID; see `persephone-media-broker`) under a Job, and the core checks
 //! its `Ready` message before it hands out the link (ADR-0043). The read and
 //! write loops and the `Ready` gate are shared (`platform/call_host.rs`).
 
@@ -142,16 +143,10 @@ mod tests {
     use super::*;
     use crate::calls::worker::{CALL_WORKER_EXE, CallHost};
 
-    /// GIVEN the built call worker WHEN the host starts it THEN it reports
-    /// Ready with no missing control and the link ends it. Needs the
-    /// worker built under `.local/build` (see `docs/development.md` and
-    /// `crates/call-worker/AGENTS.md`). Run with
-    /// `cargo test --locked -p persephone-core --lib platform::windows::call -- --ignored`.
-    #[test]
-    #[ignore = "needs the built persephone-call-worker.exe under .local/build"]
-    fn given_the_built_worker_when_started_then_it_is_ready_and_contained() {
+    /// The built call worker under `.local/build`, debug first.
+    fn built_worker() -> std::path::PathBuf {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.local/build");
-        let exe = ["debug", "release"]
+        ["debug", "release"]
             .iter()
             .flat_map(|profile| {
                 ["rust", "call-worker", "rust-call"]
@@ -160,10 +155,71 @@ mod tests {
                     .collect::<Vec<_>>()
             })
             .find(|path| path.is_file())
-            .expect("persephone-call-worker.exe not found under .local/build");
-        let link = ContainedCallHost::at(exe)
+            .expect("persephone-call-worker.exe not found under .local/build")
+    }
+
+    /// GIVEN the built call worker WHEN the host starts it THEN it reports
+    /// Ready with no missing control and the link ends it. Needs the
+    /// worker built under `.local/build` (see `docs/development.md` and
+    /// `crates/call-worker/AGENTS.md`). Run with
+    /// `cargo test --locked -p persephone-core --lib platform::windows::call -- --ignored`.
+    #[test]
+    #[ignore = "needs the built persephone-call-worker.exe under .local/build"]
+    fn given_the_built_worker_when_started_then_it_is_ready_and_contained() {
+        let link = ContainedCallHost::at(built_worker())
             .start(&WorkerAudio::default())
             .expect("the contained worker reports Ready with bits 0");
+        link.finish(Duration::from_secs(5));
+    }
+
+    /// GIVEN the built worker and a connected camera WHEN a camera test runs
+    /// in the call AppContainer THEN the camera turns on and a picture
+    /// reaches tile 0, and `Leave` ends the test. Without the camera's device
+    /// capability SID, the open fails with `E_ACCESSDENIED`
+    /// (`docs/evidence/camera-windows.md`). Needs a camera and the worker
+    /// built under `.local/build`; the camera light comes on for a moment.
+    /// Run with
+    /// `cargo test --locked -p persephone-core --lib platform::windows::call -- --ignored camera`.
+    #[test]
+    #[ignore = "needs a connected camera and the built persephone-call-worker.exe"]
+    fn given_a_camera_when_tested_in_the_container_then_a_picture_arrives() {
+        use persephone_call_protocol::{CameraState, DeviceTest, FromWorker, ToWorker};
+        let mut link = ContainedCallHost::at(built_worker())
+            .start(&WorkerAudio::default())
+            .expect("the contained worker reports Ready with bits 0");
+        let store = link.video();
+        store.sync(true, [false; 5]);
+        link.send(ToWorker::TestDevice {
+            test: DeviceTest::Camera,
+            device: None,
+        })
+        .unwrap();
+        let picture = || store.newest(0, 0, store.stream(0)).is_some();
+        let until = std::time::Instant::now() + Duration::from_secs(15);
+        let mut on = false;
+        while std::time::Instant::now() < until && !(on && picture()) {
+            match link.events.try_recv() {
+                Ok(FromWorker::Camera { state }) => {
+                    assert_eq!(state, CameraState::On, "the camera did not start");
+                    on = true;
+                }
+                Ok(FromWorker::Failed { code }) => panic!("the test failed: {code:?}"),
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(Duration::from_millis(20)),
+            }
+        }
+        assert!(on && picture(), "no camera picture in 15 seconds");
+        link.send(ToWorker::Leave).unwrap();
+        let until = std::time::Instant::now() + Duration::from_secs(5);
+        let mut left = false;
+        while std::time::Instant::now() < until && !left {
+            match link.events.try_recv() {
+                Ok(FromWorker::Left) => left = true,
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(Duration::from_millis(20)),
+            }
+        }
+        assert!(left, "the test did not end after Leave");
         link.finish(Duration::from_secs(5));
     }
 }

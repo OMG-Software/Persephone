@@ -70,6 +70,15 @@ to the page".
   capabilities become `internetClient`, `microphone` and `webcam`. Whether a
   mitigation must be relaxed for the camera is not yet measured; each one
   that is relaxed is measured and recorded, as in ADR-0043.
+  Amendment, 24 November 2026: the owner reported that the camera test did
+  not work on Windows. The named `webcam` SID from
+  `DeriveCapabilitySidsFromName` lists the camera but its open fails with
+  `E_ACCESSDENIED`. The token now also carries `webcam` as a device
+  capability SID, `S-1-15-3-<device class GUID as four RIDs>`
+  (`S-1-15-3-3845273463-1331427702-1186551195-1148109977`), the form a
+  packaged app's token has. It is the same capability, not a new one; no
+  mitigation changed. Evidence:
+  [camera-windows.md](../evidence/camera-windows.md).
 * A camera is the Media Foundation symbolic link (its ID) and the friendly
   name. The same limits and name rules as microphones apply (ADR-0043,
   "Audio devices"). `ListDevices` also lists at most 32 cameras. Listing

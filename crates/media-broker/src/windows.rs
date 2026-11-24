@@ -29,9 +29,10 @@ use windows_sys::Win32::{
         WAIT_OBJECT_0, WAIT_TIMEOUT,
     },
     Security::{
-        DeriveCapabilitySidsFromName, FreeSid, Isolation::CreateAppContainerProfile,
-        Isolation::DeleteAppContainerProfile, Isolation::DeriveAppContainerSidFromAppContainerName,
-        PSID, SECURITY_ATTRIBUTES, SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES,
+        AllocateAndInitializeSid, DeriveCapabilitySidsFromName, FreeSid,
+        Isolation::CreateAppContainerProfile, Isolation::DeleteAppContainerProfile,
+        Isolation::DeriveAppContainerSidFromAppContainerName, PSID, SECURITY_APP_PACKAGE_AUTHORITY,
+        SECURITY_ATTRIBUTES, SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES,
     },
     System::{
         JobObjects::{
@@ -73,6 +74,9 @@ const HRESULT_ALREADY_EXISTS: i32 = 0x800700B7_u32 as i32;
 const PIPE_BUFFER_BYTES: u32 = 1024 * 1024;
 // SE_GROUP_ENABLED from winnt.h, as the unsigned attribute value.
 const SE_GROUP_ENABLED: u32 = 0x4;
+// SECURITY_CAPABILITY_BASE_RID from winnt.h: the first RID of a capability
+// SID (`S-1-15-3-...`).
+const SECURITY_CAPABILITY_BASE_RID: u32 = 3;
 
 /// The only capabilities a call worker gets: network access for LiveKit and
 /// the microphone and the camera (`webcam`, ADR-0048). A closed set; callers
@@ -88,6 +92,34 @@ const CALL_CAPABILITIES: &[&str] = &[
     "webcam",
     "privateNetworkClientServer",
 ];
+/// The device capabilities a call worker gets, as the four RIDs of each
+/// device class GUID. A packaged app's token carries a device capability as
+/// the SID `S-1-15-3-<GUID as four RIDs>`, and the camera device interfaces
+/// grant access to that SID. The SID that `DeriveCapabilitySidsFromName`
+/// gives for `webcam` is not enough: with it alone, Media Foundation lists
+/// the camera inside the container but `ActivateObject` fails with
+/// `E_ACCESSDENIED` (ADR-0048; `docs/evidence/camera-windows.md`). Only
+/// `webcam`. A closed set; callers cannot add GUIDs.
+const CALL_DEVICE_CAPABILITIES: &[[u32; 4]] = &[WEBCAM_DEVICE_CAPABILITY];
+/// `webcam`: the device class `{E5323777-F976-4F5B-9B55-B94699C46E44}`.
+const WEBCAM_DEVICE_CAPABILITY: [u32; 4] = guid_rids(
+    0xE532_3777,
+    0xF976,
+    0x4F5B,
+    [0x9B, 0x55, 0xB9, 0x46, 0x99, 0xC4, 0x6E, 0x44],
+);
+
+/// The four RIDs of a GUID in a device capability SID: the GUID's 16 bytes
+/// in memory order, read as four little-endian numbers.
+const fn guid_rids(data1: u32, data2: u16, data3: u16, data4: [u8; 8]) -> [u32; 4] {
+    [
+        data1,
+        ((data3 as u32) << 16) | data2 as u32,
+        u32::from_le_bytes([data4[0], data4[1], data4[2], data4[3]]),
+        u32::from_le_bytes([data4[4], data4[5], data4[6], data4[7]]),
+    ]
+}
+
 /// Committed memory for the call worker process.
 const CALL_MEMORY_LIMIT_BYTES: usize = 512 * 1024 * 1024;
 
@@ -280,6 +312,8 @@ fn pipe(child_reads: bool) -> Result<(OwnedHandle, OwnedHandle), LaunchError> {
 struct LaunchSpec {
     /// Capability names; empty for the media worker.
     capabilities: &'static [&'static str],
+    /// Device capability GUIDs as RIDs; empty for the media worker.
+    device_capabilities: &'static [[u32; 4]],
     mitigations: Mitigations,
     memory_limit_bytes: usize,
     /// User-mode CPU limit; `None` for a long-lived worker.
@@ -291,17 +325,20 @@ impl LaunchSpec {
     fn media(policy: &WorkerPolicy) -> Self {
         Self {
             capabilities: &[],
+            device_capabilities: &[],
             mitigations: policy.mitigations,
             memory_limit_bytes: policy.memory_limit_bytes,
             cpu_time_limit: Some(policy.cpu_time_limit),
         }
     }
 
-    /// The call worker: two capabilities, no dynamic-code or Win32k
-    /// mitigation (the audio stack needs both), no CPU limit.
+    /// The call worker: the call capabilities and the camera's device
+    /// capability, no dynamic-code or Win32k mitigation (the audio stack
+    /// needs both), no CPU limit.
     fn call() -> Self {
         Self {
             capabilities: CALL_CAPABILITIES,
+            device_capabilities: CALL_DEVICE_CAPABILITIES,
             mitigations: Mitigations {
                 prohibit_dynamic_code: false,
                 disable_win32k: false,
@@ -312,15 +349,22 @@ impl LaunchSpec {
     }
 }
 
-/// Capability SIDs derived from names, freed on drop.
+/// Capability SIDs derived from names and device capability GUIDs, freed on
+/// drop.
 struct CapabilitySids {
+    /// From `DeriveCapabilitySidsFromName` (LocalAlloc).
     sids: Vec<PSID>,
+    /// From `AllocateAndInitializeSid` (FreeSid).
+    device: Vec<PSID>,
 }
 
 impl CapabilitySids {
-    fn derive(names: &[&str]) -> Result<Self, LaunchError> {
+    fn derive(names: &[&str], devices: &[[u32; 4]]) -> Result<Self, LaunchError> {
         // Built first, so the SIDs derived so far are freed on an error.
-        let mut result = Self { sids: Vec::new() };
+        let mut result = Self {
+            sids: Vec::new(),
+            device: Vec::new(),
+        };
         for name in names {
             let wide: Vec<u16> = OsStr::new(name).encode_wide().chain(Some(0)).collect();
             let (mut group_sids, mut group_count): (*mut PSID, u32) = (null_mut(), 0);
@@ -359,12 +403,38 @@ impl CapabilitySids {
                 });
             }
         }
+        for rids in devices {
+            let mut sid: PSID = null_mut();
+            // SAFETY: the authority outlives the call and `sid` is a valid out
+            // pointer. Five RIDs are used: the capability base RID and the
+            // GUID's four.
+            let ok = unsafe {
+                AllocateAndInitializeSid(
+                    &SECURITY_APP_PACKAGE_AUTHORITY,
+                    5,
+                    SECURITY_CAPABILITY_BASE_RID,
+                    rids[0],
+                    rids[1],
+                    rids[2],
+                    rids[3],
+                    0,
+                    0,
+                    0,
+                    &mut sid,
+                )
+            };
+            if ok == 0 {
+                return Err(api("AllocateAndInitializeSid"));
+            }
+            result.device.push(sid);
+        }
         Ok(result)
     }
 
     fn attributes(&self) -> Vec<SID_AND_ATTRIBUTES> {
         self.sids
             .iter()
+            .chain(&self.device)
             .map(|&sid| SID_AND_ATTRIBUTES {
                 Sid: sid,
                 Attributes: SE_GROUP_ENABLED,
@@ -378,6 +448,10 @@ impl Drop for CapabilitySids {
         for &sid in &self.sids {
             // SAFETY: each SID was allocated by DeriveCapabilitySidsFromName.
             unsafe { LocalFree(sid.cast()) };
+        }
+        for &sid in &self.device {
+            // SAFETY: each SID was allocated by AllocateAndInitializeSid.
+            unsafe { FreeSid(sid) };
         }
     }
 }
@@ -530,7 +604,8 @@ pub struct StartedCallWorker {
 }
 
 /// Starts the call worker in `profile` with the call containment: the
-/// `internetClient` and `microphone` capabilities only, the media worker's
+/// `internetClient`, `microphone` and `webcam` capabilities only (`webcam`
+/// also as its device capability SID), the media worker's
 /// mitigations except dynamic-code prohibition and Win32k disable, and a Job
 /// with kill-on-close and a memory limit. The worker is in the Job before it
 /// runs.
@@ -562,7 +637,7 @@ fn launch(
     let (child_stdout, broker_stdout) = pipe(false)?;
     let job = job(spec)?;
 
-    let capability_sids = CapabilitySids::derive(spec.capabilities)?;
+    let capability_sids = CapabilitySids::derive(spec.capabilities, spec.device_capabilities)?;
     let mut capability_list = capability_sids.attributes();
     let capabilities = SECURITY_CAPABILITIES {
         AppContainerSid: sid.0,
@@ -698,6 +773,9 @@ fn job_stats(job: &OwnedHandle, process: &OwnedHandle, elapsed: Duration) -> Wor
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows_sys::Win32::Security::{
+        EqualSid, GetSidIdentifierAuthority, GetSidSubAuthority, GetSidSubAuthorityCount,
+    };
 
     #[test]
     fn given_default_mitigations_then_flags_set_every_required_policy_bit() {
@@ -788,12 +866,64 @@ mod tests {
     /// each yields one capability SID and the SIDs differ.
     #[test]
     fn given_call_capabilities_then_the_os_derives_distinct_sids() {
-        let sids = CapabilitySids::derive(CALL_CAPABILITIES).unwrap();
+        let sids = CapabilitySids::derive(CALL_CAPABILITIES, &[]).unwrap();
         assert_eq!(sids.sids.len(), CALL_CAPABILITIES.len());
         for (i, sid) in sids.sids.iter().enumerate() {
             assert!(sids.sids[i + 1..].iter().all(|other| other != sid));
         }
         assert!(sids.attributes().iter().all(|a| a.Attributes == 4));
+    }
+
+    /// GIVEN the `webcam` device class GUID WHEN turned into RIDs THEN they
+    /// are the four numbers of the device capability SID that packaged apps
+    /// carry, `S-1-15-3-3845273463-1331427702-1186551195-1148109977`.
+    #[test]
+    fn given_webcam_guid_then_the_rids_are_those_of_its_device_capability_sid() {
+        assert_eq!(
+            WEBCAM_DEVICE_CAPABILITY,
+            [3_845_273_463, 1_331_427_702, 1_186_551_195, 1_148_109_977]
+        );
+    }
+
+    /// GIVEN the call and media launch specs THEN only the call worker gets a
+    /// device capability, and that is the camera only.
+    #[test]
+    fn given_launch_specs_then_only_the_call_worker_gets_the_camera_device_capability() {
+        assert_eq!(
+            LaunchSpec::call().device_capabilities,
+            [WEBCAM_DEVICE_CAPABILITY]
+        );
+        let media = LaunchSpec::media(&WorkerPolicy::default());
+        assert!(media.device_capabilities.is_empty());
+    }
+
+    /// GIVEN the call capabilities and the camera device capability WHEN
+    /// the SIDs are built THEN the token list has the named SIDs and then
+    /// `S-1-15-3-<RIDs>`, each enabled, and nothing else.
+    #[test]
+    fn given_device_capability_then_its_sid_is_app_package_authority_base_rid_and_guid() {
+        let sids = CapabilitySids::derive(CALL_CAPABILITIES, CALL_DEVICE_CAPABILITIES).unwrap();
+        let list = sids.attributes();
+        assert_eq!(list.len(), CALL_CAPABILITIES.len() + 1);
+        assert!(list.iter().all(|a| a.Attributes == SE_GROUP_ENABLED));
+        let device = list.last().unwrap().Sid;
+        // SAFETY: `device` is a valid SID owned by `sids`, which lives on.
+        unsafe {
+            assert_eq!(
+                (*GetSidIdentifierAuthority(device)).Value,
+                SECURITY_APP_PACKAGE_AUTHORITY.Value
+            );
+            assert_eq!(*GetSidSubAuthorityCount(device), 5);
+            let rids: Vec<u32> = (0..5).map(|i| *GetSidSubAuthority(device, i)).collect();
+            assert_eq!(rids[0], SECURITY_CAPABILITY_BASE_RID);
+            assert_eq!(rids[1..], WEBCAM_DEVICE_CAPABILITY);
+        }
+        // The named `webcam` SID is a different SID; both are kept.
+        assert!(
+            sids.sids
+                .iter()
+                .all(|&named| unsafe { EqualSid(named, device) } == 0)
+        );
     }
 
     #[test]
