@@ -102,8 +102,11 @@ no media permissions, and a browser test would prove nothing about the worker.
   chosen speaker and answers `failed`, and the page asks the user to rejoin
   the call.
 * The worker answers `DevicesSet { failure }`. The core shows a failure as the
-  call status's `deviceChange` (`not_found`, `unsupported` or `failed`) until
-  the next change. Linux reports `unsupported`: the PulseAudio path has no
+  call status's `deviceChange` (`not_found`, `unsupported`, `kept` or
+  `failed`) until the next change. `kept` (worker code `DeviceKept`) is a
+  failed microphone switch that the worker undid: the old microphone
+  captures again and the speaker is not lost, so the page does not ask to
+  rejoin. Linux reports `unsupported`: the PulseAudio path has no
   switch yet.
 * `SetDevices` also carries the camera choice. The worker keeps it, and the
   call's next camera start opens it; a camera that is on keeps running until

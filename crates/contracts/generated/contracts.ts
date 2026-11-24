@@ -150,7 +150,7 @@ tile: number, participant: CallParticipantRef | null, own: boolean,
  */
 stream: number, };
 
-export type CallDeviceChange = "not_found" | "unsupported" | "failed";
+export type CallDeviceChange = "not_found" | "unsupported" | "kept" | "failed";
 
 export type CallStatus = { phase: CallPhase, roomId: string | null, 
 /**
@@ -193,8 +193,8 @@ video: Array<CallVideoTile>,
 ringDeclined: boolean, 
 /**
  * The last change of the microphone or speaker during this call failed
- * (ADR-0059). After `not_found` and `unsupported` the call keeps the
- * devices it had. After `failed` the microphone may be the new one and
+ * (ADR-0059). After `not_found`, `unsupported` and `kept` the call keeps
+ * the devices it had. After `failed` the microphone may be the new one and
  * the sound may have stopped. Null after a change that worked, and
  * before any.
  */

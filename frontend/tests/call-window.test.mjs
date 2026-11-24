@@ -100,7 +100,10 @@ test('GIVEN each device test state THEN only the newest test has a text, and eve
   assert.match(camera, /privacy/);
   assert.doesNotMatch(deviceTestText({ test: 'microphone', state: 'unavailable', stream: 0 }, 'microphone'), /privacy/);
   assert.deepEqual(Object.keys(DEVICE_TEST_LABEL), ['microphone', 'speaker', 'camera']);
-  assert.deepEqual(Object.keys(DEVICE_CHANGE_TEXT).sort(), ['failed', 'not_found', 'unsupported']);
+  assert.deepEqual(Object.keys(DEVICE_CHANGE_TEXT).sort(), ['failed', 'kept', 'not_found', 'unsupported']);
+  // Only a change that may have stopped the sound asks to rejoin.
+  assert.doesNotMatch(DEVICE_CHANGE_TEXT.kept, /rejoin/);
+  assert.match(DEVICE_CHANGE_TEXT.failed, /rejoin/);
 });
 
 test('GIVEN a call the window saw WHEN it ends THEN the window closes after the delay, unless it is brought to the front first', (context) => {

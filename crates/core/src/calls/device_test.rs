@@ -52,20 +52,33 @@ pub fn failure_state(code: FailureCode) -> CallDeviceTestState {
         | FailureCode::Network
         | FailureCode::Decryption
         | FailureCode::Protocol
-        | FailureCode::Internal => CallDeviceTestState::Failed,
+        | FailureCode::Internal
+        | FailureCode::DeviceKept => CallDeviceTestState::Failed,
     }
 }
 
 /// The state after one worker message, or `None` when the message changes
 /// nothing. An ended test stays as it ended. `stopped` is true once the
 /// user stopped the test: a test that ends before its device ran is then
-/// `idle`, not a failure.
+/// `idle`, not a failure. A device that reports it runs after the stop (it
+/// was still opening) does not make the test run, so the user's stop is not
+/// shown as a finished test.
 pub fn next_state(
     current: CallDeviceTestState,
     message: &FromWorker,
     stopped: bool,
 ) -> Option<CallDeviceTestState> {
     if is_final(current) {
+        return None;
+    }
+    let running = matches!(
+        message,
+        FromWorker::Connected
+            | FromWorker::Camera {
+                state: CameraState::On
+            }
+    );
+    if stopped && running && current == CallDeviceTestState::Starting {
         return None;
     }
     let next = match message {
@@ -189,6 +202,28 @@ mod tests {
         assert_eq!(
             next_state(start, &FromWorker::Left, false),
             Some(CallDeviceTestState::Failed)
+        );
+    }
+
+    /// GIVEN a test the user stopped while its device opened WHEN the worker
+    /// then reports the device runs and leaves THEN the test is idle, not
+    /// done; WHEN the device ran before the stop THEN the test is done.
+    #[test]
+    fn given_a_stop_while_the_device_opens_then_a_late_start_is_ignored() {
+        let start = CallDeviceTestState::Starting;
+        let on = FromWorker::Camera {
+            state: CameraState::On,
+        };
+        assert_eq!(next_state(start, &FromWorker::Connected, true), None);
+        assert_eq!(next_state(start, &on, true), None);
+        assert_eq!(
+            next_state(start, &FromWorker::Left, true),
+            Some(CallDeviceTestState::Idle)
+        );
+        let running = CallDeviceTestState::Running;
+        assert_eq!(
+            next_state(running, &FromWorker::Left, true),
+            Some(CallDeviceTestState::Done)
         );
     }
 

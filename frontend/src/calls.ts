@@ -705,6 +705,7 @@ export const PARTICIPANT_MUTED_LABEL = 'Microphone off';
 export const DEVICE_CHANGE_TEXT: Record<CallDeviceChange, string> = {
   not_found: 'The chosen microphone or speaker is not connected. The call keeps the one it had.',
   unsupported: 'This change cannot be made during a call on this system. It applies to the next call.',
+  kept: 'The chosen microphone could not be opened. The call keeps the one it had.',
   failed: 'The microphone or speaker could not be changed, and the sound may have stopped. Choose a device again, or leave and rejoin the call.'
 };
 

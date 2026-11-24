@@ -680,6 +680,7 @@ impl View {
                 let change = failure.map(|code| match code {
                     FailureCode::DeviceNotFound => CallDeviceChange::NotFound,
                     FailureCode::Unsupported => CallDeviceChange::Unsupported,
+                    FailureCode::DeviceKept => CallDeviceChange::Kept,
                     _ => CallDeviceChange::Failed,
                 });
                 if self.device_change == change {
@@ -2903,7 +2904,12 @@ fn run_device_test(
             let _ = link.send(ToWorker::SetDiagnostics { on });
         }
         match link.events.try_recv() {
-            Ok(FromWorker::SoundLevel { level }) => inner.own_level(level),
+            // After the user's stop the meter shows nothing more.
+            Ok(FromWorker::SoundLevel { level }) => {
+                if !user_stopped {
+                    inner.own_level(level);
+                }
+            }
             Ok(FromWorker::Diagnostic {
                 level,
                 target,
@@ -4504,6 +4510,28 @@ mod tests {
             member("@b:example.org", "B", "https://other.example.org"),
         ]);
         view
+    }
+
+    /// GIVEN each device change answer WHEN it is applied THEN an undone
+    /// switch is `kept` (the call has its devices), apart from a `failed`
+    /// change that may have stopped the sound; a change that worked clears it.
+    #[test]
+    fn given_device_change_answers_then_an_undone_switch_is_kept() {
+        let mut view = view();
+        for (code, change) in [
+            (FailureCode::DeviceKept, CallDeviceChange::Kept),
+            (FailureCode::AudioDevice, CallDeviceChange::Failed),
+            (FailureCode::DeviceNotFound, CallDeviceChange::NotFound),
+            (FailureCode::Unsupported, CallDeviceChange::Unsupported),
+        ] {
+            let answer = FromWorker::DevicesSet {
+                failure: Some(code),
+            };
+            assert_eq!(view.apply(&answer), Applied::Changed);
+            assert_eq!(view.device_change, Some(change));
+        }
+        view.apply(&FromWorker::DevicesSet { failure: None });
+        assert_eq!(view.device_change, None);
     }
 
     /// GIVEN a joining call WHEN the worker connects THEN the state is

@@ -613,12 +613,15 @@ impl SwitchAudio for LiveAudio<'_> {
 }
 
 /// Switches the microphone, then the speaker, to `next`, and keeps
-/// `current` as the devices the call uses. Each failure is `AudioDevice`.
+/// `current` as the devices the call uses. Each failure is `AudioDevice`,
+/// except a failed microphone switch that is fully undone: `DeviceKept`.
 ///
 /// * A microphone switch counts only when capture runs after it, so a
 ///   lost microphone that LiveKit only selects is started again or stays
 ///   lost. A failed microphone may have stopped capture: the old
-///   microphone is switched back and started again. Where that fails, or
+///   microphone is switched back and started again. When it captures again
+///   and the speaker is not lost, the call has the devices it had, and the
+///   answer is `DeviceKept`, so the page does not ask to rejoin. Where that fails, or
 ///   where there is no old ID (libwebrtc's own default), capture starts on
 ///   what is selected, and `recording_lost` is set.
 /// * A failed speaker stopped playout, which cannot start again, so
@@ -651,6 +654,9 @@ fn apply_switch(
         && !(audio.switch_recording(id) && audio.restart_recording())
     {
         current.recording_lost = !restore_recording(audio, current.recording.as_deref());
+        if !current.recording_lost && !current.playout_lost {
+            return Err(FailureCode::DeviceKept);
+        }
         return Err(FailureCode::AudioDevice);
     }
     // A lost microphone with no ID to switch to (libwebrtc's own default):
@@ -3527,9 +3533,12 @@ mod tests {
         assert_eq!(audio.calls, ["mic mic-2", "restart", "speaker spk-2"]);
         assert!(audio.capturing);
 
-        // The new microphone fails: the old one is switched back and started.
+        // The new microphone fails: the old one is switched back and started,
+        // so the call has the devices it had.
         let mut audio = fake(&["mic-1"], &["spk-2"], true);
-        assert_eq!(run(&from, &mut audio), (failed, from.clone()));
+        let kept = Err(FailureCode::DeviceKept);
+        assert_eq!(run(&from, &mut audio), (kept, from.clone()));
+        assert!(audio.capturing);
         assert_eq!(audio.calls, ["mic mic-2", "mic mic-1", "restart"]);
 
         // ... and when nothing starts again, the microphone is lost.

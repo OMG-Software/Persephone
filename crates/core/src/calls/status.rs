@@ -33,7 +33,8 @@ pub fn end_code(reason: EndReason) -> CallEnd {
             FailureCode::Decryption
             | FailureCode::Protocol
             | FailureCode::Internal
-            | FailureCode::Unsupported => CallEnd::Internal,
+            | FailureCode::Unsupported
+            | FailureCode::DeviceKept => CallEnd::Internal,
         },
         EndReason::WorkerStopped => CallEnd::WorkerStopped,
         EndReason::WorkerCrashed => CallEnd::WorkerCrashed,

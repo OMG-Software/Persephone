@@ -473,6 +473,9 @@ pub enum FailureCode {
     /// The system's privacy settings do not let the worker use the device
     /// (ADR-0059).
     DeviceDenied = 11,
+    /// A device change failed, and the call runs on the devices it had: the
+    /// old microphone was switched back and captures (ADR-0059).
+    DeviceKept = 12,
 }
 
 impl TryFrom<u8> for FailureCode {
@@ -491,6 +494,7 @@ impl TryFrom<u8> for FailureCode {
             9 => Self::DeviceNotFound,
             10 => Self::Unsupported,
             11 => Self::DeviceDenied,
+            12 => Self::DeviceKept,
             _ => return Err(DecodeError::InvalidValue),
         })
     }
@@ -2053,7 +2057,7 @@ mod tests {
                 rotation: 0,
             },
         ];
-        for code in 1..=11 {
+        for code in 1..=12 {
             all.push(FromWorker::Failed {
                 code: FailureCode::try_from(code).unwrap(),
             });
@@ -2278,7 +2282,7 @@ mod tests {
             Err(DecodeError::InvalidValue)
         );
         assert_eq!(
-            FromWorker::decode(&[VERSION, FROM_FAILED, 12]),
+            FromWorker::decode(&[VERSION, FROM_FAILED, 13]),
             Err(DecodeError::InvalidValue)
         );
         assert_eq!(
