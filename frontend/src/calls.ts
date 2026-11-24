@@ -5,9 +5,18 @@
 import type {
   CallCamera,
   CallDevice,
+  CallDeviceChange,
   CallDevices,
+  CallDeviceTestKind,
+  CallDeviceTestState,
+  CallDeviceTestStatus,
+  CALL_DEVICE_ID_BYTES_MAX,
+  CALL_PARTICIPANTS_MAX,
+  CALL_SOUND_LEVEL_MAX,
+  CALL_USER_ID_BYTES_MAX,
   CallEnd,
   CallJoinError,
+  CallParticipantLevel,
   CallPhase,
   CallReadiness,
   CallScreen,
@@ -49,7 +58,7 @@ export const JOIN_ERROR_TEXT: Record<CallJoinError, string> = {
   keys: 'The call keys could not be made.',
   proxy_unreadable: 'The proxy setting cannot be read, so the call was not started.',
   device_setting_unreadable:
-    'The call device setting cannot be read. Choose the devices again in Preferences.'
+    'The call device setting cannot be read. Choose the devices again in Settings, Calls.'
 };
 
 // `left` has no text: the bar just goes away.
@@ -58,7 +67,7 @@ export const END_TEXT: Record<CallEnd, string> = {
   connection_failed: 'The connection to the call server failed.',
   audio_device: 'The microphone or speaker is not available.',
   device_not_found:
-    'The chosen microphone or speaker is not connected. Choose another in Preferences.',
+    'The chosen microphone or speaker is not connected. Choose another in Settings, Calls.',
   containment: 'The call stopped: its process was not contained.',
   worker_stopped: 'The call process stopped.',
   worker_crashed: 'The call process failed with an internal error.',
@@ -97,7 +106,8 @@ export const IDLE_CALL: CallStatus = {
   camera: 'off',
   screen: 'off',
   video: [],
-  ringDeclined: false
+  ringDeclined: false,
+  deviceChange: null
 };
 
 /** This account is in a call, or joining one. */
@@ -439,10 +449,14 @@ export function volumeText(percent: number): string {
   return `${volumeValue(percent)}%`;
 }
 
-/** The label of the call's sound level meter, under the call volume (ADR-0055). */
-export const SOUND_LEVEL_LABEL = 'Call sound';
+/**
+ * The label of the own microphone's level meter (ADR-0055, ADR-0059): it
+ * shows what the microphone picks up, so a silent meter means the call does
+ * not hear you.
+ */
+export const SOUND_LEVEL_LABEL = 'Your microphone';
 /** The top of the meter: full scale, 0 dBFS. 0 is -60 dBFS or quieter. */
-export const SOUND_LEVEL_MAX = 100;
+export const SOUND_LEVEL_MAX: typeof CALL_SOUND_LEVEL_MAX = 100;
 /** From this level (-6 dBFS) the meter shows the sound as loud. */
 export const SOUND_LEVEL_LOUD = 90;
 
@@ -455,6 +469,18 @@ export function parseSoundLevel(value: unknown): number | null {
   return typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= SOUND_LEVEL_MAX
     ? value
     : null;
+}
+
+/**
+ * The own microphone level the page shows (ADR-0055, ADR-0059). It is 0
+ * while a call joins, so a new call never starts with an old level. In every
+ * other phase it shows: the call's own level while the call is active, and a
+ * device test's level while no call runs, also while the bar still shows how
+ * the last call ended. The core sends 0 when a call ends, and the call bar
+ * shows no meter after the end.
+ */
+export function shownSoundLevel(phase: CallPhase, level: number): number {
+  return phase === 'joining' ? 0 : level;
 }
 
 /** The meter's spoken value: "Silent", else the level in decibels below full scale. */
@@ -533,7 +559,8 @@ export class LatestOnly<T> {
 
 export const DEVICES_UNSUPPORTED_TEXT = 'Calls are not available on this system yet.';
 export const DEVICES_UNREADABLE_TEXT = 'The saved call devices could not be read. Choose them again.';
-export const DEVICES_NOTE_TEXT = 'Device changes apply from the next call. The volume changes at once.';
+export const DEVICES_NOTE_TEXT =
+  'A microphone or speaker change applies to a running call at once, except on Linux, where it applies from the next call. A camera change applies from the next camera start. The volume changes at once.';
 
 /** The note under the menus, for a device reply. */
 export function devicesNote(devices: CallDevices): string {
@@ -620,3 +647,126 @@ export function ringsAnnouncement(rings: readonly ShownRing[]): string {
 export function ringsKey(rings: readonly ShownRing[]): string {
   return rings.map((ring) => ring.ringId).join(',');
 }
+
+/**
+ * The most devices one levels message names: the contract's
+ * `CALL_PARTICIPANTS_MAX`. Its type is that constant's literal, so a change of
+ * the contract fails the type check here.
+ */
+export const MAX_CALL_LEVELS: typeof CALL_PARTICIPANTS_MAX = 32;
+/**
+ * The longest user ID and device ID, in UTF-8 bytes: the contract's limits,
+ * typed as their literals so a change of the contract fails the type check.
+ */
+const MAX_USER_ID_BYTES: typeof CALL_USER_ID_BYTES_MAX = 255;
+const MAX_DEVICE_ID_BYTES: typeof CALL_DEVICE_ID_BYTES_MAX = 255;
+
+const utf8Bytes = (text: string) => new TextEncoder().encode(text).byteLength;
+
+/**
+ * The other devices' levels the host sent (ADR-0059), or `null` when the
+ * value is anything but a list of at most {@link MAX_CALL_LEVELS} entries with
+ * a bounded user ID, device ID and a whole level from 0 to
+ * {@link SOUND_LEVEL_MAX}. Extra fields are refused too.
+ */
+export function parseLevels(value: unknown): CallParticipantLevel[] | null {
+  if (!Array.isArray(value) || value.length > MAX_CALL_LEVELS) return null;
+  const levels: CallParticipantLevel[] = [];
+  for (const entry of value) {
+    if (typeof entry !== 'object' || entry === null) return null;
+    const keys = Object.keys(entry);
+    if (keys.length !== 3) return null;
+    const { userId, deviceId, level } = entry as Record<string, unknown>;
+    if (typeof userId !== 'string' || typeof deviceId !== 'string') return null;
+    if (utf8Bytes(userId) > MAX_USER_ID_BYTES || utf8Bytes(deviceId) > MAX_DEVICE_ID_BYTES) return null;
+    if (parseSoundLevel(level) === null) return null;
+    levels.push({ userId, deviceId, level: level as number });
+  }
+  return levels;
+}
+
+/** The key of one device in a call, for level lookups. */
+export function deviceKey(userId: string, deviceId: string): string {
+  return JSON.stringify([userId, deviceId]);
+}
+
+/**
+ * The newest level of each device. Each message names the devices that are
+ * not silent, so a device it leaves out is silent now.
+ */
+export function levelMap(levels: readonly CallParticipantLevel[]): Map<string, number> {
+  return new Map(levels.map((entry) => [deviceKey(entry.userId, entry.deviceId), entry.level]));
+}
+
+/** Read beside a participant whose microphone is off (ADR-0059). */
+export const PARTICIPANT_MUTED_LABEL = 'Microphone off';
+
+/** What a failed device change in a call means (ADR-0059). */
+export const DEVICE_CHANGE_TEXT: Record<CallDeviceChange, string> = {
+  not_found: 'The chosen microphone or speaker is not connected. The call keeps the one it had.',
+  unsupported: 'This change cannot be made during a call on this system. It applies to the next call.',
+  kept: 'The chosen microphone could not be opened. The call keeps the one it had.',
+  failed: 'The microphone or speaker could not be changed, and the sound may have stopped. Choose a device again, or leave and rejoin the call.'
+};
+
+/** The buttons that start each device test. */
+export const DEVICE_TEST_LABEL: Record<CallDeviceTestKind, string> = {
+  microphone: 'Test microphone',
+  speaker: 'Test speaker',
+  camera: 'Test camera'
+};
+export const DEVICE_TEST_STOP_LABEL = 'Stop test';
+
+/** What a running test asks of the user. */
+const RUNNING_TEXT: Record<CallDeviceTestKind, string> = {
+  microphone: 'Speak now. The meter moves when Persephone hears your microphone.',
+  speaker: 'Playing a tone. You should hear it now.',
+  camera: 'The camera picture shows below when Persephone can use the camera.'
+};
+
+/** What an ended test found. */
+const DONE_TEXT: Record<CallDeviceTestKind, string> = {
+  microphone: 'The microphone test ended. If the meter did not move, Persephone did not hear the microphone.',
+  speaker: 'The tone played. If you heard nothing, check the speaker and its volume.',
+  camera: 'The camera test ended.'
+};
+
+/** The test's state as text, for the states every test shares. */
+const STATE_TEXT: Record<Exclude<CallDeviceTestState, 'running' | 'done'>, string> = {
+  idle: '',
+  starting: 'Starting the test…',
+  not_found: 'The chosen device is not connected.',
+  denied: 'Your system did not allow Persephone to use this device. Check its privacy settings.',
+  unsupported: 'This test is not available on this system yet.',
+  unavailable: 'The device could not start. Another app may be using it.',
+  in_call: 'Leave the call to test a device.',
+  failed: 'The test could not run.'
+};
+
+/**
+ * The camera's `unavailable` text. The camera path reports one state for an
+ * app that holds the camera and for the system's privacy settings, so the
+ * text names both (ADR-0059).
+ */
+const CAMERA_TEST_UNAVAILABLE_TEXT =
+  'The camera could not start. Another app may be using it, or your system’s privacy settings may block it.';
+
+/**
+ * The text beside the `kind` test's button, or '' when that test is not
+ * the newest one.
+ */
+export function deviceTestText(status: CallDeviceTestStatus, kind: CallDeviceTestKind): string {
+  if (status.test !== kind) return '';
+  if (status.state === 'running') return RUNNING_TEXT[kind];
+  if (status.state === 'done') return DONE_TEXT[kind];
+  if (kind === 'camera' && status.state === 'unavailable') return CAMERA_TEST_UNAVAILABLE_TEXT;
+  return STATE_TEXT[status.state];
+}
+
+/** Whether the test runs or starts, so its button stops it. */
+export function deviceTestActive(status: CallDeviceTestStatus, kind: CallDeviceTestKind): boolean {
+  return status.test === kind && (status.state === 'starting' || status.state === 'running');
+}
+
+/** No device test yet. */
+export const IDLE_DEVICE_TEST: CallDeviceTestStatus = { id: 0, test: null, state: 'idle', stream: 0 };

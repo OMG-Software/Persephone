@@ -28,11 +28,13 @@ pub fn end_code(reason: EndReason) -> CallEnd {
             FailureCode::SignallingRefused | FailureCode::Tls | FailureCode::Network => {
                 CallEnd::ConnectionFailed
             }
-            FailureCode::AudioDevice => CallEnd::AudioDevice,
+            FailureCode::AudioDevice | FailureCode::DeviceDenied => CallEnd::AudioDevice,
             FailureCode::DeviceNotFound => CallEnd::DeviceNotFound,
-            FailureCode::Decryption | FailureCode::Protocol | FailureCode::Internal => {
-                CallEnd::Internal
-            }
+            FailureCode::Decryption
+            | FailureCode::Protocol
+            | FailureCode::Internal
+            | FailureCode::Unsupported
+            | FailureCode::DeviceKept => CallEnd::Internal,
         },
         EndReason::WorkerStopped => CallEnd::WorkerStopped,
         EndReason::WorkerCrashed => CallEnd::WorkerCrashed,
@@ -89,6 +91,7 @@ pub fn status(state: &CallState) -> CallStatus {
             screen,
             video,
             ring_declined,
+            device_change,
         } => CallStatus {
             phase: CallPhase::Active,
             room_id: Some(room_id.to_string()),
@@ -105,6 +108,7 @@ pub fn status(state: &CallState) -> CallStatus {
                     reachable: p.reachable,
                     keyed: p.keyed,
                     sharing: p.sharing,
+                    muted: p.muted,
                 })
                 .collect(),
             ended: None,
@@ -113,6 +117,7 @@ pub fn status(state: &CallState) -> CallStatus {
             screen: *screen,
             video: video.iter().take(CALL_VIDEO_TILES_MAX).cloned().collect(),
             ring_declined: *ring_declined,
+            device_change: *device_change,
         },
         CallState::Ended { room_id, reason } => CallStatus {
             phase: CallPhase::Ended,
@@ -471,6 +476,7 @@ mod tests {
             screen: CallScreen::Off,
             video: Vec::new(),
             ring_declined: false,
+            device_change: None,
         };
         let refused = join_reply(CallError::Declined, &CallState::Idle);
         assert_eq!(refused.phase, CallPhase::Idle);
@@ -513,6 +519,7 @@ mod tests {
             reachable: false,
             keyed: true,
             sharing: true,
+            muted: true,
         };
         let many = vec![participant; CALL_PARTICIPANTS_MAX + 5];
         let active = status(&CallState::Active {
@@ -533,8 +540,14 @@ mod tests {
                 CALL_VIDEO_TILES_MAX + 3
             ],
             ring_declined: true,
+            device_change: Some(persephone_contracts::CallDeviceChange::NotFound),
         });
         assert!(active.ring_declined);
+        assert_eq!(
+            active.device_change,
+            Some(persephone_contracts::CallDeviceChange::NotFound)
+        );
+        assert!(active.participants.iter().all(|p| p.muted));
         assert!(!CallStatus::idle().ring_declined);
         assert_eq!(active.camera, CallCamera::On);
         assert_eq!(active.screen, CallScreen::On);

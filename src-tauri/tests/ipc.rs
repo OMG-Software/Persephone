@@ -3,9 +3,10 @@
 
 use persephone_core_protocol::{Call, ErrorCode, Event, MAX_CALL_SOUND_LEVEL, MAX_ROOM_ID_BYTES};
 use persephone_desktop::{
-    BAND_PREFIX_BYTES, MAIN_WINDOW, Subscriptions, VIDEO_PREFIX_BYTES, configure, context,
+    BAND_PREFIX_BYTES, CALL_WINDOW, MAIN_WINDOW, Subscriptions, VIDEO_PREFIX_BYTES, configure,
+    context,
     core_link::{Band, CoreError, CoreLink, CoreTransport, Video},
-    create_main_window,
+    create_call_window, create_main_window,
 };
 use std::sync::{
     Arc, Mutex,
@@ -530,6 +531,15 @@ impl CoreTransport for FakeCore {
                 }
                 _ => Err(CoreError::Core(ErrorCode::InvalidArgument)),
             },
+            Call::CallDeviceTest { test, .. } => Ok(serde_json::json!({
+                "id": 3, "test": test, "state": "starting", "stream": 0
+            })),
+            Call::CallDeviceTestStop { id: None | Some(3) } => Ok(serde_json::Value::Null),
+            Call::CallDeviceTestStop { .. } => Err(CoreError::Core(ErrorCode::InvalidArgument)),
+            // A state outside the contract must not reach the page.
+            Call::CallDeviceTestStatus {} => Ok(serde_json::json!({
+                "id": 0, "test": "camera", "state": "exploded", "stream": 0
+            })),
             Call::NewSessions {} => Ok(serde_json::json!({
                 "sessions": [{"deviceId": "NEWDEV", "displayName": null}], "truncated": false
             })),
@@ -904,7 +914,10 @@ fn given_shell_config_then_security_settings_are_restrictive() {
     assert_eq!(app["withGlobalTauri"], false);
     assert_eq!(app["windows"], serde_json::json!([]));
     assert_eq!(app["security"]["freezePrototype"], true);
-    assert_eq!(app["security"]["capabilities"], serde_json::json!(["main"]));
+    assert_eq!(
+        app["security"]["capabilities"],
+        serde_json::json!(["main", "call"])
+    );
     assert!(
         app["security"]
             .get("dangerousDisableAssetCspModification")
@@ -981,6 +994,9 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-diagnostic-records",
             "allow-call-devices",
             "allow-set-call-devices",
+            "allow-call-device-test",
+            "allow-call-device-test-stop",
+            "allow-call-device-test-status",
             "allow-register",
             "allow-sign-out",
             "allow-security-status",
@@ -996,6 +1012,8 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-call-status",
             "allow-call-rings",
             "allow-call-decline-ring",
+            "allow-open-call-window",
+            "allow-close-call-window",
             "allow-set-up-encryption",
             "allow-recover-with-key",
             "allow-send-message",
@@ -1070,9 +1088,120 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-profile-list",
             "allow-add-profile",
             "allow-switch-profile",
+            "allow-exit-app",
+            "allow-minimise-to-tray",
         ])
     );
     assert!(capability.get("remote").is_none(), "no remote origins");
+
+    // The call window gets only what a call needs (ADR-0060).
+    let call: serde_json::Value =
+        serde_json::from_str(include_str!("../capabilities/call.json")).unwrap();
+    assert_eq!(call["windows"], serde_json::json!([CALL_WINDOW]));
+    assert_eq!(
+        call["permissions"],
+        serde_json::json!([
+            "allow-watch-session",
+            "allow-call-status",
+            "allow-call-video-frame",
+            "allow-call-leave",
+            "allow-call-mute",
+            "allow-call-deafen",
+            "allow-call-volume",
+            "allow-call-camera",
+            "allow-call-screen",
+            "allow-close-call-window"
+        ])
+    );
+    assert!(call.get("remote").is_none(), "no remote origins");
+}
+
+/// GIVEN the call window WHEN its page calls a call command THEN it is
+/// relayed; WHEN it calls a main window command, a device test or opens
+/// windows THEN it is refused before the core.
+#[test]
+fn given_the_call_window_then_only_call_commands_are_allowed() {
+    let core = FakeCore::new(true);
+    let app = app_with(core.clone());
+    let _main = create_main_window(&app).unwrap();
+    let window = create_call_window(&app).unwrap();
+    assert_eq!(window.label(), CALL_WINDOW);
+    assert_eq!(
+        invoke_on(&window, "call_status", app_origin(), serde_json::json!({})).unwrap()["phase"],
+        call_idle()["phase"]
+    );
+    let before = core.calls.load(Ordering::SeqCst);
+    for (cmd, args) in [
+        ("room_list", serde_json::json!({})),
+        ("app_status", serde_json::json!({})),
+        ("open_call_window", serde_json::json!({})),
+        ("minimise_to_tray", serde_json::json!({})),
+        ("exit_app", serde_json::json!({})),
+        ("call_devices", serde_json::json!({})),
+        (
+            "call_device_test",
+            serde_json::json!({"test": "microphone", "device": null}),
+        ),
+        (
+            "call_join",
+            serde_json::json!({"roomId": "!r:example.invalid", "video": false}),
+        ),
+    ] {
+        assert!(
+            invoke_on(&window, cmd, app_origin(), args).is_err(),
+            "{cmd} refused"
+        );
+    }
+    assert_eq!(core.calls.load(Ordering::SeqCst), before, "nothing relayed");
+    assert!(
+        invoke_on(
+            &window,
+            "call_status",
+            "https://evil.invalid",
+            serde_json::json!({})
+        )
+        .is_err()
+    );
+}
+
+/// GIVEN device test commands THEN bounded IDs cross, a bad one never
+/// reaches the core, and a reply outside the contract is refused.
+#[test]
+fn given_device_test_commands_then_bounded_arguments_cross() {
+    let core = FakeCore::new(true);
+    let app = app_with(core.clone());
+    let window = create_main_window(&app).unwrap();
+    let invoke = |cmd: &str, args| invoke_on(&window, cmd, app_origin(), args);
+    assert_eq!(
+        invoke(
+            "call_device_test",
+            serde_json::json!({"test": "speaker", "device": "{0.0.0.00000000}.{a}"})
+        ),
+        Ok(serde_json::json!({"id": 3, "test": "speaker", "state": "starting", "stream": 0}))
+    );
+    assert_eq!(
+        invoke("call_device_test_stop", serde_json::json!({})),
+        Ok(serde_json::Value::Null)
+    );
+    // The test ID crosses to the core.
+    assert_eq!(
+        invoke("call_device_test_stop", serde_json::json!({"id": 3})),
+        Ok(serde_json::Value::Null)
+    );
+    assert!(invoke("call_device_test_stop", serde_json::json!({"id": 4})).is_err());
+    assert!(invoke("call_device_test_stop", serde_json::json!({"id": -1})).is_err());
+    assert!(invoke("call_device_test_status", serde_json::json!({})).is_err());
+    let before = core.calls.load(Ordering::SeqCst);
+    for args in [
+        serde_json::json!({"test": "speaker", "device": ""}),
+        serde_json::json!({"test": "speaker", "device": "a\nb"}),
+        serde_json::json!({"test": "speaker", "device": "a".repeat(1025)}),
+        serde_json::json!({"test": "kettle", "device": null}),
+        serde_json::json!({"device": null}),
+    ] {
+        assert!(invoke("call_device_test", args.clone()).is_err(), "{args}");
+    }
+    assert_eq!(core.calls.load(Ordering::SeqCst), before, "nothing relayed");
 }
 
 #[test]
@@ -1313,7 +1442,7 @@ fn given_a_session_change_then_room_channels_drop_and_the_session_channel_is_tol
     assert!(
         invoke(
             "watch_session",
-            serde_json::json!({"onChange": "__CHANNEL__:3", "onSoundLevel": "__CHANNEL__:4"})
+            serde_json::json!({"onChange": "__CHANNEL__:3", "onSoundLevel": "__CHANNEL__:4", "onLevels": "__CHANNEL__:5"})
         )
         .is_ok()
     );
@@ -1341,7 +1470,35 @@ fn given_a_session_change_then_room_channels_drop_and_the_session_channel_is_tol
     subscriptions.dispatch(Event::CallSoundLevel {
         level: MAX_CALL_SOUND_LEVEL + 1,
     });
+    let level = |level| persephone_contracts::CallParticipantLevel {
+        user_id: "@bob:example.invalid".into(),
+        device_id: "BOBDEV".into(),
+        level,
+    };
+    subscriptions.dispatch(Event::CallLevels {
+        levels: vec![level(30)],
+    });
+    subscriptions.dispatch(Event::CallLevels {
+        levels: vec![level(MAX_CALL_SOUND_LEVEL + 1)],
+    });
+    subscriptions.dispatch(Event::CallDeviceTestChanged {});
     let delivered = delivered.lock().unwrap().clone();
+    // The other devices' levels go on their own channel; a level over the
+    // top drops the whole event.
+    let others: Vec<&String> = delivered
+        .iter()
+        .filter(|(channel, _)| *channel == 5)
+        .map(|(_, body)| body)
+        .collect();
+    assert_eq!(
+        others,
+        [&r#"[{"userId":"@bob:example.invalid","deviceId":"BOBDEV","level":30}]"#.to_owned()],
+        "{delivered:?}"
+    );
+    assert!(
+        delivered.contains(&(3, r#""deviceTest""#.into())),
+        "{delivered:?}"
+    );
     // The level goes on its own channel as a number; one over the top is
     // dropped, and nothing about it reaches the session channel.
     let levels: Vec<&String> = delivered
@@ -2647,7 +2804,7 @@ fn given_a_notification_event_then_only_the_toaster_sees_it() {
         request(
             "watch_session",
             app_origin(),
-            serde_json::json!({"onChange": "__CHANNEL__:3", "onSoundLevel": "__CHANNEL__:4"}),
+            serde_json::json!({"onChange": "__CHANNEL__:3", "onSoundLevel": "__CHANNEL__:4", "onLevels": "__CHANNEL__:5"}),
         ),
     )
     .unwrap();

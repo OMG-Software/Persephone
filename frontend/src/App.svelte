@@ -23,15 +23,17 @@
     liveRings,
     nextRingEnd,
     shownRings,
+    shownSoundLevel,
     videoCallButton,
     CallOperations,
     LatestOnly,
     VOLUME_SAVE_TEXT,
     type ShownRing
   } from './calls';
+  import { CALL_WINDOW_UNAVAILABLE_TEXT } from './callWindow';
   import RoomTools from './RoomTools.svelte';
   import ConnectionHealth from './ConnectionHealth.svelte';
-  import { callCamera, callDeafen, callDeclineRing, callDevices, callScreen, callJoin, callLeave, callMute, callReadiness, callRings, callStatus, callVolume, changeRoom, roomMembers, jumpToDate, eventContext, setPinned, setRoomPreference, startConversation } from './bridge';
+  import { callCamera, callDeafen, callDeclineRing, callDevices, callScreen, openCallWindow, callJoin, callLeave, callMute, callReadiness, callRings, callStatus, callVolume, changeRoom, roomMembers, jumpToDate, eventContext, setPinned, setRoomPreference, startConversation } from './bridge';
   import { LEAVE_NOT_DONE, LEAVE_QUESTION, LEAVING_TEXT, leaveAfterDraftFlush } from './roomLeave';
   import type { FocusedTimeline, ImagePick } from '../../crates/contracts/generated/contracts';
   import LocalSearch from './LocalSearch.svelte';
@@ -49,7 +51,7 @@
   import Icon from './Icon.svelte';
   import IconAction from './IconAction.svelte';
   import Menu, { type MenuItem } from './Menu.svelte';
-  import { mainMenuItems, roomMenuItems } from './menu.ts';
+  import { EXIT_DRAFT_TEXT, TRAY_UNAVAILABLE_TEXT, exitWhenSaved, mainMenuItems, roomMenuItems } from './menu.ts';
   import MemberPanel from './MemberPanel.svelte';
   import {
     MEMBERS,
@@ -73,6 +75,7 @@
   import NewConversation from './NewConversation.svelte';
   import NewRoom from './NewRoom.svelte';
   import Preferences from './Preferences.svelte';
+  import CallDevices from './CallDevices.svelte';
   import CaptureProtection from './CaptureProtection.svelte';
   import ProfileSettings from './ProfileSettings.svelte';
   import RoomSettings from './RoomSettings.svelte';
@@ -125,6 +128,8 @@
     pickImage,
     pasteImage,
     sendImage,
+    exitApp,
+    minimiseToTray,
     lockSession,
     pendingMessages,
     retryMessage,
@@ -794,13 +799,26 @@
   let volumeDraft = $state<number | null>(null);
   // Goes up each time the core says a new video picture is waiting.
   let callVideoTicks = $state(0);
-  // The running call's sound level meter (ADR-0055): 0 to 100. A level that
-  // arrives outside an active call is dropped, and it goes back to 0 when the
-  // call ends, so a new call never starts with an old level.
+  // The own microphone level (ADR-0055, ADR-0059): 0 to 100. It is the
+  // call's level while a call is active and a device test's level while no
+  // call runs, also right after a call ended. It is 0 while a call joins.
   let callSoundLevel = $state(0);
   function takeSoundLevel(level: number) {
-    callSoundLevel = callState.phase === 'active' ? level : 0;
+    callSoundLevel = shownSoundLevel(callState.phase, level);
   }
+  // Goes up each time a device test changes (ADR-0059).
+  let deviceTestTicks = $state(0);
+  // The call window opens when a call starts joining (ADR-0060). It opens
+  // once per call: closing it during the call keeps it closed until the call
+  // bar's "Call window" button.
+  let callWindowFor = false;
+  $effect(() => {
+    const joined = inCall(callState);
+    // A window that cannot open leaves the call here; say so, so no window
+    // is missed without a reason.
+    if (joined && !callWindowFor) void openCallWindow().catch(() => (error = CALL_WINDOW_UNAVAILABLE_TEXT));
+    callWindowFor = joined;
+  });
   let callJoinText = $state<string | null>(null);
   let cameraText = $state<string | null>(null);
   let screenText = $state<string | null>(null);
@@ -818,7 +836,8 @@
   // A camera failure is about the call that is running; it goes when that
   // call ends.
   $effect(() => {
-    if (callState.phase !== 'active') callSoundLevel = 0;
+    // Only written, never read here, so a level change does not run this.
+    if (callState.phase === 'joining') callSoundLevel = 0;
     if (callState.phase === 'ended' || callState.phase === 'idle') {
       cameraRequest += 1;
       cameraText = null;
@@ -1741,7 +1760,7 @@
     // Without the channel the page could keep showing a locked session, so it
     // loads nothing.
     try {
-      await watchSession(reset, refreshRooms, refreshSecurity, refreshModules, () => callRefresher.request(), () => (callVideoTicks += 1), refreshRings, refreshAccount, takeSoundLevel);
+      await watchSession(reset, refreshRooms, refreshSecurity, refreshModules, () => callRefresher.request(), () => (callVideoTicks += 1), refreshRings, refreshAccount, takeSoundLevel, () => {}, () => (deviceTestTicks += 1));
     } catch {
       unavailable = true;
       return;
@@ -2679,7 +2698,7 @@
       ?.focus();
   }
 
-  // The main menu: account-wide tools, Settings and Lock.
+  // The main menu: account-wide tools, Settings, Lock and Exit.
   const mainMenu = $derived(
     mainMenuItems(
       {
@@ -2696,7 +2715,15 @@
         ignored: () => (ignoreOpen = true),
         health: () => (healthOpen = true),
         settings: () => openSettings('security'),
-        lock: () => void toggleLock()
+        lock: () => void toggleLock(),
+        // A refusal keeps the windows shown; say why, so it is no lost click.
+        tray: () => void minimiseToTray().catch(() => (error = TRAY_UNAVAILABLE_TEXT)),
+        exit: () =>
+          void exitWhenSaved(() => draftKeeper.flush(), exitApp)
+            .then((exited) => {
+              if (!exited) error = EXIT_DRAFT_TEXT;
+            })
+            .catch(() => {})
       }
     )
   );
@@ -2826,6 +2853,11 @@
           <button type="button" class="secondary" onclick={closeSettings}>Return to room</button>
         </div>
       {/if}
+      <!-- Above every tab, so a failure from the menu or the call bar (the
+           call window, the tray, Exit) shows on any settings tab. -->
+      {#if error}
+        <p role="alert" class="error">{error}</p>
+      {/if}
       {#if settingsTab === 'profile'}
         {#if signedIn && status.account.userId}
           <ProfileSettings
@@ -2882,6 +2914,22 @@
             <p class="lede">No account is signed in. Settings belong to an account, so there are none to change.</p>
           </section>
         {/if}
+      {:else if settingsTab === 'calls'}
+        <section class="settings-page" aria-labelledby="calls-heading">
+          <h2 id="calls-heading">Calls</h2>
+          {#if signedIn}
+            <p class="lede">
+              The microphone, speaker and camera that calls use, and the call volume. They are kept
+              in this computer's encrypted profile.
+            </p>
+            <div class="panel">
+              <h3>Devices</h3>
+              <CallDevices soundLevel={callSoundLevel} testTicks={deviceTestTicks} videoTicks={callVideoTicks} />
+            </div>
+          {:else}
+            <p class="lede">No account is signed in. Call devices belong to an account, so there are none to choose.</p>
+          {/if}
+        </section>
       {:else if settingsTab === 'accounts'}
         <Accounts beforechange={prepareAccountSwitch} />
         {#if !status || status.store === 'not_configured'}
@@ -3032,9 +3080,6 @@
               {/if}
             </div>
           {/if}
-          {#if error}
-            <p role="alert" class="error">{error}</p>
-          {/if}
         </section>
       {/if}
     </Settings>
@@ -3163,6 +3208,7 @@
           onscreen={toggleScreen}
           onleave={leaveCall}
           ondismiss={dismissCall}
+          onwindow={() => void openCallWindow().catch(() => (error = CALL_WINDOW_UNAVAILABLE_TEXT))}
         />
         {#if cameraText}
           <p class="call-notice camera-notice error" role="alert">

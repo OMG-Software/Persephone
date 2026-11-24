@@ -155,6 +155,10 @@ their level after the warm-up. macOS runs the workload without the count.
     the diagnostic log.
   * It is an ARIA `meter` with the level in decibels as its spoken value.
     From -6 dBFS it shows in the danger colour.
+* Amendment, 2026-11-24 (owner request, ADR-0059): the meter now shows the
+  own microphone's level, from the local audio track's `media-source`
+  statistic, and is labelled "Your microphone". The remote levels go to each
+  participant's own meter. The timing, bounds and channel above stay.
 
 ### Positive Consequences
 

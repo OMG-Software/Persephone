@@ -32,7 +32,7 @@ use super::video::{Notifier, Picture, VideoStore};
 use super::worker::{
     CallHost, CallWorkerLink, StartError, WorkerAudio, WorkerExit, WorkerProcess, exit_is_crash,
 };
-use super::{MAX_CALL_MEMBERS, keys::FrameKey};
+use super::{MAX_CALL_MEMBERS, device_test, keys::FrameKey};
 use crate::session::Admission;
 use matrix_sdk::{
     Client, RoomState,
@@ -48,7 +48,10 @@ use persephone_call_protocol::{
     CameraState, FailureCode, FrameKeyMsg, FromWorker, MAX_VOLUME_PERCENT, ScreenState, ToWorker,
     TurnServer, VIDEO_TILES,
 };
-use persephone_contracts::{CallCamera, CallParticipantRef, CallScreen, CallVideoTile};
+use persephone_contracts::{
+    CALL_PARTICIPANTS_MAX, CallCamera, CallDeviceChange, CallDeviceTestKind, CallDeviceTestState,
+    CallDeviceTestStatus, CallParticipantLevel, CallParticipantRef, CallScreen, CallVideoTile,
+};
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet, VecDeque},
     future::Future,
@@ -168,6 +171,9 @@ pub struct Participant {
     pub keyed: bool,
     /// It shares its screen (ADR-0053); a display hint from the sender.
     pub sharing: bool,
+    /// Its microphone is muted or it has none (ADR-0059); a hint from the
+    /// sender.
+    pub muted: bool,
 }
 
 /// The call as the page sees it. It holds no secret and no peer text.
@@ -196,6 +202,8 @@ pub enum CallState {
         /// The other member of a direct chat declined this call's ring
         /// (ADR-0052). The call goes on.
         ring_declined: bool,
+        /// The last device change of this call failed (ADR-0059).
+        device_change: Option<CallDeviceChange>,
     },
     Ended {
         room_id: OwnedRoomId,
@@ -364,6 +372,13 @@ struct View {
     /// Other devices only.
     members: Vec<ActiveMember>,
     speaking: HashSet<String>,
+    /// The connection and identity of each remote microphone that is muted
+    /// or absent (ADR-0059), as the worker said with `ParticipantMuted`. A
+    /// display hint only, kept like `sharing`: an identity that is not a
+    /// member yet waits here and shows once the membership is read, and only
+    /// while the connection is the one that speaks for the member. At most
+    /// `MAX_PARTICIPANTS` are kept.
+    mic_muted: HashSet<(u8, String)>,
     keyed: HashSet<String>,
     camera: CallCamera,
     /// The own screen share.
@@ -387,6 +402,8 @@ struct View {
     video_streams: [u64; VIDEO_TILES as usize],
     /// The ring this call sent was declined (ADR-0052).
     ring_declined: bool,
+    /// The last device change failed (ADR-0059).
+    device_change: Option<CallDeviceChange>,
 }
 
 /// Remote video tiles: tiles 1 to 4 are cameras, tile 5 is the screen share.
@@ -405,6 +422,7 @@ impl View {
             volume: MAX_VOLUME_PERCENT,
             members: Vec::new(),
             speaking: HashSet::new(),
+            mic_muted: HashSet::new(),
             keyed: HashSet::new(),
             camera: if video {
                 CallCamera::Starting
@@ -417,6 +435,7 @@ impl View {
             other: OtherSfus::default(),
             video_streams: Default::default(),
             ring_declined: false,
+            device_change: None,
         }
     }
 
@@ -483,8 +502,9 @@ impl View {
             .collect();
         self.speaking.retain(|id| backends.contains(id.as_str()));
         self.keyed.retain(|id| present.contains(id.as_str()));
-        // `sharing` keeps hints of identities that are not members yet: the
-        // worker can hear of a share before the membership arrives.
+        // `sharing` and `mic_muted` keep hints of identities that are not
+        // members yet: the worker can hear of a share or a muted microphone
+        // before the membership arrives. `ParticipantLeft` removes them.
     }
 
     /// The page asked for the screen share on or off. The state shows
@@ -617,14 +637,58 @@ impl View {
         tiles
     }
 
+    /// The member whose sound level the worker reports, as the page names
+    /// it: only a current member, and only from the connection that speaks
+    /// for it.
+    fn level_member(&self, connection: u8, identity: &str) -> Option<CallParticipantLevelKey> {
+        if !self.accepts(connection, identity) {
+            return None;
+        }
+        self.backend_member(identity)
+            .map(|member| (member.user_id.to_string(), member.device_id.to_string()))
+    }
+
     fn apply(&mut self, event: &FromWorker) -> Applied {
         match event {
             // A record goes to the diagnostic log, never to the view.
-            // A sound level goes to the level meter, never to the view.
+            // A sound level goes to the level meters, never to the view.
             FromWorker::Ready { .. }
             | FromWorker::ParticipantJoined { .. }
             | FromWorker::Diagnostic { .. }
-            | FromWorker::SoundLevel { .. } => Applied::Same,
+            | FromWorker::SoundLevel { .. }
+            | FromWorker::ParticipantLevel { .. } => Applied::Same,
+            FromWorker::ParticipantMuted {
+                connection,
+                identity,
+                muted,
+            } => {
+                let key = (*connection, identity.clone());
+                let changed = if *muted {
+                    self.mic_muted.len() < persephone_call_protocol::MAX_PARTICIPANTS
+                        && self.mic_muted.insert(key)
+                } else {
+                    self.mic_muted.remove(&key)
+                };
+                // A hint for someone who is not a member changes no row.
+                if changed && self.accepts(*connection, identity) {
+                    Applied::Changed
+                } else {
+                    Applied::Same
+                }
+            }
+            FromWorker::DevicesSet { failure } => {
+                let change = failure.map(|code| match code {
+                    FailureCode::DeviceNotFound => CallDeviceChange::NotFound,
+                    FailureCode::Unsupported => CallDeviceChange::Unsupported,
+                    FailureCode::DeviceKept => CallDeviceChange::Kept,
+                    _ => CallDeviceChange::Failed,
+                });
+                if self.device_change == change {
+                    return Applied::Same;
+                }
+                self.device_change = change;
+                Applied::Changed
+            }
             FromWorker::Camera { state } => self.set_camera(match state {
                 CameraState::Off => CallCamera::Off,
                 CameraState::On => CallCamera::On,
@@ -726,9 +790,10 @@ impl View {
                 identity,
             } => {
                 let video = self.forget_video(*connection, identity);
-                let speaking =
-                    self.accepts(*connection, identity) && self.speaking.remove(identity);
-                if speaking || video {
+                let accepted = self.accepts(*connection, identity);
+                let speaking = accepted && self.speaking.remove(identity);
+                let muted = self.mic_muted.remove(&(*connection, identity.clone())) && accepted;
+                if speaking || video || muted {
                     Applied::Changed
                 } else {
                     Applied::Same
@@ -814,12 +879,16 @@ impl View {
                         .keyed
                         .contains(&participant_identity(&m.user_id, &m.device_id)),
                     sharing: self.is_sharing(m),
+                    muted: self.mic_muted.iter().any(|(connection, id)| {
+                        m.backend_identities.contains(id) && self.accepts(*connection, id)
+                    }),
                 })
                 .collect(),
             camera: self.camera,
             screen: self.screen,
             video: self.video_tiles(),
             ring_declined: self.ring_declined,
+            device_change: self.device_change,
         }
     }
 }
@@ -1014,6 +1083,10 @@ struct Joining {
     flags: Arc<Flags>,
     /// The worker, once it runs, so the end of the session can kill it.
     kill: Arc<Mutex<Option<Arc<dyn WorkerProcess>>>>,
+    /// A microphone and speaker choice made while the call joins
+    /// (ADR-0059). The call task gets the same channel and sends the
+    /// newest choice once the worker is connected.
+    devices: watch::Sender<Option<DeviceChoice>>,
 }
 
 struct RunHandle {
@@ -1032,7 +1105,19 @@ struct RunHandle {
     /// The latest playout volume. A watch keeps only the newest value, so a
     /// fast slider never fills the command queue.
     volume: watch::Sender<u8>,
+    /// The latest microphone and speaker choice made during the call
+    /// (ADR-0059). `None` until one is made.
+    devices: watch::Sender<Option<DeviceChoice>>,
     task: Option<JoinHandle<()>>,
+}
+
+/// A microphone, speaker and camera choice; `None` is the system default.
+/// The camera applies from the call's next camera start (ADR-0059).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DeviceChoice {
+    recording: Option<String>,
+    playout: Option<String>,
+    camera: Option<String>,
 }
 
 /// What the page asks of a running call.
@@ -1059,8 +1144,23 @@ enum Command {
 
 /// Tells the owner of the controller that the state changed.
 type Listener = Arc<dyn Fn() + Send + Sync>;
-/// Takes the call's sound level, 0 to `MAX_SOUND_LEVEL` (ADR-0055).
-pub type SoundListener = Arc<dyn Fn(u8) + Send + Sync>;
+/// Takes the call's sound levels (ADR-0055, ADR-0059).
+pub type SoundListener = Arc<dyn Fn(SoundUpdate) + Send + Sync>;
+
+/// A member as the page names it: user ID and device ID.
+type CallParticipantLevelKey = (String, String);
+
+/// A change of the level meters. Not call state: the page gets the newest
+/// one only.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SoundUpdate {
+    /// The own microphone, 0 to `MAX_SOUND_LEVEL`, as it is sent. In a
+    /// device test (ADR-0059) the tested microphone.
+    Own(u8),
+    /// Every other device that is not silent now, at most
+    /// [`MAX_CALL_MEMBERS`]. Empty when the call ends.
+    Participants(Vec<CallParticipantLevel>),
+}
 
 struct Inner {
     host: Arc<dyn CallHost>,
@@ -1075,9 +1175,71 @@ struct Inner {
     /// [`CallController::set_sound_listener`].
     sound_listener: Mutex<Option<SoundListener>>,
     /// The picture store of the running worker, from its start to the end of
-    /// the call or join.
+    /// the call or join, or of a camera test while no call runs (ADR-0059).
     video: Mutex<Option<VideoStore>>,
     next_id: AtomicU64,
+    /// The newest device test (ADR-0059).
+    device_test: Mutex<DeviceTestSlot>,
+    /// Tells the owner that the device test changed.
+    test_listener: Mutex<Option<Listener>>,
+}
+
+/// One member's sound level and the worker participant that sent it, so a
+/// change of membership can check that the source still stands for it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LevelSample {
+    level: u8,
+    connection: u8,
+    identity: String,
+}
+
+/// The newest device test and what ends it.
+struct DeviceTestSlot {
+    status: CallDeviceTestStatus,
+    /// Numbers the tests; a test changes the status only while it is the
+    /// newest.
+    generation: u64,
+    /// Set to end the running test.
+    stop: Arc<AtomicBool>,
+    /// The thread of the newest test. The next test waits for it, so two
+    /// tests never hold a device at once.
+    thread: Option<std::thread::JoinHandle<()>>,
+    /// The threads that the next test thread waits for. A new thread takes
+    /// them all when it starts; when no thread could start, they stay here
+    /// for the next one. A handle is never dropped while its thread runs,
+    /// so no test thread is ever left unwaited. Ended threads are pruned,
+    /// so this holds at most the threads that still run.
+    previous: Vec<std::thread::JoinHandle<()>>,
+    /// The test that the newest thread runs once the test before it ended.
+    /// `Some` while that thread still waits: a newer test then replaces
+    /// this job and starts no thread, so at most two test threads exist.
+    job: Option<DeviceTestJob>,
+}
+
+/// A device test that waits for its thread.
+struct DeviceTestJob {
+    generation: u64,
+    test: CallDeviceTestKind,
+    device: Option<String>,
+    stop: Arc<AtomicBool>,
+}
+
+impl Default for DeviceTestSlot {
+    fn default() -> Self {
+        Self {
+            status: CallDeviceTestStatus {
+                id: 0,
+                test: None,
+                state: CallDeviceTestState::Idle,
+                stream: 0,
+            },
+            generation: 0,
+            stop: Arc::new(AtomicBool::new(true)),
+            thread: None,
+            previous: Vec::new(),
+            job: None,
+        }
+    }
 }
 
 impl Inner {
@@ -1108,6 +1270,30 @@ impl Inner {
         });
         if changed {
             self.notify();
+        }
+    }
+
+    /// Sets the status of device test `generation`, if it is still the
+    /// newest, and tells the test listener. Called with no lock held.
+    fn set_test(&self, generation: u64, change: impl FnOnce(&mut CallDeviceTestStatus)) {
+        let changed = {
+            let mut slot = plain(&self.device_test);
+            if slot.generation != generation {
+                return;
+            }
+            let before = slot.status.clone();
+            change(&mut slot.status);
+            slot.status != before
+        };
+        if changed && let Some(listener) = plain(&self.test_listener).clone() {
+            listener();
+        }
+    }
+
+    /// Gives the sound listener a level of the own side.
+    fn own_level(&self, level: u8) {
+        if let Some(listener) = plain(&self.sound_listener).clone() {
+            listener(SoundUpdate::Own(level));
         }
     }
 
@@ -1146,6 +1332,7 @@ struct JoinGuard {
     room_id: OwnedRoomId,
     flags: Arc<Flags>,
     kill: Arc<Mutex<Option<Arc<dyn WorkerProcess>>>>,
+    devices: watch::Sender<Option<DeviceChoice>>,
     armed: bool,
 }
 
@@ -1193,6 +1380,8 @@ impl CallController {
                 sound_listener: Mutex::new(None),
                 video: Mutex::new(None),
                 next_id: AtomicU64::new(0),
+                device_test: Mutex::new(DeviceTestSlot::default()),
+                test_listener: Mutex::new(None),
             }),
         }
     }
@@ -1221,6 +1410,88 @@ impl CallController {
     /// not call the controller. The level is not part of the call state.
     pub fn set_sound_listener(&self, listener: SoundListener) {
         *plain(&self.inner.sound_listener) = Some(listener);
+    }
+
+    /// Calls `listener` after each change of the device test's status, on
+    /// the test's thread. It must not block and must not call the controller.
+    pub fn set_test_listener(&self, listener: Listener) {
+        *plain(&self.inner.test_listener) = Some(listener);
+    }
+
+    /// The newest device test (ADR-0059).
+    pub fn device_test_status(&self) -> CallDeviceTestStatus {
+        plain(&self.inner.device_test).status.clone()
+    }
+
+    /// Ends the device test that runs, if any. Its status follows when the
+    /// worker has ended.
+    pub fn stop_device_test(&self) {
+        self.stop_device_test_if(None);
+    }
+
+    /// Ends the device test `id` if it is still the newest; `None` ends any.
+    /// The check and the stop happen under the test lock, so a late stop
+    /// from a closed page never ends a newer test (ADR-0059).
+    pub fn stop_device_test_if(&self, id: Option<u64>) {
+        let slot = plain(&self.inner.device_test);
+        if id.is_none_or(|id| id == slot.generation) {
+            slot.stop.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// Starts a device test (ADR-0059) and returns its first status. A test
+    /// that runs is stopped, and the new one waits for its end. While a call
+    /// runs or joins the test is refused (`in_call`); where calls are not
+    /// supported it is `unsupported`. The worker connects to nothing.
+    pub fn start_device_test(
+        &self,
+        test: CallDeviceTestKind,
+        device: Option<String>,
+    ) -> CallDeviceTestStatus {
+        // The test lock first, then the call check: a join that starts after
+        // the check stops this test, because its stop takes the same lock
+        // after the join holds the call slot. No path holds the call slot
+        // while it waits for the test lock.
+        let mut slot = plain(&self.inner.device_test);
+        let refused = if !self.inner.host.supported() {
+            Some(CallDeviceTestState::Unsupported)
+        } else if !matches!(*self.inner.slot(), Slot::Idle) {
+            Some(CallDeviceTestState::InCall)
+        } else {
+            None
+        };
+        // A refusal is the reply only. It is not the test's status, so it
+        // does not stay after the call ends, and nothing that runs stops.
+        if let Some(state) = refused {
+            return CallDeviceTestStatus {
+                id: 0,
+                test: Some(test),
+                state,
+                stream: 0,
+            };
+        }
+        slot.stop.store(true, Ordering::SeqCst);
+        slot.generation += 1;
+        slot.status = CallDeviceTestStatus {
+            id: slot.generation,
+            test: Some(test),
+            state: CallDeviceTestState::Starting,
+            stream: 0,
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        slot.stop = stop.clone();
+        let job = DeviceTestJob {
+            generation: slot.generation,
+            test,
+            device,
+            stop,
+        };
+        // A thread that still waits takes the newest job when it starts.
+        if slot.job.replace(job).is_some() {
+            return slot.status.clone();
+        }
+        start_test_thread(&mut slot, &self.inner, spawn_device_test);
+        slot.status.clone()
     }
 
     /// The newest picture of stream `stream` on `tile` with a number above
@@ -1274,13 +1545,17 @@ impl CallController {
         let id = self.inner.next_id.fetch_add(1, Ordering::SeqCst) + 1;
         let flags = Arc::new(Flags::default());
         let kill = Arc::new(Mutex::new(None));
+        let devices = watch::channel(None).0;
         *slot = Slot::Joining(Joining {
             id,
             room_id: room_id.to_owned(),
             flags: flags.clone(),
             kill: kill.clone(),
+            devices: devices.clone(),
         });
         drop(slot);
+        // The call needs the devices: a device test ends.
+        self.stop_device_test();
         self.inner.publish(CallState::Joining {
             room_id: room_id.to_owned(),
         });
@@ -1290,6 +1565,7 @@ impl CallController {
             room_id: room_id.to_owned(),
             flags,
             kill,
+            devices,
             armed: true,
         })
     }
@@ -1327,7 +1603,7 @@ impl CallController {
         };
         let mut setup = Setup::new(client.clone(), guard.flags.clone(), proxy);
         let prepared = self
-            .prepare(&scope, client, room_id, &access, &mut setup, &guard.kill)
+            .prepare(&scope, client, room_id, &access, &mut setup, &guard)
             .await;
         let call = match prepared {
             Ok(call) => call,
@@ -1342,6 +1618,7 @@ impl CallController {
         let camera_wanted = call.camera_wanted.clone();
         let screen_control = call.screen_control.clone();
         let volume = call.volume.clone();
+        let devices = call.devices.clone();
         let mut call = Some(call);
         let halted = {
             // `leave` and the end of the session set their flag under this
@@ -1368,6 +1645,7 @@ impl CallController {
                         camera_wanted,
                         screen_control,
                         volume,
+                        devices,
                         task: Some(task),
                     });
                     guard.armed = false;
@@ -1391,7 +1669,8 @@ impl CallController {
         room_id: &RoomId,
         access: &Access,
         setup: &mut Setup,
-        kill: &Mutex<Option<Arc<dyn WorkerProcess>>>,
+        // The join's worker slot and device channel.
+        guard: &JoinGuard,
     ) -> Result<Call, CallError> {
         let flags = &access.flags;
         flags.halt()?;
@@ -1425,7 +1704,7 @@ impl CallController {
             scope.devices.playout.as_deref(),
         );
         let link = start_worker(&self.inner.host, audio).await?;
-        *plain(kill) = Some(link.kill_handle());
+        *plain(&guard.kill) = Some(link.kill_handle());
         // Pictures go to the store from now on; the store ends with the call.
         let store = link.video();
         if let Some(notifier) = plain(&self.inner.video_listener).clone() {
@@ -1624,6 +1903,8 @@ impl CallController {
             camera_wanted: Arc::new(AtomicBool::new(scope.video)),
             audio: AudioWants::default(),
             volume: watch::channel(scope.devices.volume()).0,
+            devices: guard.devices.clone(),
+            levels: BTreeMap::new(),
             portal: None,
             portal_capture: false,
             portal_sent: false,
@@ -1708,6 +1989,45 @@ impl CallController {
                 Ok(())
             }
             _ => Err(CallError::NotInCall),
+        }
+    }
+
+    /// Moves the running or joining call to another microphone and speaker,
+    /// and gives it the camera for its next camera start (ADR-0059). Only
+    /// the newest choice is sent, once the worker is
+    /// connected; the worker's answer shows as the state's `device_change`.
+    /// After a failed change the same choice is sent again, so choosing a
+    /// device again (a headset plugged back in) reaches the worker.
+    /// `NotInCall` without a call: the choice then applies to the next one.
+    pub fn set_devices(
+        &self,
+        recording: Option<&str>,
+        playout: Option<&str>,
+        camera: Option<&str>,
+    ) -> Result<(), CallError> {
+        let choice = Some(DeviceChoice {
+            recording: recording.map(str::to_owned),
+            playout: playout.map(str::to_owned),
+            camera: camera.map(str::to_owned),
+        });
+        // Read before the call slot is taken, so no lock waits on the other.
+        let again = matches!(
+            &*self.inner.state.borrow(),
+            CallState::Active {
+                device_change: Some(_),
+                ..
+            }
+        );
+        match &*self.inner.slot() {
+            Slot::Running(run) => {
+                offer_devices(&run.devices, choice, again);
+                Ok(())
+            }
+            Slot::Joining(join) => {
+                offer_devices(&join.devices, choice, again);
+                Ok(())
+            }
+            Slot::Idle => Err(CallError::NotInCall),
         }
     }
 
@@ -1852,6 +2172,9 @@ impl CallController {
     /// ends, and the session's client goes with them; the delayed leave ends
     /// the membership within seconds.
     pub fn stop_for_session_end(&self) {
+        // A device test ends too, with or without a call. The test lock is
+        // taken and dropped before the call slot.
+        self.stop_device_test();
         let (room_id, kill) = {
             let mut slot = self.inner.slot();
             match std::mem::replace(&mut *slot, Slot::Idle) {
@@ -2145,6 +2468,12 @@ struct Call {
     audio: AudioWants,
     /// The playout volume. The controller sends; the task subscribes.
     volume: watch::Sender<u8>,
+    /// A device change during the call (ADR-0059). The controller sends;
+    /// the task subscribes.
+    devices: watch::Sender<Option<DeviceChoice>>,
+    /// The level of each other member that is not silent (ADR-0059), at
+    /// most [`MAX_CALL_MEMBERS`], with the worker participant it came from.
+    levels: BTreeMap<CallParticipantLevelKey, LevelSample>,
     /// The camera portal access request in flight (Linux portal path).
     /// Dropping it (the call ends) cancels the request.
     portal: Option<PortalTask>,
@@ -2405,6 +2734,215 @@ async fn refine_worker_stop(call: &Call) -> EndReason {
     stop_reason(exit)
 }
 
+/// Starts the thread for the job in `slot` with `spawn`. The newest thread
+/// joins the kept threads, which ended threads are first pruned from. The
+/// handle is added, never put in place of one, so no running thread is
+/// detached whatever order the threads take their work in. A failed start
+/// keeps them all for the next thread and ends the job as `failed`.
+fn start_test_thread(
+    slot: &mut DeviceTestSlot,
+    inner: &Arc<Inner>,
+    spawn: impl FnOnce(Arc<Inner>) -> std::io::Result<std::thread::JoinHandle<()>>,
+) {
+    slot.previous.retain(|thread| !thread.is_finished());
+    if let Some(thread) = slot.thread.take() {
+        slot.previous.push(thread);
+    }
+    match spawn(inner.clone()) {
+        Ok(thread) => slot.thread = Some(thread),
+        Err(_) => {
+            slot.job = None;
+            slot.status.state = CallDeviceTestState::Failed;
+        }
+    }
+}
+
+/// A device test thread: it waits for every thread before it, then runs
+/// the newest job, if one is left.
+fn spawn_device_test(inner: Arc<Inner>) -> std::io::Result<std::thread::JoinHandle<()>> {
+    std::thread::Builder::new()
+        .name("call-device-test".to_owned())
+        .spawn(move || {
+            let previous = std::mem::take(&mut plain(&inner.device_test).previous);
+            for thread in previous {
+                let _ = thread.join();
+            }
+            let job = plain(&inner.device_test).job.take();
+            if let Some(job) = job {
+                let limit = device_test::TEST_LIMIT;
+                run_device_test(
+                    &inner,
+                    job.generation,
+                    job.test,
+                    job.device,
+                    &job.stop,
+                    limit,
+                );
+            }
+        })
+}
+
+/// Replaces a kept device choice with a newer one that waits unread in
+/// `devices`, so a retry sends the newest choice only.
+fn take_newer_choice(
+    devices: &mut watch::Receiver<Option<DeviceChoice>>,
+    pending: &mut Option<(Instant, DeviceChoice)>,
+) {
+    if devices.has_changed().unwrap_or(false)
+        && let Some(choice) = devices.borrow_and_update().clone()
+    {
+        *pending = Some((Instant::now(), choice));
+    }
+}
+
+/// Gives the call a microphone and speaker choice. The same choice as the
+/// last one changes nothing, so saving only the camera does not restart the
+/// sound of a running call; with `again` (the last change failed) it is
+/// sent again.
+fn offer_devices(
+    devices: &watch::Sender<Option<DeviceChoice>>,
+    choice: Option<DeviceChoice>,
+    again: bool,
+) {
+    devices.send_if_modified(|current| {
+        if *current == choice && !again {
+            false
+        } else {
+            *current = choice;
+            true
+        }
+    });
+}
+
+/// Runs device test `generation` on its own thread (ADR-0059): starts a
+/// worker, sends `TestDevice` and follows the answers until the worker ends,
+/// `stop` is set or `limit` ([`device_test::TEST_LIMIT`]) passes. Only the
+/// user's stop ends a test that has not run as idle; the limit is no user
+/// stop, so it ends that test as failed. A camera test's store
+/// is the controller's picture store while no call runs. The worker gets the
+/// diagnostic log's switch before the test and on each change, and its
+/// records go to the log (ADR-0058), so a failing test leaves a record.
+fn run_device_test(
+    inner: &Arc<Inner>,
+    generation: u64,
+    test: CallDeviceTestKind,
+    device: Option<String>,
+    stop: &AtomicBool,
+    limit: Duration,
+) {
+    let end = |state| inner.set_test(generation, |status| status.state = state);
+    if stop.load(Ordering::SeqCst) {
+        end(CallDeviceTestState::Idle);
+        return;
+    }
+    // No sound server name: Linux tests no microphone or speaker yet.
+    let Ok(mut link) = inner.host.start(&WorkerAudio::default()) else {
+        end(CallDeviceTestState::Failed);
+        return;
+    };
+    let store = link.video();
+    let camera = test == CallDeviceTestKind::Camera;
+    if camera {
+        store.sync(true, [false; REMOTE_TILES]);
+        if let Some(notifier) = plain(&inner.video_listener).clone() {
+            store.set_notifier(notifier);
+        }
+        // Under the slot lock, so a join that starts now replaces it.
+        let slot = inner.slot();
+        let mut video = plain(&inner.video);
+        if matches!(*slot, Slot::Idle) && video.is_none() {
+            *video = Some(store.clone());
+        }
+        drop(video);
+        drop(slot);
+        let stream = store.stream(0);
+        inner.set_test(generation, |status| status.stream = stream);
+    }
+    let mut diagnostics = crate::diagnostics::global().watch();
+    let on = *diagnostics.borrow_and_update();
+    // The order rule: a stop recorded while the worker started (its ready
+    // wait can take seconds) ends the test here, before `TestDevice`, so no
+    // device opens. A later stop reaches the worker as `Leave` after
+    // `TestDevice`; the worker may open the device, and closes it when it
+    // reads `Leave`.
+    let stopped_early = stop.load(Ordering::SeqCst);
+    let sent = if stopped_early {
+        Ok(())
+    } else {
+        link.send(ToWorker::SetDiagnostics { on }).and_then(|()| {
+            link.send(ToWorker::TestDevice {
+                test: device_test::worker_test(test),
+                device,
+            })
+        })
+    };
+    let mut state = if stopped_early {
+        CallDeviceTestState::Idle
+    } else {
+        CallDeviceTestState::Starting
+    };
+    let limit = std::time::Instant::now() + limit;
+    let mut leave_by: Option<std::time::Instant> = None;
+    // Whether the `Leave` was the user's stop, not the limit.
+    let mut user_stopped = false;
+    if sent.is_err() {
+        state = CallDeviceTestState::Failed;
+    }
+    while !device_test::is_final(state) {
+        let now = std::time::Instant::now();
+        if leave_by.is_none() && (stop.load(Ordering::SeqCst) || now >= limit) {
+            user_stopped = stop.load(Ordering::SeqCst);
+            let _ = link.send(ToWorker::Leave);
+            leave_by = Some(now + device_test::LEAVE_WAIT);
+        }
+        if leave_by.is_some_and(|by| now >= by) {
+            state = CallDeviceTestState::Failed;
+            break;
+        }
+        if diagnostics.has_changed().unwrap_or(false) {
+            let on = *diagnostics.borrow_and_update();
+            let _ = link.send(ToWorker::SetDiagnostics { on });
+        }
+        match link.events.try_recv() {
+            // After the user's stop the meter shows nothing more.
+            Ok(FromWorker::SoundLevel { level }) => {
+                if !user_stopped {
+                    inner.own_level(level);
+                }
+            }
+            Ok(FromWorker::Diagnostic {
+                level,
+                target,
+                message,
+            }) => worker_record(level, &target, &message),
+            Ok(message) => {
+                if let Some(next) = device_test::next_state(state, &message, user_stopped) {
+                    state = next;
+                    inner.set_test(generation, |status| status.state = next);
+                }
+            }
+            Err(mpsc::error::TryRecvError::Empty) => std::thread::sleep(device_test::POLL),
+            Err(mpsc::error::TryRecvError::Disconnected) => {
+                state = CallDeviceTestState::Failed;
+            }
+        }
+    }
+    link.finish(device_test::FINISH_TIMEOUT);
+    if camera {
+        let mut video = plain(&inner.video);
+        if video.as_ref().is_some_and(|shown| shown.is_same(&store)) {
+            *video = None;
+        }
+        drop(video);
+        store.close();
+    }
+    inner.own_level(0);
+    inner.set_test(generation, |status| {
+        status.state = state;
+        status.stream = 0;
+    });
+}
+
 async fn run_call(
     inner: Arc<Inner>,
     id: u64,
@@ -2433,6 +2971,11 @@ async fn run_call(
         flags.ended.store(true, Ordering::SeqCst);
     }
     call.finish(flags.ended()).await;
+    // The meters show nothing once the call is over.
+    if let Some(listener) = plain(&inner.sound_listener).clone() {
+        listener(SoundUpdate::Own(0));
+        listener(SoundUpdate::Participants(Vec::new()));
+    }
     guard.armed = false;
     // After the end of the session the slot is free and the state shows it.
     if inner.release(id) {
@@ -2887,8 +3430,17 @@ impl Call {
         // call state (ADR-0055). The reader already bounded it.
         if let FromWorker::SoundLevel { level } = event {
             if let Some(listener) = plain(&inner.sound_listener).clone() {
-                listener(*level);
+                listener(SoundUpdate::Own(*level));
             }
+            return Ok(());
+        }
+        if let FromWorker::ParticipantLevel {
+            connection,
+            identity,
+            level,
+        } = event
+        {
+            self.participant_level(inner, *connection, identity, *level);
             return Ok(());
         }
         // A camera that is not on has no capture left: its remote is used up.
@@ -2925,6 +3477,64 @@ impl Call {
             self.publish(inner);
         }
         Ok(())
+    }
+
+    /// Keeps one member's level and gives the meters every level when it
+    /// changed. Only a current member counts; silence removes it.
+    fn participant_level(&mut self, inner: &Inner, connection: u8, identity: &str, level: u8) {
+        let Some(key) = self.view.level_member(connection, identity) else {
+            return;
+        };
+        let changed = if level == 0 {
+            self.levels.remove(&key).is_some()
+        } else if self.levels.len() < MAX_CALL_MEMBERS || self.levels.contains_key(&key) {
+            let sample = LevelSample {
+                level,
+                connection,
+                identity: identity.to_owned(),
+            };
+            self.levels.insert(key, sample).map(|old| old.level) != Some(level)
+        } else {
+            false
+        };
+        if changed {
+            self.send_levels(inner);
+        }
+    }
+
+    /// Forgets each level whose source no longer stands for its device: the
+    /// member left, or moved to an SFU that the sample's connection does not
+    /// speak for. It gives the meters the rest. Such a source's silence is
+    /// not taken (`level_member`), so without this its last level would stay.
+    fn prune_levels(&mut self, inner: &Inner) {
+        let before = self.levels.len();
+        let view = &self.view;
+        self.levels.retain(|key, sample| {
+            view.level_member(sample.connection, &sample.identity)
+                .as_ref()
+                == Some(key)
+        });
+        if self.levels.len() != before {
+            self.send_levels(inner);
+        }
+    }
+
+    /// Gives the meters the levels of the members now, at most
+    /// `CALL_PARTICIPANTS_MAX`, so the list is never refused as too long.
+    fn send_levels(&self, inner: &Inner) {
+        if let Some(listener) = plain(&inner.sound_listener).clone() {
+            listener(SoundUpdate::Participants(
+                self.levels
+                    .iter()
+                    .take(CALL_PARTICIPANTS_MAX)
+                    .map(|((user_id, device_id), sample)| CallParticipantLevel {
+                        user_id: user_id.clone(),
+                        device_id: device_id.clone(),
+                        level: sample.level,
+                    })
+                    .collect(),
+            ));
+        }
     }
 
     /// Looks for members on other SFUs and acts on what the user has and has
@@ -3144,6 +3754,26 @@ impl Call {
         Ok(())
     }
 
+    /// Sends the pending device choice (ADR-0059). A full queue keeps it for
+    /// a retry, so a busy worker does not end the call; a newer choice
+    /// replaces it.
+    fn apply_devices(
+        &self,
+        pending: &mut Option<(Instant, DeviceChoice)>,
+    ) -> Result<(), EndReason> {
+        if let Some((_, choice)) = pending.take() {
+            let message = ToWorker::SetDevices {
+                recording: choice.recording.clone(),
+                playout: choice.playout.clone(),
+                camera: choice.camera.clone(),
+            };
+            if !self.queue_worker(message)? {
+                *pending = Some((Instant::now() + UNSENT_RETRY, choice));
+            }
+        }
+        Ok(())
+    }
+
     /// Queues `message` when the worker's queue has room: `false` when it is
     /// full. Only a closed queue is an error.
     fn queue_worker(&self, message: ToWorker) -> Result<bool, EndReason> {
@@ -3286,10 +3916,16 @@ impl Call {
         // there was none, the worker gets the Join's volume again.
         let mut volume = self.volume.subscribe();
         volume.mark_changed();
+        // A device choice made since the join started; the join used the
+        // saved one. A choice made before this point is sent at once.
+        let mut devices = self.devices.subscribe();
+        devices.mark_changed();
         // The diagnostic log's switch, sent at once and on each change.
         let mut diagnostics = crate::diagnostics::global().watch();
         diagnostics.mark_changed();
         let mut pending_diagnostics: Option<(Instant, bool)> = None;
+        // The newest device choice while the worker's queue is full.
+        let mut pending_devices: Option<(Instant, DeviceChoice)> = None;
         self.start_keys(inner).await?;
         // A video join on the portal path asks for the camera now (the join
         // sent `camera_on: false`).
@@ -3301,6 +3937,7 @@ impl Call {
             let due = pending_own.as_ref().map(|(at, _)| *at);
             let retry = self.unsent_retry;
             let diagnostics_due = pending_diagnostics.map(|(at, _)| at);
+            let devices_due = pending_devices.as_ref().map(|(at, _)| *at);
             tokio::select! {
                 _ = &mut *stop => return Ok(()),
                 () = wake.notified() => self.take_waiting_stop(inner, u64::MAX)?,
@@ -3324,6 +3961,25 @@ impl Call {
                 Ok(()) = volume.changed() => {
                     let percent = *volume.borrow_and_update();
                     self.volume_changed(inner, percent)?;
+                }
+                Ok(()) = devices.changed() => {
+                    let choice = devices.borrow_and_update().clone();
+                    if let Some(choice) = choice {
+                        pending_devices = Some((Instant::now(), choice));
+                        self.apply_devices(&mut pending_devices)?;
+                    }
+                }
+                () = async {
+                    match devices_due {
+                        Some(at) => time::sleep_until(at.into()).await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    // `select!` picks a ready arm at random: a newer choice
+                    // that waits unread replaces the kept one first, so the
+                    // worker never switches to an older choice.
+                    take_newer_choice(&mut devices, &mut pending_devices);
+                    self.apply_devices(&mut pending_devices)?;
                 }
                 Ok(()) = diagnostics.changed() => {
                     let on = *diagnostics.borrow_and_update();
@@ -3418,6 +4074,7 @@ impl Call {
         // change with a membership (ADR-0056).
         let backends = backend_changes(&self.view.members, &current);
         self.view.set_members(current);
+        self.prune_levels(inner);
         // The video filter follows the members at once, so a later error
         // cannot leave a departed member's picture allowed. A video stream
         // may also have started before its member was known.
@@ -3853,6 +4510,28 @@ mod tests {
             member("@b:example.org", "B", "https://other.example.org"),
         ]);
         view
+    }
+
+    /// GIVEN each device change answer WHEN it is applied THEN an undone
+    /// switch is `kept` (the call has its devices), apart from a `failed`
+    /// change that may have stopped the sound; a change that worked clears it.
+    #[test]
+    fn given_device_change_answers_then_an_undone_switch_is_kept() {
+        let mut view = view();
+        for (code, change) in [
+            (FailureCode::DeviceKept, CallDeviceChange::Kept),
+            (FailureCode::AudioDevice, CallDeviceChange::Failed),
+            (FailureCode::DeviceNotFound, CallDeviceChange::NotFound),
+            (FailureCode::Unsupported, CallDeviceChange::Unsupported),
+        ] {
+            let answer = FromWorker::DevicesSet {
+                failure: Some(code),
+            };
+            assert_eq!(view.apply(&answer), Applied::Changed);
+            assert_eq!(view.device_change, Some(change));
+        }
+        view.apply(&FromWorker::DevicesSet { failure: None });
+        assert_eq!(view.device_change, None);
     }
 
     /// GIVEN a joining call WHEN the worker connects THEN the state is
@@ -4394,6 +5073,397 @@ mod tests {
         assert_eq!(*watched.borrow(), 70, "only the newest value is kept");
     }
 
+    /// GIVEN a call that is still joining WHEN the microphone and speaker
+    /// change THEN the choice waits on the join's channel, and a task that
+    /// subscribes later still sees it; WHEN no call runs THEN it is
+    /// `NotInCall` and applies to the next call.
+    #[test]
+    fn given_a_joining_call_when_devices_change_then_the_task_gets_the_choice() {
+        let calls = controller(FakeHost::new(true, None));
+        assert_eq!(
+            calls.set_devices(Some("mic-1"), None, None),
+            Err(CallError::NotInCall)
+        );
+        let guard = calls.claim(room_id!("!r:example.org")).unwrap();
+        assert_eq!(
+            calls.set_devices(Some("mic-1"), Some("spk-1"), Some("cam-1")),
+            Ok(())
+        );
+        // The call task subscribes after the worker connects, as `run` does.
+        let mut task = guard.devices.subscribe();
+        task.mark_changed();
+        assert!(task.has_changed().unwrap(), "an earlier choice is sent");
+        assert_eq!(
+            *task.borrow_and_update(),
+            Some(DeviceChoice {
+                recording: Some("mic-1".to_owned()),
+                playout: Some("spk-1".to_owned()),
+                camera: Some("cam-1".to_owned()),
+            })
+        );
+    }
+
+    /// GIVEN a running call WHEN the same microphone and speaker are chosen
+    /// again THEN nothing is sent, so saving only the camera keeps the sound;
+    /// WHEN the last change failed THEN the same choice is sent again, so a
+    /// device plugged back in reaches the worker.
+    #[test]
+    fn given_a_failed_device_change_then_the_same_choice_is_sent_again() {
+        let calls = controller(FakeHost::new(true, None));
+        let (_store, _commands, _killed) = running_call(&calls, active_state());
+        let mut task = match &*calls.inner.slot() {
+            Slot::Running(run) => run.devices.subscribe(),
+            _ => unreachable!("the call runs"),
+        };
+        let choose = || calls.set_devices(Some("mic-1"), Some("spk-1"), None);
+        assert_eq!(choose(), Ok(()));
+        assert!(task.has_changed().unwrap());
+        task.borrow_and_update();
+        assert_eq!(choose(), Ok(()));
+        assert!(!task.has_changed().unwrap(), "the same choice is not sent");
+
+        let mut failed = active_state();
+        if let CallState::Active { device_change, .. } = &mut failed {
+            *device_change = Some(CallDeviceChange::NotFound);
+        }
+        calls.inner.publish(failed);
+        assert_eq!(choose(), Ok(()));
+        assert!(
+            task.has_changed().unwrap(),
+            "after a failure it is sent again"
+        );
+    }
+
+    /// GIVEN a call that runs WHEN a device test is asked for THEN the reply
+    /// is `in_call`, and the test's status stays as it was, so the refusal
+    /// does not stay after the call ends.
+    #[test]
+    fn given_a_running_call_when_a_device_test_is_asked_then_the_refusal_is_not_kept() {
+        let calls = controller(FakeHost::new(true, None));
+        let (_store, _commands, _killed) = running_call(&calls, active_state());
+        let reply = calls.start_device_test(CallDeviceTestKind::Microphone, None);
+        assert_eq!(reply.state, CallDeviceTestState::InCall);
+        assert_eq!(reply.test, Some(CallDeviceTestKind::Microphone));
+        let kept = calls.device_test_status();
+        assert_eq!(kept.state, CallDeviceTestState::Idle);
+        assert_eq!(kept.test, None);
+    }
+
+    /// GIVEN a device test thread that still waits for the test before it
+    /// WHEN more tests are asked for THEN no thread starts: the job of the
+    /// waiting thread becomes the newest test, so at most two test threads
+    /// exist, and the stop of the older job is set.
+    #[test]
+    fn given_a_waiting_test_thread_when_tests_are_asked_then_no_thread_starts() {
+        let calls = controller(FakeHost::new(true, None));
+        let first_stop = Arc::new(AtomicBool::new(false));
+        {
+            let mut slot = plain(&calls.inner.device_test);
+            slot.generation = 1;
+            slot.stop = first_stop.clone();
+            slot.job = Some(DeviceTestJob {
+                generation: 1,
+                test: CallDeviceTestKind::Microphone,
+                device: None,
+                stop: first_stop.clone(),
+            });
+        }
+        for _ in 0..3 {
+            let reply =
+                calls.start_device_test(CallDeviceTestKind::Speaker, Some("spk".to_owned()));
+            assert_eq!(reply.state, CallDeviceTestState::Starting);
+        }
+        assert!(first_stop.load(Ordering::SeqCst), "the older job stops");
+        let slot = plain(&calls.inner.device_test);
+        assert!(slot.thread.is_none(), "no thread started");
+        let job = slot.job.as_ref().expect("the newest job waits");
+        assert_eq!(job.generation, 4);
+        assert_eq!(job.generation, slot.generation);
+        assert_eq!(slot.status.id, slot.generation, "the status names its test");
+        assert_eq!(job.test, CallDeviceTestKind::Speaker);
+        assert_eq!(job.device.as_deref(), Some("spk"));
+    }
+
+    /// A host whose worker answers with `events`, in order, and keeps what
+    /// it is sent.
+    struct ScriptHost {
+        events: Mutex<Vec<FromWorker>>,
+        sent: Mutex<Option<mpsc::Receiver<ToWorker>>>,
+        /// The worker's side, kept open so a test can answer later.
+        answers: Mutex<Option<mpsc::Sender<FromWorker>>>,
+        /// Set during the start, as a stop that comes while it waits.
+        stop_on_start: Mutex<Option<Arc<AtomicBool>>>,
+    }
+
+    impl ScriptHost {
+        fn new(events: Vec<FromWorker>) -> Arc<Self> {
+            Arc::new(Self {
+                events: Mutex::new(events),
+                sent: Mutex::new(None),
+                answers: Mutex::new(None),
+                stop_on_start: Mutex::new(None),
+            })
+        }
+    }
+
+    impl CallHost for ScriptHost {
+        fn start(&self, _: &WorkerAudio) -> Result<CallWorkerLink, StartError> {
+            let (commands, received) = mpsc::channel(8);
+            let (answers, events) = mpsc::channel(8);
+            for event in self.events.lock().unwrap().drain(..) {
+                answers.try_send(event).unwrap();
+            }
+            *self.sent.lock().unwrap() = Some(received);
+            *self.answers.lock().unwrap() = Some(answers);
+            if let Some(stop) = self.stop_on_start.lock().unwrap().as_ref() {
+                stop.store(true, Ordering::SeqCst);
+            }
+            Ok(CallWorkerLink::from_parts(
+                commands,
+                events,
+                Box::new(FakeProcess(Arc::new(AtomicBool::new(false)))),
+            ))
+        }
+
+        fn confirm_direct_connection(&self) -> bool {
+            true
+        }
+    }
+
+    /// GIVEN a microphone test WHEN its worker starts THEN it gets the
+    /// diagnostic log's switch before `TestDevice` (ADR-0058); WHEN the
+    /// worker sends a diagnostic record during the test THEN the record
+    /// goes to the log and the test still ends as done.
+    #[test]
+    fn given_a_device_test_then_its_worker_gets_the_diagnostic_switch_first() {
+        let record = FromWorker::Diagnostic {
+            level: 2,
+            target: "call_worker".into(),
+            message: "no device".into(),
+        };
+        let host = ScriptHost::new(vec![FromWorker::Connected, record, FromWorker::Left]);
+        let calls = controller(host.clone());
+        plain(&calls.inner.device_test).generation = 1;
+        let mic = Some("mic".to_owned());
+        run_device_test(
+            &calls.inner,
+            1,
+            CallDeviceTestKind::Microphone,
+            mic,
+            &AtomicBool::new(false),
+            device_test::TEST_LIMIT,
+        );
+        assert_eq!(calls.device_test_status().state, CallDeviceTestState::Done);
+        let mut sent = host
+            .sent
+            .lock()
+            .unwrap()
+            .take()
+            .expect("the worker started");
+        // Other tests turn the global log on and off, so only the order is
+        // checked here.
+        assert!(matches!(
+            sent.try_recv(),
+            Ok(ToWorker::SetDiagnostics { .. })
+        ));
+        assert!(matches!(
+            sent.try_recv(),
+            Ok(ToWorker::TestDevice { device: Some(id), .. }) if id == "mic"
+        ));
+    }
+
+    /// GIVEN a test that never ran (a camera open that hangs) WHEN the
+    /// core's limit ends it THEN it is failed, so the page says why; WHEN
+    /// the user stops it THEN it is idle.
+    #[test]
+    fn given_a_test_ended_by_the_limit_then_it_failed_and_a_user_stop_is_idle() {
+        // The limit passes at once: the worker answers `Leave` with `Left`.
+        let host = ScriptHost::new(vec![FromWorker::Left]);
+        let calls = controller(host.clone());
+        plain(&calls.inner.device_test).generation = 1;
+        let stop = AtomicBool::new(false);
+        run_device_test(
+            &calls.inner,
+            1,
+            CallDeviceTestKind::Camera,
+            None,
+            &stop,
+            Duration::ZERO,
+        );
+        assert_eq!(
+            calls.device_test_status().state,
+            CallDeviceTestState::Failed
+        );
+
+        // The user stops it after the start; the worker answers the core's
+        // `Leave` with `Left`.
+        let host = ScriptHost::new(Vec::new());
+        let calls = controller(host.clone());
+        plain(&calls.inner.device_test).generation = 1;
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let mut seen_leave = false;
+                while !seen_leave {
+                    if let Some(sent) = host.sent.lock().unwrap().as_mut() {
+                        stop.store(true, Ordering::SeqCst);
+                        while let Ok(message) = sent.try_recv() {
+                            seen_leave |= matches!(message, ToWorker::Leave);
+                        }
+                    }
+                    std::thread::yield_now();
+                }
+                let answers = host.answers.lock().unwrap().clone().unwrap();
+                answers.try_send(FromWorker::Left).unwrap();
+            });
+            let limit = device_test::TEST_LIMIT;
+            run_device_test(
+                &calls.inner,
+                1,
+                CallDeviceTestKind::Camera,
+                None,
+                &stop,
+                limit,
+            );
+        });
+        assert_eq!(calls.device_test_status().state, CallDeviceTestState::Idle);
+    }
+
+    /// GIVEN a stop recorded while the test worker starts WHEN the worker is
+    /// ready THEN no `TestDevice` is sent, so no device opens, and the test
+    /// ends as idle.
+    #[test]
+    fn given_a_stop_during_the_worker_start_then_no_device_opens() {
+        let host = ScriptHost::new(Vec::new());
+        let stop = Arc::new(AtomicBool::new(false));
+        *host.stop_on_start.lock().unwrap() = Some(stop.clone());
+        let calls = controller(host.clone());
+        plain(&calls.inner.device_test).generation = 1;
+        let limit = device_test::TEST_LIMIT;
+        run_device_test(
+            &calls.inner,
+            1,
+            CallDeviceTestKind::Microphone,
+            None,
+            &stop,
+            limit,
+        );
+        assert_eq!(calls.device_test_status().state, CallDeviceTestState::Idle);
+        let mut sent = host
+            .sent
+            .lock()
+            .unwrap()
+            .take()
+            .expect("the worker started");
+        while let Ok(message) = sent.try_recv() {
+            assert!(
+                !matches!(message, ToWorker::TestDevice { .. }),
+                "no device test is sent"
+            );
+        }
+    }
+
+    /// GIVEN test 2 is the newest WHEN a stop names test 1 THEN test 2 runs
+    /// on; WHEN a stop names test 2, or no test, THEN it stops.
+    #[test]
+    fn given_a_stop_for_an_older_test_then_the_newest_runs_on() {
+        let calls = controller(FakeHost::new(true, None));
+        let stop = Arc::new(AtomicBool::new(false));
+        {
+            let mut slot = plain(&calls.inner.device_test);
+            slot.generation = 2;
+            slot.stop = stop.clone();
+        }
+        calls.stop_device_test_if(Some(1));
+        assert!(
+            !stop.load(Ordering::SeqCst),
+            "an older test's stop is ignored"
+        );
+        calls.stop_device_test_if(Some(2));
+        assert!(stop.load(Ordering::SeqCst));
+        stop.store(false, Ordering::SeqCst);
+        calls.stop_device_test();
+        assert!(stop.load(Ordering::SeqCst), "no ID stops any test");
+    }
+
+    /// GIVEN a test thread that still runs WHEN the next test thread cannot
+    /// start THEN the running thread is kept as `previous` and the test is
+    /// `failed`; WHEN a later thread starts THEN it takes that thread and
+    /// waits for it, so no test thread is left unwaited.
+    #[test]
+    fn given_a_failed_test_thread_start_then_the_running_thread_is_still_waited_for() {
+        let calls = controller(FakeHost::new(true, None));
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+        let running = std::thread::spawn(move || {
+            let _ = wait.recv();
+        });
+        let mut slot = plain(&calls.inner.device_test);
+        slot.thread = Some(running);
+        slot.status.state = CallDeviceTestState::Starting;
+        start_test_thread(&mut slot, &calls.inner, |_| {
+            Err(std::io::Error::other("no thread"))
+        });
+        assert!(slot.thread.is_none());
+        assert_eq!(slot.previous.len(), 1, "the running thread is kept");
+        assert_eq!(slot.status.state, CallDeviceTestState::Failed);
+
+        slot.status.state = CallDeviceTestState::Starting;
+        start_test_thread(&mut slot, &calls.inner, spawn_device_test);
+        let next = slot.thread.take().expect("the next thread starts");
+        drop(slot);
+        release.send(()).unwrap();
+        next.join().unwrap();
+        assert!(
+            plain(&calls.inner.device_test).previous.is_empty(),
+            "the next thread took the running one and waited for it"
+        );
+    }
+
+    /// GIVEN a kept thread A and a newest thread B that both still run
+    /// WHEN another test thread starts THEN neither handle is dropped: the
+    /// new thread waits for both, so neither is left unwaited, and an ended
+    /// kept thread is pruned.
+    #[test]
+    fn given_two_running_test_threads_when_another_starts_then_it_waits_for_both() {
+        let calls = controller(FakeHost::new(true, None));
+        let (done_tx, done) = std::sync::mpsc::channel::<&str>();
+        let mut releases = Vec::new();
+        let mut running = |name: &'static str| {
+            let (release, wait) = std::sync::mpsc::channel::<()>();
+            releases.push(release);
+            let done_tx = done_tx.clone();
+            std::thread::spawn(move || {
+                let _ = wait.recv();
+                // Late, so a thread that did not join it ends first.
+                std::thread::sleep(Duration::from_millis(50));
+                let _ = done_tx.send(name);
+            })
+        };
+        let ended = std::thread::spawn(|| {});
+        while !ended.is_finished() {
+            std::thread::yield_now();
+        }
+        let a = running("a");
+        let b = running("b");
+        let mut slot = plain(&calls.inner.device_test);
+        slot.previous = vec![ended, a];
+        slot.thread = Some(b);
+        start_test_thread(&mut slot, &calls.inner, spawn_device_test);
+        assert_eq!(
+            slot.previous.len(),
+            2,
+            "A and B are kept; the ended one goes"
+        );
+        let next = slot.thread.take().expect("the next thread starts");
+        drop(slot);
+        for release in releases {
+            release.send(()).unwrap();
+        }
+        next.join().unwrap();
+        let mut finished: Vec<_> = done.try_iter().collect();
+        finished.sort_unstable();
+        assert_eq!(finished, ["a", "b"], "the next thread ended after both");
+    }
+
     /// GIVEN a running call whose command queue is full
     /// WHEN mute or deafen is asked for
     /// THEN each is refused as `Busy`, not taken as if there were no call;
@@ -4440,6 +5510,7 @@ mod tests {
             camera_wanted: Arc::new(AtomicBool::new(false)),
             screen_control: Arc::default(),
             volume: watch::channel(MAX_VOLUME_PERCENT).0,
+            devices: watch::channel(None).0,
             task: None,
         });
         calls.stop_for_session_end();
@@ -4614,6 +5685,8 @@ mod tests {
             camera_wanted: Arc::new(AtomicBool::new(false)),
             audio: AudioWants::default(),
             volume: watch::channel(MAX_VOLUME_PERCENT).0,
+            devices: watch::channel(None).0,
+            levels: BTreeMap::new(),
             portal: None,
             portal_capture: false,
             portal_sent: false,
@@ -4875,6 +5948,129 @@ mod tests {
         ));
     }
 
+    /// GIVEN a device choice and a full worker queue WHEN it is applied
+    /// THEN the call goes on and the choice waits; WHEN the queue has room
+    /// THEN the worker gets it; WHEN the queue is closed THEN the call ends.
+    #[tokio::test]
+    async fn given_a_full_queue_then_a_device_choice_waits() {
+        let fixture = test_call(
+            no_admission(),
+            Arc::new(Flags::default()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let (call, mut to_worker) = (fixture.call, fixture.to_worker);
+        let now = Instant::now();
+        let choice = DeviceChoice {
+            recording: Some("mic-2".to_owned()),
+            playout: None,
+            camera: Some("cam-2".to_owned()),
+        };
+        let mut pending = Some((now, choice.clone()));
+
+        fill_queue(&call, &mut to_worker, 0);
+        call.apply_devices(&mut pending).unwrap();
+        let (retry, waiting) = pending.clone().expect("the choice waits");
+        assert!(retry > now);
+        assert_eq!(waiting, choice);
+
+        while to_worker.try_recv().is_ok() {}
+        call.apply_devices(&mut pending).unwrap();
+        assert_eq!(pending, None);
+        assert!(matches!(
+            to_worker.try_recv(),
+            Ok(ToWorker::SetDevices { recording: Some(id), playout: None, camera: Some(cam) })
+                if id == "mic-2" && cam == "cam-2"
+        ));
+
+        let mut pending = Some((now, choice));
+        drop(to_worker);
+        assert!(matches!(
+            call.apply_devices(&mut pending),
+            Err(EndReason::WorkerStopped)
+        ));
+    }
+
+    /// GIVEN a device choice kept for a retry and a newer choice not read
+    /// yet WHEN the retry is due THEN the newer choice replaces the kept one
+    /// before anything is sent; with no newer choice the kept one stays.
+    #[test]
+    fn given_a_newer_choice_when_a_retry_is_due_then_only_the_newer_is_sent() {
+        let sender = watch::channel(None::<DeviceChoice>).0;
+        let mut devices = sender.subscribe();
+        let choice = |id: &str| DeviceChoice {
+            recording: Some(id.to_owned()),
+            playout: None,
+            camera: None,
+        };
+        let mut pending = Some((Instant::now(), choice("mic-1")));
+        take_newer_choice(&mut devices, &mut pending);
+        assert_eq!(
+            pending.as_ref().map(|(_, c)| c.clone()),
+            Some(choice("mic-1"))
+        );
+        sender.send_replace(Some(choice("mic-2")));
+        take_newer_choice(&mut devices, &mut pending);
+        assert_eq!(
+            pending.as_ref().map(|(_, c)| c.clone()),
+            Some(choice("mic-2"))
+        );
+        assert!(!devices.has_changed().unwrap(), "the newer choice is read");
+    }
+
+    /// GIVEN two members with a sound level WHEN one leaves the call THEN
+    /// its level goes from the meters at once, and the member that stays
+    /// keeps its level; a prune with no change sends nothing.
+    #[test]
+    fn given_a_member_with_a_level_when_it_leaves_then_its_level_goes() {
+        let mut fixture = test_call(
+            no_admission(),
+            Arc::new(Flags::default()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let calls = controller(FakeHost::new(true, None));
+        let updates = Arc::new(Mutex::new(Vec::new()));
+        let heard = updates.clone();
+        calls.set_sound_listener(Arc::new(move |update| plain(&heard).push(update)));
+        let inner = calls.inner.clone();
+        fixture.call.view = view();
+        fixture.call.view.set_members(vec![
+            member("@a:example.org", "A", "https://sfu.example.org"),
+            member("@c:example.org", "C", "https://sfu.example.org"),
+        ]);
+        let call = &mut fixture.call;
+        let members = call.view.members.clone();
+        let (a, b) = (members[0].clone(), members[1].clone());
+        call.participant_level(&inner, 0, &a.backend_identities[0], 40);
+        call.participant_level(&inner, 0, &b.backend_identities[0], 20);
+        assert_eq!(call.levels.len(), 2);
+        call.view.set_members(vec![b.clone()]);
+        call.prune_levels(&inner);
+        let last = plain(&updates).last().cloned();
+        assert_eq!(
+            last,
+            Some(SoundUpdate::Participants(vec![CallParticipantLevel {
+                user_id: b.user_id.to_string(),
+                device_id: b.device_id.to_string(),
+                level: 20,
+            }]))
+        );
+        let sent = plain(&updates).len();
+        call.prune_levels(&inner);
+        assert_eq!(plain(&updates).len(), sent, "no change sends nothing");
+        // The member that stays moves to another SFU: connection 0 no longer
+        // speaks for it, so its level goes too.
+        call.view.set_members(vec![member(
+            b.user_id.as_str(),
+            b.device_id.as_str(),
+            "https://other.example.org",
+        )]);
+        call.prune_levels(&inner);
+        assert_eq!(
+            plain(&updates).last().cloned(),
+            Some(SoundUpdate::Participants(Vec::new()))
+        );
+    }
+
     /// Ends a portal request that produced no remote.
     fn finish_without_remote(call: &mut Call, inner: &Inner) {
         #[cfg(target_os = "linux")]
@@ -5094,7 +6290,7 @@ mod tests {
         }));
         let levels = Arc::new(Mutex::new(Vec::new()));
         let heard = levels.clone();
-        calls.set_sound_listener(Arc::new(move |level| plain(&heard).push(level)));
+        calls.set_sound_listener(Arc::new(move |update| plain(&heard).push(update)));
         let inner = calls.inner.clone();
         let mut call = fixture.call;
         call.worker_event(&inner, &FromWorker::Connected).unwrap();
@@ -5105,7 +6301,7 @@ mod tests {
             assert_eq!(call.worker_event(&inner, &message), Ok(()));
             assert_eq!(call.view.apply(&message), Applied::Same);
         }
-        assert_eq!(*plain(&levels), [0, 55, 100]);
+        assert_eq!(*plain(&levels), [0, 55, 100].map(SoundUpdate::Own));
         assert_eq!(call.view.state(), state);
         assert_eq!(changes.load(Ordering::SeqCst), before);
     }
@@ -5364,6 +6560,7 @@ mod tests {
             camera_wanted: call.camera_wanted.clone(),
             screen_control: call.screen_control.clone(),
             volume: call.volume.clone(),
+            devices: call.devices.clone(),
             task: None,
         });
         run_call(
@@ -5596,6 +6793,7 @@ mod tests {
             camera_wanted: Arc::new(AtomicBool::new(false)),
             screen_control: Arc::default(),
             volume: watch::channel(MAX_VOLUME_PERCENT).0,
+            devices: watch::channel(None).0,
             task: None,
         });
         calls.inner.publish(state);
@@ -5613,6 +6811,7 @@ mod tests {
             screen: CallScreen::Off,
             video: Vec::new(),
             ring_declined: false,
+            device_change: None,
         }
     }
 
@@ -5685,6 +6884,7 @@ mod tests {
                 stream: 0,
             }],
             ring_declined: false,
+            device_change: None,
         });
         assert!(calls.video_picture(0, 0, store.stream(0)).is_some());
         assert_eq!(calls.set_camera(false), Ok(()));
@@ -7165,6 +8365,67 @@ mod tests {
             persephone_call_protocol::MAX_PARTICIPANTS
         );
         assert_eq!(sharing(&view), ["@c:example.org:C"], "strangers hidden");
+    }
+
+    /// GIVEN a muted microphone reported before the membership of its
+    /// member arrives WHEN the membership arrives THEN the member shows the
+    /// mute mark; a hint from a connection that does not speak for the
+    /// member does not show; unmuting and leaving remove the mark; hints
+    /// beyond the bound are not kept.
+    #[test]
+    fn given_a_mute_hint_before_the_membership_then_it_shows_once_the_member_arrives() {
+        let mut view = view();
+        view.apply(&FromWorker::Connected);
+        let muted = |connection, identity: &str, muted| FromWorker::ParticipantMuted {
+            connection,
+            identity: identity.to_owned(),
+            muted,
+        };
+        assert_eq!(
+            view.apply(&muted(0, "@c:example.org:C", true)),
+            Applied::Same
+        );
+        assert_eq!(
+            view.apply(&muted(2, "@d:example.org:D", true)),
+            Applied::Same
+        );
+        let marked = |view: &View| {
+            let CallState::Active { participants, .. } = view.state() else {
+                panic!("active");
+            };
+            participants
+                .iter()
+                .filter(|p| p.muted)
+                .map(|p| format!("{}:{}", p.user_id, p.device_id))
+                .collect::<Vec<_>>()
+        };
+        assert!(marked(&view).is_empty());
+        view.set_members(vec![
+            member("@a:example.org", "A", "https://sfu.example.org"),
+            member("@c:example.org", "C", "https://sfu.example.org"),
+            member("@d:example.org", "D", "https://sfu.example.org"),
+        ]);
+        assert_eq!(marked(&view), ["@c:example.org:C"]);
+        assert_eq!(
+            view.apply(&muted(0, "@c:example.org:C", false)),
+            Applied::Changed
+        );
+        assert!(marked(&view).is_empty());
+        view.apply(&muted(0, "@a:example.org:A", true));
+        assert_eq!(marked(&view), ["@a:example.org:A"]);
+        assert_eq!(
+            view.apply(&FromWorker::ParticipantLeft {
+                connection: 0,
+                identity: "@a:example.org:A".to_owned(),
+            }),
+            Applied::Changed
+        );
+        assert!(marked(&view).is_empty());
+
+        for index in 0..persephone_call_protocol::MAX_PARTICIPANTS + 4 {
+            view.apply(&muted(0, &format!("@s{index}:example.org:S"), true));
+        }
+        assert!(view.mic_muted.len() <= persephone_call_protocol::MAX_PARTICIPANTS);
     }
 
     /// GIVEN each worker screen state WHEN applied THEN the page's state

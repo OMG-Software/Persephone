@@ -10,6 +10,10 @@ import type {
   CallJoinError,
   CallReadiness,
   CallStatus,
+  CallParticipantLevel,
+  CallDeviceTestKind,
+  CallDeviceTestState,
+  CallDeviceTestStatus,
   CallUnavailable,
   CallVideoTile,
   LocalSearchFilters,
@@ -270,7 +274,7 @@ void bigintFilter;
 void unknownAttachment;
 void unknownSync;
 void missingHealth;
-const idleCall: CallStatus = { phase: "idle", roomId: null, muted: false, deafened: false, volume: 100, participants: [], ended: null, joinError: null, camera: "off", screen: "off", video: [], ringDeclined: false };
+const idleCall: CallStatus = { phase: "idle", roomId: null, muted: false, deafened: false, volume: 100, participants: [], ended: null, joinError: null, camera: "off", screen: "off", video: [], ringDeclined: false, deviceChange: null };
 const readyCall: CallReadiness = { available: false, reason: "no_call_server", activeMembers: 0 };
 // @ts-expect-error a status carries codes, never a token or URL
 const callWithToken: CallStatus = { ...idleCall, token: "secret" };
@@ -290,6 +294,18 @@ const ringList: CallRings = { rings: [{ ringId: 1, roomId: "!r:s", caller: "@a:s
 const ringWithName: CallRings = { rings: [{ ...ringList.rings[0], name: "x" }] };
 // @ts-expect-error only audio and video are intents
 const unknownIntent: CallIntent = "hologram";
+// @ts-expect-error only the defined device change failures are accepted
+const unknownDeviceChange: CallStatus = { ...idleCall, deviceChange: "unplugged" };
+const levelList: CallParticipantLevel[] = [{ userId: "@a:s", deviceId: "D", level: 40 }];
+// @ts-expect-error a level carries the device and a number, nothing else
+const levelWithName: CallParticipantLevel = { ...levelList[0], name: "x" };
+const testStatus: CallDeviceTestStatus = { id: 4, test: "camera", state: "running", stream: 2 };
+// @ts-expect-error the test ID is required
+const noTestId: CallDeviceTestStatus = { test: "camera", state: "running", stream: 2 };
+// @ts-expect-error only the defined device tests are accepted
+const unknownTest: CallDeviceTestKind = "kettle";
+// @ts-expect-error only the defined test states are accepted
+const unknownTestState: CallDeviceTestState = "exploded";
 // @ts-expect-error the declined flag is required
 const missingDeclined: CallStatus = { ...idleCall, ringDeclined: undefined };
 // @ts-expect-error the deafen flag is required
@@ -341,3 +357,9 @@ void logNever;
 void logMissingPath;
 void logMissingFailed;
 void logWithText;
+void unknownDeviceChange;
+void levelWithName;
+void testStatus;
+void noTestId;
+void unknownTest;
+void unknownTestState;

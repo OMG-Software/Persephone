@@ -328,6 +328,25 @@ pub enum Call {
     DiscoverHomeserver {
         server_name: String,
     },
+    /// Test one call device in a contained call worker (ADR-0059): listen
+    /// on a microphone, play a tone on a speaker or show a camera. `device`
+    /// is a platform device ID of at most [`MAX_CALL_DEVICE_ID_BYTES`], or
+    /// null for the system default. Replies the test's status at once;
+    /// `call_device_test_changed` follows each change. A test that runs is
+    /// stopped first. Refused with the state `in_call` while a call runs.
+    CallDeviceTest {
+        test: persephone_contracts::CallDeviceTestKind,
+        /// Required, though it may be null.
+        #[serde(deserialize_with = "Option::deserialize")]
+        device: Option<String>,
+    },
+    /// Stop the device test that runs, if any: with `id`, only when that
+    /// test is still the newest (ADR-0059). Replies null.
+    CallDeviceTestStop {
+        id: Option<u64>,
+    },
+    /// The newest device test's status.
+    CallDeviceTestStatus {},
     /// Sign in to this homeserver through its OAuth 2.0 provider (OIDC,
     /// ADR-0030). The core asks in its own window before the provider's page
     /// opens in the browser; the password goes to the provider, never here.
@@ -855,7 +874,7 @@ pub const MAX_THREE_PIDS: usize = 50;
 pub const MAX_NEW_SESSION_IDS: usize = 10;
 
 /// Longest device ID either side accepts in a call.
-pub const MAX_DEVICE_ID_BYTES: usize = 255;
+pub const MAX_DEVICE_ID_BYTES: usize = persephone_contracts::CALL_DEVICE_ID_BYTES_MAX;
 
 /// Longest room or sender name in a [`Event::Notification`], in bytes.
 pub const MAX_NOTIFICATION_NAME_BYTES: usize = 512;
@@ -962,7 +981,7 @@ pub const IMAGE_HANDLE_BYTES: usize = 32;
 pub const MAX_BAND_BYTES: u64 = MIB;
 
 /// Longest user ID either side accepts in a call (the Matrix limit).
-pub const MAX_USER_ID_BYTES: usize = 255;
+pub const MAX_USER_ID_BYTES: usize = persephone_contracts::CALL_USER_ID_BYTES_MAX;
 
 /// Longest verification flow ID either side accepts.
 pub const MAX_FLOW_ID_BYTES: usize = 128;
@@ -1035,8 +1054,9 @@ pub const MAX_HOMESERVER_URL_BYTES: usize = 2048;
 pub const MAX_SUBSCRIPTIONS: usize = 16;
 
 /// The top of the call's sound level meter (ADR-0055): 0 dBFS. 0 is
-/// -60 dBFS or quieter.
-pub const MAX_CALL_SOUND_LEVEL: u8 = 100;
+/// -60 dBFS or quieter. The contract's ceiling, so the core, the host and
+/// the page check one number.
+pub const MAX_CALL_SOUND_LEVEL: u8 = persephone_contracts::CALL_SOUND_LEVEL_MAX;
 
 /// A notification from the core. Events carry no message content: the UI
 /// fetches content through bounded calls. A burst of changes to one room
@@ -1076,6 +1096,17 @@ pub enum Event {
     CallSoundLevel {
         level: u8,
     },
+    /// The sound of the other devices in the call changed (ADR-0059): each
+    /// device that is not silent now, at most [`MAX_CALL_LEVELS`], with
+    /// validated IDs and a level of 0 to [`MAX_CALL_SOUND_LEVEL`]. Empty
+    /// when the call ends. Coalesced like `CallSoundLevel`.
+    CallLevels {
+        #[serde(deserialize_with = "bounded_levels")]
+        levels: Vec<persephone_contracts::CallParticipantLevel>,
+    },
+    /// A device test started, changed or ended (ADR-0059): ask for
+    /// `call_device_test_status`. Content-free and coalesced.
+    CallDeviceTestChanged {},
     /// An incoming call ring started, ended or changed (ADR-0052): ask for
     /// `call_rings`. Content-free and coalesced like `CallChanged`.
     RingsChanged {},
@@ -1102,6 +1133,140 @@ pub enum Event {
         #[serde(default)]
         call: bool,
     },
+}
+
+/// Most devices in one `call_levels` event: the most call participants.
+pub const MAX_CALL_LEVELS: usize = persephone_contracts::CALL_PARTICIPANTS_MAX;
+
+/// Whether every level names a device with bounded IDs and is in range.
+pub fn levels_within_limits(levels: &[persephone_contracts::CallParticipantLevel]) -> bool {
+    levels.len() <= MAX_CALL_LEVELS
+        && levels.iter().all(|level| {
+            level.user_id.len() <= MAX_USER_ID_BYTES
+                && level.device_id.len() <= MAX_DEVICE_ID_BYTES
+                && level.level <= MAX_CALL_SOUND_LEVEL
+        })
+}
+
+/// Reads a level list and refuses an entry past [`MAX_CALL_LEVELS`], an
+/// overlong ID or a level out of range before it keeps it, so a hostile list
+/// allocates at most the limits.
+fn bounded_levels<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<persephone_contracts::CallParticipantLevel>, D::Error> {
+    struct Levels;
+    impl<'de> serde::de::Visitor<'de> for Levels {
+        type Value = Vec<persephone_contracts::CallParticipantLevel>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "at most {MAX_CALL_LEVELS} call levels")
+        }
+
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut levels = Vec::new();
+            loop {
+                // A full list only checks for one more entry, unbuilt.
+                if levels.len() == MAX_CALL_LEVELS {
+                    if seq.next_element::<serde::de::IgnoredAny>()?.is_some() {
+                        return Err(serde::de::Error::custom("call levels out of bounds"));
+                    }
+                    return Ok(levels);
+                }
+                let Some(level) = seq.next_element::<WireLevel>()? else {
+                    return Ok(levels);
+                };
+                if level.level > MAX_CALL_SOUND_LEVEL {
+                    return Err(serde::de::Error::custom("call levels out of bounds"));
+                }
+                levels.push(persephone_contracts::CallParticipantLevel {
+                    user_id: level.user_id.0,
+                    device_id: level.device_id.0,
+                    level: level.level,
+                });
+            }
+        }
+    }
+    deserializer.deserialize_seq(Levels)
+}
+
+/// One entry of a level list as it crosses, with its IDs bounded. Only a
+/// JSON object is read: a derived visitor would also take a positional
+/// array, which is not the contract.
+struct WireLevel {
+    user_id: BoundedText<MAX_USER_ID_BYTES>,
+    device_id: BoundedText<MAX_DEVICE_ID_BYTES>,
+    level: u8,
+}
+
+impl<'de> Deserialize<'de> for WireLevel {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        enum Field {
+            UserId,
+            DeviceId,
+            Level,
+        }
+        struct Entry;
+        impl<'de> serde::de::Visitor<'de> for Entry {
+            type Value = WireLevel;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a call level object")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
+                use serde::de::Error;
+                let (mut user_id, mut device_id, mut level) = (None, None, None);
+                while let Some(field) = map.next_key::<Field>()? {
+                    let fresh = match field {
+                        Field::UserId => user_id.replace(map.next_value()?).is_none(),
+                        Field::DeviceId => device_id.replace(map.next_value()?).is_none(),
+                        Field::Level => level.replace(map.next_value()?).is_none(),
+                    };
+                    if !fresh {
+                        return Err(A::Error::custom("duplicate call level field"));
+                    }
+                }
+                Ok(WireLevel {
+                    user_id: user_id.ok_or_else(|| A::Error::missing_field("userId"))?,
+                    device_id: device_id.ok_or_else(|| A::Error::missing_field("deviceId"))?,
+                    level: level.ok_or_else(|| A::Error::missing_field("level"))?,
+                })
+            }
+        }
+        deserializer.deserialize_map(Entry)
+    }
+}
+
+/// A string of at most `N` bytes, refused before it is copied.
+struct BoundedText<const N: usize>(String);
+
+impl<'de, const N: usize> Deserialize<'de> for BoundedText<N> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Text<const N: usize>;
+        impl<const N: usize> serde::de::Visitor<'_> for Text<N> {
+            type Value = BoundedText<N>;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "a string of at most {N} bytes")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, text: &str) -> Result<Self::Value, E> {
+                if text.len() > N {
+                    return Err(E::custom("text too long"));
+                }
+                Ok(BoundedText(text.to_owned()))
+            }
+        }
+        deserializer.deserialize_str(Text::<N>)
+    }
 }
 
 /// Most records in one `diagnostic_records` call.
@@ -1336,6 +1501,11 @@ pub fn call_video_within_limits(call: &Call) -> bool {
                 && *stream <= MAX_SAFE_TIMESTAMP
         }
         Call::SetCallDevices { camera, .. } => camera.as_ref().is_none_or(|id| {
+            !id.is_empty()
+                && id.len() <= MAX_CALL_DEVICE_ID_BYTES
+                && !id.chars().any(char::is_control)
+        }),
+        Call::CallDeviceTest { device, .. } => device.as_ref().is_none_or(|id| {
             !id.is_empty()
                 && id.len() <= MAX_CALL_DEVICE_ID_BYTES
                 && !id.chars().any(char::is_control)
@@ -3934,6 +4104,119 @@ mod timeline_events_wire_tests {
             )
             .is_err()
         );
+    }
+
+    /// GIVEN call level events WHEN read THEN bounded ones are kept, and a
+    /// level over the top, too many devices or an overlong ID is refused.
+    #[test]
+    fn given_call_level_events_then_only_bounded_ones_are_read() {
+        let event = |levels: serde_json::Value| {
+            serde_json::from_value::<CoreMessage>(
+                serde_json::json!({"event": {"call_levels": {"levels": levels}}}),
+            )
+        };
+        let one = |level: u32, user: &str| serde_json::json!({"userId": user, "deviceId": "D", "level": level});
+        assert!(event(serde_json::json!([])).is_ok());
+        assert!(event(serde_json::json!([one(100, "@a:example.org")])).is_ok());
+        assert!(event(serde_json::json!([one(101, "@a:example.org")])).is_err());
+        let long = format!("@{}:example.org", "a".repeat(MAX_USER_ID_BYTES));
+        assert!(event(serde_json::json!([one(1, &long)])).is_err());
+        let many: Vec<_> = (0..=MAX_CALL_LEVELS)
+            .map(|_| one(1, "@a:example.org"))
+            .collect();
+        assert!(event(serde_json::Value::Array(many)).is_err());
+        // At the limits, on the byte path that the receiver reads.
+        let full: Vec<_> = (0..MAX_CALL_LEVELS)
+            .map(|_| one(1, "@a:example.org"))
+            .collect();
+        let bytes =
+            serde_json::to_vec(&serde_json::json!({"event": {"call_levels": {"levels": full}}}))
+                .unwrap();
+        assert!(serde_json::from_slice::<CoreMessage>(&bytes).is_ok());
+        // An entry past the limit is refused unbuilt, whatever it holds.
+        let mut over: Vec<_> = (0..MAX_CALL_LEVELS)
+            .map(|_| one(1, "@a:example.org"))
+            .collect();
+        over.push(serde_json::json!({"anything": [1, 2, 3]}));
+        let error = event(serde_json::Value::Array(over)).unwrap_err();
+        // An entry is an object, never a positional array (byte path).
+        let positional = br#"{"event":{"call_levels":{"levels":[["@a:example.org","D",42]]}}}"#;
+        assert!(serde_json::from_slice::<CoreMessage>(positional).is_err());
+        let object =
+            br#"{"event":{"call_levels":{"levels":[{"userId":"@a:example.org","deviceId":"D","level":42}]}}}"#;
+        assert!(serde_json::from_slice::<CoreMessage>(object).is_ok());
+        let twice = br#"{"event":{"call_levels":{"levels":[{"userId":"@a:example.org","userId":"@b:example.org","deviceId":"D","level":42}]}}}"#;
+        assert!(serde_json::from_slice::<CoreMessage>(twice).is_err());
+        let missing =
+            br#"{"event":{"call_levels":{"levels":[{"userId":"@a:example.org","deviceId":"D"}]}}}"#;
+        assert!(serde_json::from_slice::<CoreMessage>(missing).is_err());
+        assert!(
+            error.to_string().contains("call levels out of bounds"),
+            "{error}"
+        );
+        let longest = "a".repeat(MAX_USER_ID_BYTES);
+        assert!(event(serde_json::json!([one(1, &longest)])).is_ok());
+        let device = "D".repeat(MAX_DEVICE_ID_BYTES + 1);
+        assert!(
+            event(
+                serde_json::json!([{"userId": "@a:example.org", "deviceId": device, "level": 1}])
+            )
+            .is_err()
+        );
+        assert!(
+            event(serde_json::json!([{"userId": "@a:example.org", "deviceId": "D", "level": 1, "x": 1}]))
+                .is_err()
+        );
+        let wire =
+            serde_json::to_string(&CoreMessage::Event(Event::CallDeviceTestChanged {})).unwrap();
+        assert_eq!(wire, r#"{"event":{"call_device_test_changed":{}}}"#);
+    }
+
+    /// GIVEN device test commands WHEN read THEN each has its wire form, the
+    /// device is required (null allowed), and a bad ID is refused by the
+    /// limit check.
+    #[test]
+    fn given_device_test_commands_then_they_read_and_are_bounded() {
+        let read = |text: &str| serde_json::from_str::<Request>(text);
+        let test =
+            read(r#"{"id":1,"call":{"command":"call_device_test","test":"camera","device":null}}"#)
+                .expect("a test");
+        assert_eq!(
+            test.call,
+            Call::CallDeviceTest {
+                test: persephone_contracts::CallDeviceTestKind::Camera,
+                device: None,
+            }
+        );
+        assert!(read(r#"{"id":1,"call":{"command":"call_device_test","test":"camera"}}"#).is_err());
+        assert!(
+            read(r#"{"id":1,"call":{"command":"call_device_test","test":"x","device":null}}"#)
+                .is_err()
+        );
+        assert_eq!(
+            read(r#"{"id":1,"call":{"command":"call_device_test_stop"}}"#)
+                .unwrap()
+                .call,
+            Call::CallDeviceTestStop { id: None }
+        );
+        assert_eq!(
+            read(r#"{"id":1,"call":{"command":"call_device_test_stop","id":7}}"#)
+                .unwrap()
+                .call,
+            Call::CallDeviceTestStop { id: Some(7) }
+        );
+        assert!(read(r#"{"id":1,"call":{"command":"call_device_test_stop","id":-1}}"#).is_err());
+        assert!(read(r#"{"id":1,"call":{"command":"call_device_test_status"}}"#).is_ok());
+        let with = |device: &str| Call::CallDeviceTest {
+            test: persephone_contracts::CallDeviceTestKind::Microphone,
+            device: Some(device.to_owned()),
+        };
+        assert!(call_video_within_limits(&with("{0.0.1.00000000}.{a}")));
+        assert!(!call_video_within_limits(&with("")));
+        assert!(!call_video_within_limits(&with("a\nb")));
+        assert!(!call_video_within_limits(&with(
+            &"a".repeat(MAX_CALL_DEVICE_ID_BYTES + 1)
+        )));
     }
 
     /// GIVEN a diagnostics event THEN its wire form carries only `on`.

@@ -21,7 +21,10 @@ zeroize = "=1.9.1"
 
 [target.'cfg(windows)'.dependencies]
 # Camera capture through Media Foundation (ADR-0048) and screen capture
-# through Windows.Graphics.Capture (ADR-0053): only these features.
+# through Windows.Graphics.Capture (ADR-0053), the default speaker and
+# microphone for media (`sound_defaults.rs`), and the WASAPI device tests
+# (`sound_test.rs`, ADR-0059; `IMMDevice::Activate` needs the two
+# `PROPVARIANT` features): only these features.
 windows = { version = "=0.62.2", default-features = false, features = [
   "Foundation",
   "Graphics_Capture",
@@ -32,8 +35,11 @@ windows = { version = "=0.62.2", default-features = false, features = [
   "Win32_Graphics_Dxgi",
   "Win32_Graphics_Dxgi_Common",
   "Win32_Graphics_Gdi",
+  "Win32_Media_Audio",
   "Win32_Media_MediaFoundation",
   "Win32_System_Com",
+  "Win32_System_Com_StructuredStorage",
+  "Win32_System_Variant",
   "Win32_System_WinRT_Direct3D11",
   "Win32_System_WinRT_Graphics_Capture",
 ] }

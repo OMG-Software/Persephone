@@ -120,6 +120,8 @@ const VIDEO_EVENT_GAP: Duration = Duration::from_millis(33);
 /// The shortest time between two `call_sound_level` events: about ten a
 /// second, the worker's own rate (ADR-0055).
 const SOUND_EVENT_GAP: Duration = Duration::from_millis(100);
+// The worker's meter and the page's have one top (ADR-0055).
+const _: () = assert!(persephone_call_protocol::MAX_SOUND_LEVEL == MAX_CALL_SOUND_LEVEL);
 
 /// Longest a `lock_session` call waits for admitted work before replying
 /// `locking`; the UI may call again to resume the wait. Covers one sync round.
@@ -174,6 +176,11 @@ struct Notifications {
     sound_level: Option<u8>,
     /// When the last `call_sound_level` event was taken.
     sound_taken: Option<Instant>,
+    /// The newest levels of the other devices in the call, not yet sent
+    /// (ADR-0059). They leave with the sound level, under its gap.
+    participant_levels: Option<Vec<persephone_contracts::CallParticipantLevel>>,
+    /// The device test changed since the last notification (ADR-0059).
+    device_test_changed: bool,
     /// The report of third-party modules changed since the last notification.
     modules_changed: bool,
     /// The diagnostic log was turned on or off since the last notification.
@@ -321,6 +328,23 @@ impl Hub {
         let mut notifications = lock(&self.notifications);
         notifications.sound_level = Some(level.min(MAX_CALL_SOUND_LEVEL));
         self.changed.notify_all();
+    }
+
+    /// Keeps `levels` as the other devices' levels to send; newer ones
+    /// replace them. They leave under the sound level's gap.
+    fn participant_levels_changed(&self, levels: Vec<persephone_contracts::CallParticipantLevel>) {
+        let mut notifications = lock(&self.notifications);
+        notifications.participant_levels = Some(levels);
+        self.changed.notify_all();
+    }
+
+    /// The device test changed: one `call_device_test_changed` event waits.
+    fn device_test_changed(&self) {
+        let mut notifications = lock(&self.notifications);
+        if !notifications.device_test_changed {
+            notifications.device_test_changed = true;
+            self.changed.notify_all();
+        }
     }
 
     /// Queues events for the subscribed rooms among `rooms`, and one room-list
@@ -741,9 +765,20 @@ impl Core {
             }
         }));
         let tell = Arc::downgrade(&hub);
-        calls.set_sound_listener(Arc::new(move |level| {
+        calls.set_sound_listener(Arc::new(move |update| {
             if let Some(hub) = tell.upgrade() {
-                hub.sound_level_changed(level);
+                match update {
+                    calls::controller::SoundUpdate::Own(level) => hub.sound_level_changed(level),
+                    calls::controller::SoundUpdate::Participants(levels) => {
+                        hub.participant_levels_changed(levels);
+                    }
+                }
+            }
+        }));
+        let tell = Arc::downgrade(&hub);
+        calls.set_test_listener(Arc::new(move || {
+            if let Some(hub) = tell.upgrade() {
+                hub.device_test_changed();
             }
         }));
         Self {
@@ -1508,6 +1543,20 @@ impl Core {
                 Ok(()) => ok(&calls::status::status(&self.calls.state())),
                 Err(code) => Outcome::Error(code),
             },
+            Call::CallDeviceTest { test, device } => {
+                if !call_video_within_limits(call) {
+                    return Outcome::Error(ErrorCode::InvalidArgument);
+                }
+                match self.calls_open() {
+                    Ok(()) => ok(&self.calls.start_device_test(*test, device.clone())),
+                    Err(code) => Outcome::Error(code),
+                }
+            }
+            Call::CallDeviceTestStop { id } => {
+                self.calls.stop_device_test_if(*id);
+                Outcome::Ok(serde_json::Value::Null)
+            }
+            Call::CallDeviceTestStatus {} => ok(&self.calls.device_test_status()),
             Call::ImageBand { .. } => Outcome::Error(ErrorCode::Unavailable),
             // Its image frame reaches only `serve`.
             Call::PasteImage { .. } => Outcome::Error(ErrorCode::InvalidArgument),
@@ -2802,8 +2851,9 @@ impl Core {
         )
     }
 
-    /// Saves the call devices; they apply to calls joined afterwards. A
-    /// device need not be connected now. The saved volume is kept; when the
+    /// Saves the call devices; they apply to calls joined afterwards, and
+    /// the microphone and speaker also to the running call. A device need
+    /// not be connected now. The saved volume is kept; when the
     /// old record cannot be read, the new one has the default volume.
     fn set_call_devices(
         &self,
@@ -2838,6 +2888,14 @@ impl Core {
                 .and_then(|saved| saved.volume);
             calls::devices::save(stores, &selection).await
         }) {
+            // A running call moves to the new microphone and speaker at once,
+            // and opens the new camera at its next camera start (ADR-0059);
+            // without a call the choice waits for the next one.
+            let _ = self.calls.set_devices(
+                selection.recording.as_deref(),
+                selection.playout.as_deref(),
+                selection.camera.as_deref(),
+            );
             Outcome::Ok(serde_json::Value::Null)
         } else {
             Outcome::Error(ErrorCode::Internal)
@@ -3745,13 +3803,16 @@ impl Core {
                 .map(|taken| (taken + VIDEO_EVENT_GAP).saturating_duration_since(Instant::now()))
                 .filter(|wait| !wait.is_zero());
             let video_due = notifications.video_changed && video_wait.is_none();
-            // A sound level waits for its own gap the same way.
+            // A sound level waits for its own gap the same way; the other
+            // devices' levels go with it.
+            let sound_pending =
+                notifications.sound_level.is_some() || notifications.participant_levels.is_some();
             let sound_wait = notifications
-                .sound_level
-                .and(notifications.sound_taken)
+                .sound_taken
+                .filter(|_| sound_pending)
                 .map(|taken| (taken + SOUND_EVENT_GAP).saturating_duration_since(Instant::now()))
                 .filter(|wait| !wait.is_zero());
-            let sound_due = notifications.sound_level.is_some() && sound_wait.is_none();
+            let sound_due = sound_pending && sound_wait.is_none();
             let idle = notifications.pending.is_empty()
                 && !notifications.session_changed
                 && !notifications.room_list_changed
@@ -3761,6 +3822,7 @@ impl Core {
                 && !notifications.rings_changed
                 && !notifications.modules_changed
                 && !notifications.diagnostics_changed
+                && !notifications.device_test_changed
                 && notifications.toast.is_none()
                 && !video_due
                 && !sound_due
@@ -3803,19 +3865,28 @@ impl Core {
         } else {
             None
         };
-        let sound = if notifications.sound_level.is_some()
+        let (sound, levels) = if (notifications.sound_level.is_some()
+            || notifications.participant_levels.is_some())
             && notifications
                 .sound_taken
                 .is_none_or(|taken| taken.elapsed() >= SOUND_EVENT_GAP)
         {
             notifications.sound_taken = Some(Instant::now());
-            notifications
-                .sound_level
-                .take()
-                .map(|level| Event::CallSoundLevel { level })
+            (
+                notifications
+                    .sound_level
+                    .take()
+                    .map(|level| Event::CallSoundLevel { level }),
+                notifications
+                    .participant_levels
+                    .take()
+                    .map(|levels| Event::CallLevels { levels }),
+            )
         } else {
-            None
+            (None, None)
         };
+        let device_test = std::mem::take(&mut notifications.device_test_changed)
+            .then_some(Event::CallDeviceTestChanged {});
         let session =
             std::mem::take(&mut notifications.session_changed).then_some(Event::SessionChanged {});
         let list = std::mem::take(&mut notifications.room_list_changed)
@@ -3855,6 +3926,8 @@ impl Core {
                 .chain(rings)
                 .chain(video)
                 .chain(sound)
+                .chain(levels)
+                .chain(device_test)
                 .chain(modules)
                 .chain(diagnostics)
                 .chain(toast)

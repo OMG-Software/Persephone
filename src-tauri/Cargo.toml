@@ -29,10 +29,13 @@ log = { version = "=0.4.34", default-features = false }
 # serve the embedded frontend; there is no development server. Off: devtools in
 # release, dynamic ACL changes, tracing (which records IPC payloads),
 # compression, isolation, and the Linux-only x11/dbus until Linux is built.
+# `tray-icon`: the main menu's "Minimise to tray" (ADR-0060); the crate was
+# already in the lock at this version.
 tauri = { version = "=2.12.4", default-features = false, features = [
   "wry",
   "common-controls-v6",
   "custom-protocol",
+  "tray-icon",
 ] }
 # ADR-0022: desktop notifications (Windows toasts), shown from Rust only. No
 # capability grants the page any of its commands; the plugin has no features.
@@ -67,5 +70,6 @@ tauri = { version = "=2.12.4", default-features = false, features = [
   "wry",
   "common-controls-v6",
   "custom-protocol",
+  "tray-icon",
   "test",
 ] }

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
-import { mainMenuItems, menuTarget, roomMenuItems } from '../src/menu.ts';
+import { exitWhenSaved, mainMenuItems, menuTarget, roomMenuItems } from '../src/menu.ts';
 import {
   SIDEBAR_DEFAULT,
   SIDEBAR_MAX,
@@ -45,34 +45,39 @@ test('GIVEN an open menu WHEN a key does not move focus or nothing can take it T
 
 const chosen = [];
 const actions = Object.fromEntries(
-  ['explore', 'groups', 'search', 'drafts', 'ignored', 'health', 'settings', 'lock'].map((name) => [name, () => chosen.push(name)])
+  ['explore', 'groups', 'search', 'drafts', 'ignored', 'health', 'settings', 'lock', 'tray', 'exit'].map((name) => [name, () => chosen.push(name)])
 );
 const mainMenu = (state) =>
   mainMenuItems({ signedIn: true, canLock: true, switching: false, confirmingSignOut: false, ...state }, actions);
 
-test('GIVEN a signed-in account WHEN the main menu opens THEN Settings and Lock Persephone follow the account tools', () => {
+test('GIVEN a signed-in account WHEN the main menu opens THEN Settings and Lock Persephone follow the account tools, and Minimise to tray and Exit end it', () => {
   const items = mainMenu({});
   assert.deepEqual(items.map((item) => item.label), [
     'Explore public rooms', 'Room groups', 'Search cached messages', 'Saved drafts', 'Ignored users', 'Connection health',
-    'Settings', 'Lock Persephone'
+    'Settings', 'Lock Persephone', 'Minimise to tray', 'Exit Persephone'
   ]);
   assert.equal(items[6].separated, true, 'a line sets Settings and Lock apart');
+  assert.equal(items.at(-2).separated, true, 'a line sets the tray and Exit apart');
+  assert.equal(Boolean(items.at(-1).separated), false);
   chosen.length = 0;
-  items.at(-2).onselect();
-  items.at(-1).onselect();
-  assert.deepEqual(chosen, ['settings', 'lock']);
-  assert.equal(items.at(-1).disabled, false);
+  for (const item of items.slice(-4)) item.onselect();
+  assert.deepEqual(chosen, ['settings', 'lock', 'tray', 'exit']);
+  assert.equal(items.at(-3).disabled, false);
 });
 
-test('GIVEN no account WHEN the main menu opens THEN Settings is still there and nothing else is', () => {
+test('GIVEN no account WHEN the main menu opens THEN Settings and Exit are still there and nothing else is', () => {
   const items = mainMenu({ signedIn: false, canLock: false });
-  assert.deepEqual(items.map((item) => [item.label, Boolean(item.separated)]), [['Settings', false]]);
+  assert.deepEqual(items.map((item) => [item.label, Boolean(item.separated)]), [
+    ['Settings', false],
+    ['Minimise to tray', true],
+    ['Exit Persephone', false]
+  ]);
 });
 
 test('GIVEN the session is changing or the sign-out question is open WHEN the main menu opens THEN Lock is disabled', () => {
-  const working = mainMenu({ switching: true }).at(-1);
+  const working = mainMenu({ switching: true }).at(-3);
   assert.deepEqual([working.label, working.disabled], ['Working…', true]);
-  const asking = mainMenu({ confirmingSignOut: true }).at(-1);
+  const asking = mainMenu({ confirmingSignOut: true }).at(-3);
   assert.deepEqual([asking.label, asking.disabled], ['Lock Persephone', true]);
 });
 
@@ -278,4 +283,17 @@ test('GIVEN readers with presence WHEN joined THEN each row keeps a known status
     null
   );
   assert.deepEqual(rows.map((row) => row.presence), ['online', 'unavailable', 'offline', null, null]);
+});
+
+test('GIVEN a draft save WHEN Exit is chosen THEN Persephone exits only after the save, and stays open when it fails', async () => {
+  const order = [];
+  const exit = async () => { order.push('exit'); };
+  const saved = async () => { order.push('flush'); return true; };
+  assert.equal(await exitWhenSaved(saved, exit), true);
+  assert.deepEqual(order, ['flush', 'exit']);
+
+  order.length = 0;
+  assert.equal(await exitWhenSaved(async () => false, exit), false);
+  assert.equal(await exitWhenSaved(async () => { throw new Error('core gone'); }, exit), false);
+  assert.deepEqual(order, [], 'no exit without a saved draft');
 });

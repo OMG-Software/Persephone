@@ -11,8 +11,39 @@ import {
   maxPixels,
   maxSide,
   parseVideoPicture,
+  tileCanvas,
   tileLayout
 } from '../src/video.ts';
+
+// GIVEN a canvas registered under a tile WHEN its cell moves to another
+// tile THEN the registration moves with it; WHEN another canvas took the old
+// tile first THEN that canvas stays; WHEN destroyed THEN only its own tile
+// is cleared.
+test('a tile canvas follows its tile and clears only its own registration', () => {
+  const canvases = {};
+  const first = { name: 'first' };
+  const action = tileCanvas(canvases, first, 2);
+  assert.equal(canvases[2], first);
+  action.update(2);
+  assert.equal(canvases[2], first);
+  action.update(1);
+  assert.equal(canvases[1], first);
+  assert.equal(canvases[2], undefined);
+
+  const second = { name: 'second' };
+  const other = tileCanvas(canvases, second, 3);
+  action.update(3);
+  assert.equal(canvases[3], first);
+  other.update(4);
+  assert.equal(canvases[3], first, 'the moved canvas keeps tile 3');
+  assert.equal(canvases[4], second);
+  other.destroy();
+  assert.equal(canvases[4], undefined);
+  canvases[1] = second;
+  action.destroy();
+  assert.equal(canvases[3], undefined);
+  assert.equal(canvases[1], second, 'a tile another canvas holds stays');
+});
 
 let vite;
 let CallVideo;

@@ -1806,3 +1806,23 @@ test('GIVEN the profile passphrase is off WHEN the preferences render THEN the i
   assert.doesNotMatch(off, /id="idle-lock"/);
   assert.doesNotMatch(off, /Ctrl\+Shift\+L/);
 });
+
+test('GIVEN the settings rail WHEN Calls is open THEN it follows Preferences, and Preferences has no call devices', async () => {
+  const { default: Settings } = await vite.ssrLoadModule('/src/Settings.svelte');
+  const { createRawSnippet } = await vite.ssrLoadModule('svelte');
+  const body = createRawSnippet(() => ({ render: () => '<p>page</p>' }));
+  const html = render(Settings, {
+    props: { userId: null, tab: 'calls', ontab: () => {}, onback: () => {}, children: body }
+  }).body;
+  const labels = [...html.matchAll(/class="room-row"[^>]*>\s*([^<]*?)\s*<\/button>/g)].map((m) => m[1]);
+  assert.deepEqual(labels.slice(labels.indexOf('Preferences'), labels.indexOf('Preferences') + 2), [
+    'Preferences',
+    'Calls'
+  ]);
+  assert.match(html, /aria-current="page"[^>]*>\s*Calls\s*<\/button>/);
+  const preferences = render(Preferences, {
+    props: { settings: DEFAULT_PREFERENCES, failure: null, mac: false, profilePassphrase: false, onchange: () => {} }
+  }).body;
+  assert.doesNotMatch(preferences, /id="call-microphone"/);
+  assert.doesNotMatch(preferences, /<h3>Calls<\/h3>/);
+});

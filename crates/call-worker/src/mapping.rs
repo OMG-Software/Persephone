@@ -20,9 +20,13 @@ pub fn valid_identity(identity: &str) -> bool {
         && !identity.chars().any(char::is_control)
 }
 
-/// The first message must be `Join` or `ListDevices`; nothing else may start.
+/// The first message must be `Join`, `ListDevices` or `TestDevice`; nothing
+/// else may start.
 pub fn is_first_message_allowed(message: &ToWorker) -> bool {
-    matches!(message, ToWorker::Join { .. } | ToWorker::ListDevices)
+    matches!(
+        message,
+        ToWorker::Join { .. } | ToWorker::ListDevices | ToWorker::TestDevice { .. }
+    )
 }
 
 /// LiveKit makes `index:N` IDs when the OS gives no GUID. They change when a
@@ -48,6 +52,21 @@ pub fn choose_device<'a>(
     } else {
         Err(FailureCode::DeviceNotFound)
     }
+}
+
+/// The device to open when the user chose none: the system's default for
+/// media (`sound_defaults`), when the list has it. `None` leaves libwebrtc's
+/// own choice, which on Windows is the default communications device. An
+/// unstable ID is never selected.
+pub fn system_default<'a>(
+    system: Option<&str>,
+    available: impl IntoIterator<Item = &'a str>,
+) -> Option<String> {
+    let system = system.filter(|id| is_listable_device_id(id))?;
+    available
+        .into_iter()
+        .any(|id| id == system)
+        .then(|| system.to_owned())
 }
 
 /// Builds one wire list from (ID, name) pairs. It skips unstable IDs, IDs the
@@ -135,7 +154,10 @@ pub fn sound_path(
 /// What the worker saw in the room, reduced to what it reports.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RoomChange {
-    Joined(u8, String),
+    /// A participant joined; `true` when it has a microphone that is not
+    /// muted. No microphone counts as muted (ADR-0059): later microphone
+    /// track events keep the mark current.
+    Joined(u8, String, bool),
     Left(u8, String),
     /// The complete set of current speakers of one connection.
     Speakers(u8, Vec<String>),
@@ -229,11 +251,18 @@ impl SpeakingTracker {
 /// [`valid_identity`] are ignored.
 pub fn apply(change: RoomChange, tracker: &mut SpeakingTracker) -> Vec<FromWorker> {
     match change {
-        RoomChange::Joined(connection, identity) if valid_identity(&identity) => {
-            vec![FromWorker::ParticipantJoined {
-                connection,
-                identity,
-            }]
+        RoomChange::Joined(connection, identity, microphone) if valid_identity(&identity) => {
+            vec![
+                FromWorker::ParticipantJoined {
+                    connection,
+                    identity: identity.clone(),
+                },
+                FromWorker::ParticipantMuted {
+                    connection,
+                    identity,
+                    muted: !microphone,
+                },
+            ]
         }
         RoomChange::Left(connection, identity) if valid_identity(&identity) => {
             tracker.forget(connection, &identity);
@@ -311,6 +340,14 @@ impl<C, U> Slots<C, U> {
     pub fn open(&self) -> impl Iterator<Item = &U> {
         self.0.values().filter_map(|slot| match slot {
             Slot::Up(open) => Some(open),
+            Slot::Connecting(_) | Slot::Ended => None,
+        })
+    }
+
+    /// The open connections with their indexes.
+    pub fn open_indexed(&self) -> impl Iterator<Item = (u8, &U)> {
+        self.0.iter().filter_map(|(index, slot)| match slot {
+            Slot::Up(open) => Some((*index, open)),
             Slot::Connecting(_) | Slot::Ended => None,
         })
     }
@@ -426,9 +463,9 @@ pub struct LevelGate {
 }
 
 impl LevelGate {
-    /// The message for `level` at `now`, or `None` when the core already
-    /// has it and it is not yet due again.
-    pub fn next(&mut self, level: u8, now: Instant) -> Option<FromWorker> {
+    /// The level to send for `level` at `now`, or `None` when the core
+    /// already has it and it is not yet due again.
+    pub fn next(&mut self, level: u8, now: Instant) -> Option<u8> {
         let due = level > 0
             && self
                 .sent
@@ -438,7 +475,103 @@ impl LevelGate {
         }
         self.last = level;
         self.sent = Some(now);
-        Some(FromWorker::SoundLevel { level })
+        Some(level)
+    }
+}
+
+/// One measurement of the call's sound, linear (0.0 to 1.0, as WebRTC's
+/// `audioLevel`): the own microphone as it is sent, and each remote
+/// participant as it is played (ADR-0055, ADR-0059). `None` is a level
+/// that was not read in time: its meter keeps the level it has, so a slow
+/// read never shows as silence.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Levels {
+    pub own: Option<f64>,
+    /// Connection, identity and level. One identity may come more than
+    /// once (one per audio track); the loudest counts, and one unread track
+    /// makes the participant's level unread.
+    pub remote: Vec<(u8, String, Option<f64>)>,
+}
+
+/// The gates of the own level and of each remote participant. It holds at
+/// most [`MAX_PARTICIPANTS`] remote gates; a participant that is no longer
+/// measured gets silence once and its gate goes.
+#[derive(Debug, Default)]
+pub struct LevelMeters {
+    own: LevelGate,
+    remote: HashMap<(u8, String), LevelGate>,
+}
+
+impl LevelMeters {
+    /// The messages for one measurement at `now`: `SoundLevel` for the own
+    /// microphone, then `ParticipantLevel` for each remote participant whose
+    /// level the core does not have. An identity the protocol would refuse
+    /// is left out.
+    pub fn next(&mut self, levels: &Levels, now: Instant) -> Vec<FromWorker> {
+        let mut out = Vec::new();
+        if let Some(linear) = levels.own
+            && let Some(level) = self.own.next(sound_level(linear), now)
+        {
+            out.push(FromWorker::SoundLevel { level });
+        }
+        let mut loudest: Vec<((u8, &str), Option<f64>)> = Vec::new();
+        for (connection, identity, linear) in &levels.remote {
+            if !valid_identity(identity) || *connection > MAX_OTHER_CONNECTIONS {
+                continue;
+            }
+            let full = loudest.len() >= MAX_PARTICIPANTS;
+            match loudest
+                .iter_mut()
+                .find(|(key, _)| *key == (*connection, identity.as_str()))
+            {
+                Some((_, level)) => *level = level.zip(*linear).map(|(a, b)| a.max(b)),
+                None if !full => loudest.push(((*connection, identity), *linear)),
+                None => {}
+            }
+        }
+        for ((connection, identity), linear) in &loudest {
+            let key = (*connection, (*identity).to_owned());
+            if !self.remote.contains_key(&key) && self.remote.len() >= MAX_PARTICIPANTS {
+                continue;
+            }
+            let gate = self.remote.entry(key).or_default();
+            // Not read in time: the core keeps the level it has.
+            let Some(linear) = linear else {
+                continue;
+            };
+            if let Some(level) = gate.next(sound_level(*linear), now) {
+                out.push(FromWorker::ParticipantLevel {
+                    connection: *connection,
+                    identity: (*identity).to_owned(),
+                    level,
+                });
+            }
+        }
+        self.remote.retain(|(connection, identity), gate| {
+            if loudest
+                .iter()
+                .any(|(key, _)| *key == (*connection, identity.as_str()))
+            {
+                return true;
+            }
+            if let Some(level) = gate.next(0, now) {
+                out.push(FromWorker::ParticipantLevel {
+                    connection: *connection,
+                    identity: identity.clone(),
+                    level,
+                });
+            }
+            false
+        });
+        out
+    }
+
+    /// The own level alone, for a measurement without remote participants
+    /// (the microphone test).
+    pub fn own(&mut self, linear: f64, now: Instant) -> Option<FromWorker> {
+        self.own
+            .next(sound_level(linear), now)
+            .map(|level| FromWorker::SoundLevel { level })
     }
 }
 
@@ -503,6 +636,15 @@ mod tests {
     }
 
     #[test]
+    fn given_test_device_when_it_is_first_then_it_is_allowed() {
+        // GIVEN TestDevice, WHEN it is the first message, THEN it is accepted.
+        assert!(is_first_message_allowed(&ToWorker::TestDevice {
+            test: persephone_call_protocol::DeviceTest::Speaker,
+            device: None,
+        }));
+    }
+
+    #[test]
     fn given_device_ids_when_checked_then_index_ids_are_not_listable() {
         // GIVEN a GUID and index IDs, WHEN checked, THEN only the GUID passes.
         assert!(is_listable_device_id("{0.0.1.00000000}.{6a2c}"));
@@ -541,6 +683,29 @@ mod tests {
             choose_device(Some("a"), []),
             Err(FailureCode::DeviceNotFound)
         );
+    }
+
+    #[test]
+    fn given_no_choice_when_the_system_default_is_listed_then_it_is_opened() {
+        // GIVEN the Windows console default speaker among the listed ones
+        // (the default communications device is another one), WHEN no
+        // speaker is chosen, THEN the console default is the one opened.
+        let console = "{0.0.0.00000000}.{00000000-0000-4000-8000-000000000001}";
+        let mixer = "{0.0.0.00000000}.{00000000-0000-4000-8000-000000000002}";
+        assert_eq!(
+            system_default(Some(console), [mixer, console]),
+            Some(console.to_owned())
+        );
+    }
+
+    #[test]
+    fn given_no_usable_system_default_then_libwebrtc_keeps_its_choice() {
+        // GIVEN no default, a default that is not listed, or an unstable
+        // index ID, WHEN no device is chosen, THEN nothing is selected.
+        assert_eq!(system_default(None, ["a"]), None);
+        assert_eq!(system_default(Some("b"), ["a"]), None);
+        assert_eq!(system_default(Some("A"), ["a"]), None);
+        assert_eq!(system_default(Some("index:0"), ["index:0"]), None);
     }
 
     #[test]
@@ -724,6 +889,11 @@ mod tests {
                 url: "wss://sfu.other.example".to_owned(),
                 jwt: Zeroizing::new("a.b.c".to_owned()),
             },
+            ToWorker::SetDevices {
+                recording: None,
+                playout: None,
+                camera: None,
+            },
         ] {
             assert!(!is_first_message_allowed(&message), "{message:?}");
         }
@@ -747,13 +917,32 @@ mod tests {
         let mut tracker = SpeakingTracker::default();
         assert_eq!(
             apply(
-                RoomChange::Joined(0, "@a:example.org:D".into()),
+                RoomChange::Joined(0, "@a:example.org:D".into(), true),
                 &mut tracker
             ),
-            vec![FromWorker::ParticipantJoined {
+            vec![
+                FromWorker::ParticipantJoined {
+                    connection: 0,
+                    identity: "@a:example.org:D".into()
+                },
+                FromWorker::ParticipantMuted {
+                    connection: 0,
+                    identity: "@a:example.org:D".into(),
+                    muted: false
+                }
+            ]
+        );
+        // A participant with no microphone, or a muted one, shows as muted.
+        assert_eq!(
+            apply(
+                RoomChange::Joined(0, "@b:example.org:D".into(), false),
+                &mut tracker
+            )[1],
+            FromWorker::ParticipantMuted {
                 connection: 0,
-                identity: "@a:example.org:D".into()
-            }]
+                identity: "@b:example.org:D".into(),
+                muted: true
+            }
         );
         assert_eq!(
             apply(RoomChange::Left(0, "@a:example.org:D".into()), &mut tracker),
@@ -762,7 +951,13 @@ mod tests {
                 identity: "@a:example.org:D".into()
             }]
         );
-        assert!(apply(RoomChange::Joined(0, "bad\u{7}".into()), &mut tracker).is_empty());
+        assert!(
+            apply(
+                RoomChange::Joined(0, "bad\u{7}".into(), false),
+                &mut tracker
+            )
+            .is_empty()
+        );
     }
 
     #[test]
@@ -772,13 +967,20 @@ mod tests {
         let mut tracker = SpeakingTracker::default();
         assert_eq!(
             apply(
-                RoomChange::Joined(2, "@c:other.example:D".into()),
+                RoomChange::Joined(2, "@c:other.example:D".into(), true),
                 &mut tracker
             ),
-            vec![FromWorker::ParticipantJoined {
-                connection: 2,
-                identity: "@c:other.example:D".into()
-            }]
+            vec![
+                FromWorker::ParticipantJoined {
+                    connection: 2,
+                    identity: "@c:other.example:D".into()
+                },
+                FromWorker::ParticipantMuted {
+                    connection: 2,
+                    identity: "@c:other.example:D".into(),
+                    muted: false
+                }
+            ]
         );
         assert_eq!(
             apply(
@@ -1061,13 +1263,7 @@ mod tests {
         let sent: Vec<u8> = [0, 0, 40, 40, 41, 0, 0]
             .into_iter()
             .zip(0..)
-            .filter_map(
-                |(level, tick)| match gate.next(level, at(start, tick * 100)) {
-                    Some(FromWorker::SoundLevel { level }) => Some(level),
-                    Some(other) => panic!("not a level: {other:?}"),
-                    None => None,
-                },
-            )
+            .filter_map(|(level, tick)| gate.next(level, at(start, tick * 100)))
             .collect();
         assert_eq!(sent, [40, 41, 0]);
     }
@@ -1082,12 +1278,131 @@ mod tests {
         let repeat = u64::try_from(SOUND_LEVEL_REPEAT.as_millis()).expect("short");
         assert!(gate.next(60, start).is_some());
         assert!(gate.next(60, at(start, repeat - 1)).is_none());
-        assert_eq!(
-            gate.next(60, at(start, repeat)),
-            Some(FromWorker::SoundLevel { level: 60 })
-        );
+        assert_eq!(gate.next(60, at(start, repeat)), Some(60));
         assert!(gate.next(60, at(start, repeat + 100)).is_none());
         assert!(gate.next(0, at(start, repeat + 200)).is_some());
         assert!(gate.next(0, at(start, 10 * repeat)).is_none());
+    }
+
+    fn remote(connection: u8, identity: &str, linear: f64) -> (u8, String, Option<f64>) {
+        (connection, identity.to_owned(), Some(linear))
+    }
+
+    /// GIVEN the own microphone and two remote participants, one with two
+    /// tracks WHEN measured THEN the own level is `SoundLevel`, each remote
+    /// one a `ParticipantLevel` of its loudest track, and an unchanged
+    /// measurement sends nothing.
+    #[test]
+    fn given_own_and_remote_levels_then_each_has_its_own_message() {
+        let mut meters = LevelMeters::default();
+        let start = Instant::now();
+        let levels = Levels {
+            own: Some(0.5),
+            remote: vec![
+                remote(0, "@a:example.org:A", 0.1),
+                remote(0, "@a:example.org:A", 1.0),
+                remote(1, "@b:example.org:B", 0.5),
+            ],
+        };
+        let sent = meters.next(&levels, start);
+        assert_eq!(
+            sent,
+            [
+                FromWorker::SoundLevel { level: 90 },
+                FromWorker::ParticipantLevel {
+                    connection: 0,
+                    identity: "@a:example.org:A".to_owned(),
+                    level: MAX_SOUND_LEVEL,
+                },
+                FromWorker::ParticipantLevel {
+                    connection: 1,
+                    identity: "@b:example.org:B".to_owned(),
+                    level: 90,
+                },
+            ]
+        );
+        assert!(meters.next(&levels, at(start, 100)).is_empty());
+    }
+
+    /// GIVEN levels that were sent WHEN the next measurement could not read
+    /// the own level or a participant's track in time THEN nothing is sent
+    /// for them, so a slow read never shows as silence, and the participant
+    /// is still measured: a later read level is sent as a change.
+    #[test]
+    fn given_an_unread_level_then_the_meter_keeps_its_level() {
+        let mut meters = LevelMeters::default();
+        let start = Instant::now();
+        let heard = Levels {
+            own: Some(0.5),
+            remote: vec![remote(0, "@a:example.org:A", 0.5)],
+        };
+        assert_eq!(meters.next(&heard, start).len(), 2);
+        let unread = Levels {
+            own: None,
+            remote: vec![
+                (0, "@a:example.org:A".to_owned(), None),
+                remote(0, "@a:example.org:A", 1.0),
+            ],
+        };
+        assert!(meters.next(&unread, at(start, 100)).is_empty());
+        let quiet = Levels {
+            own: Some(0.0),
+            remote: vec![remote(0, "@a:example.org:A", 0.0)],
+        };
+        assert_eq!(
+            meters.next(&quiet, at(start, 200)),
+            [
+                FromWorker::SoundLevel { level: 0 },
+                FromWorker::ParticipantLevel {
+                    connection: 0,
+                    identity: "@a:example.org:A".to_owned(),
+                    level: 0,
+                },
+            ]
+        );
+    }
+
+    /// GIVEN a participant that was heard WHEN it is no longer measured THEN
+    /// it gets silence once and is forgotten; a bad identity or connection is
+    /// never sent.
+    #[test]
+    fn given_a_participant_that_goes_then_silence_is_sent_once() {
+        let mut meters = LevelMeters::default();
+        let start = Instant::now();
+        meters.next(
+            &Levels {
+                own: Some(0.0),
+                remote: vec![
+                    remote(0, "@a:example.org:A", 0.5),
+                    remote(0, "", 0.5),
+                    remote(9, "@c:example.org:C", 0.5),
+                ],
+            },
+            start,
+        );
+        let gone = meters.next(&Levels::default(), at(start, 100));
+        assert_eq!(
+            gone,
+            [FromWorker::ParticipantLevel {
+                connection: 0,
+                identity: "@a:example.org:A".to_owned(),
+                level: 0,
+            }]
+        );
+        assert!(meters.next(&Levels::default(), at(start, 200)).is_empty());
+    }
+
+    /// GIVEN more remote participants than the protocol allows WHEN measured
+    /// THEN at most `MAX_PARTICIPANTS` are sent.
+    #[test]
+    fn given_too_many_participants_then_the_meters_stay_bounded() {
+        let mut meters = LevelMeters::default();
+        let levels = Levels {
+            own: Some(0.0),
+            remote: (0..MAX_PARTICIPANTS + 5)
+                .map(|n| remote(0, &format!("@p{n}:example.org:D"), 0.5))
+                .collect(),
+        };
+        assert_eq!(meters.next(&levels, Instant::now()).len(), MAX_PARTICIPANTS);
     }
 }

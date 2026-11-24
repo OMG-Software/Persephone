@@ -6,8 +6,10 @@
     cameraButton,
     DEAFEN_LABEL,
     DEAFEN_TEXT,
+    DEVICE_CHANGE_TEXT,
     END_TEXT,
     NO_KEY_TEXT,
+    PARTICIPANT_MUTED_LABEL,
     PHASE_TEXT,
     RING_DECLINED_TEXT,
     SCREEN_TEXT,
@@ -48,7 +50,8 @@
     oncamera,
     onscreen,
     onleave,
-    ondismiss
+    ondismiss,
+    onwindow = () => {}
   }: {
     status: CallStatus;
     dismissed: boolean;
@@ -74,6 +77,8 @@
     onscreen: () => void;
     onleave: () => void;
     ondismiss: () => void;
+    // Opens the call window, or brings it to the front (ADR-0060).
+    onwindow?: () => void;
   } = $props();
 
   const shown = $derived(showCallBar(status, dismissed));
@@ -138,6 +143,10 @@
             <Icon name="screen" />
             {screen.label}
           </button>
+          <button type="button" class="secondary call-window-open" onclick={onwindow}>
+            <Icon name="video" />
+            Call window
+          </button>
           <button type="button" class="secondary call-leave" onclick={onleave}>Leave</button>
         {/if}
       </span>
@@ -161,7 +170,8 @@
         />
         <output class="note">{volumeText(volume)}</output>
       </label>
-      <!-- What the call plays now, after the volume: it moves while someone talks. -->
+      <!-- What your microphone picks up: it moves while you talk, so a still
+           meter means the call does not hear you. -->
       <div
         class="call-level"
         class:loud={soundLevel >= SOUND_LEVEL_LOUD}
@@ -181,6 +191,9 @@
     {#if !ended && screenText !== ''}
       <p class="call-screen-note note" role="status">{screenText}</p>
     {/if}
+    {#if !ended && status.deviceChange}
+      <p class="call-device-note note" role="status">{DEVICE_CHANGE_TEXT[status.deviceChange]}</p>
+    {/if}
     {#if ended}
       <p class="call-end">{status.ended === null ? END_TEXT.internal : END_TEXT[status.ended]}</p>
     {:else if status.participants.length > 0}
@@ -193,6 +206,7 @@
               <span class="speaking-mark idle" aria-hidden="true"></span>
             {/if}
             <PersonName userId={person.userId} name={names.get(person.userId) ?? null} />
+            {#if person.muted}<span class="call-muted" role="img" aria-label={PARTICIPANT_MUTED_LABEL}><Icon name="mic-off" /></span>{/if}
             {#if person.sharing}<span class="note call-note call-sharing">{SHARING_TEXT}</span>{/if}
             {#if !person.keyed}<span class="note call-note">{NO_KEY_TEXT}</span>{/if}
             {#if !person.reachable}<span class="note call-note">{UNREACHABLE_TEXT}</span>{/if}

@@ -3567,6 +3567,14 @@ mark {
   margin: 0;
 }
 
+/* Opens the call window (ADR-0060). Not `.call-window`: that is the call
+   window page's root. */
+.call-window-open {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 /* The shared screen is wider than a camera tile, so text on it can be read. */
 .video-tile.screen {
   grid-column: span 2;
@@ -3775,4 +3783,178 @@ mark {
   flex: 1 1 240px;
   min-width: 0;
   overflow-wrap: anywhere;
+}
+
+/* A participant whose microphone is off (ADR-0059). */
+.call-muted {
+  display: inline-flex;
+  flex: none;
+  color: var(--ink3);
+}
+
+/* The device tests in Settings, Calls (ADR-0059). */
+.device-tests-title {
+  margin: 16px 0 4px;
+}
+
+.device-test {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin: 8px 0;
+}
+
+.device-test .note {
+  flex-basis: 100%;
+  margin: 0;
+}
+
+.device-test .call-level {
+  align-self: center;
+  margin: 0;
+}
+
+/* The call window (ADR-0060): the grid fills the space, the participant
+   list sits on the right and can be hidden, the controls are at the
+   bottom. */
+.call-window {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background: var(--bg);
+  color: var(--ink);
+}
+
+.call-window-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.call-window-head .call-phase {
+  flex: 1;
+  margin: 0;
+}
+
+.call-roster-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.call-window-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.call-grid {
+  display: grid;
+  flex: 1;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  align-content: start;
+  gap: 8px;
+  padding: 12px;
+  overflow: auto;
+}
+
+.call-grid-empty {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+}
+
+.call-cell.speaking .video-frame {
+  outline: 2px solid var(--presence);
+}
+
+.call-placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink3);
+}
+
+.call-placeholder svg {
+  width: 40px;
+  height: 40px;
+}
+
+.call-cell .video-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.call-roster {
+  flex: none;
+  width: 260px;
+  padding: 12px;
+  overflow: auto;
+  border-left: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.call-roster h2 {
+  margin: 0 0 8px;
+  font-size: 15px;
+}
+
+.call-roster ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.call-roster li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.call-roster-name {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.call-roster .call-level {
+  flex-basis: 100%;
+  width: 100%;
+  margin: 0;
+}
+
+.call-roster .note {
+  flex-basis: 100%;
+}
+
+.call-window-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.call-window-controls .call-leave {
+  margin-left: auto;
+}
+
+.call-window-note {
+  margin: 0;
+  padding: 4px 16px;
 }

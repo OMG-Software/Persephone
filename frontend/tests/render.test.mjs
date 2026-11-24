@@ -254,7 +254,7 @@ test('GIVEN an active call and a sound level WHEN the call bar renders THEN a me
   const slider = quiet.indexOf('type="range"');
   const meter = quiet.indexOf('role="meter"');
   assert.ok(slider >= 0 && meter > slider, 'the meter comes right after the volume slider');
-  assert.match(quiet, /aria-label="Call sound"/);
+  assert.match(quiet, /aria-label="Your microphone"/);
   assert.match(quiet, /aria-valuenow="50"/);
   assert.match(quiet, /aria-valuetext="−30 dB"/);
   assert.match(quiet, /scaleX\(0\.5\)/);
@@ -263,4 +263,40 @@ test('GIVEN an active call and a sound level WHEN the call bar renders THEN a me
   assert.match(loud, /class="call-level[^"]*loud/);
   const { body: ended } = render(CallBar, { props: { ...props, status: { ...status, phase: 'ended', ended: 'internal' }, soundLevel: 95 } });
   assert.doesNotMatch(ended, /role="meter"/);
+});
+
+test('GIVEN a call with a camera on and one off WHEN the call window renders THEN each device has a cell and a roster row with a meter and a mute mark', async () => {
+  const { default: CallWindow } = await vite.ssrLoadModule('/src/CallWindow.svelte');
+  const person = (userId, deviceId, muted) => ({ userId, deviceId, speaking: false, reachable: true, keyed: true, sharing: false, muted });
+  const hostile = '@<img src=x onerror=alert(1)>:s';
+  const initialStatus = {
+    phase: 'active', roomId: '!r:s', muted: true, deafened: false, volume: 100, ended: null, joinError: null,
+    camera: 'off', screen: 'off', ringDeclined: false, deviceChange: null,
+    participants: [person('@a:s', 'A', false), person(hostile, 'B', true)],
+    video: [{ tile: 2, participant: { userId: '@a:s', deviceId: 'A' }, own: false, stream: 3 }]
+  };
+  const { body: html } = render(CallWindow, { props: { initialStatus } });
+  // Three cells: yours and B's with placeholders, A's with a canvas (hidden
+  // until its first picture comes).
+  assert.equal((html.match(/class="video-tile call-cell/g) ?? []).length, 3);
+  assert.equal((html.match(/<canvas/g) ?? []).length, 1);
+  assert.equal((html.match(/class="call-placeholder"/g) ?? []).length, 3);
+  // The roster is open, with a meter for you and for each device.
+  assert.match(html, /aria-expanded="true"/);
+  assert.match(html, />\s*Hide participants\s*</);
+  const roster = html.slice(html.indexOf('id="call-roster"'));
+  assert.doesNotMatch(roster.slice(0, roster.indexOf('>')), /hidden/);
+  assert.equal((roster.match(/role="meter"/g) ?? []).length, 3);
+  assert.match(roster, /aria-label="Your microphone"/);
+  assert.match(roster, /aria-labelledby="call-roster-name-1"/);
+  // Muted: you and B, in the grid and in the roster.
+  assert.equal((html.match(/aria-label="Microphone off"/g) ?? []).length, 4);
+  // User IDs are inert text.
+  assert.match(html, /&lt;img/);
+  assert.doesNotMatch(html, /<img\b/i);
+  assert.match(html, />Leave</);
+
+  const { body: idle } = render(CallWindow, { props: {} });
+  assert.match(idle, /No call is running\./);
+  assert.doesNotMatch(idle, /role="meter"|class="video-tile/);
 });

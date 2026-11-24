@@ -19,7 +19,8 @@ use livekit::{
     options::{TrackPublishOptions, VideoCodec, VideoEncoding},
     prelude::{
         AudioProcessingOptions, LocalAudioTrack, LocalTrack, LocalTrackPublication,
-        LocalVideoTrack, PlatformAudio, RemoteAudioTrack, RemoteTrack, RemoteTrackPublication,
+        LocalVideoTrack, Participant, PlatformAudio, PlayoutDeviceId, RecordingDeviceId,
+        RemoteAudioTrack, RemoteParticipant, RemoteTrack, RemoteTrackPublication, TrackKind,
         TrackSid, TrackSource,
     },
     rtc_engine::EngineError,
@@ -38,9 +39,9 @@ use livekit::{
 };
 use livekit_signaling::SignalError;
 use persephone_call_protocol::{
-    CameraState, FailureCode, FrameKeyMsg, FromWorker, MAX_OTHER_CONNECTIONS, MAX_PARTICIPANTS,
-    MAX_SCREEN_FPS, MAX_VIDEO_FPS, MAX_VIDEO_PIXELS, MAX_VIDEO_SIDE, SCREEN_TILE, ScreenState,
-    ScreenTarget, ToWorker, VIDEO_TILES,
+    CameraState, DeviceTest, FailureCode, FrameKeyMsg, FromWorker, MAX_OTHER_CONNECTIONS,
+    MAX_PARTICIPANTS, MAX_SCREEN_FPS, MAX_VIDEO_FPS, MAX_VIDEO_PIXELS, MAX_VIDEO_SIDE, SCREEN_TILE,
+    ScreenState, ScreenTarget, ToWorker, VIDEO_TILES,
 };
 use tokio::sync::mpsc::{self, Receiver, UnboundedReceiver};
 use tokio::task::JoinHandle;
@@ -51,13 +52,16 @@ use zeroize::Zeroizing;
 use crate::camera::{self, CapturedFrame, Format};
 use crate::containment;
 use crate::mapping::{
-    ConnectFault, LevelGate, Playout, RoomChange, Slot, Slots, SoundPath, SpeakingTracker, apply,
-    bounded_device_list, choose_device, failure_for_connect, sound_level, valid_identity,
+    ConnectFault, LevelMeters, Levels, Playout, RoomChange, Slot, Slots, SoundPath,
+    SpeakingTracker, apply, bounded_device_list, choose_device, failure_for_connect,
+    system_default, valid_identity,
 };
 #[cfg(target_os = "linux")]
 use crate::mapping::{pulse_device_list, sound_path};
 use crate::output::{Closed, Output, PictureSink};
 use crate::screen;
+use crate::sound_defaults;
+use crate::sound_test;
 use crate::video::{
     Added, OWN_TILE, RateLimiter, ScreenQueue, TileAssigner, fit_for_tile, fit_publish_box,
     fit_within_box, quarter_turns, rgba_len,
@@ -76,6 +80,17 @@ const SCREEN_MAX_BITRATE: u64 = 1_500_000;
 const SPEAKING_TICK: Duration = Duration::from_millis(100);
 /// The longest one sound level measurement may take (ADR-0055).
 const SOUND_MEASURE_TIMEOUT: Duration = Duration::from_millis(500);
+/// The time one measurement has to read statistics: the own microphone
+/// first, then the remote tracks. It is shorter than
+/// [`SOUND_MEASURE_TIMEOUT`], so a slow remote read never drops the own
+/// level (ADR-0059).
+const SOUND_READ_BUDGET: Duration = Duration::from_millis(400);
+const _: () = assert!(SOUND_READ_BUDGET.as_millis() < SOUND_MEASURE_TIMEOUT.as_millis());
+/// The most remote audio tracks measured at once: two for each participant
+/// (a microphone and a screen share's sound).
+const MAX_MEASURED_TRACKS: usize = 2 * MAX_PARTICIPANTS;
+/// How long a camera test shows the camera when nothing stops it.
+const CAMERA_TEST_TIME: Duration = Duration::from_secs(30);
 
 /// Why the call ended.
 enum End {
@@ -142,6 +157,7 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
 
     // A microphone or speaker chosen by sound server name is checked before
     // audio starts; libwebrtc then opens its default stream (ADR-0049).
+    let joined_sound = (recording_device.clone(), playout_device.clone());
     let paths = match sound_paths(recording_device.as_deref(), playout_device.as_deref()).await {
         Ok(paths) => paths,
         Err(code) => return fail(output, code).await,
@@ -153,13 +169,17 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
     fn listed(wanted: Option<&str>, path: SoundPath) -> Option<&str> {
         wanted.filter(|_| path == SoundPath::Listed)
     }
-    if let Err(code) = select_devices(
+    // Read once, before the event loop: a change during the call reuses it.
+    let media_defaults = MediaDefaults::read();
+    let sound_devices = match select_devices(
         &audio,
+        &media_defaults,
         listed(recording_device.as_deref(), paths[0]),
         listed(playout_device.as_deref(), paths[1]),
     ) {
-        return fail(output, code).await;
-    }
+        Ok(devices) => devices,
+        Err(code) => return fail(output, code).await,
+    };
     // Linux stage 2 (ADR-0049): after the sound server connection and before
     // anything goes to the SFU. A failure ends the call.
     if !containment::apply_stage2() && !cfg!(feature = "dev-uncontained") {
@@ -190,8 +210,8 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
         return EXIT_FAILED;
     }
     let mut tracker = SpeakingTracker::default();
-    for identity in room.remote_participants().keys() {
-        let change = RoomChange::Joined(0, identity.to_string());
+    for (identity, participant) in room.remote_participants() {
+        let change = RoomChange::Joined(0, identity.to_string(), microphone_on(&participant));
         for message in apply(change, &mut tracker) {
             if output.send(message).await.is_err() {
                 let _ = room.close().await;
@@ -214,7 +234,7 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
     // results can wait.
     let (connect_tx, connect_done) = mpsc::channel::<Connected>(usize::from(MAX_OTHER_CONNECTIONS));
     // At most one sound level measurement runs, so one result can wait.
-    let (sound_tx, mut sound_done) = mpsc::channel::<Option<f64>>(1);
+    let (sound_tx, mut sound_done) = mpsc::channel::<Option<Levels>>(1);
     let mut others_inbox = OtherInbox {
         events: OtherEvents::default(),
         connected: connect_done,
@@ -223,10 +243,14 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
         room: &room,
         provider: &provider,
         identity: &own,
+        audio: &audio,
+        sound_devices,
+        media_defaults,
         output,
         own_sids,
         publication: &publication,
         camera_device,
+        joined_sound,
         camera: None,
         stalled: None,
         gate: CameraGate::new(own_index),
@@ -390,41 +414,532 @@ async fn sound_paths(
     Ok([SoundPath::Listed; 2])
 }
 
-/// Applies the chosen microphone and speaker. `None` keeps the system default.
+/// The microphone and speaker a call uses: the platform IDs it opened, or
+/// `None` where it left libwebrtc's own default (no listed system default).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct SoundDevices {
+    recording: Option<String>,
+    playout: Option<String>,
+    /// After a failed change the call may not use `recording`, or capture
+    /// may have stopped, so the next change switches even to the same
+    /// choice.
+    recording_lost: bool,
+    /// The same for the speaker: going back to the old one failed.
+    playout_lost: bool,
+}
+
+/// The system's default speaker and microphone for media, as
+/// `sound_defaults::media_defaults` read them when the call started.
+/// Reading them is a blocking system query, so a change during the call
+/// uses this copy and never runs it in the event loop.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct MediaDefaults {
+    playout: Option<String>,
+    recording: Option<String>,
+}
+
+impl MediaDefaults {
+    /// Reads the defaults. It blocks, so call it before the event loop.
+    fn read() -> Self {
+        let (playout, recording) = sound_defaults::media_defaults();
+        Self { playout, recording }
+    }
+}
+
+/// Resolves the chosen microphone and speaker to listed device IDs. `None`
+/// is the system's default for media where it is listed (`defaults`), else
+/// `None`. A chosen device that is missing is `DeviceNotFound`, never
+/// another device. Nothing changes here.
+fn resolve_devices(
+    audio: &PlatformAudio,
+    defaults: &MediaDefaults,
+    recording: Option<&str>,
+    playout: Option<&str>,
+) -> Result<SoundDevices, FailureCode> {
+    let (default_playout, default_recording) = (&defaults.playout, &defaults.recording);
+    let recording_devices: Vec<_> = audio.recording_devices().collect();
+    let ids = || recording_devices.iter().map(|device| device.id.as_str());
+    let recording = match recording {
+        Some(_) => choose_device(recording, ids())?,
+        None => system_default(default_recording.as_deref(), ids()),
+    };
+    let playout_devices: Vec<_> = audio.playout_devices().collect();
+    let ids = || playout_devices.iter().map(|device| device.id.as_str());
+    let playout = match playout {
+        Some(_) => choose_device(playout, ids())?,
+        None => system_default(default_playout.as_deref(), ids()),
+    };
+    Ok(SoundDevices {
+        recording,
+        playout,
+        ..SoundDevices::default()
+    })
+}
+
+/// The listed microphone with this platform ID, as libwebrtc names it.
+/// `resolve_devices` checked it, so `None` means it left since then.
+fn recording_id(audio: &PlatformAudio, id: &str) -> Result<RecordingDeviceId, FailureCode> {
+    audio
+        .recording_devices()
+        .find(|device| device.id.as_str() == id)
+        .map(|device| device.id)
+        .ok_or(FailureCode::DeviceNotFound)
+}
+
+/// The listed speaker with this platform ID; see `recording_id`.
+fn playout_id(audio: &PlatformAudio, id: &str) -> Result<PlayoutDeviceId, FailureCode> {
+    audio
+        .playout_devices()
+        .find(|device| device.id.as_str() == id)
+        .map(|device| device.id)
+        .ok_or(FailureCode::DeviceNotFound)
+}
+
+/// Applies the chosen microphone and speaker before the sound starts. Both
+/// choices are checked before either device changes.
 fn select_devices(
     audio: &PlatformAudio,
+    defaults: &MediaDefaults,
+    recording: Option<&str>,
+    playout: Option<&str>,
+) -> Result<SoundDevices, FailureCode> {
+    let wanted = resolve_devices(audio, defaults, recording, playout)?;
+    if let Some(id) = &wanted.recording {
+        audio
+            .set_recording_device(&recording_id(audio, id)?)
+            .map_err(|_| FailureCode::DeviceNotFound)?;
+    }
+    if let Some(id) = &wanted.playout {
+        audio
+            .set_playout_device(&playout_id(audio, id)?)
+            .map_err(|_| FailureCode::DeviceNotFound)?;
+    }
+    Ok(wanted)
+}
+
+/// What a change during a call does, from the devices in use and the
+/// resolved choice: `Ok(None)` changes nothing, `Ok(Some(..))` switches to
+/// those devices. A `None` choice that names no listed device cannot move a
+/// call off a device it opened by ID, so that is `Unsupported`; the choice
+/// then applies to the next call.
+fn device_switch(
+    current: &SoundDevices,
+    wanted: &SoundDevices,
+) -> Result<Option<SoundDevices>, FailureCode> {
+    let stranded =
+        |wanted: &Option<String>, current: &Option<String>| wanted.is_none() && current.is_some();
+    if stranded(&wanted.recording, &current.recording)
+        || stranded(&wanted.playout, &current.playout)
+    {
+        return Err(FailureCode::Unsupported);
+    }
+    Ok((wanted != current).then(|| wanted.clone()))
+}
+
+/// Whether a `SetDevices` sound choice is no change where no device changes
+/// during a call (Linux, ADR-0049): the same choice as the join. Elsewhere
+/// every choice goes to `switch_devices`, which finds what changes and
+/// switches a lost device again.
+fn sound_unchanged_here(
+    joined: &(Option<String>, Option<String>),
+    recording: &Option<String>,
+    playout: &Option<String>,
+) -> bool {
+    cfg!(target_os = "linux") && joined.0 == *recording && joined.1 == *playout
+}
+
+/// Moves the running call to other devices (`SetDevices`, ADR-0059). Both
+/// choices are checked before either device changes; `apply_switch` then
+/// changes them. On Linux the sound server stream was chosen when the
+/// worker started (ADR-0049), so a change applies to the next call only.
+fn switch_devices(
+    audio: &PlatformAudio,
+    defaults: &MediaDefaults,
+    current: &mut SoundDevices,
     recording: Option<&str>,
     playout: Option<&str>,
 ) -> Result<(), FailureCode> {
-    let recording_devices: Vec<_> = audio.recording_devices().collect();
-    let wanted = choose_device(
-        recording,
-        recording_devices.iter().map(|device| device.id.as_str()),
-    )?;
-    if let Some(wanted) = wanted {
-        let device = recording_devices
-            .iter()
-            .find(|device| device.id.as_str() == wanted)
-            .ok_or(FailureCode::DeviceNotFound)?;
-        audio
-            .set_recording_device(&device.id)
-            .map_err(|_| FailureCode::DeviceNotFound)?;
+    if cfg!(target_os = "linux") {
+        return Err(FailureCode::Unsupported);
     }
-    let playout_devices: Vec<_> = audio.playout_devices().collect();
-    let wanted = choose_device(
-        playout,
-        playout_devices.iter().map(|device| device.id.as_str()),
-    )?;
-    if let Some(wanted) = wanted {
-        let device = playout_devices
-            .iter()
-            .find(|device| device.id.as_str() == wanted)
-            .ok_or(FailureCode::DeviceNotFound)?;
-        audio
-            .set_playout_device(&device.id)
-            .map_err(|_| FailureCode::DeviceNotFound)?;
+    let wanted = resolve_devices(audio, defaults, recording, playout)?;
+    let Some(next) = device_switch(current, &wanted)? else {
+        return Ok(());
+    };
+    // Both IDs are found before either device changes.
+    if let Some(id) = &next.recording {
+        recording_id(audio, id)?;
     }
+    if let Some(id) = &next.playout {
+        playout_id(audio, id)?;
+    }
+    apply_switch(current, next, &mut LiveAudio(audio))
+}
+
+/// The sound device calls a change during a call makes.
+trait SwitchAudio {
+    /// Switches the microphone; `false` when it failed.
+    fn switch_recording(&mut self, id: &str) -> bool;
+    /// Switches the speaker; `false` when it failed.
+    fn switch_playout(&mut self, id: &str) -> bool;
+    /// Starts the microphone again where a failed switch stopped it; `true`
+    /// when capture is set up after it.
+    fn restart_recording(&mut self) -> bool;
+}
+
+/// `SwitchAudio` on LiveKit's platform audio. LiveKit 0.11 stops a device
+/// before it opens the new one, and a failed open leaves it stopped; a
+/// switch while the device is stopped only selects it. A stopped
+/// microphone starts again with `start_recording`. The call always has a
+/// published microphone (the join fails without one, and mute only mutes
+/// the publication), so this never opens a microphone the call did not
+/// use. Playout has no public start, so a stopped speaker stays stopped
+/// until the call is joined again (ADR-0059).
+struct LiveAudio<'a>(&'a PlatformAudio);
+
+impl SwitchAudio for LiveAudio<'_> {
+    fn switch_recording(&mut self, id: &str) -> bool {
+        recording_id(self.0, id).is_ok_and(|id| self.0.switch_recording_device(&id).is_ok())
+    }
+
+    fn switch_playout(&mut self, id: &str) -> bool {
+        playout_id(self.0, id).is_ok_and(|id| self.0.switch_playout_device(&id).is_ok())
+    }
+
+    fn restart_recording(&mut self) -> bool {
+        (self.0.is_recording_initialized() || self.0.start_recording().is_ok())
+            && self.0.is_recording_initialized()
+    }
+}
+
+/// Switches the microphone, then the speaker, to `next`, and keeps
+/// `current` as the devices the call uses. Each failure is `AudioDevice`,
+/// except a failed microphone switch that is fully undone: `DeviceKept`.
+///
+/// * A microphone switch counts only when capture runs after it, so a
+///   lost microphone that LiveKit only selects is started again or stays
+///   lost. A failed microphone may have stopped capture: the old
+///   microphone is switched back and started again. When it captures again
+///   and the speaker is not lost, the call has the devices it had, and the
+///   answer is `DeviceKept`, so the page does not ask to rejoin. Where that fails, or
+///   where there is no old ID (libwebrtc's own default), capture starts on
+///   what is selected, and `recording_lost` is set.
+/// * A failed speaker stopped playout, which cannot start again, so
+///   `playout_lost` is set. The old speaker is selected again for when
+///   playout starts. The microphone, if it moved, goes back too. Where it
+///   cannot, `current` names the new microphone and `recording_lost` is
+///   set; with no old ID the new microphone stays.
+/// * A lost microphone chosen as libwebrtc's own default (no ID) has
+///   capture started on what is selected, or stays lost.
+/// * A lost speaker is only selected by a later switch, or not at all when
+///   the choice has no ID: it stays lost and the change reports
+///   `AudioDevice`, so the page asks to rejoin.
+///
+/// A lost device is switched again by the next change, even to the same
+/// choice.
+fn apply_switch(
+    current: &mut SoundDevices,
+    next: SoundDevices,
+    audio: &mut impl SwitchAudio,
+) -> Result<(), FailureCode> {
+    let recording = next
+        .recording
+        .clone()
+        .filter(|_| next.recording != current.recording || current.recording_lost);
+    let playout = next
+        .playout
+        .clone()
+        .filter(|_| next.playout != current.playout || current.playout_lost);
+    if let Some(id) = &recording
+        && !(audio.switch_recording(id) && audio.restart_recording())
+    {
+        current.recording_lost = !restore_recording(audio, current.recording.as_deref());
+        if !current.recording_lost && !current.playout_lost {
+            return Err(FailureCode::DeviceKept);
+        }
+        return Err(FailureCode::AudioDevice);
+    }
+    // A lost microphone with no ID to switch to (libwebrtc's own default):
+    // capture starts on what is selected, or the microphone stays lost.
+    if recording.is_none() && current.recording_lost && !audio.restart_recording() {
+        return Err(FailureCode::AudioDevice);
+    }
+    let speaker = playout.as_deref().map(|id| audio.switch_playout(id));
+    if speaker == Some(false) {
+        if let Some(old) = current.playout.as_deref() {
+            audio.switch_playout(old);
+        }
+        current.playout_lost = true;
+        if recording.is_some() {
+            match current.recording.as_deref() {
+                // libwebrtc's own default has no ID to go back to; the new
+                // microphone runs.
+                None => current.recording.clone_from(&next.recording),
+                Some(old) => {
+                    let back = restore_recording(audio, Some(old));
+                    if !back {
+                        current.recording.clone_from(&next.recording);
+                    }
+                    current.recording_lost = !back;
+                }
+            }
+        }
+        return Err(FailureCode::AudioDevice);
+    }
+    if current.playout_lost {
+        // Selected only, or nothing to select (no ID): playout stays
+        // stopped. The microphone, if it moved, runs.
+        current.recording.clone_from(&next.recording);
+        current.recording_lost = false;
+        current.playout.clone_from(&next.playout);
+        return Err(FailureCode::AudioDevice);
+    }
+    *current = next;
     Ok(())
+}
+
+/// Puts the microphone back on `old` and starts capture: `true` when the
+/// old microphone runs again. Otherwise capture is started on what is
+/// selected, so the call keeps a microphone where one opens.
+fn restore_recording(audio: &mut impl SwitchAudio, old: Option<&str>) -> bool {
+    let back = old.is_some_and(|old| audio.switch_recording(old)) && audio.restart_recording();
+    if !back {
+        audio.restart_recording();
+    }
+    back
+}
+
+/// What a device test's thread reports.
+enum TestNote {
+    Started,
+    Level(f64),
+    Done(Result<(), FailureCode>),
+}
+
+/// Runs one device test (`TestDevice`, ADR-0059), then ends. It connects
+/// to nothing. The microphone and speaker tests use `sound_test`; the camera
+/// test shows the camera on tile 0. `Leave` or a closed input ends a test
+/// early; any other message but the diagnostic switch is a protocol failure.
+pub async fn test_device(first: ToWorker, input: &mut Receiver<Input>, output: &Output) -> u8 {
+    let ToWorker::TestDevice { test, device } = first else {
+        return fail(output, FailureCode::Protocol).await;
+    };
+    // The test needs no new socket, so the second stage comes first (Linux).
+    if !containment::apply_stage2() && !cfg!(feature = "dev-uncontained") {
+        return fail(output, FailureCode::Containment).await;
+    }
+    match test {
+        DeviceTest::Camera => test_camera(device, input, output).await,
+        DeviceTest::Microphone => test_sound(SoundTest::Microphone, device, input, output).await,
+        DeviceTest::Speaker => test_sound(SoundTest::Speaker, device, input, output).await,
+    }
+}
+
+/// The device tests that use sound, so a camera test can never reach the
+/// tone or the microphone.
+#[derive(Clone, Copy)]
+enum SoundTest {
+    Microphone,
+    Speaker,
+}
+
+/// What the input asks during a device test.
+enum TestInput {
+    /// Go on.
+    Continue,
+    /// End the test.
+    Stop,
+    Bad,
+}
+
+fn test_input(message: Option<Input>) -> TestInput {
+    match message {
+        Some(Input::Message(ToWorker::SetDiagnostics { on })) => {
+            crate::diagnostics::global().set_on(on);
+            TestInput::Continue
+        }
+        Some(Input::Message(ToWorker::Leave)) | Some(Input::Eof) | None => TestInput::Stop,
+        Some(Input::Message(_)) | Some(Input::Bad) => TestInput::Bad,
+    }
+}
+
+async fn test_sound(
+    test: SoundTest,
+    device: Option<String>,
+    input: &mut Receiver<Input>,
+    output: &Output,
+) -> u8 {
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (notes_tx, mut notes) = mpsc::channel::<TestNote>(16);
+    let thread_stop = stop.clone();
+    let spawned = std::thread::Builder::new()
+        .name("device-test".to_owned())
+        .spawn(move || {
+            let started = notes_tx.clone();
+            let levels = notes_tx.clone();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match test {
+                SoundTest::Microphone => sound_test::listen(
+                    device.as_deref(),
+                    &thread_stop,
+                    || {
+                        let _ = started.try_send(TestNote::Started);
+                    },
+                    // A full queue drops a level; the next one follows.
+                    |level| {
+                        let _ = levels.try_send(TestNote::Level(level));
+                    },
+                ),
+                SoundTest::Speaker => {
+                    sound_test::play_tone(device.as_deref(), &thread_stop, || {
+                        let _ = started.try_send(TestNote::Started);
+                    })
+                }
+            }))
+            .unwrap_or(Err(FailureCode::Internal));
+            let _ = notes_tx.blocking_send(TestNote::Done(result));
+        });
+    if spawned.is_err() {
+        return fail(output, FailureCode::Internal).await;
+    }
+    let mut meters = LevelMeters::default();
+    let mut bad = false;
+    loop {
+        tokio::select! {
+            note = notes.recv() => match note {
+                Some(TestNote::Started) => {
+                    if output.send(FromWorker::Connected).await.is_err() {
+                        stop.store(true, std::sync::atomic::Ordering::Release);
+                    }
+                }
+                Some(TestNote::Level(linear)) => {
+                    if let Some(message) = meters.own(linear, std::time::Instant::now())
+                        && output.send(message).await.is_err()
+                    {
+                        stop.store(true, std::sync::atomic::Ordering::Release);
+                    }
+                }
+                Some(TestNote::Done(Ok(()))) if !bad => {
+                    let _ = output.send(FromWorker::Left).await;
+                    return EXIT_DONE;
+                }
+                Some(TestNote::Done(Ok(()))) => return fail(output, FailureCode::Protocol).await,
+                Some(TestNote::Done(Err(code))) => return fail(output, code).await,
+                None => return fail(output, FailureCode::Internal).await,
+            },
+            message = input.recv(), if !stop.load(std::sync::atomic::Ordering::Acquire) => {
+                match test_input(message) {
+                    TestInput::Continue => {}
+                    TestInput::Stop => stop.store(true, std::sync::atomic::Ordering::Release),
+                    TestInput::Bad => {
+                        bad = true;
+                        stop.store(true, std::sync::atomic::Ordering::Release);
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn test_camera(device: Option<String>, input: &mut Receiver<Input>, output: &Output) -> u8 {
+    let pictures = output.pictures();
+    let mut limiter = RateLimiter::default();
+    let (ended_tx, mut ended) = mpsc::channel::<()>(1);
+    let (open_tx, mut opened) = mpsc::channel::<Opened<camera::Capture, CameraState>>(1);
+    // No portal grant comes with a test: the portal path reports
+    // `Unavailable`, the other paths open the camera directly.
+    let started = spawn_open(open_tx, 0, CameraState::Unavailable, move || {
+        camera::open(
+            device.as_deref(),
+            camera::Grant::default(),
+            move |frame| {
+                if !limiter.admit(std::time::Instant::now()) {
+                    return;
+                }
+                if let Some(picture) = fitted_i420(&frame)
+                    && let Some((width, height, rgba)) = to_rgba(OWN_TILE, &picture)
+                {
+                    pictures.put(OWN_TILE, 0, width, height, rgba);
+                }
+            },
+            move || {
+                let _ = ended_tx.try_send(());
+            },
+        )
+    });
+    if started.is_err() {
+        return fail(output, FailureCode::Internal).await;
+    }
+    // The open blocks on its thread; `Leave` meanwhile ends the test, and the
+    // late result is dropped there, which releases the camera.
+    let capture = loop {
+        tokio::select! {
+            done = opened.recv() => match done.map(|done| done.result) {
+                Some(Ok(capture)) => break capture,
+                Some(Err(state)) => {
+                    if output.send(FromWorker::Camera { state }).await.is_ok() {
+                        let _ = output.send(FromWorker::Left).await;
+                    }
+                    return EXIT_DONE;
+                }
+                None => return fail(output, FailureCode::Internal).await,
+            },
+            message = input.recv() => match test_input(message) {
+                TestInput::Continue => {}
+                TestInput::Stop => {
+                    let _ = output.send(FromWorker::Left).await;
+                    return EXIT_DONE;
+                }
+                TestInput::Bad => return fail(output, FailureCode::Protocol).await,
+            },
+        }
+    };
+    let mut code = None;
+    if output.send(FromWorker::Connected).await.is_err()
+        || output
+            .send(FromWorker::Camera {
+                state: CameraState::On,
+            })
+            .await
+            .is_err()
+    {
+        code = Some(FailureCode::Internal);
+    }
+    let limit = tokio::time::sleep(CAMERA_TEST_TIME);
+    tokio::pin!(limit);
+    while code.is_none() {
+        tokio::select! {
+            () = &mut limit => break,
+            _ = ended.recv() => break,
+            message = input.recv() => match test_input(message) {
+                TestInput::Continue => {}
+                TestInput::Stop => break,
+                TestInput::Bad => code = Some(FailureCode::Protocol),
+            },
+        }
+    }
+    // Stopping joins the capture thread, which blocks.
+    let held = tokio::task::spawn_blocking(move || capture.stop().is_some())
+        .await
+        .unwrap_or(true);
+    output.clear_picture(OWN_TILE);
+    if let Some(code) = code {
+        return fail(output, code).await;
+    }
+    let state = if held {
+        CameraState::Unavailable
+    } else {
+        CameraState::Off
+    };
+    for message in [
+        FromWorker::VideoStopped { tile: OWN_TILE },
+        FromWorker::Camera { state },
+        FromWorker::Left,
+    ] {
+        if output.send(message).await.is_err() {
+            return EXIT_FAILED;
+        }
+    }
+    EXIT_DONE
 }
 
 /// Everything the call changes after it is connected.
@@ -432,12 +947,25 @@ struct Call<'a> {
     room: &'a Room,
     provider: &'a KeyProvider,
     identity: &'a ParticipantIdentity,
+    /// The microphone and speaker, for a change during the call.
+    audio: &'a PlatformAudio,
+    /// The devices the call uses now (ADR-0059).
+    sound_devices: SoundDevices,
+    /// The system defaults read when the call started, for "System default"
+    /// during the call.
+    media_defaults: MediaDefaults,
     output: &'a Output,
     /// The microphone's publication.
     publication: &'a LocalTrackPublication,
     /// The SIDs of every own track (microphone and camera).
     own_sids: Vec<TrackSid>,
+    /// The camera the next camera start opens: the join's choice, then the
+    /// newest `SetDevices` choice (ADR-0059).
     camera_device: Option<String>,
+    /// The microphone and speaker choice of the join. On Linux no device
+    /// changes during a call, so a `SetDevices` with this choice (a change of
+    /// the camera only) is no sound change there.
+    joined_sound: (Option<String>, Option<String>),
     camera: Option<LocalCamera>,
     /// A capture that did not end in time after a stop (a blocked read on a
     /// stalled camera). Its frames are already revoked. No new camera opens
@@ -480,41 +1008,43 @@ struct Call<'a> {
     /// The volume and deafen state of every remote audio track, on every
     /// connection (ADR-0055).
     playout: Playout,
-    /// The level meter's measurement of the received sound (ADR-0055).
+    /// The level meters' measurement of the own and received sound
+    /// (ADR-0055, ADR-0059).
     sound: SoundProbe,
 }
 
-/// Measures the received sound for the level meter (ADR-0055). At most one
-/// measurement runs, on its own task, so the event loop never waits for it.
+/// Measures the own and the received sound for the level meters (ADR-0055,
+/// ADR-0059). At most one measurement runs, on its own task, so the event
+/// loop never waits for it.
 struct SoundProbe {
-    /// A measurement reports the loudest linear level here, or `None` when
-    /// it did not finish.
-    done: mpsc::Sender<Option<f64>>,
+    /// A measurement reports its levels here, or `None` when it did not
+    /// finish.
+    done: mpsc::Sender<Option<Levels>>,
     task: Option<JoinHandle<()>>,
-    gate: LevelGate,
+    meters: LevelMeters,
 }
 
-/// One measurement's report. Dropping it sends the level, or `None`, so the
-/// task reports once however it ends: done, timed out or unwound. Only one
-/// measurement runs and the slot is freed only by its report, so the channel
-/// of one place has room.
+/// One measurement's report. Dropping it sends the levels, or `None`, so
+/// the task reports once however it ends: done, timed out or unwound. Only
+/// one measurement runs and the slot is freed only by its report, so the
+/// channel of one place has room.
 struct SoundReport {
-    done: mpsc::Sender<Option<f64>>,
-    level: Option<f64>,
+    done: mpsc::Sender<Option<Levels>>,
+    levels: Option<Levels>,
 }
 
 impl Drop for SoundReport {
     fn drop(&mut self) {
-        let _ = self.done.try_send(self.level.take());
+        let _ = self.done.try_send(self.levels.take());
     }
 }
 
 impl SoundProbe {
-    fn new(done: mpsc::Sender<Option<f64>>) -> Self {
+    fn new(done: mpsc::Sender<Option<Levels>>) -> Self {
         Self {
             done,
             task: None,
-            gate: LevelGate::default(),
+            meters: LevelMeters::default(),
         }
     }
 
@@ -528,7 +1058,7 @@ impl SoundProbe {
     /// the level, or `None` when it timed out or unwound.
     fn start<F>(&mut self, measure: F, limit: Duration) -> bool
     where
-        F: std::future::Future<Output = f64> + Send + 'static,
+        F: std::future::Future<Output = Levels> + Send + 'static,
     {
         if self.is_busy() {
             return false;
@@ -537,43 +1067,119 @@ impl SoundProbe {
         self.task = Some(tokio::spawn(async move {
             // Reports when dropped, also if the measurement unwinds, so the
             // slot is always freed. A timeout reports `None`, not silence.
-            let mut report = SoundReport { done, level: None };
-            report.level = tokio::time::timeout(limit, measure).await.ok();
+            let mut report = SoundReport { done, levels: None };
+            report.levels = tokio::time::timeout(limit, measure).await.ok();
         }));
         true
     }
 
     /// A measurement's report arrived: the slot is free. One that did not
-    /// finish (`None`) changes nothing, so the meter keeps its level until
-    /// the next one.
-    fn end(&mut self, linear: Option<f64>) -> Option<FromWorker> {
+    /// finish (`None`) changes nothing, so the meters keep their levels
+    /// until the next one.
+    fn end(&mut self, levels: Option<Levels>) -> Vec<FromWorker> {
         self.task = None;
-        self.gate
-            .next(sound_level(linear?), std::time::Instant::now())
+        match levels {
+            Some(levels) => self.meters.next(&levels, std::time::Instant::now()),
+            None => Vec::new(),
+        }
     }
 }
 
-/// The loudest `audioLevel` (0.0 to 1.0) of the tracks' inbound streams.
-/// WebRTC measures it on the audio as it is played, after the call volume:
+/// The levels of the own microphone and of each remote participant.
+///
+/// The own level is the `audioLevel` of the microphone's media source: the
+/// sound as it is sent, so it is silence while muted. A remote level is the
+/// loudest `audioLevel` of the participant's inbound streams. WebRTC
+/// measures it on the audio as it is played, after the call volume:
 /// `ChannelReceive::GetAudioFrameWithInfo` scales the frame by the output
 /// gain (`set_volume`) before `output_audio_level_.ComputeLevel`, and a
 /// disabled (deafened) track sets that gain to 0
-/// (`AudioRtpReceiver::Reconfigure`). So the meter follows the slider and is
-/// empty while deafened. A track whose statistics cannot be read counts as
-/// silent.
-async fn loudest_level(tracks: Vec<RemoteAudioTrack>) -> f64 {
-    let mut loudest = 0.0_f64;
-    for track in tracks {
-        let Ok(stats) = track.get_stats().await else {
-            continue;
-        };
-        for stat in stats {
-            if let RtcStats::InboundRtp(inbound) = stat {
-                loudest = loudest.max(inbound.inbound.audio_level);
-            }
+/// (`AudioRtpReceiver::Reconfigure`). A track whose statistics cannot be
+/// read counts as silent. A read that does not finish by `deadline` is
+/// `None`: its meter keeps its level, so one slow read never holds back the
+/// own level or the other tracks' levels, and never shows as silence.
+async fn measure_levels(
+    own: Option<LocalAudioTrack>,
+    remote: Vec<(u8, String, RemoteAudioTrack)>,
+    deadline: tokio::time::Instant,
+) -> Levels {
+    let mut levels = Levels {
+        own: Some(0.0),
+        remote: Vec::new(),
+    };
+    if let Some(track) = own {
+        levels.own = read_by(deadline, track.get_stats()).await.map(|stats| {
+            stats
+                .into_iter()
+                .flatten()
+                .filter_map(|stat| match stat {
+                    RtcStats::MediaSource(source) if source.source.kind == "audio" => {
+                        Some(source.audio.audio_level)
+                    }
+                    _ => None,
+                })
+                .fold(0.0_f64, f64::max)
+        });
+    }
+    let (sources, reads): (Vec<_>, Vec<_>) = remote
+        .into_iter()
+        .map(|(connection, identity, track)| {
+            (
+                (connection, identity),
+                async move { track.get_stats().await },
+            )
+        })
+        .unzip();
+    for ((connection, identity), stats) in sources.into_iter().zip(read_all(deadline, reads).await)
+    {
+        let loudest = stats.map(|stats| {
+            stats
+                .into_iter()
+                .flatten()
+                .filter_map(|stat| match stat {
+                    RtcStats::InboundRtp(inbound) => Some(inbound.inbound.audio_level),
+                    _ => None,
+                })
+                .fold(0.0_f64, f64::max)
+        });
+        levels.remote.push((connection, identity, loudest));
+    }
+    levels
+}
+
+/// Runs every read at once, each bounded by `deadline` (`read_by`), and
+/// gives their outputs in order: `None` for a read that did not finish in
+/// time. One slow read never keeps another from starting. The reads are at
+/// most [`MAX_MEASURED_TRACKS`], and dropping this ends them all.
+async fn read_all<F>(deadline: tokio::time::Instant, reads: Vec<F>) -> Vec<Option<F::Output>>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let mut out: Vec<Option<F::Output>> =
+        std::iter::repeat_with(|| None).take(reads.len()).collect();
+    let mut running = tokio::task::JoinSet::new();
+    for (index, read) in reads.into_iter().enumerate() {
+        running.spawn(async move { (index, read_by(deadline, read).await) });
+    }
+    while let Some(done) = running.join_next().await {
+        if let Ok((index, output)) = done {
+            out[index] = output;
         }
     }
-    loudest
+    out
+}
+
+/// `read`'s output when it finishes by `deadline`, else `None`. A read
+/// whose deadline has passed is never started.
+async fn read_by<F: std::future::Future>(
+    deadline: tokio::time::Instant,
+    read: F,
+) -> Option<F::Output> {
+    if tokio::time::Instant::now() >= deadline {
+        return None;
+    }
+    tokio::time::timeout_at(deadline, read).await.ok()
 }
 
 /// The connections to other SFUs (ADR-0054). They subscribe only: nothing
@@ -1588,18 +2194,21 @@ impl Call<'_> {
                         up: true,
                     })
                     .await?;
-                for identity in room
+                for (identity, participant) in room
                     .remote_participants()
-                    .keys()
+                    .into_iter()
                     .take(MAX_PARTICIPANTS)
-                    .map(ToString::to_string)
-                    .filter(|identity| valid_identity(identity))
+                    .map(|(identity, participant)| (identity.to_string(), participant))
+                    .filter(|(identity, _)| valid_identity(identity))
                 {
                     self.output
                         .send(FromWorker::ParticipantJoined {
                             connection: index,
-                            identity,
+                            identity: identity.clone(),
                         })
+                        .await?;
+                    // No microphone counts as muted (ADR-0059).
+                    self.send_muted(index, identity, !microphone_on(&participant))
                         .await?;
                 }
                 events.insert(index, receiver);
@@ -1635,19 +2244,59 @@ impl Call<'_> {
         tracks
     }
 
-    /// Starts a measurement of the received sound, unless one runs. With no
-    /// remote audio the level is silence at once.
-    fn measure_sound(&mut self) -> Option<FromWorker> {
+    /// Every subscribed remote audio track with its connection and its
+    /// participant's identity, at most [`MAX_MEASURED_TRACKS`].
+    fn remote_audio_by_participant(&self) -> Vec<(u8, String, RemoteAudioTrack)> {
+        let rooms = std::iter::once((0, self.room)).chain(self.others.open_indexed());
+        let mut tracks = Vec::new();
+        for (connection, room) in rooms {
+            for (identity, participant) in room.remote_participants() {
+                for publication in participant.track_publications().values() {
+                    if tracks.len() >= MAX_MEASURED_TRACKS {
+                        return tracks;
+                    }
+                    if let Some(RemoteTrack::Audio(track)) = publication.track() {
+                        tracks.push((connection, identity.to_string(), track));
+                    }
+                }
+            }
+        }
+        tracks
+    }
+
+    /// Starts a measurement of the own and the received sound, unless one
+    /// runs.
+    fn measure_sound(&mut self) {
         if self.sound.is_busy() {
-            return None;
+            return;
         }
-        let tracks = self.remote_audio();
-        if tracks.is_empty() {
-            return self.sound.gate.next(0, std::time::Instant::now());
-        }
+        let own = match self.publication.track() {
+            Some(LocalTrack::Audio(track)) => Some(track),
+            _ => None,
+        };
+        let remote = self.remote_audio_by_participant();
+        let deadline = tokio::time::Instant::now() + SOUND_READ_BUDGET;
         self.sound
-            .start(loudest_level(tracks), SOUND_MEASURE_TIMEOUT);
-        None
+            .start(measure_levels(own, remote, deadline), SOUND_MEASURE_TIMEOUT);
+    }
+
+    /// Tells the core whether a remote participant's microphone is muted.
+    async fn send_muted(
+        &self,
+        connection: u8,
+        identity: String,
+        muted: bool,
+    ) -> Result<(), Closed> {
+        if !valid_identity(&identity) {
+            return Ok(());
+        }
+        self.output
+            .send(FromWorker::ParticipantMuted {
+                connection,
+                identity,
+                muted,
+            })
+            .await
     }
 
     /// Gives every subscribed remote audio track the call's playout.
@@ -1694,10 +2343,46 @@ impl Call<'_> {
         match event {
             RoomEvent::TrackSubscribed {
                 track: RemoteTrack::Audio(track),
-                ..
+                publication,
+                participant,
             } => {
                 play_remote_audio(track, self.playout);
-                Ok(())
+                if publication.source() != TrackSource::Microphone {
+                    return Ok(());
+                }
+                self.send_muted(
+                    connection,
+                    participant.identity().to_string(),
+                    publication.is_muted(),
+                )
+                .await
+            }
+            RoomEvent::TrackUnsubscribed {
+                track: RemoteTrack::Audio(_),
+                publication,
+                participant,
+            } if publication.source() == TrackSource::Microphone => {
+                // No microphone counts as muted.
+                self.send_muted(connection, participant.identity().to_string(), true)
+                    .await
+            }
+            RoomEvent::TrackMuted {
+                participant: Participant::Remote(participant),
+                publication,
+            } if publication.kind() == TrackKind::Audio
+                && publication.source() == TrackSource::Microphone =>
+            {
+                self.send_muted(connection, participant.identity().to_string(), true)
+                    .await
+            }
+            RoomEvent::TrackUnmuted {
+                participant: Participant::Remote(participant),
+                publication,
+            } if publication.kind() == TrackKind::Audio
+                && publication.source() == TrackSource::Microphone =>
+            {
+                self.send_muted(connection, participant.identity().to_string(), false)
+                    .await
             }
             RoomEvent::TrackSubscribed {
                 track: RemoteTrack::Video(track),
@@ -1886,9 +2571,32 @@ impl Call<'_> {
                 share,
             } => Ok(self.screen_off(share).await),
             ToWorker::Subscribe { index, url, jwt } => self.begin_other(index, url, jwt),
-            ToWorker::Join { .. } | ToWorker::ListDevices | ToWorker::Leave => {
-                Err(FailureCode::Protocol)
+            // A camera choice applies from the next camera start. A sound
+            // change that fails keeps the call on the devices it can.
+            ToWorker::SetDevices {
+                recording,
+                playout,
+                camera,
+            } => {
+                self.camera_device = camera;
+                let failure = if sound_unchanged_here(&self.joined_sound, &recording, &playout) {
+                    None
+                } else {
+                    switch_devices(
+                        self.audio,
+                        &self.media_defaults,
+                        &mut self.sound_devices,
+                        recording.as_deref(),
+                        playout.as_deref(),
+                    )
+                    .err()
+                };
+                Ok(vec![FromWorker::DevicesSet { failure }])
             }
+            ToWorker::Join { .. }
+            | ToWorker::ListDevices
+            | ToWorker::TestDevice { .. }
+            | ToWorker::Leave => Err(FailureCode::Protocol),
         }
     }
 }
@@ -2086,7 +2794,7 @@ async fn event_loop(
     screens: &mut ScreenInbox,
     others: &mut OtherInbox,
     tracker: &mut SpeakingTracker,
-    sound_done: &mut Receiver<Option<f64>>,
+    sound_done: &mut Receiver<Option<Levels>>,
 ) -> End {
     let mut tick = interval(SPEAKING_TICK);
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -2168,12 +2876,10 @@ async fn event_loop(
                     return End::Failed(FailureCode::Internal);
                 }
             }
-            Some(linear) = sound_done.recv() => {
-                outgoing.extend(call.sound.end(linear));
+            Some(levels) = sound_done.recv() => {
+                outgoing.extend(call.sound.end(levels));
             }
-            _ = tick.tick() => {
-                outgoing.extend(call.measure_sound());
-            }
+            _ = tick.tick() => call.measure_sound(),
         }
         outgoing.extend(tracker.poll(Instant::now().into_std()));
         let disconnected = outgoing.iter().any(|message| {
@@ -2638,12 +3344,25 @@ fn describe_room_event_text(event: &RoomEvent) -> Option<(u8, String)> {
     })
 }
 
+/// Whether a remote participant has a microphone that is not muted. A
+/// participant that publishes none (listening only, or sharing a screen
+/// only) does not.
+fn microphone_on(participant: &RemoteParticipant) -> bool {
+    participant
+        .track_publications()
+        .values()
+        .any(|publication| {
+            publication.source() == TrackSource::Microphone && !publication.is_muted()
+        })
+}
+
 /// Reduces a room event to what the core is told. Everything else is dropped.
 fn room_change(connection: u8, event: &RoomEvent) -> Option<RoomChange> {
     match event {
         RoomEvent::ParticipantConnected(participant) => Some(RoomChange::Joined(
             connection,
             participant.identity().to_string(),
+            microphone_on(participant),
         )),
         RoomEvent::ParticipantDisconnected(participant) => Some(RoomChange::Left(
             connection,
@@ -2693,24 +3412,294 @@ mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
 
+    /// GIVEN the devices a call uses and a new choice WHEN a change during
+    /// the call is planned THEN an equal choice changes nothing, a new one
+    /// switches, and a "System default" that names no listed device cannot
+    /// move the call off a device it opened by ID.
+    #[test]
+    fn given_a_change_during_a_call_then_only_a_reachable_choice_switches() {
+        let devices = |recording: Option<&str>, playout: Option<&str>| SoundDevices {
+            recording: recording.map(str::to_owned),
+            playout: playout.map(str::to_owned),
+            ..SoundDevices::default()
+        };
+        let current = devices(Some("mic-1"), Some("spk-1"));
+        assert_eq!(device_switch(&current, &current), Ok(None));
+        let next = devices(Some("mic-2"), Some("spk-1"));
+        assert_eq!(device_switch(&current, &next), Ok(Some(next.clone())));
+        assert_eq!(
+            device_switch(&current, &devices(None, Some("spk-1"))),
+            Err(FailureCode::Unsupported)
+        );
+        assert_eq!(
+            device_switch(&current, &devices(Some("mic-1"), None)),
+            Err(FailureCode::Unsupported)
+        );
+        // A call on libwebrtc's own defaults stays there for a default choice.
+        let unresolved = devices(None, None);
+        assert_eq!(device_switch(&unresolved, &unresolved), Ok(None));
+        assert_eq!(
+            device_switch(&unresolved, &devices(Some("mic-2"), None)),
+            Ok(Some(devices(Some("mic-2"), None)))
+        );
+    }
+
+    /// GIVEN the join's sound choice WHEN `SetDevices` carries it again (a
+    /// camera change only) or another one THEN only on Linux, where no
+    /// device changes during a call, the same choice is no sound change;
+    /// elsewhere every choice goes to the switch.
+    #[test]
+    fn given_the_joined_sound_choice_then_only_linux_skips_the_switch() {
+        let joined = (Some("mic-1".to_owned()), None);
+        let same = sound_unchanged_here(&joined, &Some("mic-1".to_owned()), &None);
+        assert_eq!(same, cfg!(target_os = "linux"));
+        assert!(!sound_unchanged_here(
+            &joined,
+            &Some("mic-2".to_owned()),
+            &None
+        ));
+        assert!(!sound_unchanged_here(
+            &joined,
+            &Some("mic-1".to_owned()),
+            &Some("spk".to_owned())
+        ));
+    }
+
+    /// A sound device fake that keeps LiveKit 0.11's capture state: the
+    /// IDs that switch, whether a restart starts capture, whether capture
+    /// runs, and every call in order. A failed microphone switch stops
+    /// capture; a switch while it is stopped only selects.
+    #[derive(Default)]
+    struct FakeAudio {
+        mics: Vec<&'static str>,
+        speakers: Vec<&'static str>,
+        restarts: bool,
+        capturing: bool,
+        calls: Vec<String>,
+    }
+
+    impl SwitchAudio for FakeAudio {
+        fn switch_recording(&mut self, id: &str) -> bool {
+            self.calls.push(format!("mic {id}"));
+            let opened = self.mics.contains(&id);
+            self.capturing &= opened;
+            opened
+        }
+
+        fn switch_playout(&mut self, id: &str) -> bool {
+            self.calls.push(format!("speaker {id}"));
+            self.speakers.contains(&id)
+        }
+
+        fn restart_recording(&mut self) -> bool {
+            self.calls.push("restart".to_owned());
+            self.capturing |= self.restarts;
+            self.capturing
+        }
+    }
+
+    /// GIVEN a change of both devices WHEN each switch succeeds or fails
+    /// THEN `current` names the devices the call uses, a failed microphone
+    /// switch starts the old microphone again, a failed speaker is lost,
+    /// and a lost device is switched again by the next change, even to the
+    /// same choice. A lost microphone counts as back only when capture
+    /// runs; a lost speaker stays lost.
+    #[test]
+    fn given_a_device_switch_then_current_names_the_devices_in_use() {
+        let devices = |recording: Option<&str>, playout: Option<&str>| SoundDevices {
+            recording: recording.map(str::to_owned),
+            playout: playout.map(str::to_owned),
+            ..SoundDevices::default()
+        };
+        let next = devices(Some("mic-2"), Some("spk-2"));
+        let from = devices(Some("mic-1"), Some("spk-1"));
+        let run = |start: &SoundDevices, audio: &mut FakeAudio| {
+            let mut current = start.clone();
+            let result = apply_switch(&mut current, next.clone(), audio);
+            (result, current)
+        };
+        let fake = |mics: &[&'static str], speakers: &[&'static str], restarts| FakeAudio {
+            mics: mics.to_vec(),
+            speakers: speakers.to_vec(),
+            restarts,
+            capturing: true,
+            calls: Vec::new(),
+        };
+        let failed = Err(FailureCode::AudioDevice);
+
+        // Both switch.
+        let mut audio = fake(&["mic-2"], &["spk-2"], true);
+        assert_eq!(run(&from, &mut audio), (Ok(()), next.clone()));
+        assert_eq!(audio.calls, ["mic mic-2", "restart", "speaker spk-2"]);
+        assert!(audio.capturing);
+
+        // The new microphone fails: the old one is switched back and started,
+        // so the call has the devices it had.
+        let mut audio = fake(&["mic-1"], &["spk-2"], true);
+        let kept = Err(FailureCode::DeviceKept);
+        assert_eq!(run(&from, &mut audio), (kept, from.clone()));
+        assert!(audio.capturing);
+        assert_eq!(audio.calls, ["mic mic-2", "mic mic-1", "restart"]);
+
+        // ... and when nothing starts again, the microphone is lost.
+        let mut audio = fake(&[], &["spk-2"], false);
+        let (result, current) = run(&from, &mut audio);
+        assert_eq!(result, failed);
+        assert!(current.recording_lost && !current.playout_lost);
+
+        // The speaker fails: both go back to the old devices, and the
+        // speaker is lost, as its playout stopped.
+        let mut audio = fake(&["mic-1", "mic-2"], &["spk-1"], true);
+        let mut lost_speaker = from.clone();
+        lost_speaker.playout_lost = true;
+        assert_eq!(run(&from, &mut audio), (failed, lost_speaker));
+        assert_eq!(
+            audio.calls,
+            [
+                "mic mic-2",
+                "restart",
+                "speaker spk-2",
+                "speaker spk-1",
+                "mic mic-1",
+                "restart"
+            ]
+        );
+
+        // The speaker cannot go back: it is lost; the microphone went back.
+        let mut audio = fake(&["mic-1", "mic-2"], &[], true);
+        let (result, current) = run(&from, &mut audio);
+        assert_eq!(result, failed);
+        assert!(current.playout_lost && !current.recording_lost);
+        assert_eq!(current.recording.as_deref(), Some("mic-1"));
+
+        // The microphone cannot go back: `current` names the new one, and
+        // capture is started on what is selected.
+        let mut audio = fake(&["mic-2"], &["spk-1"], true);
+        let (result, current) = run(&from, &mut audio);
+        assert_eq!(result, failed);
+        assert_eq!(current.recording.as_deref(), Some("mic-2"));
+        assert!(current.recording_lost);
+        assert_eq!(audio.calls.last().map(String::as_str), Some("restart"));
+
+        // No old microphone ID: the new microphone stays.
+        let mut audio = fake(&["mic-2"], &["spk-1"], true);
+        let (result, current) = run(&devices(None, Some("spk-1")), &mut audio);
+        assert_eq!(result, failed);
+        assert_eq!(current.recording.as_deref(), Some("mic-2"));
+
+        // A lost microphone is switched again, even to the same choice.
+        let mut lost = next.clone();
+        lost.recording_lost = true;
+        let mut audio = fake(&["mic-2"], &["spk-2"], true);
+        assert_eq!(run(&lost, &mut audio), (Ok(()), next.clone()));
+        assert_eq!(audio.calls, ["mic mic-2", "restart"]);
+
+        // A lost microphone that the switch only selects is started; when
+        // capture does not start, it stays lost.
+        let mut audio = fake(&["mic-2"], &["spk-2"], true);
+        audio.capturing = false;
+        assert_eq!(run(&lost, &mut audio), (Ok(()), next.clone()));
+        assert!(audio.capturing);
+        let mut audio = fake(&["mic-2"], &["spk-2"], false);
+        audio.capturing = false;
+        let (result, current) = run(&lost, &mut audio);
+        assert_eq!(result, failed);
+        assert!(current.recording_lost && !audio.capturing);
+
+        // A lost speaker is only selected: it stays lost, and the
+        // microphone that moved is kept.
+        let mut lost = devices(Some("mic-1"), Some("spk-2"));
+        lost.playout_lost = true;
+        let mut audio = fake(&["mic-2"], &["spk-2"], true);
+        let (result, current) = run(&lost, &mut audio);
+        assert_eq!(result, failed);
+        assert_eq!(audio.calls, ["mic mic-2", "restart", "speaker spk-2"]);
+        assert_eq!(
+            (current.recording.as_deref(), current.playout.as_deref()),
+            (Some("mic-2"), Some("spk-2"))
+        );
+        assert!(current.playout_lost && !current.recording_lost);
+        assert_eq!(
+            device_switch(&lost, &next),
+            Ok(Some(next.clone())),
+            "a lost device is not the same as the choice"
+        );
+
+        // A lost microphone or speaker chosen with no ID: the microphone
+        // counts as back only when capture starts; the speaker stays lost.
+        let mut lost_default = devices(None, Some("spk-1"));
+        lost_default.recording_lost = true;
+        for (restarts, back) in [(false, false), (true, true)] {
+            let mut audio = fake(&[], &["spk-1"], restarts);
+            audio.capturing = false;
+            let mut current = lost_default.clone();
+            let result = apply_switch(&mut current, devices(None, Some("spk-1")), &mut audio);
+            assert_eq!(result.is_ok(), back);
+            assert_eq!(current.recording_lost, !back);
+            assert_eq!(audio.capturing, back);
+            assert_eq!(audio.calls, ["restart"]);
+        }
+        let mut lost_speaker = devices(Some("mic-1"), None);
+        lost_speaker.playout_lost = true;
+        let mut audio = fake(&["mic-1"], &[], true);
+        let mut current = lost_speaker.clone();
+        let result = apply_switch(&mut current, devices(Some("mic-1"), None), &mut audio);
+        assert_eq!(result, failed);
+        assert!(current.playout_lost, "no ID cannot start playout");
+        assert!(audio.calls.is_empty());
+    }
+
+    /// GIVEN a Windows machine with speakers or microphones WHEN the worker
+    /// reads the media defaults THEN each is a device that libwebrtc lists,
+    /// so "System default" opens it and not the default communications
+    /// device. A machine with no device of a kind checks nothing for it.
+    #[cfg(windows)]
+    #[test]
+    fn given_windows_devices_then_the_media_defaults_are_listed_ones() {
+        let Ok(audio) = PlatformAudio::new() else {
+            return;
+        };
+        let playout: Vec<String> = audio
+            .playout_devices()
+            .map(|device| device.id.as_str().to_owned())
+            .collect();
+        let recording: Vec<String> = audio
+            .recording_devices()
+            .map(|device| device.id.as_str().to_owned())
+            .collect();
+        drop(audio);
+        let (speaker, microphone) = sound_defaults::media_defaults();
+        if !playout.is_empty() {
+            let speaker = speaker.expect("a default speaker");
+            assert!(playout.contains(&speaker), "{speaker} in {playout:?}");
+        }
+        if !recording.is_empty() {
+            let microphone = microphone.expect("a default microphone");
+            assert!(
+                recording.contains(&microphone),
+                "{microphone} in {recording:?}"
+            );
+        }
+    }
+
     /// GIVEN a sound measurement that finishes, one that times out and one
     /// that unwinds THEN each reports exactly once: the level, then `None`
     /// twice. So a slow or failed measurement never shows as silence and
     /// never keeps the slot.
     #[tokio::test]
     async fn given_measurement_endings_then_each_reports_once() {
-        let (tx, mut rx) = mpsc::channel::<Option<f64>>(1);
+        let (tx, mut rx) = mpsc::channel::<Option<Levels>>(1);
         drop(SoundReport {
             done: tx.clone(),
-            level: Some(0.5),
+            levels: Some(own(0.5)),
         });
-        assert_eq!(rx.recv().await, Some(Some(0.5)));
+        assert_eq!(rx.recv().await, Some(Some(own(0.5))));
 
         let done = tx.clone();
         tokio::spawn(async move {
-            let mut report = SoundReport { done, level: None };
-            report.level =
-                tokio::time::timeout(Duration::from_millis(1), std::future::pending::<f64>())
+            let mut report = SoundReport { done, levels: None };
+            report.levels =
+                tokio::time::timeout(Duration::from_millis(1), std::future::pending::<Levels>())
                     .await
                     .ok();
         })
@@ -2720,7 +3709,7 @@ mod tests {
 
         let done = tx.clone();
         let unwound = tokio::spawn(async move {
-            let _report = SoundReport { done, level: None };
+            let _report = SoundReport { done, levels: None };
             panic!("statistics read failed");
         });
         assert!(unwound.await.is_err());
@@ -2734,36 +3723,102 @@ mod tests {
     /// without a message.
     #[tokio::test]
     async fn given_sound_measurements_then_one_runs_and_every_end_frees_it() {
-        let (tx, mut rx) = mpsc::channel::<Option<f64>>(1);
+        let (tx, mut rx) = mpsc::channel::<Option<Levels>>(1);
         let mut probe = SoundProbe::new(tx);
         let long = Duration::from_secs(5);
 
-        assert!(probe.start(async { 0.5 }, long));
-        assert!(!probe.start(async { 1.0 }, long), "one runs at a time");
+        assert!(probe.start(async { own(0.5) }, long));
+        assert!(!probe.start(async { own(1.0) }, long), "one runs at a time");
         let report = rx.recv().await.expect("a report");
-        assert_eq!(report, Some(0.5));
+        assert_eq!(report, Some(own(0.5)));
         assert!(probe.is_busy(), "busy until the report is taken");
         let first = probe.end(report);
-        assert!(matches!(first, Some(FromWorker::SoundLevel { level }) if level > 0));
+        assert!(matches!(first.as_slice(), [FromWorker::SoundLevel { level }] if *level > 0));
         assert!(!probe.is_busy());
 
-        assert!(probe.start(async { 0.5 }, long));
+        assert!(probe.start(async { own(0.5) }, long));
         let same = rx.recv().await.expect("a report");
-        assert_eq!(probe.end(same), None, "an unchanged level is not sent");
+        assert!(probe.end(same).is_empty(), "an unchanged level is not sent");
 
-        assert!(probe.start(std::future::pending::<f64>(), Duration::from_millis(1)));
+        assert!(probe.start(std::future::pending::<Levels>(), Duration::from_millis(1)));
         let timed_out = rx.recv().await.expect("a report");
         assert_eq!(timed_out, None);
-        assert_eq!(probe.end(timed_out), None, "a timeout is not silence");
+        assert!(probe.end(timed_out).is_empty(), "a timeout is not silence");
         assert!(!probe.is_busy());
 
         assert!(probe.start(async { panic!("statistics read failed") }, long));
         let unwound = rx.recv().await.expect("a report");
         assert_eq!(unwound, None);
-        assert_eq!(probe.end(unwound), None);
-        assert!(probe.start(async { 0.0 }, long), "the slot is free again");
+        assert!(probe.end(unwound).is_empty());
+        assert!(
+            probe.start(async { own(0.0) }, long),
+            "the slot is free again"
+        );
         let silent = rx.recv().await.expect("a report");
-        assert_eq!(probe.end(silent), Some(FromWorker::SoundLevel { level: 0 }));
+        assert_eq!(probe.end(silent), [FromWorker::SoundLevel { level: 0 }]);
+    }
+
+    fn own(linear: f64) -> Levels {
+        Levels {
+            own: Some(linear),
+            remote: Vec::new(),
+        }
+    }
+
+    /// GIVEN a statistics read and a deadline WHEN the read finishes in
+    /// time, does not, or its deadline has passed THEN it gives its output,
+    /// `None` at the deadline, and `None` without starting, so one slow
+    /// read never holds back the own level.
+    #[tokio::test]
+    async fn given_a_read_deadline_then_a_late_read_counts_as_unread() {
+        let soon = tokio::time::Instant::now() + Duration::from_secs(5);
+        assert_eq!(read_by(soon, async { 7 }).await, Some(7));
+        let short = tokio::time::Instant::now() + Duration::from_millis(5);
+        assert_eq!(read_by(short, std::future::pending::<u8>()).await, None);
+        let passed = tokio::time::Instant::now();
+        let never = std::future::poll_fn(|_| -> std::task::Poll<u8> {
+            panic!("a read after its deadline is not started")
+        });
+        assert_eq!(read_by(passed, never).await, None);
+    }
+
+    /// GIVEN a slow read before two quick ones WHEN they are read under one
+    /// deadline THEN the quick ones are still read, in order, and only the
+    /// slow one is `None`.
+    #[tokio::test]
+    async fn given_a_slow_read_then_the_other_reads_still_finish() {
+        type Read = std::pin::Pin<Box<dyn std::future::Future<Output = u8> + Send>>;
+        let reads: Vec<Read> = vec![
+            Box::pin(std::future::pending::<u8>()),
+            Box::pin(async {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                2
+            }),
+            Box::pin(async { 3 }),
+        ];
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(300);
+        assert_eq!(read_all(deadline, reads).await, [None, Some(2), Some(3)]);
+    }
+
+    /// GIVEN test input WHEN it is read THEN the diagnostic switch goes on,
+    /// `Leave` and a closed input stop, and any other message is refused.
+    #[test]
+    fn given_device_test_input_then_only_leave_and_the_switch_are_served() {
+        assert!(matches!(
+            test_input(Some(Input::Message(ToWorker::SetDiagnostics { on: false }))),
+            TestInput::Continue
+        ));
+        assert!(matches!(
+            test_input(Some(Input::Message(ToWorker::Leave))),
+            TestInput::Stop
+        ));
+        assert!(matches!(test_input(Some(Input::Eof)), TestInput::Stop));
+        assert!(matches!(test_input(None), TestInput::Stop));
+        assert!(matches!(
+            test_input(Some(Input::Message(ToWorker::SetMuted { muted: true }))),
+            TestInput::Bad
+        ));
+        assert!(matches!(test_input(Some(Input::Bad)), TestInput::Bad));
     }
 
     /// GIVEN room events that need no participant WHEN described THEN each

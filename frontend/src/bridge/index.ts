@@ -13,9 +13,12 @@ import type {
   AppStatus,
   CallCamera,
   CallDevices,
+  CallDeviceTestKind,
+  CallDeviceTestStatus,
   CallEnd,
   CallJoinError,
   CallParticipant,
+  CallParticipantLevel,
   CallPhase,
   CallReadiness,
   CallRing,
@@ -95,7 +98,7 @@ import type {
   PublicRoomPage,
   JoinedRoom
 } from '../../../crates/contracts/generated/contracts';
-import { parseSoundLevel } from '../calls.ts';
+import { parseLevels, parseSoundLevel } from '../calls.ts';
 import { MAX_PASTED_IMAGE_BYTES, parseBand, type Band } from '../image.ts';
 import { parseVideoPicture, type VideoPicture } from '../video.ts';
 
@@ -335,8 +338,11 @@ export async function subscribeRoom(
  * account's status changed within its session, such as the homeserver
  * refusing its presence (ask `appStatus`; it clears nothing). Anything else
  * counts as a session change, which clears the page. `onSoundLevel` gets the
- * running call's sound level meter value on its own channel (ADR-0055): a
- * whole number from 0 to 100; anything else is dropped.
+ * own microphone's level meter value on its own channel (ADR-0055,
+ * ADR-0059): a whole number from 0 to 100; anything else is dropped.
+ * `onLevels` gets the other devices' levels on a third channel: every device
+ * that is not silent now; a bad list is dropped. `onDeviceTest` runs when a
+ * device test changed (ask `callDeviceTestStatus`; it clears nothing).
  */
 export async function watchSession(
   onSession: () => void,
@@ -347,7 +353,9 @@ export async function watchSession(
   onCallVideo: () => void,
   onRings: () => void,
   onAccount: () => void,
-  onSoundLevel: (level: number) => void = () => {}
+  onSoundLevel: (level: number) => void = () => {},
+  onLevels: (levels: CallParticipantLevel[]) => void = () => {},
+  onDeviceTest: () => void = () => {}
 ): Promise<void> {
   const channel = new Channel<string>((message) =>
     message === 'rooms'
@@ -366,7 +374,9 @@ export async function watchSession(
                   ? onAccount()
                   : message === 'diagnostics'
                     ? void followDiagnostics()
-                    : onSession()
+                    : message === 'deviceTest'
+                      ? onDeviceTest()
+                      : onSession()
   );
   if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
     installPageDiagnostics(window);
@@ -375,7 +385,11 @@ export async function watchSession(
     const level = parseSoundLevel(value);
     if (level !== null) onSoundLevel(level);
   });
-  await invoke<null>('watch_session', { onChange: channel, onSoundLevel: soundLevel });
+  const levels = new Channel<unknown>((value) => {
+    const parsed = parseLevels(value);
+    if (parsed !== null) onLevels(parsed);
+  });
+  await invoke<null>('watch_session', { onChange: channel, onSoundLevel: soundLevel, onLevels: levels });
   // The log may already be on (a reloaded page): follow it from now.
   await followDiagnostics();
 }
@@ -398,6 +412,36 @@ async function followDiagnostics(): Promise<void> {
     // drop the waiting records uncounted. The core ignores records while
     // its log is off, and the next change event reads the state again.
   }
+}
+
+/**
+ * Quits Persephone: the window closes and the core ends after it, as when
+ * the window is closed. A running call ends with it.
+ */
+export function exitApp(): Promise<void> {
+  return invoke<void>('exit_app');
+}
+
+/**
+ * Hides Persephone's windows and shows its tray icon; a click on the icon
+ * brings them back. A call keeps running. Rejects with `unavailable`, and
+ * keeps the windows shown, where the system has no tray.
+ */
+export function minimiseToTray(): Promise<void> {
+  return invoke<void>('minimise_to_tray');
+}
+
+/**
+ * Opens the call window (ADR-0060), or brings it to the front. It shows the
+ * call's video grid and participants; the main window keeps its call bar.
+ */
+export function openCallWindow(): Promise<void> {
+  return invoke<void>('open_call_window');
+}
+
+/** Closes the call window, if it is open. The call goes on. */
+export function closeCallWindow(): Promise<void> {
+  return invoke<void>('close_call_window');
 }
 
 /** Locks the session; `locking` means work is still finishing (call again). */
@@ -583,7 +627,9 @@ export function callDevices(): Promise<CallDevices> {
 /**
  * Saves the call microphone, speaker and camera as device IDs from `callDevices`;
  * `null` is the system default. A device need not be connected now. It
- * applies to calls joined afterwards.
+ * applies to calls joined afterwards, and the microphone and speaker also to
+ * a call that runs (ADR-0059); a failed change shows as the call status's
+ * `deviceChange`.
  */
 export function setCallDevices(
   recording: string | null,
@@ -591,6 +637,28 @@ export function setCallDevices(
   camera: string | null
 ): Promise<void> {
   return invoke<void>('set_call_devices', { recording, playout, camera });
+}
+
+/**
+ * Tests one call device in a contained worker (ADR-0059): listens on the
+ * microphone (its level arrives as `watchSession`'s `onSoundLevel`), plays a
+ * tone on the speaker, or shows the camera on video tile 0 with the status's
+ * stream. `device` is an ID from `callDevices`, or `null` for the system
+ * default. A test that runs is stopped first; while a call runs the test is
+ * refused with the state `in_call`. Changes arrive as `onDeviceTest`.
+ */
+export function callDeviceTest(test: CallDeviceTestKind, device: string | null): Promise<CallDeviceTestStatus> {
+  return invoke<CallDeviceTestStatus>('call_device_test', { test, device });
+}
+
+/** Stops the device test that runs, if any; with `id`, only that test. */
+export function callDeviceTestStop(id: number | null = null): Promise<void> {
+  return invoke<void>('call_device_test_stop', { id });
+}
+
+/** The newest device test. */
+export function callDeviceTestStatus(): Promise<CallDeviceTestStatus> {
+  return invoke<CallDeviceTestStatus>('call_device_test_status');
 }
 
 /** The call as the core shows it: codes, flags and bounded IDs only. */

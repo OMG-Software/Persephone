@@ -319,6 +319,11 @@ impl VideoStore {
         }
     }
 
+    /// Whether `other` is this store or a clone of it.
+    pub fn is_same(&self, other: &VideoStore) -> bool {
+        Arc::ptr_eq(&self.state, &other.state)
+    }
+
     /// Ends the store: drops every picture and refuses later ones.
     pub fn close(&self) {
         let mut state = self.state();

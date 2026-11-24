@@ -7,7 +7,9 @@
 //! account settings turns it off. A new session turns it on again, and a
 //! settings reply for a call that started before that change is ignored.
 //!
-//! Only the top-level window is covered. Windows does not let a process set
+//! Each top-level window of the app is covered: the main window and the
+//! call window (ADR-0060) each set an applier under their label.
+//! Only the top-level windows are covered. Windows does not let a process set
 //! the affinity of another process's windows, and the web view's child
 //! windows belong to the web view process.
 //!
@@ -16,6 +18,7 @@
 //! that decides who can read it (ADR-0047).
 
 use persephone_contracts::DisplaySession;
+use std::collections::BTreeMap;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 /// Applies the wanted state to the window. Called with the state locked, so
@@ -26,7 +29,8 @@ struct Inner {
     wanted: bool,
     /// Counts session changes, so a reply from an older session is ignored.
     session: u64,
-    applier: Option<Applier>,
+    /// One applier per window label.
+    appliers: BTreeMap<String, Applier>,
 }
 
 /// The wanted capture protection. On by default.
@@ -40,7 +44,7 @@ impl Default for CaptureState {
             inner: Mutex::new(Inner {
                 wanted: true,
                 session: 0,
-                applier: None,
+                appliers: BTreeMap::new(),
             }),
         }
     }
@@ -58,12 +62,23 @@ impl CaptureState {
         self.inner().wanted
     }
 
-    /// Sets what applies the state to the window, and applies the wanted
-    /// state at once.
+    /// Sets what applies the state to the main window, and applies the
+    /// wanted state at once.
     pub fn set_applier(&self, applier: Applier) {
+        self.set_window_applier("main", applier);
+    }
+
+    /// Sets what applies the state to the window `label`, replacing its
+    /// earlier one, and applies the wanted state at once.
+    pub fn set_window_applier(&self, label: &str, applier: Applier) {
         let mut inner = self.inner();
         applier(inner.wanted);
-        inner.applier = Some(applier);
+        inner.appliers.insert(label.to_owned(), applier);
+    }
+
+    /// The window `label` has gone: nothing is applied to it any more.
+    pub fn remove_window_applier(&self, label: &str) {
+        self.inner().appliers.remove(label);
     }
 
     /// The current session number. Take it before a settings call starts.
@@ -90,7 +105,7 @@ impl CaptureState {
 
     fn apply(inner: &mut Inner, on: bool) {
         inner.wanted = on;
-        if let Some(applier) = &inner.applier {
+        for applier in inner.appliers.values() {
             applier(on);
         }
     }
@@ -233,6 +248,22 @@ mod tests {
         assert_eq!(*calls.lock().unwrap(), vec![true, true]);
         state.set_for(state.session(), false);
         assert!(!state.wanted());
+    }
+
+    /// GIVEN a main and a call window WHEN the state changes THEN both get
+    /// it; WHEN the call window has gone THEN only the main window does.
+    #[test]
+    fn given_two_windows_then_each_gets_the_state_until_it_goes() {
+        let state = CaptureState::default();
+        let main = recording(&state);
+        let call = Arc::new(Mutex::new(Vec::new()));
+        let seen = call.clone();
+        state.set_window_applier("call", Box::new(move |on| seen.lock().unwrap().push(on)));
+        state.set_for(state.session(), false);
+        state.remove_window_applier("call");
+        state.protect();
+        assert_eq!(*main.lock().unwrap(), vec![true, false, true]);
+        assert_eq!(*call.lock().unwrap(), vec![true, false]);
     }
 
     /// GIVEN no applier WHEN the state changes THEN the wanted state still

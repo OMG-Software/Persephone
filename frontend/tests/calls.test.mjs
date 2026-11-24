@@ -46,6 +46,7 @@ import {
   LatestOnly,
   parseSoundLevel,
   SOUND_LEVEL_MAX,
+  shownSoundLevel,
   soundLevelText,
   volumeText,
   volumeValue
@@ -592,4 +593,12 @@ test('GIVEN meter levels WHEN spoken THEN silence is named and the rest are deci
   assert.equal(soundLevelText(50), '−30 dB');
   assert.equal(soundLevelText(90), '−6 dB');
   assert.equal(soundLevelText(SOUND_LEVEL_MAX), '0 dB');
+});
+
+test('GIVEN a microphone level WHEN the call is joining THEN it shows 0, ELSE it shows, also after a call ended', () => {
+  assert.equal(shownSoundLevel('joining', 70), 0);
+  assert.equal(shownSoundLevel('active', 70), 70);
+  assert.equal(shownSoundLevel('idle', 70), 70);
+  // A microphone test after a failed call: the bar still shows the end.
+  assert.equal(shownSoundLevel('ended', 70), 70);
 });

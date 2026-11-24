@@ -108,7 +108,25 @@ keyed: boolean,
  * It shares its screen (ADR-0053). The sender's label is only a
  * display hint; shown as text.
  */
-sharing: boolean, };
+sharing: boolean, 
+/**
+ * Its microphone is muted, or it sends no sound (ADR-0059). Its own
+ * claim: shown as a hint only.
+ */
+muted: boolean, };
+
+export type CallParticipantLevel = { userId: string, deviceId: string, level: number, };
+
+export type CallDeviceTestKind = "microphone" | "speaker" | "camera";
+
+export type CallDeviceTestState = "idle" | "starting" | "running" | "done" | "not_found" | "denied" | "unsupported" | "unavailable" | "in_call" | "failed";
+
+export type CallDeviceTestStatus = { 
+/**
+ * Numbers the tests, so the page can stop the one it started
+ * (`call_device_test_stop`). 0 for no test and for a refusal.
+ */
+id: number, test: CallDeviceTestKind | null, state: CallDeviceTestState, stream: number, };
 
 export type CallEnd = "left" | "connection_failed" | "audio_device" | "containment" | "worker_stopped" | "worker_crashed" | "membership_lost" | "keys_unavailable" | "session_ended" | "internal" | "device_not_found";
 
@@ -131,6 +149,8 @@ tile: number, participant: CallParticipantRef | null, own: boolean,
  * At most 2^53 - 1, so the page holds it exactly.
  */
 stream: number, };
+
+export type CallDeviceChange = "not_found" | "unsupported" | "kept" | "failed";
 
 export type CallStatus = { phase: CallPhase, roomId: string | null, 
 /**
@@ -170,7 +190,15 @@ video: Array<CallVideoTile>,
  * The other member of a direct chat declined this call's ring
  * (ADR-0052). The call goes on until the user leaves.
  */
-ringDeclined: boolean, };
+ringDeclined: boolean, 
+/**
+ * The last change of the microphone or speaker during this call failed
+ * (ADR-0059). After `not_found`, `unsupported` and `kept` the call keeps
+ * the devices it had. After `failed` the microphone may be the new one and
+ * the sound may have stopped. Null after a change that worked, and
+ * before any.
+ */
+deviceChange: CallDeviceChange | null, };
 
 export type CallIntent = "audio" | "video";
 
@@ -906,3 +934,15 @@ export const timelinePageFixture = {
     }
   ]
 } as const satisfies TimelinePage;
+
+/** Most other devices a call shows. */
+export const CALL_PARTICIPANTS_MAX = 32;
+
+/** Longest user ID in a call, in UTF-8 bytes. */
+export const CALL_USER_ID_BYTES_MAX = 255;
+
+/** Longest device ID in a call, in UTF-8 bytes. */
+export const CALL_DEVICE_ID_BYTES_MAX = 255;
+
+/** The top of a call sound level meter. */
+export const CALL_SOUND_LEVEL_MAX = 100;

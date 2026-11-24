@@ -1,0 +1,17 @@
+{
+  "identifier": "call",
+  "description": "The call window may watch the session and call levels, read the call status and pictures, and mute, deafen, change the volume, turn the camera or screen on or off, and leave or close its window, and nothing else: no rooms, messages, keys, account, files, links, plugins, events, paths or webview permissions (ADR-0060).",
+  "windows": ["call"],
+  "permissions": [
+    "allow-watch-session",
+    "allow-call-status",
+    "allow-call-video-frame",
+    "allow-call-leave",
+    "allow-call-mute",
+    "allow-call-deafen",
+    "allow-call-volume",
+    "allow-call-camera",
+    "allow-call-screen",
+    "allow-close-call-window"
+  ]
+}

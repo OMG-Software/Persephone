@@ -3,7 +3,6 @@
   import { notificationLevel, setNotificationLevel, type AccountSettings, type NotificationLevel } from './bridge';
   import { notificationLevelText } from './accountChanges';
   import ProxySettings from './ProxySettings.svelte';
-  import CallDevices from './CallDevices.svelte';
   import DiagnosticsSettings from './DiagnosticsSettings.svelte';
   import { notWindows } from './image';
   import { EVENT_SWITCHES } from './stateText';
@@ -256,10 +255,6 @@
   <div class="panel">
     <h3>Connection</h3>
     <ProxySettings />
-  </div>
-  <div class="panel">
-    <h3>Calls</h3>
-    <CallDevices />
   </div>
   <div class="panel">
     <h3>Privacy</h3>
