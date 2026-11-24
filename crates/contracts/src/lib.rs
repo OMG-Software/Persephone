@@ -1998,6 +1998,9 @@ pub enum StoreState {
     /// Linux: the core cannot show its own windows (no display), so it
     /// cannot ask. Unlock may try again.
     NoDisplay,
+    /// Linux: another Persephone window of this user is creating the
+    /// keyring item and is still asking its user. Unlock may try again.
+    KeyringBusy,
 }
 
 /// Reply of the `app_status` command. It carries no system, account or user

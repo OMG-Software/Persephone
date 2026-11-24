@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { resettable, storeText, unlockable } from '../src/storeText.ts';
 import { healthLabels } from '../src/healthLabels.ts';
 
-const linuxReasons = ['no_session_bus', 'no_secret_service', 'no_default_keyring', 'no_display'];
+const linuxReasons = ['no_session_bus', 'no_secret_service', 'no_default_keyring', 'no_display', 'keyring_busy'];
 
 test('GIVEN each Linux vault reason WHEN the profile stays locked THEN its own text says what to do next', () => {
   const texts = linuxReasons.map((state) => storeText[state]);
@@ -18,6 +18,7 @@ test('GIVEN each Linux vault reason WHEN the profile stays locked THEN its own t
   assert.match(storeText.no_secret_service, /GNOME Keyring or KWallet/);
   assert.match(storeText.no_session_bus, /no session bus/);
   assert.match(storeText.no_display, /could not open its own window/);
+  assert.match(storeText.keyring_busy, /another Persephone window is setting up the keyring/);
 });
 
 test('GIVEN a Linux vault reason WHEN the locked page shows THEN Unlock tries again and Reset is not offered', () => {
@@ -35,4 +36,5 @@ test('GIVEN a Linux vault reason WHEN the health details show THEN a fixed short
   assert.equal(label('no_secret_service'), 'No keyring service');
   assert.equal(label('no_default_keyring'), 'No default keyring');
   assert.equal(label('no_display'), 'No display for the core windows');
+  assert.equal(label('keyring_busy'), 'Keyring busy in another window');
 });

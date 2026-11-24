@@ -468,7 +468,7 @@ export function resetProfile(): Promise<StoreState> {
 
 /**
  * Starts signing in to `homeserver`. Only the URL is sent: the core asks for
- * the username and password itself, in a Windows sign-in window. The outcome
+ * the username and password itself, in a Persephone sign-in window. The outcome
  * arrives as a session change.
  */
 export function signIn(homeserver: string): Promise<AccountStatus> {
@@ -668,7 +668,7 @@ export function callStatus(): Promise<CallStatus> {
 
 /**
  * Starts setting up encryption. The core asks for the password and shows the
- * recovery key in its own Windows windows; neither reaches this page.
+ * recovery key in its own Persephone windows; neither reaches this page.
  * Progress arrives as security changes.
  */
 export function setUpEncryption(): Promise<SecurityStatus> {

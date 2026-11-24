@@ -78,10 +78,11 @@ pub const PROMPT_TIMEOUT: Duration = Duration::from_secs(300);
 const MAX_ITEMS: usize = 64;
 /// The session-bus name a core owns while it may create the item.
 pub const CREATION_NAME: &str = "io.github.omg_software.persephone.StoreKeyWrapCreation";
-/// Longest wait for another core that owns [`CREATION_NAME`] (it may be
-/// waiting for its user's answers). Then this attempt fails, and Unlock can
-/// try again.
-pub const CREATION_WAIT: Duration = Duration::from_secs(15 * 60);
+/// Longest wait for another core that owns [`CREATION_NAME`]: long enough
+/// for a creation without prompts, short enough that a core started while
+/// another asks its user is not held before its window opens. Then this
+/// attempt is [`VaultError::Busy`], and Unlock can try again.
+pub const CREATION_WAIT: Duration = Duration::from_secs(5);
 /// How often a waiting core asks for [`CREATION_NAME`] again.
 const CREATION_POLL: Duration = Duration::from_millis(100);
 
@@ -221,12 +222,14 @@ pub fn canonical(items: &[OwnedObjectPath]) -> Option<&OwnedObjectPath> {
 }
 
 /// What one request for [`CREATION_NAME`] leaves: the name is ours, another
-/// core owns it and there is time to wait, or anything else (a refusal, a
-/// failed call, or a queue entry that `DoNotQueue` rules out), which fails.
+/// core owns it and there is time to wait, another core still owns it when
+/// the wait is over, or anything else (a refusal, a failed call, or a queue
+/// entry that `DoNotQueue` rules out), which fails.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Claim {
     Owned,
     Wait,
+    Busy,
     Refused,
 }
 
@@ -236,6 +239,7 @@ pub fn claim(reply: Option<RequestNameReply>, expired: bool) -> Claim {
     match reply {
         Some(RequestNameReply::PrimaryOwner) => Claim::Owned,
         Some(RequestNameReply::Exists) if !expired => Claim::Wait,
+        Some(RequestNameReply::Exists) => Claim::Busy,
         _ => Claim::Refused,
     }
 }
@@ -251,7 +255,8 @@ pub struct CreationLock<'c> {
 
 impl<'c> CreationLock<'c> {
     /// Owns the name on `connection`, waiting at most `wait` for another
-    /// owner. A longer wait or any other failure is `Failed`.
+    /// owner. Another owner after the wait is `Busy`; any other failure is
+    /// `Failed`.
     pub fn acquire(connection: &'c Connection, wait: Duration) -> Result<Self, VaultError> {
         let deadline = Instant::now() + wait;
         loop {
@@ -266,6 +271,7 @@ impl<'c> CreationLock<'c> {
             match claim(reply, Instant::now() >= deadline) {
                 Claim::Owned => return Ok(Self { connection }),
                 Claim::Wait => thread::sleep(CREATION_POLL),
+                Claim::Busy => return Err(VaultError::Busy),
                 Claim::Refused => return Err(VaultError::Failed),
             }
         }
@@ -682,8 +688,8 @@ mod tests {
     }
 
     /// GIVEN replies to `RequestName` THEN only primary ownership takes the
-    /// lock; another owner waits until the wait expires, and a queue entry,
-    /// an existing own claim or a failed call fails.
+    /// lock; another owner waits until the wait expires and is then busy,
+    /// and a queue entry, an existing own claim or a failed call fails.
     #[test]
     fn given_name_replies_then_only_primary_ownership_takes_the_lock() {
         assert_eq!(
@@ -695,7 +701,7 @@ mod tests {
             Claim::Owned
         );
         assert_eq!(claim(Some(RequestNameReply::Exists), false), Claim::Wait);
-        assert_eq!(claim(Some(RequestNameReply::Exists), true), Claim::Refused);
+        assert_eq!(claim(Some(RequestNameReply::Exists), true), Claim::Busy);
         for expired in [false, true] {
             assert_eq!(
                 claim(Some(RequestNameReply::InQueue), expired),
@@ -989,8 +995,9 @@ mod tests {
 
     /// GIVEN a disposable bus (shared with the other live tests, so the
     /// first claim may wait for them) WHEN one connection owns the creation
-    /// name THEN another connection, as another core would, waits and fails
-    /// after its wait, and takes it while waiting once the first lets go.
+    /// name THEN another connection, as another core would, waits and is
+    /// busy after its wait, and takes it while waiting once the first lets
+    /// go.
     #[test]
     #[ignore = "needs a disposable session bus"]
     fn given_a_disposable_keyring_then_the_creation_name_has_one_owner() {
@@ -1000,7 +1007,7 @@ mod tests {
         let started = Instant::now();
         assert!(matches!(
             CreationLock::acquire(&second, Duration::from_millis(250)),
-            Err(VaultError::Failed)
+            Err(VaultError::Busy)
         ));
         assert!(started.elapsed() >= Duration::from_millis(250));
         let waiter =

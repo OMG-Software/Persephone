@@ -948,6 +948,7 @@ fn linux_vault_reasons_are_fixed_store_codes() {
         (StoreState::NoSecretService, "no_secret_service"),
         (StoreState::NoDefaultKeyring, "no_default_keyring"),
         (StoreState::NoDisplay, "no_display"),
+        (StoreState::KeyringBusy, "keyring_busy"),
         (StoreState::Unsupported, "unsupported"),
     ] {
         assert_eq!(

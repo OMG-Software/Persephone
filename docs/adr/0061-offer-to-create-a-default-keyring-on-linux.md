@@ -88,11 +88,15 @@ for the other yes-or-no questions.
   reads could choose the second. The lock is on the bus because the bus is
   what every core that reaches the provider shares: a file under each
   process's data directory would not join cores with different
-  environments. A core waits at most 15 minutes for the name, then fails,
-  and Unlock can try again. The bus releases the name when a core's
-  connection closes. Cores that reach one provider through different buses,
-  and cores from before this change, are not serialised (see the negative
-  consequences).
+  environments. A core waits at most 5 seconds for the name. That is enough
+  for a creation without prompts. It is short because the core opens the
+  profile before any window shows, so a longer wait would hold a starting
+  core with no window. If another core still holds the name, the profile
+  stays locked with the reason "keyring busy", and Unlock can try again
+  after the user answers the other window. The bus releases the name when a
+  core's connection closes. Cores that reach one provider through different
+  buses, and cores from before this change, are not serialised (see the
+  negative consequences).
 
 The question is asked only when a new secret must be stored (a new profile,
 or a profile whose wrap is written again). A profile whose secret is already
@@ -100,9 +104,9 @@ lost cannot be opened by a new keyring, so the question is not asked then.
 
 ### Fixed reasons
 
-The vault's `unsupported` result on Linux is split into four reasons. Each is
-a fixed store state that the page shows with a fixed text that says what to
-do next:
+The vault's `unsupported` result on Linux is split into four reasons, and the
+creation lock adds a fifth. Each is a fixed store state that the page shows
+with a fixed text that says what to do next:
 
 | Store state | Cause |
 | --- | --- |
@@ -110,6 +114,7 @@ do next:
 | `no_secret_service` | No service owns `org.freedesktop.secrets`, and none can be started. |
 | `no_default_keyring` | No default collection, and none was created (see above). |
 | `no_display` | The core cannot show its windows, so it cannot ask. |
+| `keyring_busy` | Another core of this user still holds the creation lock after the wait (see above). |
 
 These states are retryable: "Unlock" opens the profile again after the user
 fixes the cause. The other platforms keep `unsupported` for "no vault on this
@@ -146,8 +151,10 @@ system". No text from the bus or the provider reaches the page.
   cores still follow, so they would disagree about the item; the owner can
   decide on that separately.
 * While one core waits for its user's answers, a second core that must store
-  a new secret shows "Unlocking" until the first finishes, for at most 15
-  minutes.
+  a new secret stays locked with "keyring busy" after 5 seconds. The user
+  must answer the first core's windows, then choose Unlock in the second.
+  A creation without prompts that takes longer than 5 seconds, on a slow
+  provider, also gives "keyring busy" once.
 * A provider that creates the collection but does not set the alias leaves
   the profile locked, although a new collection exists. The user can make it
   the default in the keyring manager.

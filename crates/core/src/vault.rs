@@ -23,6 +23,10 @@ pub enum VaultError {
     /// (Linux, ADR-0010 and ADR-0061). The reason is a fixed code that tells
     /// the user what to set up.
     Missing(Missing),
+    /// Another Persephone process of this user is creating the vault's
+    /// secret and is still asking its user (Linux, ADR-0061). Nothing was
+    /// stored; a later attempt can succeed.
+    Busy,
     /// The vault refused or failed the operation. No detail is kept, so no
     /// error text can carry key material.
     Failed,

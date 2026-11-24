@@ -29,7 +29,10 @@ export const storeText: Record<StoreState, string> = {
     'Or choose Unlock and answer Yes to let Persephone ask the keyring to create one',
   no_display:
     'Local store locked: Persephone could not open its own window to ask. ' +
-    'Start Persephone in a desktop session with a display, then choose Unlock'
+    'Start Persephone in a desktop session with a display, then choose Unlock',
+  keyring_busy:
+    'Local store locked: another Persephone window is setting up the keyring. ' +
+    'Answer its questions there, then choose Unlock'
 };
 
 /**
@@ -48,7 +51,8 @@ export const unlockable: readonly StoreState[] = [
   'no_session_bus',
   'no_secret_service',
   'no_default_keyring',
-  'no_display'
+  'no_display',
+  'keyring_busy'
 ];
 
 /**

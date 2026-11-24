@@ -358,7 +358,7 @@ test('the sign-in form asks only for the homeserver; the password goes to a nati
   assert.match(failed, /did not accept that username and password/);
 
   const waiting = render(SignIn, { props: props({ state: 'signing_in', userId: null, error: null }) }).body;
-  assert.match(waiting, /Waiting for the Windows sign-in window/);
+  assert.match(waiting, /Waiting for the Persephone sign-in window/);
   assert.match(waiting, /<button type="submit" class="primary wide" disabled/);
 });
 
