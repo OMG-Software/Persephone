@@ -1060,35 +1060,44 @@ impl SoundProbe {
 /// `ChannelReceive::GetAudioFrameWithInfo` scales the frame by the output
 /// gain (`set_volume`) before `output_audio_level_.ComputeLevel`, and a
 /// disabled (deafened) track sets that gain to 0
-/// (`AudioRtpReceiver::Reconfigure`). A track whose statistics cannot be read
-/// by `deadline` counts as silent, so one slow read never holds back the
-/// own level or the other tracks' levels.
+/// (`AudioRtpReceiver::Reconfigure`). A track whose statistics cannot be
+/// read counts as silent. A read that does not finish by `deadline` is
+/// `None`: its meter keeps its level, so one slow read never holds back the
+/// own level or the other tracks' levels, and never shows as silence.
 async fn measure_levels(
     own: Option<LocalAudioTrack>,
     remote: Vec<(u8, String, RemoteAudioTrack)>,
     deadline: tokio::time::Instant,
 ) -> Levels {
-    let mut levels = Levels::default();
-    if let Some(track) = own
-        && let Some(Ok(stats)) = read_by(deadline, track.get_stats()).await
-    {
-        for stat in stats {
-            if let RtcStats::MediaSource(source) = stat
-                && source.source.kind == "audio"
-            {
-                levels.own = levels.own.max(source.audio.audio_level);
-            }
-        }
+    let mut levels = Levels {
+        own: Some(0.0),
+        remote: Vec::new(),
+    };
+    if let Some(track) = own {
+        levels.own = read_by(deadline, track.get_stats()).await.map(|stats| {
+            stats
+                .into_iter()
+                .flatten()
+                .filter_map(|stat| match stat {
+                    RtcStats::MediaSource(source) if source.source.kind == "audio" => {
+                        Some(source.audio.audio_level)
+                    }
+                    _ => None,
+                })
+                .fold(0.0_f64, f64::max)
+        });
     }
     for (connection, identity, track) in remote {
-        let mut loudest = 0.0_f64;
-        if let Some(Ok(stats)) = read_by(deadline, track.get_stats()).await {
-            for stat in stats {
-                if let RtcStats::InboundRtp(inbound) = stat {
-                    loudest = loudest.max(inbound.inbound.audio_level);
-                }
-            }
-        }
+        let loudest = read_by(deadline, track.get_stats()).await.map(|stats| {
+            stats
+                .into_iter()
+                .flatten()
+                .filter_map(|stat| match stat {
+                    RtcStats::InboundRtp(inbound) => Some(inbound.inbound.audio_level),
+                    _ => None,
+                })
+                .fold(0.0_f64, f64::max)
+        });
         levels.remote.push((connection, identity, loudest));
     }
     levels
@@ -3626,7 +3635,7 @@ mod tests {
 
     fn own(linear: f64) -> Levels {
         Levels {
-            own: linear,
+            own: Some(linear),
             remote: Vec::new(),
         }
     }

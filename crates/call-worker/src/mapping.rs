@@ -481,13 +481,16 @@ impl LevelGate {
 
 /// One measurement of the call's sound, linear (0.0 to 1.0, as WebRTC's
 /// `audioLevel`): the own microphone as it is sent, and each remote
-/// participant as it is played (ADR-0055, ADR-0059).
+/// participant as it is played (ADR-0055, ADR-0059). `None` is a level
+/// that was not read in time: its meter keeps the level it has, so a slow
+/// read never shows as silence.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Levels {
-    pub own: f64,
+    pub own: Option<f64>,
     /// Connection, identity and level. One identity may come more than
-    /// once (one per audio track); the loudest counts.
-    pub remote: Vec<(u8, String, f64)>,
+    /// once (one per audio track); the loudest counts, and one unread track
+    /// makes the participant's level unread.
+    pub remote: Vec<(u8, String, Option<f64>)>,
 }
 
 /// The gates of the own level and of each remote participant. It holds at
@@ -506,10 +509,12 @@ impl LevelMeters {
     /// is left out.
     pub fn next(&mut self, levels: &Levels, now: Instant) -> Vec<FromWorker> {
         let mut out = Vec::new();
-        if let Some(level) = self.own.next(sound_level(levels.own), now) {
+        if let Some(linear) = levels.own
+            && let Some(level) = self.own.next(sound_level(linear), now)
+        {
             out.push(FromWorker::SoundLevel { level });
         }
-        let mut loudest: Vec<((u8, &str), f64)> = Vec::new();
+        let mut loudest: Vec<((u8, &str), Option<f64>)> = Vec::new();
         for (connection, identity, linear) in &levels.remote {
             if !valid_identity(identity) || *connection > MAX_OTHER_CONNECTIONS {
                 continue;
@@ -519,7 +524,7 @@ impl LevelMeters {
                 .iter_mut()
                 .find(|(key, _)| *key == (*connection, identity.as_str()))
             {
-                Some((_, level)) => *level = level.max(*linear),
+                Some((_, level)) => *level = level.zip(*linear).map(|(a, b)| a.max(b)),
                 None if !full => loudest.push(((*connection, identity), *linear)),
                 None => {}
             }
@@ -530,6 +535,10 @@ impl LevelMeters {
                 continue;
             }
             let gate = self.remote.entry(key).or_default();
+            // Not read in time: the core keeps the level it has.
+            let Some(linear) = linear else {
+                continue;
+            };
             if let Some(level) = gate.next(sound_level(*linear), now) {
                 out.push(FromWorker::ParticipantLevel {
                     connection: *connection,
@@ -1274,8 +1283,8 @@ mod tests {
         assert!(gate.next(0, at(start, 10 * repeat)).is_none());
     }
 
-    fn remote(connection: u8, identity: &str, linear: f64) -> (u8, String, f64) {
-        (connection, identity.to_owned(), linear)
+    fn remote(connection: u8, identity: &str, linear: f64) -> (u8, String, Option<f64>) {
+        (connection, identity.to_owned(), Some(linear))
     }
 
     /// GIVEN the own microphone and two remote participants, one with two
@@ -1287,7 +1296,7 @@ mod tests {
         let mut meters = LevelMeters::default();
         let start = Instant::now();
         let levels = Levels {
-            own: 0.5,
+            own: Some(0.5),
             remote: vec![
                 remote(0, "@a:example.org:A", 0.1),
                 remote(0, "@a:example.org:A", 1.0),
@@ -1314,6 +1323,44 @@ mod tests {
         assert!(meters.next(&levels, at(start, 100)).is_empty());
     }
 
+    /// GIVEN levels that were sent WHEN the next measurement could not read
+    /// the own level or a participant's track in time THEN nothing is sent
+    /// for them, so a slow read never shows as silence, and the participant
+    /// is still measured: a later read level is sent as a change.
+    #[test]
+    fn given_an_unread_level_then_the_meter_keeps_its_level() {
+        let mut meters = LevelMeters::default();
+        let start = Instant::now();
+        let heard = Levels {
+            own: Some(0.5),
+            remote: vec![remote(0, "@a:example.org:A", 0.5)],
+        };
+        assert_eq!(meters.next(&heard, start).len(), 2);
+        let unread = Levels {
+            own: None,
+            remote: vec![
+                (0, "@a:example.org:A".to_owned(), None),
+                remote(0, "@a:example.org:A", 1.0),
+            ],
+        };
+        assert!(meters.next(&unread, at(start, 100)).is_empty());
+        let quiet = Levels {
+            own: Some(0.0),
+            remote: vec![remote(0, "@a:example.org:A", 0.0)],
+        };
+        assert_eq!(
+            meters.next(&quiet, at(start, 200)),
+            [
+                FromWorker::SoundLevel { level: 0 },
+                FromWorker::ParticipantLevel {
+                    connection: 0,
+                    identity: "@a:example.org:A".to_owned(),
+                    level: 0,
+                },
+            ]
+        );
+    }
+
     /// GIVEN a participant that was heard WHEN it is no longer measured THEN
     /// it gets silence once and is forgotten; a bad identity or connection is
     /// never sent.
@@ -1323,7 +1370,7 @@ mod tests {
         let start = Instant::now();
         meters.next(
             &Levels {
-                own: 0.0,
+                own: Some(0.0),
                 remote: vec![
                     remote(0, "@a:example.org:A", 0.5),
                     remote(0, "", 0.5),
@@ -1350,7 +1397,7 @@ mod tests {
     fn given_too_many_participants_then_the_meters_stay_bounded() {
         let mut meters = LevelMeters::default();
         let levels = Levels {
-            own: 0.0,
+            own: Some(0.0),
             remote: (0..MAX_PARTICIPANTS + 5)
                 .map(|n| remote(0, &format!("@p{n}:example.org:D"), 0.5))
                 .collect(),
