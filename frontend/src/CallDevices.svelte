@@ -34,6 +34,7 @@
     volumeText,
     volumeValue
   } from './calls';
+  import { DeviceTests, testLevel, testLive, testTiles } from './deviceTests';
 
   // The call microphone, speaker, camera and volume (ADR-0043, ADR-0048,
   // ADR-0055). The core lists the devices through a
@@ -53,46 +54,26 @@
 
   let test = $state<CallDeviceTestStatus>(IDLE_DEVICE_TEST);
   let testBusy = $state(false);
-  // Numbers the test requests, so an older answer never replaces a newer one.
-  let testRequest = 0;
-  // Set when the settings close: a start that answers later is stopped.
-  let destroyed = false;
-
-  async function readTest() {
-    const mine = ++testRequest;
-    try {
-      const next = await callDeviceTestStatus();
-      if (mine === testRequest) test = next;
-    } catch {
-      // The status stays as it was; the next change reads it again.
-    }
-  }
+  // The request rules (deviceTests.ts): newest answer only, and a test that
+  // runs or starts late is stopped when the settings close.
+  const tests = new DeviceTests(
+    { start: callDeviceTest, stop: callDeviceTestStop, status: callDeviceTestStatus },
+    (next) => (test = next),
+    IDLE_DEVICE_TEST
+  );
 
   $effect(() => {
     testTicks;
-    untrack(() => void readTest());
+    untrack(() => void tests.read());
   });
 
   // Starts the `kind` test with the device its menu shows, or stops it.
   async function runTest(kind: CallDeviceTestKind) {
     if (testBusy) return;
     testBusy = true;
-    const mine = ++testRequest;
     try {
-      if (deviceTestActive(test, kind)) {
-        await callDeviceTestStop();
-      } else {
-        const menu = kind === 'microphone' ? recording : kind === 'speaker' ? playout : camera;
-        const next = await callDeviceTest(kind, deviceChoice(menu));
-        if (destroyed) {
-          // Only this test: a newer one from a reopened page keeps running.
-          if (next.state === 'starting' || next.state === 'running') {
-            void callDeviceTestStop(next.id).catch(() => {});
-          }
-          return;
-        }
-        if (mine === testRequest) test = next;
-      }
+      const menu = kind === 'microphone' ? recording : kind === 'speaker' ? playout : camera;
+      await tests.run(kind, deviceChoice(menu));
     } catch (reason) {
       failure = failures[String(reason)] ?? 'The test could not start.';
     } finally {
@@ -101,18 +82,11 @@
   }
 
   // Leaving the settings ends a test that runs.
-  onDestroy(() => {
-    destroyed = true;
-    if (test.state === 'starting' || test.state === 'running') void callDeviceTestStop(test.id).catch(() => {});
-  });
+  onDestroy(() => tests.close());
 
-  const testing = $derived(test.state === 'starting' || test.state === 'running');
-  const micLevel = $derived(deviceTestActive(test, 'microphone') ? soundLevel : 0);
-  const cameraTiles = $derived(
-    test.test === 'camera' && test.state === 'running'
-      ? [{ tile: 0, participant: null, own: true, stream: test.stream }]
-      : []
-  );
+  const testing = $derived(testLive(test));
+  const micLevel = $derived(testLevel(test, soundLevel));
+  const cameraTiles = $derived(testTiles(test));
   const noNames: ReadonlyMap<string, string> = new Map();
 
   let devices = $state<CallDevices | null>(null);
