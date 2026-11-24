@@ -12,9 +12,16 @@
 //! Diffie-Hellman session would add no protection against anyone who can
 //! read the bus (ADR-0010).
 //!
-//! Without a session bus, a Secret Service provider or a default
-//! collection, the vault is [`VaultError::Unsupported`]; a locked collection
-//! whose unlock prompt the user dismisses, or does not answer within
+//! Without a session bus or a Secret Service provider, the vault is
+//! [`VaultError::Missing`] with that part as the reason. Without a default
+//! collection, the core asks in its own window whether the provider should
+//! create one ([`default_collection`], ADR-0061); the provider then asks for
+//! the new keyring's password in its own prompt, which Persephone never
+//! sees. A "no", a closed window, a dismissed or unanswered keyring prompt,
+//! a provider that refuses, or no display to ask on, is again
+//! [`VaultError::Missing`]. The vault never calls `SetAlias`, so it never
+//! changes which existing keyring is the default. A locked collection whose
+//! unlock prompt the user dismisses, or does not answer within
 //! [`PROMPT_TIMEOUT`], and every other refusal is [`VaultError::Failed`].
 //! Either way the profile stays locked: there is no kernel keyring, file or
 //! passphrase-only fallback.
@@ -24,7 +31,8 @@
 
 use super::super::unix::{SECRET_BYTES, SecretStore};
 use super::bus::{self, BusError};
-use crate::vault::VaultError;
+use crate::credentials::PromptError;
+use crate::vault::{Missing, VaultError};
 use std::{collections::HashMap, sync::mpsc, thread, time::Duration};
 use zbus::{
     blocking::{Connection, Proxy, proxy::Builder as ProxyBuilder},
@@ -47,8 +55,9 @@ pub const LABEL: &str = "Persephone local store key wrap";
 pub const CONTENT_TYPE: &str = "text/plain";
 /// Bytes of the item's value: two hexadecimal digits for each secret byte.
 pub const ENCODED_BYTES: usize = 2 * SECRET_BYTES;
-/// Longest wait for the user to answer the provider's unlock prompt. The
-/// prompt is then dismissed and the profile stays locked.
+/// Longest wait for the user to answer the provider's unlock or
+/// create-keyring prompt. The prompt is then dismissed and the profile stays
+/// locked.
 pub const PROMPT_TIMEOUT: Duration = Duration::from_secs(300);
 /// Most matching items accepted in one search; more is refused.
 const MAX_ITEMS: usize = 64;
@@ -62,6 +71,15 @@ const SESSION_INTERFACE: &str = "org.freedesktop.Secret.Session";
 const PROMPT_INTERFACE: &str = "org.freedesktop.Secret.Prompt";
 /// The object path that means "none" (no prompt, no collection).
 const NONE: &str = "/";
+/// The alias of the collection that keeps the item.
+const DEFAULT_ALIAS: &str = "default";
+/// The label of a keyring that the vault asks the provider to create, as
+/// libsecret's own clients name the login keyring.
+pub const NEW_KEYRING_LABEL: &str = "Login";
+
+/// The core's question before it asks the provider to create a default
+/// keyring: `Ok(true)` only for an explicit yes.
+pub type Ask = fn() -> Result<bool, PromptError>;
 
 /// The attributes that name the item, for both search and creation.
 pub fn attributes() -> HashMap<&'static str, &'static str> {
@@ -103,13 +121,72 @@ pub fn decode(text: &[u8]) -> Result<Zeroizing<[u8; SECRET_BYTES]>, VaultError> 
     Ok(secret)
 }
 
-/// The vault error for a bus error: no bus or no provider is
-/// `Unsupported`, anything else `Failed`.
-pub fn vault_error(error: BusError) -> VaultError {
+/// The vault error for a failed connection: a missing session bus is
+/// [`Missing::SessionBus`], anything else `Failed`.
+pub fn connect_error(error: BusError) -> VaultError {
     match error {
-        BusError::Absent => VaultError::Unsupported,
+        BusError::Absent => VaultError::Missing(Missing::SessionBus),
         BusError::Failed => VaultError::Failed,
     }
+}
+
+/// The vault error for a failed call: no provider owns the name, and none
+/// can be started, is [`Missing::SecretService`]; anything else `Failed`.
+pub fn call_error(error: BusError) -> VaultError {
+    match error {
+        BusError::Absent => VaultError::Missing(Missing::SecretService),
+        BusError::Failed => VaultError::Failed,
+    }
+}
+
+/// What the answer to the create-keyring question leaves: only a yes goes
+/// on. No, a closed window or a window that did not run is "no default
+/// keyring"; no display to ask on is [`Missing::Display`].
+pub fn creation_allowed(answer: Result<bool, PromptError>) -> Result<(), VaultError> {
+    match answer {
+        Ok(true) => Ok(()),
+        Err(PromptError::Unsupported) => Err(VaultError::Missing(Missing::Display)),
+        Ok(false) | Err(PromptError::Cancelled | PromptError::Invalid | PromptError::Failed) => {
+            Err(VaultError::Missing(Missing::DefaultKeyring))
+        }
+    }
+}
+
+/// What a failed `CreateCollection` (or its prompt) leaves: a refusal, a
+/// dismissed or unanswered prompt, or any other failure is "no default
+/// keyring"; a provider or bus that went away keeps its own reason.
+pub fn creation_error(error: VaultError) -> VaultError {
+    match error {
+        VaultError::Failed => VaultError::Missing(Missing::DefaultKeyring),
+        other => other,
+    }
+}
+
+/// The provider calls that finding or creating the default collection
+/// needs. There is deliberately no `SetAlias`.
+pub trait Keyrings {
+    /// The collection the `default` alias names, `None` for none.
+    fn read_default(&self) -> Result<Option<OwnedObjectPath>, VaultError>;
+    /// Asks the provider to create a collection with the `default` alias,
+    /// and waits for its prompt, if any.
+    fn create_default(&self) -> Result<(), VaultError>;
+}
+
+/// The default collection. When there is none, asks once with `ask`, and
+/// only after a yes has the provider create one; afterwards only a
+/// collection that the provider now names `default` is used (ADR-0061).
+pub fn default_collection(
+    keyrings: &impl Keyrings,
+    ask: Ask,
+) -> Result<OwnedObjectPath, VaultError> {
+    if let Some(collection) = keyrings.read_default()? {
+        return Ok(collection);
+    }
+    creation_allowed(ask())?;
+    keyrings.create_default().map_err(creation_error)?;
+    keyrings
+        .read_default()?
+        .ok_or(VaultError::Missing(Missing::DefaultKeyring))
 }
 
 /// The item every process uses when more than one matches (two cores that
@@ -124,18 +201,25 @@ pub fn canonical(items: &[OwnedObjectPath]) -> Option<&OwnedObjectPath> {
 pub struct SecretService {
     /// `None`: the user's session bus. Tests name another address.
     address: Option<String>,
+    /// The question before a default keyring is created.
+    ask: Ask,
 }
 
 impl SecretService {
-    /// The item on the user's session bus.
+    /// The item on the user's session bus; a missing default keyring is
+    /// asked about in the core's own window.
     pub fn session_bus() -> Self {
-        Self { address: None }
+        Self {
+            address: None,
+            ask: super::credentials::confirm_keyring_creation,
+        }
     }
 
-    /// The item behind the bus at `address` (tests).
-    pub fn at(address: String) -> Self {
+    /// The item behind the bus at `address`, asking with `ask` (tests).
+    pub fn at(address: String, ask: Ask) -> Self {
         Self {
             address: Some(address),
+            ask,
         }
     }
 
@@ -144,7 +228,7 @@ impl SecretService {
             None => bus::session(),
             Some(address) => bus::at(address),
         }
-        .map_err(vault_error)
+        .map_err(connect_error)
     }
 }
 
@@ -165,7 +249,7 @@ impl SecretStore for SecretService {
         if let Some(stored) = load(&connection, &session)? {
             return Ok(stored);
         }
-        let collection = default_collection(&connection)?;
+        let collection = default_collection(&Provider(&connection), self.ask)?;
         unlock(&connection, std::slice::from_ref(&collection))?;
         let value = encode(secret);
         let mut properties: HashMap<&str, Value<'_>> = HashMap::new();
@@ -244,7 +328,7 @@ where
 {
     connection
         .call_method(Some(SECRETS), path, Some(interface), method, body)
-        .map_err(|error| vault_error(bus::classify(&error)))
+        .map_err(|error| call_error(bus::classify(&error)))
 }
 
 /// The matching items: (unlocked, locked).
@@ -298,21 +382,43 @@ fn load(
     decode(&value).map(Some)
 }
 
-/// The default collection's path. No default collection is `Unsupported`:
-/// there is no keyring to keep the item in.
-fn default_collection(connection: &Connection) -> Result<OwnedObjectPath, VaultError> {
-    let reply = call(
-        connection,
-        SERVICE_PATH,
-        SERVICE_INTERFACE,
-        "ReadAlias",
-        &("default",),
-    )?;
-    let collection: OwnedObjectPath = reply.body().deserialize().map_err(|_| VaultError::Failed)?;
-    if collection.as_str() == NONE {
-        return Err(VaultError::Unsupported);
+/// The provider on one connection.
+struct Provider<'c>(&'c Connection);
+
+impl Keyrings for Provider<'_> {
+    fn read_default(&self) -> Result<Option<OwnedObjectPath>, VaultError> {
+        let reply = call(
+            self.0,
+            SERVICE_PATH,
+            SERVICE_INTERFACE,
+            "ReadAlias",
+            &(DEFAULT_ALIAS,),
+        )?;
+        let collection: OwnedObjectPath =
+            reply.body().deserialize().map_err(|_| VaultError::Failed)?;
+        Ok((collection.as_str() != NONE).then_some(collection))
     }
-    Ok(collection)
+
+    /// `CreateCollection` with the label [`NEW_KEYRING_LABEL`] and the
+    /// `default` alias. The provider asks for the keyring's password in its
+    /// own prompt; Persephone neither sees nor sets it.
+    fn create_default(&self) -> Result<(), VaultError> {
+        let mut properties: HashMap<&str, Value<'_>> = HashMap::new();
+        properties.insert(
+            "org.freedesktop.Secret.Collection.Label",
+            Value::from(NEW_KEYRING_LABEL),
+        );
+        let reply = call(
+            self.0,
+            SERVICE_PATH,
+            SERVICE_INTERFACE,
+            "CreateCollection",
+            &(properties, DEFAULT_ALIAS),
+        )?;
+        let (_collection, prompt): (OwnedObjectPath, OwnedObjectPath) =
+            reply.body().deserialize().map_err(|_| VaultError::Failed)?;
+        complete(self.0, &prompt)
+    }
 }
 
 /// Unlocks `objects`; the provider may prompt the user.
@@ -441,13 +547,21 @@ mod tests {
         }
     }
 
-    /// GIVEN bus errors THEN a missing bus or provider is unsupported and
-    /// any other refusal fails; GIVEN several matching items THEN every
-    /// reader picks the same one.
+    /// GIVEN bus errors THEN a missing bus and a missing provider each keep
+    /// their own reason and any other refusal fails; GIVEN several matching
+    /// items THEN every reader picks the same one.
     #[test]
     fn given_errors_and_duplicates_then_the_choice_is_fixed() {
-        assert_eq!(vault_error(BusError::Absent), VaultError::Unsupported);
-        assert_eq!(vault_error(BusError::Failed), VaultError::Failed);
+        assert_eq!(
+            connect_error(BusError::Absent),
+            VaultError::Missing(Missing::SessionBus)
+        );
+        assert_eq!(connect_error(BusError::Failed), VaultError::Failed);
+        assert_eq!(
+            call_error(BusError::Absent),
+            VaultError::Missing(Missing::SecretService)
+        );
+        assert_eq!(call_error(BusError::Failed), VaultError::Failed);
         let path = |text: &str| OwnedObjectPath::try_from(text).unwrap();
         let items = [
             path("/org/freedesktop/secrets/collection/login/7"),
@@ -465,47 +579,301 @@ mod tests {
     }
 
     /// GIVEN no reachable session bus (an address with nothing behind it)
-    /// WHEN the vault protects or opens THEN it is unsupported and no key
-    /// comes back: the profile stays locked.
+    /// WHEN the vault protects or opens THEN the reason is "no session bus",
+    /// nothing is asked and no key comes back: the profile stays locked.
     #[test]
-    fn given_no_session_bus_then_the_vault_is_unsupported() {
+    fn given_no_session_bus_then_the_vault_reports_it() {
         let dir = tempfile::tempdir().unwrap();
         let address = format!("unix:path={}", dir.path().join("no-bus").display());
-        let store = SecretService::at(address.clone());
-        assert_eq!(store.load(), Err(VaultError::Unsupported));
-        assert_eq!(
-            store.store_new(&[1u8; SECRET_BYTES]).err(),
-            Some(VaultError::Unsupported)
-        );
-        let vault = Wrapped(SecretService::at(address));
-        assert_eq!(
-            vault.protect(b"sealed").err(),
-            Some(VaultError::Unsupported)
-        );
-        assert_eq!(
-            vault.unprotect(&[1u8; 64]).err(),
-            Some(VaultError::Unsupported)
-        );
+        let no_bus = Some(VaultError::Missing(Missing::SessionBus));
+        let store = SecretService::at(address.clone(), never_asked);
+        assert_eq!(store.load().err(), no_bus);
+        assert_eq!(store.store_new(&[1u8; SECRET_BYTES]).err(), no_bus);
+        let vault = Wrapped(SecretService::at(address, never_asked));
+        assert_eq!(vault.protect(b"sealed").err(), no_bus);
+        assert_eq!(vault.unprotect(&[1u8; 64]).err(), no_bus);
     }
 
-    /// GIVEN a Secret Service provider on the session bus (a disposable
-    /// GNOME Keyring under `dbus-run-session`, never the user's own) WHEN
-    /// the secret is stored twice and read THEN the first stays, and the
-    /// wrap opens with it.
+    fn never_asked() -> Result<bool, PromptError> {
+        panic!("the create-keyring question must not be asked here")
+    }
+
+    /// A provider in memory: what `ReadAlias` gives before and after a
+    /// creation, what `CreateCollection` does, and what was called.
+    struct Fake {
+        before: Result<Option<&'static str>, VaultError>,
+        create: Result<(), VaultError>,
+        after: Option<&'static str>,
+        calls: std::cell::RefCell<Vec<&'static str>>,
+    }
+
+    impl Fake {
+        fn new(before: Option<&'static str>) -> Self {
+            Self {
+                before: Ok(before),
+                create: Ok(()),
+                after: Some(LOGIN),
+                calls: std::cell::RefCell::default(),
+            }
+        }
+    }
+
+    const LOGIN: &str = "/org/freedesktop/secrets/collection/login";
+
+    impl Keyrings for Fake {
+        fn read_default(&self) -> Result<Option<OwnedObjectPath>, VaultError> {
+            let created = self.calls.borrow().contains(&"create");
+            self.calls.borrow_mut().push("read");
+            let path = if created {
+                self.after
+            } else {
+                match &self.before {
+                    Ok(path) => *path,
+                    Err(VaultError::Missing(missing)) => {
+                        return Err(VaultError::Missing(*missing));
+                    }
+                    Err(_) => return Err(VaultError::Failed),
+                }
+            };
+            Ok(path.map(|path| OwnedObjectPath::try_from(path).unwrap()))
+        }
+
+        fn create_default(&self) -> Result<(), VaultError> {
+            self.calls.borrow_mut().push("create");
+            match &self.create {
+                Ok(()) => Ok(()),
+                Err(VaultError::Missing(missing)) => Err(VaultError::Missing(*missing)),
+                Err(_) => Err(VaultError::Failed),
+            }
+        }
+    }
+
+    thread_local! {
+        static ASKED: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    }
+
+    fn asked() -> u32 {
+        ASKED.with(std::cell::Cell::take)
+    }
+
+    fn yes() -> Result<bool, PromptError> {
+        ASKED.with(|asked| asked.set(asked.get() + 1));
+        Ok(true)
+    }
+
+    fn no() -> Result<bool, PromptError> {
+        ASKED.with(|asked| asked.set(asked.get() + 1));
+        Ok(false)
+    }
+
+    fn closed() -> Result<bool, PromptError> {
+        ASKED.with(|asked| asked.set(asked.get() + 1));
+        Err(PromptError::Cancelled)
+    }
+
+    fn not_shown() -> Result<bool, PromptError> {
+        ASKED.with(|asked| asked.set(asked.get() + 1));
+        Err(PromptError::Failed)
+    }
+
+    fn no_display() -> Result<bool, PromptError> {
+        ASKED.with(|asked| asked.set(asked.get() + 1));
+        Err(PromptError::Unsupported)
+    }
+
+    /// GIVEN a default collection WHEN the item's collection is found THEN
+    /// it is used as it is: nothing is asked and nothing is created.
+    #[test]
+    fn given_a_default_keyring_then_it_is_used_without_a_question() {
+        asked();
+        let fake = Fake::new(Some(LOGIN));
+        assert_eq!(
+            default_collection(&fake, never_asked).unwrap().as_str(),
+            LOGIN
+        );
+        assert_eq!(*fake.calls.borrow(), ["read"]);
+    }
+
+    /// GIVEN no default collection WHEN the user says yes and the provider
+    /// creates one under the `default` alias THEN that collection is used,
+    /// after exactly one question and one creation.
+    #[test]
+    fn given_no_default_keyring_and_a_yes_then_one_is_created_once() {
+        asked();
+        let fake = Fake::new(None);
+        assert_eq!(default_collection(&fake, yes).unwrap().as_str(), LOGIN);
+        assert_eq!(asked(), 1);
+        assert_eq!(*fake.calls.borrow(), ["read", "create", "read"]);
+    }
+
+    /// GIVEN no default collection WHEN the user says no, closes the window,
+    /// or the window does not run THEN nothing is created and the reason is
+    /// "no default keyring"; WHEN there is no display THEN nothing is
+    /// created and the reason is "no display".
+    #[test]
+    fn given_no_default_keyring_and_no_yes_then_nothing_is_created() {
+        asked();
+        for (ask, reason) in [
+            (no as Ask, Missing::DefaultKeyring),
+            (closed, Missing::DefaultKeyring),
+            (not_shown, Missing::DefaultKeyring),
+            (no_display, Missing::Display),
+        ] {
+            let fake = Fake::new(None);
+            assert_eq!(
+                default_collection(&fake, ask).err(),
+                Some(VaultError::Missing(reason))
+            );
+            assert_eq!(asked(), 1);
+            assert_eq!(*fake.calls.borrow(), ["read"], "{reason:?}");
+        }
+    }
+
+    /// GIVEN a yes WHEN the provider refuses `CreateCollection`, or its
+    /// prompt is dismissed or not answered (both `Failed`) THEN the reason
+    /// is "no default keyring", asked once; WHEN the provider goes away
+    /// meanwhile THEN the reason is "no Secret Service".
+    #[test]
+    fn given_a_yes_and_a_refused_creation_then_the_profile_stays_locked() {
+        asked();
+        for (create, reason) in [
+            (VaultError::Failed, Missing::DefaultKeyring),
+            (
+                VaultError::Missing(Missing::SecretService),
+                Missing::SecretService,
+            ),
+        ] {
+            let fake = Fake {
+                create: Err(create),
+                ..Fake::new(None)
+            };
+            assert_eq!(
+                default_collection(&fake, yes).err(),
+                Some(VaultError::Missing(reason))
+            );
+            assert_eq!(asked(), 1);
+            assert_eq!(*fake.calls.borrow(), ["read", "create"]);
+        }
+    }
+
+    /// GIVEN a yes WHEN the provider creates a collection but does not name
+    /// it `default` THEN it is not used, no alias is set by the vault, and
+    /// the reason is "no default keyring".
+    #[test]
+    fn given_a_created_keyring_that_is_not_the_default_then_it_is_not_used() {
+        asked();
+        let fake = Fake {
+            after: None,
+            ..Fake::new(None)
+        };
+        assert_eq!(
+            default_collection(&fake, yes).err(),
+            Some(VaultError::Missing(Missing::DefaultKeyring))
+        );
+        assert_eq!(asked(), 1);
+        assert_eq!(*fake.calls.borrow(), ["read", "create", "read"]);
+    }
+
+    /// GIVEN `ReadAlias` that fails or finds no provider THEN that error
+    /// stands and nothing is asked.
+    #[test]
+    fn given_a_failed_alias_read_then_nothing_is_asked() {
+        for (error, expected) in [
+            (VaultError::Failed, VaultError::Failed),
+            (
+                VaultError::Missing(Missing::SecretService),
+                VaultError::Missing(Missing::SecretService),
+            ),
+        ] {
+            let fake = Fake {
+                before: Err(error),
+                ..Fake::new(None)
+            };
+            assert_eq!(default_collection(&fake, never_asked).err(), Some(expected));
+            assert_eq!(*fake.calls.borrow(), ["read"]);
+        }
+    }
+
+    /// GIVEN each answer and creation failure THEN only a yes goes on, and
+    /// only a refusal or failed prompt becomes "no default keyring".
+    #[test]
+    fn given_answers_and_failures_then_each_maps_to_one_result() {
+        assert_eq!(creation_allowed(Ok(true)), Ok(()));
+        for answer in [
+            Ok(false),
+            Err(PromptError::Cancelled),
+            Err(PromptError::Invalid),
+            Err(PromptError::Failed),
+        ] {
+            assert_eq!(
+                creation_allowed(answer),
+                Err(VaultError::Missing(Missing::DefaultKeyring)),
+                "{answer:?}"
+            );
+        }
+        assert_eq!(
+            creation_allowed(Err(PromptError::Unsupported)),
+            Err(VaultError::Missing(Missing::Display))
+        );
+        assert_eq!(
+            creation_error(VaultError::Failed),
+            VaultError::Missing(Missing::DefaultKeyring)
+        );
+        for missing in [Missing::SessionBus, Missing::SecretService] {
+            assert_eq!(
+                creation_error(VaultError::Missing(missing)),
+                VaultError::Missing(missing)
+            );
+        }
+    }
+
+    /// The disposable session bus that `dbus-run-session` names. These
+    /// tests never use the user's own bus or keyring.
+    fn disposable_bus() -> String {
+        std::env::var("DBUS_SESSION_BUS_ADDRESS")
+            .expect("run under dbus-run-session with a disposable keyring")
+    }
+
+    /// GIVEN a disposable GNOME Keyring with an unlocked default keyring
+    /// (`gnome-keyring-daemon --unlock` under `dbus-run-session`, never the
+    /// user's own) WHEN the secret is stored twice and read THEN the first
+    /// stays, the wrap opens with it, and nothing is asked.
     #[test]
     #[ignore = "needs a disposable Secret Service provider on the session bus"]
     fn given_a_disposable_keyring_then_the_secret_is_stored_once() {
-        let store = SecretService::session_bus();
+        let store = SecretService::at(disposable_bus(), never_asked);
         let first = [7u8; SECRET_BYTES];
         let stored = store.store_new(&first).unwrap();
         let second = [9u8; SECRET_BYTES];
         assert_eq!(*store.store_new(&second).unwrap(), *stored, "kept");
         assert_eq!(store.load().unwrap().as_deref(), Some(&*stored));
-        let vault = Wrapped(SecretService::session_bus());
+        let vault = Wrapped(SecretService::at(disposable_bus(), never_asked));
         let blob = vault.protect(b"sealed store key").unwrap();
         assert_eq!(
             vault.unprotect(&blob).unwrap().as_slice(),
             b"sealed store key"
         );
+    }
+
+    /// GIVEN a disposable GNOME Keyring with no default keyring
+    /// (`gnome-keyring-daemon --start` under `dbus-run-session`, no display)
+    /// WHEN a secret is stored and the user says no THEN it is asked once,
+    /// nothing is created and the reason is "no default keyring"; WHEN the
+    /// user says yes but the keyring cannot show its password prompt THEN
+    /// the reason is the same, and still no default keyring exists.
+    #[test]
+    #[ignore = "needs a disposable Secret Service provider without a default keyring"]
+    fn given_a_disposable_provider_without_a_default_then_it_stays_locked() {
+        asked();
+        let no_keyring = Some(VaultError::Missing(Missing::DefaultKeyring));
+        let store = SecretService::at(disposable_bus(), no);
+        assert_eq!(store.store_new(&[3u8; SECRET_BYTES]).err(), no_keyring);
+        assert_eq!(asked(), 1);
+        assert_eq!(store.load(), Ok(None));
+        let store = SecretService::at(disposable_bus(), yes);
+        assert_eq!(store.store_new(&[4u8; SECRET_BYTES]).err(), no_keyring);
+        assert_eq!(asked(), 1);
+        let connection = bus::at(&disposable_bus()).unwrap();
+        assert_eq!(Provider(&connection).read_default(), Ok(None));
     }
 }

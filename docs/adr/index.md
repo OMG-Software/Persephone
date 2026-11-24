@@ -67,6 +67,7 @@
 * [0058 - Write a diagnostic log only when the user turns it on](0058-write-a-diagnostic-log-only-when-the-user-turns-it-on.md)
 * [0059 - Test call devices, show each participant's level and switch devices during a call](0059-test-call-devices-show-each-participants-level-and-switch-devices-during-a-call.md)
 * [0060 - Show calls in a separate call window](0060-show-calls-in-a-separate-call-window.md)
+* [0061 - Offer to create a default keyring on Linux](0061-offer-to-create-a-default-keyring-on-linux.md)
 
 ## Superseded Records
 

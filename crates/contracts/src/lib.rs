@@ -1985,6 +1985,19 @@ pub enum StoreState {
     StoreUnavailable,
     /// This platform has no supported vault yet.
     Unsupported,
+    /// Linux: there is no session bus, so the Secret Service cannot be
+    /// reached (ADR-0061). Unlock may try again.
+    NoSessionBus,
+    /// Linux: no Secret Service provider (such as GNOME Keyring or KWallet)
+    /// runs on the session bus. Unlock may try again.
+    NoSecretService,
+    /// Linux: the Secret Service has no default keyring, and none was
+    /// created (the user said no, or the keyring refused or did not finish
+    /// creating one). Unlock may try again.
+    NoDefaultKeyring,
+    /// Linux: the core cannot show its own windows (no display), so it
+    /// cannot ask. Unlock may try again.
+    NoDisplay,
 }
 
 /// Reply of the `app_status` command. It carries no system, account or user

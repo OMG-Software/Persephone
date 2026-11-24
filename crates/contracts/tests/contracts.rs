@@ -938,3 +938,26 @@ fn security_status_carries_the_profile_passphrase_setting() {
     extra["passphrase"] = "x".into();
     assert!(serde_json::from_value::<SecurityStatus>(extra).is_err());
 }
+
+/// GIVEN the Linux vault reasons (ADR-0061) WHEN they cross to the page THEN
+/// each is its own fixed snake_case code, and an unknown code is refused.
+#[test]
+fn linux_vault_reasons_are_fixed_store_codes() {
+    for (state, code) in [
+        (StoreState::NoSessionBus, "no_session_bus"),
+        (StoreState::NoSecretService, "no_secret_service"),
+        (StoreState::NoDefaultKeyring, "no_default_keyring"),
+        (StoreState::NoDisplay, "no_display"),
+        (StoreState::Unsupported, "unsupported"),
+    ] {
+        assert_eq!(
+            serde_json::to_value(state).unwrap(),
+            serde_json::json!(code)
+        );
+        assert_eq!(
+            serde_json::from_value::<StoreState>(serde_json::json!(code)).unwrap(),
+            state
+        );
+    }
+    assert!(serde_json::from_value::<StoreState>(serde_json::json!("no_keyring")).is_err());
+}

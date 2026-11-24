@@ -19,9 +19,26 @@ pub type StoreKey = Zeroizing<[u8; KEY_BYTES]>;
 pub enum VaultError {
     /// No vault is implemented for this platform.
     Unsupported,
+    /// The platform has a vault, but this system lacks a part it needs
+    /// (Linux, ADR-0010 and ADR-0061). The reason is a fixed code that tells
+    /// the user what to set up.
+    Missing(Missing),
     /// The vault refused or failed the operation. No detail is kept, so no
     /// error text can carry key material.
     Failed,
+}
+
+/// The part of the system that a vault needs and did not find.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Missing {
+    /// No session bus.
+    SessionBus,
+    /// No Secret Service provider on the session bus.
+    SecretService,
+    /// No default keyring, and none was created.
+    DefaultKeyring,
+    /// No display for the core's own windows, so the core cannot ask.
+    Display,
 }
 
 /// Wraps and unwraps key material: the sealed store key, or a store key

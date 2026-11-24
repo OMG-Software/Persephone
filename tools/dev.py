@@ -45,22 +45,32 @@ def linux_live_tests(cargo_flags, environment):
     directory is a private temporary one too: GNOME Keyring finds a running
     daemon through `$XDG_RUNTIME_DIR/keyring/control`, and would otherwise
     unlock and use the user's. It holds only sockets, so it is in the system
-    temporary directory, which supports them wherever the repository is."""
+    temporary directory, which supports them wherever the repository is.
+
+    A second new GNOME Keyring is started without `--unlock`, so it has no
+    default keyring, for the create-keyring refusals (ADR-0061). It runs
+    without a display, so the keyring's own prompt can never appear on the
+    user's desktop."""
     live = ["cargo", "test", *cargo_flags, "-p", "persephone-core", "--lib", "--", "--ignored"]
     run([*live, "platform::linux::ui::"], environment)
+    vault = "platform::linux::vault::tests::"
+    # `--unlock` creates and unlocks the keyring; `--start` then puts its
+    # Secret Service on the private bus.
+    unlocked = "printf %s disposable | gnome-keyring-daemon --unlock --components=secrets >/dev/null && "
+    started = 'gnome-keyring-daemon --start --components=secrets >/dev/null && exec "$@"'
+    no_display = {"DISPLAY", "WAYLAND_DISPLAY"}
     LIVE_DATA.mkdir(parents=True, exist_ok=True)
-    with (
-        tempfile.TemporaryDirectory(dir=LIVE_DATA) as data,
-        tempfile.TemporaryDirectory(prefix="persephone-keyring-") as runtime,
+    for start, test, keep in (
+        (unlocked + started, "given_a_disposable_keyring_then", lambda name: True),
+        (started, "given_a_disposable_provider_without_a_default", lambda name: name not in no_display),
     ):
-        keyring = {**environment, "XDG_DATA_HOME": data, "XDG_RUNTIME_DIR": runtime}
-        # `--unlock` creates and unlocks the keyring; `--start` then puts its
-        # Secret Service on the private bus.
-        start = (
-            "printf %s disposable | gnome-keyring-daemon --unlock --components=secrets >/dev/null"
-            ' && gnome-keyring-daemon --start --components=secrets >/dev/null && exec "$@"'
-        )
-        run(["dbus-run-session", "--", "sh", "-c", start, "sh", *live, "platform::linux::vault::"], keyring)
+        with (
+            tempfile.TemporaryDirectory(dir=LIVE_DATA) as data,
+            tempfile.TemporaryDirectory(prefix="persephone-keyring-") as runtime,
+        ):
+            keyring = {name: value for name, value in environment.items() if keep(name)}
+            keyring.update(XDG_DATA_HOME=data, XDG_RUNTIME_DIR=runtime)
+            run(["dbus-run-session", "--", "sh", "-c", start, "sh", *live, vault + test], keyring)
 
 
 def run(command, environment, *, cwd=ROOT):

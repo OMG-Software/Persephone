@@ -65,7 +65,7 @@
     <p>More people changed identity than are listed here; sending stays paused until all are accepted.</p>
   {/if}
   {#if confirming}
-    <p role="status">Answer in the Windows window Persephone opened.</p>
+    <p role="status">Answer the question in the Persephone window.</p>
   {:else if failure}
     <p role="alert" class="error">{failure}</p>
   {/if}

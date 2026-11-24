@@ -520,7 +520,7 @@ test('the encryption panel offers the step that fits and never asks for a secret
   }
 
   const waiting = panel(status('none', { operation: 'waiting_for_password' }));
-  assert.match(waiting, /Enter your password in the Windows window/);
+  assert.match(waiting, /Enter your password in the Persephone window\./);
   assert.match(waiting, /<button type="button" disabled/);
   const wrong = panel(status('unverified', { error: 'wrong_recovery_key' }));
   assert.match(wrong, /role="alert"/);
@@ -1026,7 +1026,7 @@ test('GIVEN members whose identity changed WHEN the room shows THEN sending is p
   assert.match(cut, /More people changed identity than are listed here/);
 
   const asking = view({ changes: changes([{ userId: '@a:s', wasVerified: false }]), busy: true, confirming: true });
-  assert.match(asking, /Answer in the Windows window Persephone opened\./);
+  assert.match(asking, /Answer the question in the Persephone window\./);
   const failed = view({
     changes: changes([{ userId: '@a:s', wasVerified: false }]),
     failure: 'That identity change is no longer listed.'
@@ -1755,7 +1755,7 @@ test('GIVEN the core waits for the passphrase or another operation runs WHEN the
   const button = (html) => /<button[^>]*>Turn off passphrase</.exec(html)?.[0] ?? '';
 
   const waiting = panel(status({ operation: 'waiting_for_passphrase' }));
-  assert.match(waiting, /Enter the passphrase in the Windows window/);
+  assert.match(waiting, /Enter the passphrase in the Persephone window\./);
   assert.match(button(waiting), /disabled/);
   assert.match(button(panel(status({ operation: 'working' }))), /disabled/);
   assert.match(button(panel(status(), true)), /disabled/);

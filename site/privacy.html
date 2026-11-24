@@ -33,7 +33,7 @@
   <main id="main">
     <section class="hero">
       <div class="wrap">
-        <p class="eyebrow">Last updated 23 November 2026</p>
+        <p class="eyebrow">Last updated 24 November 2026</p>
         <h1>Privacy policy</h1>
         <p class="lede">
           This policy tells you what data the Persephone project collects, what the Persephone app
@@ -258,8 +258,11 @@
           app has no way to recover a forgotten passphrase. Lock and the idle lock exist only while
           the passphrase is on.</li>
           <li>The operating system's keystore protects the key in both cases. On Windows this is
-          DPAPI. The Linux Secret Service adapter is not implemented. The macOS Keychain adapter is
-          implemented but has no recorded native app run. If no keystore is available, the profile
+          DPAPI. On Linux it is the Secret Service (such as GNOME Keyring or KWallet): the app keeps a
+          random secret there that wraps the key. If the system has no default keyring, the app asks
+          whether the keyring may create one. The keyring then asks for its password in its own
+          window; the app never sees that password. The Linux adapter has no recorded native app run.
+          The macOS Keychain adapter is implemented but has no recorded native app run. If no keystore is available, the profile
           stays locked. The app never writes an unprotected key instead.</li>
         </ul>
         <p>The app keeps images that you load in memory only. It drops them when you lock the
