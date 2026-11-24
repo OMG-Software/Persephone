@@ -1201,10 +1201,12 @@ struct DeviceTestSlot {
     /// The thread of the newest test. The next test waits for it, so two
     /// tests never hold a device at once.
     thread: Option<std::thread::JoinHandle<()>>,
-    /// The thread that the next test thread waits for. A new thread takes
-    /// it when it starts; when no thread could start, it stays here for the
-    /// next one, so no test thread is ever left unwaited.
-    previous: Option<std::thread::JoinHandle<()>>,
+    /// The threads that the next test thread waits for. A new thread takes
+    /// them all when it starts; when no thread could start, they stay here
+    /// for the next one. A handle is never dropped while its thread runs,
+    /// so no test thread is ever left unwaited. Ended threads are pruned,
+    /// so this holds at most the threads that still run.
+    previous: Vec<std::thread::JoinHandle<()>>,
     /// The test that the newest thread runs once the test before it ended.
     /// `Some` while that thread still waits: a newer test then replaces
     /// this job and starts no thread, so at most two test threads exist.
@@ -1231,7 +1233,7 @@ impl Default for DeviceTestSlot {
             generation: 0,
             stop: Arc::new(AtomicBool::new(true)),
             thread: None,
-            previous: None,
+            previous: Vec::new(),
             job: None,
         }
     }
@@ -2716,18 +2718,19 @@ async fn refine_worker_stop(call: &Call) -> EndReason {
     stop_reason(exit)
 }
 
-/// Starts the thread for the job in `slot` with `spawn`. No thread still
-/// waits (the job was empty before this request), so a thread kept as
-/// `previous` was left by a thread that could not start, and `thread` is
-/// then empty. A failed start keeps `previous` for the next thread and ends
-/// the job as `failed`.
+/// Starts the thread for the job in `slot` with `spawn`. The newest thread
+/// joins the kept threads, which ended threads are first pruned from. The
+/// handle is added, never put in place of one, so no running thread is
+/// detached whatever order the threads take their work in. A failed start
+/// keeps them all for the next thread and ends the job as `failed`.
 fn start_test_thread(
     slot: &mut DeviceTestSlot,
     inner: &Arc<Inner>,
     spawn: impl FnOnce(Arc<Inner>) -> std::io::Result<std::thread::JoinHandle<()>>,
 ) {
+    slot.previous.retain(|thread| !thread.is_finished());
     if let Some(thread) = slot.thread.take() {
-        slot.previous = Some(thread);
+        slot.previous.push(thread);
     }
     match spawn(inner.clone()) {
         Ok(thread) => slot.thread = Some(thread),
@@ -2738,15 +2741,15 @@ fn start_test_thread(
     }
 }
 
-/// A device test thread: it waits for the thread before it, then runs the
-/// newest job, if one is left.
+/// A device test thread: it waits for every thread before it, then runs
+/// the newest job, if one is left.
 fn spawn_device_test(inner: Arc<Inner>) -> std::io::Result<std::thread::JoinHandle<()>> {
     std::thread::Builder::new()
         .name("call-device-test".to_owned())
         .spawn(move || {
-            let previous = plain(&inner.device_test).previous.take();
-            if let Some(previous) = previous {
-                let _ = previous.join();
+            let previous = std::mem::take(&mut plain(&inner.device_test).previous);
+            for thread in previous {
+                let _ = thread.join();
             }
             let job = plain(&inner.device_test).job.take();
             if let Some(job) = job {
@@ -5099,7 +5102,7 @@ mod tests {
             Err(std::io::Error::other("no thread"))
         });
         assert!(slot.thread.is_none());
-        assert!(slot.previous.is_some(), "the running thread is kept");
+        assert_eq!(slot.previous.len(), 1, "the running thread is kept");
         assert_eq!(slot.status.state, CallDeviceTestState::Failed);
 
         slot.status.state = CallDeviceTestState::Starting;
@@ -5109,9 +5112,55 @@ mod tests {
         release.send(()).unwrap();
         next.join().unwrap();
         assert!(
-            plain(&calls.inner.device_test).previous.is_none(),
+            plain(&calls.inner.device_test).previous.is_empty(),
             "the next thread took the running one and waited for it"
         );
+    }
+
+    /// GIVEN a kept thread A and a newest thread B that both still run
+    /// WHEN another test thread starts THEN neither handle is dropped: the
+    /// new thread waits for both, so neither is left unwaited, and an ended
+    /// kept thread is pruned.
+    #[test]
+    fn given_two_running_test_threads_when_another_starts_then_it_waits_for_both() {
+        let calls = controller(FakeHost::new(true, None));
+        let (done_tx, done) = std::sync::mpsc::channel::<&str>();
+        let mut releases = Vec::new();
+        let mut running = |name: &'static str| {
+            let (release, wait) = std::sync::mpsc::channel::<()>();
+            releases.push(release);
+            let done_tx = done_tx.clone();
+            std::thread::spawn(move || {
+                let _ = wait.recv();
+                // Late, so a thread that did not join it ends first.
+                std::thread::sleep(Duration::from_millis(50));
+                let _ = done_tx.send(name);
+            })
+        };
+        let ended = std::thread::spawn(|| {});
+        while !ended.is_finished() {
+            std::thread::yield_now();
+        }
+        let a = running("a");
+        let b = running("b");
+        let mut slot = plain(&calls.inner.device_test);
+        slot.previous = vec![ended, a];
+        slot.thread = Some(b);
+        start_test_thread(&mut slot, &calls.inner, spawn_device_test);
+        assert_eq!(
+            slot.previous.len(),
+            2,
+            "A and B are kept; the ended one goes"
+        );
+        let next = slot.thread.take().expect("the next thread starts");
+        drop(slot);
+        for release in releases {
+            release.send(()).unwrap();
+        }
+        next.join().unwrap();
+        let mut finished: Vec<_> = done.try_iter().collect();
+        finished.sort_unstable();
+        assert_eq!(finished, ["a", "b"], "the next thread ended after both");
     }
 
     /// GIVEN a running call whose command queue is full
