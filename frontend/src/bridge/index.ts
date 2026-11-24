@@ -400,6 +400,14 @@ async function followDiagnostics(): Promise<void> {
   }
 }
 
+/**
+ * Quits Persephone: the window closes and the core ends after it, as when
+ * the window is closed. A running call ends with it.
+ */
+export function exitApp(): Promise<void> {
+  return invoke<void>('exit_app');
+}
+
 /** Locks the session; `locking` means work is still finishing (call again). */
 export function lockSession(): Promise<StoreState> {
   return invoke<StoreState>('lock_session');

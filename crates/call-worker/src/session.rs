@@ -52,12 +52,14 @@ use crate::camera::{self, CapturedFrame, Format};
 use crate::containment;
 use crate::mapping::{
     ConnectFault, LevelGate, Playout, RoomChange, Slot, Slots, SoundPath, SpeakingTracker, apply,
-    bounded_device_list, choose_device, failure_for_connect, sound_level, valid_identity,
+    bounded_device_list, choose_device, failure_for_connect, sound_level, system_default,
+    valid_identity,
 };
 #[cfg(target_os = "linux")]
 use crate::mapping::{pulse_device_list, sound_path};
 use crate::output::{Closed, Output, PictureSink};
 use crate::screen;
+use crate::sound_defaults;
 use crate::video::{
     Added, OWN_TILE, RateLimiter, ScreenQueue, TileAssigner, fit_for_tile, fit_publish_box,
     fit_within_box, quarter_turns, rgba_len,
@@ -390,17 +392,25 @@ async fn sound_paths(
     Ok([SoundPath::Listed; 2])
 }
 
-/// Applies the chosen microphone and speaker. `None` keeps the system default.
+/// Applies the chosen microphone and speaker. `None` opens the system's
+/// default for media where it is listed (`sound_defaults`); a chosen device
+/// that is missing is `DeviceNotFound`, never another device.
 fn select_devices(
     audio: &PlatformAudio,
     recording: Option<&str>,
     playout: Option<&str>,
 ) -> Result<(), FailureCode> {
+    let (default_playout, default_recording) = if recording.is_none() || playout.is_none() {
+        sound_defaults::media_defaults()
+    } else {
+        (None, None)
+    };
     let recording_devices: Vec<_> = audio.recording_devices().collect();
-    let wanted = choose_device(
-        recording,
-        recording_devices.iter().map(|device| device.id.as_str()),
-    )?;
+    let ids = || recording_devices.iter().map(|device| device.id.as_str());
+    let wanted = match recording {
+        Some(_) => choose_device(recording, ids())?,
+        None => system_default(default_recording.as_deref(), ids()),
+    };
     if let Some(wanted) = wanted {
         let device = recording_devices
             .iter()
@@ -411,10 +421,11 @@ fn select_devices(
             .map_err(|_| FailureCode::DeviceNotFound)?;
     }
     let playout_devices: Vec<_> = audio.playout_devices().collect();
-    let wanted = choose_device(
-        playout,
-        playout_devices.iter().map(|device| device.id.as_str()),
-    )?;
+    let ids = || playout_devices.iter().map(|device| device.id.as_str());
+    let wanted = match playout {
+        Some(_) => choose_device(playout, ids())?,
+        None => system_default(default_playout.as_deref(), ids()),
+    };
     if let Some(wanted) = wanted {
         let device = playout_devices
             .iter()
@@ -2692,6 +2703,39 @@ async fn fail(output: &Output, code: FailureCode) -> u8 {
 mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
+
+    /// GIVEN a Windows machine with speakers or microphones WHEN the worker
+    /// reads the media defaults THEN each is a device that libwebrtc lists,
+    /// so "System default" opens it and not the default communications
+    /// device. A machine with no device of a kind checks nothing for it.
+    #[cfg(windows)]
+    #[test]
+    fn given_windows_devices_then_the_media_defaults_are_listed_ones() {
+        let Ok(audio) = PlatformAudio::new() else {
+            return;
+        };
+        let playout: Vec<String> = audio
+            .playout_devices()
+            .map(|device| device.id.as_str().to_owned())
+            .collect();
+        let recording: Vec<String> = audio
+            .recording_devices()
+            .map(|device| device.id.as_str().to_owned())
+            .collect();
+        drop(audio);
+        let (speaker, microphone) = sound_defaults::media_defaults();
+        if !playout.is_empty() {
+            let speaker = speaker.expect("a default speaker");
+            assert!(playout.contains(&speaker), "{speaker} in {playout:?}");
+        }
+        if !recording.is_empty() {
+            let microphone = microphone.expect("a default microphone");
+            assert!(
+                recording.contains(&microphone),
+                "{microphone} in {recording:?}"
+            );
+        }
+    }
 
     /// GIVEN a sound measurement that finishes, one that times out and one
     /// that unwinds THEN each reports exactly once: the level, then `None`

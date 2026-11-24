@@ -1070,6 +1070,7 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-profile-list",
             "allow-add-profile",
             "allow-switch-profile",
+            "allow-exit-app",
         ])
     );
     assert!(capability.get("remote").is_none(), "no remote origins");

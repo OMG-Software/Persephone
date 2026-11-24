@@ -189,6 +189,21 @@ Proposed option: "a contained call worker".
   was heard sent no audio: a diagnostic log of 23 November showed
   `StartRecording` failing with "Playout must be started before recording
   when using the built-in AEC".
+* Amendment, 2026-11-24: "System default" is the system's default device
+  for media. On Windows, libwebrtc otherwise opens the default
+  *communications* endpoint (`adm_helpers::Init` selects
+  `kDefaultCommunicationDevice`), which can be another device. A diagnostic
+  log of 24 November showed remote sound played (`PLAY` level above 0) while
+  the owner heard nothing: Windows' default speaker was a headset, but its
+  default communications speaker was a virtual mixer. With no choice, the
+  worker now reads the console default endpoints through MMDevice
+  (`crates/call-worker/src/sound_defaults.rs`) and selects each one that
+  libwebrtc lists, by the same endpoint ID. A default that is not listed or
+  cannot be read leaves libwebrtc's own choice. A chosen device is never
+  replaced by the default. Other systems read nothing: their default stream
+  already is the system default. Verified on Windows 11 with the worker's
+  test `given_windows_devices_then_the_media_defaults_are_listed_ones`, run
+  outside the AppContainer; not yet run in a live call.
 
 ### Session lifecycle
 

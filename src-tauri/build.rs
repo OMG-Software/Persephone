@@ -137,6 +137,7 @@ fn main() {
             "profile_list",
             "add_profile",
             "switch_profile",
+            "exit_app",
         ]));
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         attributes = attributes

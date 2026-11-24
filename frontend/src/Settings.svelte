@@ -5,6 +5,7 @@
     | 'security'
     | 'devices'
     | 'preferences'
+    | 'calls'
     | 'accounts'
     | 'session';
 </script>
@@ -38,6 +39,7 @@
     { id: 'security', label: 'Security & encryption' },
     { id: 'devices', label: 'Sessions' },
     { id: 'preferences', label: 'Preferences' },
+    { id: 'calls', label: 'Calls' },
     { id: 'accounts', label: 'Accounts' },
     { id: 'session', label: 'This session' }
   ];

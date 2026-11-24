@@ -23,7 +23,7 @@ before(async () => {
   // arguments the page sends, without Tauri's own State, Window and Channel.
   const host = await readFile(new URL('../../src-tauri/src/lib.rs', import.meta.url), 'utf8');
   hostArguments = new Map();
-  for (const [, name, parameters] of host.matchAll(/async fn ([a-z_]+)\(([^)]*)\)/g)) {
+  for (const [, name, parameters] of host.matchAll(/async fn ([a-z_]+)(?:<[^>]*>)?\(([^)]*)\)/g)) {
     const names = [...parameters.matchAll(/([a-z_]+):\s*([A-Za-z]+)/g)]
       .filter(([, , type]) => !['State', 'Window', 'WebviewWindow', 'AppHandle'].includes(type))
       .map(([, parameter]) => camel(parameter));
@@ -110,6 +110,7 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
     ],
     [() => bridge.setDisplayName('Al'), 'set_display_name', { name: 'Al' }],
     [() => bridge.deviceList(), 'device_list', {}],
+    [() => bridge.exitApp(), 'exit_app', {}],
     [() => bridge.accountSettings(), 'account_settings', {}],
     [() => bridge.roomDraft('!r:s'), 'room_draft', { roomId: '!r:s' }],
     [() => bridge.roomDrafts(), 'room_drafts', {}],

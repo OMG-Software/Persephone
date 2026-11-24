@@ -25,6 +25,7 @@ mod output;
 mod pulse;
 mod screen;
 mod session;
+mod sound_defaults;
 mod video;
 
 use std::io;

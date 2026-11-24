@@ -36,6 +36,8 @@ export type MenuCommand = {
   separated?: boolean;
 };
 
+export const EXIT_LABEL = 'Exit Persephone';
+
 /** What the main menu's commands do. */
 export type MainMenuActions = {
   explore: () => void;
@@ -46,13 +48,14 @@ export type MainMenuActions = {
   health: () => void;
   settings: () => void;
   lock: () => void;
+  exit: () => void;
 };
 
 /**
  * The main menu. The account tools show only when signed in. Settings is
  * always there, so it stays reachable with synthetic data. Lock shows when
  * the profile can be locked, and is disabled while the session changes or
- * the sign-out question is open.
+ * the sign-out question is open. Exit is always last, set apart by a line.
  */
 export function mainMenuItems(
   state: { signedIn: boolean; canLock: boolean; switching: boolean; confirmingSignOut: boolean },
@@ -77,7 +80,12 @@ export function mainMenuItems(
         }
       ]
     : [];
-  return [...account, { label: 'Settings', onselect: act.settings, separated: account.length > 0 }, ...lock];
+  return [
+    ...account,
+    { label: 'Settings', onselect: act.settings, separated: account.length > 0 },
+    ...lock,
+    { label: EXIT_LABEL, onselect: act.exit, separated: true }
+  ];
 }
 
 /** What the selected room's menu commands do. */

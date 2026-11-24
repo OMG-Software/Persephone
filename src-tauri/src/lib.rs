@@ -72,7 +72,7 @@ use std::{
     },
 };
 use tauri::{
-    Manager, Runtime, State, Url, WebviewUrl, WebviewWindowBuilder,
+    AppHandle, Manager, Runtime, State, Url, WebviewUrl, WebviewWindowBuilder,
     ipc::{Channel, InvokeBody, Response},
     webview::{NewWindowResponse, PageLoadEvent},
 };
@@ -1928,6 +1928,15 @@ async fn switch_profile(core: State<'_, CoreLink>, slot: u32) -> Result<(), Stri
     relay::<()>(core.inner(), Call::SwitchProfile { slot }).await
 }
 
+/// Quits Persephone from the main menu. The UI ends as when its window
+/// closes, and the core, which waits for it, then ends too. Nothing goes to
+/// the core first: a clean UI exit is how the core learns of it.
+#[tauri::command]
+async fn exit_app<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    app.exit(0);
+    Ok(())
+}
+
 /// Drops every subscription when the page (re)loads: the new page holds none
 /// of the old channels, and the core's slots would otherwise stay taken.
 fn reset_subscriptions(core: &CoreLink, subscriptions: &Subscriptions) {
@@ -2096,7 +2105,8 @@ pub fn configure<R: Runtime>(
             set_notification_level,
             profile_list,
             add_profile,
-            switch_profile
+            switch_profile,
+            exit_app
         ])
         .on_page_load(|webview, payload| {
             if payload.event() == PageLoadEvent::Started {

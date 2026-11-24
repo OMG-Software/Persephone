@@ -49,7 +49,7 @@ export const JOIN_ERROR_TEXT: Record<CallJoinError, string> = {
   keys: 'The call keys could not be made.',
   proxy_unreadable: 'The proxy setting cannot be read, so the call was not started.',
   device_setting_unreadable:
-    'The call device setting cannot be read. Choose the devices again in Preferences.'
+    'The call device setting cannot be read. Choose the devices again in Settings, Calls.'
 };
 
 // `left` has no text: the bar just goes away.
@@ -58,7 +58,7 @@ export const END_TEXT: Record<CallEnd, string> = {
   connection_failed: 'The connection to the call server failed.',
   audio_device: 'The microphone or speaker is not available.',
   device_not_found:
-    'The chosen microphone or speaker is not connected. Choose another in Preferences.',
+    'The chosen microphone or speaker is not connected. Choose another in Settings, Calls.',
   containment: 'The call stopped: its process was not contained.',
   worker_stopped: 'The call process stopped.',
   worker_crashed: 'The call process failed with an internal error.',

@@ -1,6 +1,6 @@
 {
   "identifier": "main",
-  "description": "The main window may call the app's view, subscription, session lock, profile reset, sign-in, registration, sign-out, encryption, audio call, sending, image, conversation, room, room settings, account, account change, notification level, profile and window display commands and nothing else: no core plugin, notification plugin, event, window, path or webview permissions.",
+  "description": "The main window may call the app's view, subscription, session lock, profile reset, sign-in, registration, sign-out, encryption, audio call, sending, image, conversation, room, room settings, account, account change, notification level, profile, window display and exit commands and nothing else: no core plugin, notification plugin, event, window, path or webview permissions.",
   "windows": ["main"],
   "permissions": [
     "allow-app-status",
@@ -126,6 +126,7 @@
     "allow-set-notification-level",
     "allow-profile-list",
     "allow-add-profile",
-    "allow-switch-profile"
+    "allow-switch-profile",
+    "allow-exit-app"
   ]
 }

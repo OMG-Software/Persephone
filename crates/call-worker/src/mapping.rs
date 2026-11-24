@@ -50,6 +50,21 @@ pub fn choose_device<'a>(
     }
 }
 
+/// The device to open when the user chose none: the system's default for
+/// media (`sound_defaults`), when the list has it. `None` leaves libwebrtc's
+/// own choice, which on Windows is the default communications device. An
+/// unstable ID is never selected.
+pub fn system_default<'a>(
+    system: Option<&str>,
+    available: impl IntoIterator<Item = &'a str>,
+) -> Option<String> {
+    let system = system.filter(|id| is_listable_device_id(id))?;
+    available
+        .into_iter()
+        .any(|id| id == system)
+        .then(|| system.to_owned())
+}
+
 /// Builds one wire list from (ID, name) pairs. It skips unstable IDs, IDs the
 /// wire refuses and repeated IDs, and keeps at most `MAX_DEVICES`.
 pub fn bounded_device_list<'a>(
@@ -541,6 +556,29 @@ mod tests {
             choose_device(Some("a"), []),
             Err(FailureCode::DeviceNotFound)
         );
+    }
+
+    #[test]
+    fn given_no_choice_when_the_system_default_is_listed_then_it_is_opened() {
+        // GIVEN the Windows console default speaker among the listed ones
+        // (the default communications device is another one), WHEN no
+        // speaker is chosen, THEN the console default is the one opened.
+        let console = "{0.0.0.00000000}.{00000000-0000-4000-8000-000000000001}";
+        let mixer = "{0.0.0.00000000}.{00000000-0000-4000-8000-000000000002}";
+        assert_eq!(
+            system_default(Some(console), [mixer, console]),
+            Some(console.to_owned())
+        );
+    }
+
+    #[test]
+    fn given_no_usable_system_default_then_libwebrtc_keeps_its_choice() {
+        // GIVEN no default, a default that is not listed, or an unstable
+        // index ID, WHEN no device is chosen, THEN nothing is selected.
+        assert_eq!(system_default(None, ["a"]), None);
+        assert_eq!(system_default(Some("b"), ["a"]), None);
+        assert_eq!(system_default(Some("A"), ["a"]), None);
+        assert_eq!(system_default(Some("index:0"), ["index:0"]), None);
     }
 
     #[test]

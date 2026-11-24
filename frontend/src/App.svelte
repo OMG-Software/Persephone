@@ -73,6 +73,7 @@
   import NewConversation from './NewConversation.svelte';
   import NewRoom from './NewRoom.svelte';
   import Preferences from './Preferences.svelte';
+  import CallDevices from './CallDevices.svelte';
   import CaptureProtection from './CaptureProtection.svelte';
   import ProfileSettings from './ProfileSettings.svelte';
   import RoomSettings from './RoomSettings.svelte';
@@ -125,6 +126,7 @@
     pickImage,
     pasteImage,
     sendImage,
+    exitApp,
     lockSession,
     pendingMessages,
     retryMessage,
@@ -2679,7 +2681,7 @@
       ?.focus();
   }
 
-  // The main menu: account-wide tools, Settings and Lock.
+  // The main menu: account-wide tools, Settings, Lock and Exit.
   const mainMenu = $derived(
     mainMenuItems(
       {
@@ -2696,7 +2698,8 @@
         ignored: () => (ignoreOpen = true),
         health: () => (healthOpen = true),
         settings: () => openSettings('security'),
-        lock: () => void toggleLock()
+        lock: () => void toggleLock(),
+        exit: () => void exitApp().catch(() => {})
       }
     )
   );
@@ -2882,6 +2885,22 @@
             <p class="lede">No account is signed in. Settings belong to an account, so there are none to change.</p>
           </section>
         {/if}
+      {:else if settingsTab === 'calls'}
+        <section class="settings-page" aria-labelledby="calls-heading">
+          <h2 id="calls-heading">Calls</h2>
+          {#if signedIn}
+            <p class="lede">
+              The microphone, speaker and camera that calls use, and the call volume. They are kept
+              in this computer's encrypted profile.
+            </p>
+            <div class="panel">
+              <h3>Devices</h3>
+              <CallDevices />
+            </div>
+          {:else}
+            <p class="lede">No account is signed in. Call devices belong to an account, so there are none to choose.</p>
+          {/if}
+        </section>
       {:else if settingsTab === 'accounts'}
         <Accounts beforechange={prepareAccountSwitch} />
         {#if !status || status.store === 'not_configured'}
