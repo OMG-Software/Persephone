@@ -12,8 +12,12 @@ use std::time::Duration;
 use persephone_call_protocol::{CameraState, DeviceTest, FailureCode, FromWorker};
 use persephone_contracts::{CallDeviceTestKind, CallDeviceTestState};
 
-/// The longest a test may run before the core ends it: the camera test's 30
-/// seconds and its open (with a permission dialog on macOS).
+use super::worker::WorkerAudio;
+
+/// The longest a test may run before the core ends it, counted from before
+/// the worker starts: the worker start, the Linux camera portal wait (at most
+/// 60 seconds), and the camera test's 30 seconds and its open (with a
+/// permission dialog on macOS).
 pub const TEST_LIMIT: Duration = Duration::from_secs(100);
 /// How long the worker has to end after `Leave`.
 pub const LEAVE_WAIT: Duration = Duration::from_secs(5);
@@ -28,6 +32,18 @@ pub fn worker_test(kind: CallDeviceTestKind) -> DeviceTest {
         CallDeviceTestKind::Microphone => DeviceTest::Microphone,
         CallDeviceTestKind::Speaker => DeviceTest::Speaker,
         CallDeviceTestKind::Camera => DeviceTest::Camera,
+    }
+}
+
+/// The sound server names the test worker starts with (Linux, ADR-0049): a
+/// `pulse:` choice of the device under test, as a call with that choice
+/// gets it. The other device and the camera test get none, so a test opens
+/// only the device it tests.
+pub fn worker_audio(kind: CallDeviceTestKind, device: Option<&str>) -> WorkerAudio {
+    match kind {
+        CallDeviceTestKind::Microphone => WorkerAudio::for_choice(device, None),
+        CallDeviceTestKind::Speaker => WorkerAudio::for_choice(None, device),
+        CallDeviceTestKind::Camera => WorkerAudio::default(),
     }
 }
 
@@ -224,6 +240,35 @@ mod tests {
         assert_eq!(
             next_state(running, &FromWorker::Left, true),
             Some(CallDeviceTestState::Done)
+        );
+    }
+
+    /// GIVEN a `pulse:` choice WHEN each test starts its worker THEN only
+    /// the device under test goes to the launch: the microphone test gets
+    /// the source, the speaker test the sink, the camera test neither; a
+    /// choice that is not `pulse:` gives no name.
+    #[test]
+    fn given_a_sound_server_choice_then_only_the_tested_device_is_named() {
+        let microphone = worker_audio(CallDeviceTestKind::Microphone, Some("pulse:vmic"));
+        assert_eq!(microphone.source.as_deref(), Some("vmic"));
+        assert_eq!(microphone.sink, None);
+        let speaker = worker_audio(CallDeviceTestKind::Speaker, Some("pulse:vsink"));
+        assert_eq!(speaker.source, None);
+        assert_eq!(speaker.sink.as_deref(), Some("vsink"));
+        assert_eq!(
+            worker_audio(CallDeviceTestKind::Camera, Some("pulse:vmic")),
+            WorkerAudio::default()
+        );
+        assert_eq!(
+            worker_audio(
+                CallDeviceTestKind::Microphone,
+                Some("{0.0.1.00000000}.{6a2c}")
+            ),
+            WorkerAudio::default()
+        );
+        assert_eq!(
+            worker_audio(CallDeviceTestKind::Speaker, None),
+            WorkerAudio::default()
         );
     }
 

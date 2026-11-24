@@ -2835,8 +2835,12 @@ fn run_device_test(
         end(CallDeviceTestState::Idle);
         return;
     }
-    // No sound server name: Linux tests no microphone or speaker yet.
-    let Ok(mut link) = inner.host.start(&WorkerAudio::default()) else {
+    // The limit counts from here, so it covers the worker start and the
+    // Linux portal wait too.
+    let limit = std::time::Instant::now() + limit;
+    // A `pulse:` choice goes to the launch as for a call (Linux, ADR-0049).
+    let audio = device_test::worker_audio(test, device.as_deref());
+    let Ok(mut link) = inner.host.start(&audio) else {
         end(CallDeviceTestState::Failed);
         return;
     };
@@ -2857,6 +2861,14 @@ fn run_device_test(
         drop(slot);
         let stream = store.stream(0);
         inner.set_test(generation, |status| status.stream = stream);
+    }
+    // Portal path (Linux): the camera test gets one remote before
+    // `TestDevice`, as a listing does. The desktop may ask the user; the
+    // user's stop ends that wait. Without access nothing goes, and the
+    // worker reports the camera unavailable.
+    #[cfg(target_os = "linux")]
+    if camera {
+        super::devices::send_portal_remote(&link, stop);
     }
     let mut diagnostics = crate::diagnostics::global().watch();
     let on = *diagnostics.borrow_and_update();
@@ -2881,7 +2893,6 @@ fn run_device_test(
     } else {
         CallDeviceTestState::Starting
     };
-    let limit = std::time::Instant::now() + limit;
     let mut leave_by: Option<std::time::Instant> = None;
     // Whether the `Leave` was the user's stop, not the limit.
     let mut user_stopped = false;

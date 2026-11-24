@@ -134,9 +134,10 @@ pub enum ListError {
 
 /// On the portal camera path, gets the PipeWire remote from the camera portal
 /// and sends it to the worker. Blocks for up to 60 seconds while the desktop
-/// asks the user. Any failure sends nothing.
+/// asks the user; `cancel` ends the wait. Any failure sends nothing. The
+/// listing and the camera test (ADR-0059) use it.
 #[cfg(target_os = "linux")]
-fn send_portal_remote(link: &super::worker::CallWorkerLink, cancel: &AtomicBool) {
+pub(super) fn send_portal_remote(link: &super::worker::CallWorkerLink, cancel: &AtomicBool) {
     use crate::platform::linux::camera_portal;
     use std::os::fd::AsFd;
     if link.camera_path() != super::worker::CameraPath::Portal {
