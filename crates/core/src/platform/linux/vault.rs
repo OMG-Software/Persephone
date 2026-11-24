@@ -199,13 +199,15 @@ pub trait Keyrings {
     /// The collection the `default` alias names, `None` for none.
     fn read_default(&self) -> Result<Option<OwnedObjectPath>, VaultError>;
     /// Asks the provider to create a collection with the `default` alias,
-    /// and waits for its prompt, if any.
-    fn create_default(&self) -> Result<(), VaultError>;
+    /// waits for its prompt, if any, and returns the collection it made.
+    fn create_default(&self) -> Result<OwnedObjectPath, VaultError>;
 }
 
 /// The default collection. When there is none, asks once with `ask`, and
-/// only after a yes has the provider create one; afterwards only a
-/// collection that the provider now names `default` is used (ADR-0061).
+/// only after a yes has the provider create one; afterwards the created
+/// collection is used only if the provider now names it `default`. Another
+/// collection under the alias (another client changed it meanwhile) is not
+/// used (ADR-0061).
 pub fn default_collection(
     keyrings: &impl Keyrings,
     ask: Ask,
@@ -214,10 +216,28 @@ pub fn default_collection(
         return Ok(collection);
     }
     creation_allowed(ask())?;
-    keyrings.create_default().map_err(creation_error)?;
-    keyrings
-        .read_default()?
-        .ok_or(VaultError::Missing(Missing::DefaultKeyring))
+    let created = keyrings.create_default().map_err(creation_error)?;
+    match keyrings.read_default()? {
+        Some(collection) if collection == created => Ok(collection),
+        _ => Err(VaultError::Missing(Missing::DefaultKeyring)),
+    }
+}
+
+/// The collection that `CreateCollection` made: the path in its reply or,
+/// when that is `/` because the provider prompted, the object path in the
+/// prompt's result. `None` when neither names a collection.
+pub fn created_collection(
+    reply: OwnedObjectPath,
+    prompted: Option<&Value<'_>>,
+) -> Option<OwnedObjectPath> {
+    if reply.as_str() != NONE {
+        return Some(reply);
+    }
+    match prompted? {
+        Value::ObjectPath(path) if path.as_str() != NONE => Some(path.clone().into()),
+        Value::Value(inner) => created_collection(reply, Some(inner)),
+        _ => None,
+    }
 }
 
 /// The item every process uses when more than one matches (an older core
@@ -526,7 +546,7 @@ impl Keyrings for Provider<'_> {
     /// `CreateCollection` with the label [`NEW_KEYRING_LABEL`] and the
     /// `default` alias. The provider asks for the keyring's password in its
     /// own prompt; Persephone neither sees nor sets it.
-    fn create_default(&self) -> Result<(), VaultError> {
+    fn create_default(&self) -> Result<OwnedObjectPath, VaultError> {
         let mut properties: HashMap<&str, Value<'_>> = HashMap::new();
         properties.insert(
             "org.freedesktop.Secret.Collection.Label",
@@ -539,9 +559,10 @@ impl Keyrings for Provider<'_> {
             "CreateCollection",
             &(properties, DEFAULT_ALIAS),
         )?;
-        let (_collection, prompt): (OwnedObjectPath, OwnedObjectPath) =
+        let (collection, prompt): (OwnedObjectPath, OwnedObjectPath) =
             reply.body().deserialize().map_err(|_| VaultError::Failed)?;
-        complete(self.0, &prompt)
+        let prompted = complete(self.0, &prompt)?;
+        created_collection(collection, prompted.as_deref()).ok_or(VaultError::Failed)
     }
 }
 
@@ -556,15 +577,20 @@ fn unlock(connection: &Connection, objects: &[OwnedObjectPath]) -> Result<(), Va
     )?;
     let (_unlocked, prompt): (Vec<OwnedObjectPath>, OwnedObjectPath) =
         reply.body().deserialize().map_err(|_| VaultError::Failed)?;
-    complete(connection, &prompt)
+    complete(connection, &prompt).map(drop)
 }
 
 /// Runs the provider's prompt at `prompt`, if there is one, and waits for
 /// it to complete. A dismissed prompt, or one not answered within
 /// [`PROMPT_TIMEOUT`] (then dismissed here), fails.
-fn complete(connection: &Connection, prompt: &OwnedObjectPath) -> Result<(), VaultError> {
+/// Runs the provider's prompt `prompt` (`/`: none) and returns its result
+/// (`None` without a prompt). A dismissed or unanswered prompt is `Failed`.
+fn complete(
+    connection: &Connection,
+    prompt: &OwnedObjectPath,
+) -> Result<Option<OwnedValue>, VaultError> {
     if prompt.as_str() == NONE {
-        return Ok(());
+        return Ok(None);
     }
     let failed = |_| VaultError::Failed;
     let proxy: Proxy<'static> = ProxyBuilder::new(connection)
@@ -596,11 +622,11 @@ fn complete(connection: &Connection, prompt: &OwnedObjectPath) -> Result<(), Vau
             return Err(VaultError::Failed);
         }
     };
-    let (dismissed, _result): (bool, OwnedValue) = message.body().deserialize().map_err(failed)?;
+    let (dismissed, result): (bool, OwnedValue) = message.body().deserialize().map_err(failed)?;
     if dismissed {
         Err(VaultError::Failed)
     } else {
-        Ok(())
+        Ok(Some(result))
     }
 }
 
@@ -755,7 +781,7 @@ mod tests {
     /// creation, what `CreateCollection` does, and what was called.
     struct Fake {
         before: Result<Option<&'static str>, VaultError>,
-        create: Result<(), VaultError>,
+        create: Result<&'static str, VaultError>,
         after: Option<&'static str>,
         calls: std::cell::RefCell<Vec<&'static str>>,
     }
@@ -764,7 +790,7 @@ mod tests {
         fn new(before: Option<&'static str>) -> Self {
             Self {
                 before: Ok(before),
-                create: Ok(()),
+                create: Ok(LOGIN),
                 after: Some(LOGIN),
                 calls: std::cell::RefCell::default(),
             }
@@ -772,6 +798,7 @@ mod tests {
     }
 
     const LOGIN: &str = "/org/freedesktop/secrets/collection/login";
+    const OTHER: &str = "/org/freedesktop/secrets/collection/other";
 
     impl Keyrings for Fake {
         fn read_default(&self) -> Result<Option<OwnedObjectPath>, VaultError> {
@@ -791,10 +818,10 @@ mod tests {
             Ok(path.map(|path| OwnedObjectPath::try_from(path).unwrap()))
         }
 
-        fn create_default(&self) -> Result<(), VaultError> {
+        fn create_default(&self) -> Result<OwnedObjectPath, VaultError> {
             self.calls.borrow_mut().push("create");
             match &self.create {
-                Ok(()) => Ok(()),
+                Ok(path) => Ok(OwnedObjectPath::try_from(*path).unwrap()),
                 Err(VaultError::Missing(missing)) => Err(VaultError::Missing(*missing)),
                 Err(_) => Err(VaultError::Failed),
             }
@@ -927,6 +954,51 @@ mod tests {
         assert_eq!(*fake.calls.borrow(), ["read", "create", "read"]);
     }
 
+    /// GIVEN a yes WHEN the provider creates a collection but the `default`
+    /// alias then names another one (another client changed it meanwhile)
+    /// THEN neither is used, and the reason is "no default keyring".
+    #[test]
+    fn given_the_default_alias_moved_after_creation_then_nothing_is_used() {
+        asked();
+        let fake = Fake {
+            after: Some(OTHER),
+            ..Fake::new(None)
+        };
+        assert_eq!(
+            default_collection(&fake, yes).err(),
+            Some(VaultError::Missing(Missing::DefaultKeyring))
+        );
+        assert_eq!(asked(), 1);
+        assert_eq!(*fake.calls.borrow(), ["read", "create", "read"]);
+    }
+
+    /// GIVEN `CreateCollection`'s reply and prompt result THEN the created
+    /// collection is the reply's path; when that is `/`, the object path in
+    /// the prompt's result (also inside a variant); and none when neither
+    /// names one.
+    #[test]
+    fn given_creation_replies_then_the_created_collection_is_found() {
+        let path = |path: &str| OwnedObjectPath::try_from(path).unwrap();
+        let object = |path: &'static str| Value::ObjectPath(path.try_into().unwrap());
+        assert_eq!(created_collection(path(LOGIN), None), Some(path(LOGIN)));
+        assert_eq!(
+            created_collection(path(LOGIN), Some(&object(OTHER))),
+            Some(path(LOGIN)),
+            "the reply's path wins"
+        );
+        assert_eq!(
+            created_collection(path(NONE), Some(&object(LOGIN))),
+            Some(path(LOGIN))
+        );
+        assert_eq!(
+            created_collection(path(NONE), Some(&Value::Value(Box::new(object(LOGIN))))),
+            Some(path(LOGIN))
+        );
+        for prompted in [None, Some(object(NONE)), Some(Value::from("login"))] {
+            assert_eq!(created_collection(path(NONE), prompted.as_ref()), None);
+        }
+    }
+
     /// GIVEN `ReadAlias` that fails or finds no provider THEN that error
     /// stands and nothing is asked.
     #[test]
@@ -1011,17 +1083,23 @@ mod tests {
     /// GIVEN a disposable bus (shared with the other live tests, so the
     /// first claim may wait for them) WHEN one lock owns the creation name
     /// THEN another lock, as another core's would, waits and is busy after
-    /// its wait, and takes it while waiting once the first lets go.
+    /// its wait, and takes it while waiting once the first lets go. `held`
+    /// owns the name from before the busy check until it is dropped, so the
+    /// other live tests on this bus cannot free or take it during the check;
+    /// after the drop, the waiter may wait for one of them, within its 30 s.
     #[test]
     #[ignore = "needs a disposable session bus"]
     fn given_a_disposable_keyring_then_the_creation_name_has_one_owner() {
         let address = disposable_bus();
         let held = CreationLock::acquire(Some(&address), Duration::from_secs(30)).unwrap();
         let started = Instant::now();
-        assert!(matches!(
-            CreationLock::acquire(Some(&address), Duration::from_millis(250)),
-            Err(VaultError::Busy)
-        ));
+        assert!(
+            matches!(
+                CreationLock::acquire(Some(&address), Duration::from_millis(250)),
+                Err(VaultError::Busy)
+            ),
+            "`held` owns the name, so a second lock is busy"
+        );
         assert!(started.elapsed() >= Duration::from_millis(250));
         let waiter = thread::spawn(move || {
             CreationLock::acquire(Some(&address), Duration::from_secs(30)).is_ok()

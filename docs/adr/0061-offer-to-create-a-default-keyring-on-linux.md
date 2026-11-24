@@ -67,13 +67,16 @@ for the other yes-or-no questions.
 * **Yes:** the core calls `CreateCollection` with the label "Login" and the
   alias `default`. It completes the provider's `Prompt` object with the same
   handling as the unlock prompt of ADR-0010, dismissed after 5 minutes without
-  an answer. It then reads the alias again. Only a collection that the
-  provider now names `default` is used, and the item is then created as
-  before.
+  an answer. It keeps the path of the new collection (from the method's
+  reply, or from the prompt's result when the provider prompts) and then
+  reads the alias again. The new collection is used only if the provider
+  now names it `default`, and the item is then created as before.
 * **No, a closed window, a dismissed or unanswered keyring prompt, a
   provider that refuses `CreateCollection` (some KWallet and KeePassXC
-  setups), or a provider that does not make the new collection the
-  default:** the profile stays locked with the reason "no default keyring".
+  setups), a provider that does not make the new collection the default,
+  or an alias that names another collection by then (another program
+  changed it):** the profile stays locked with the reason "no default
+  keyring".
 * Persephone asks at most once in each open attempt. "Unlock" on the page is
   a new attempt and can ask again.
 * Persephone never calls `SetAlias`, so it never changes which of the user's
