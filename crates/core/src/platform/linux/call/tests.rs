@@ -74,13 +74,19 @@ fn start_sound_test(audio: &WorkerAudio, test: DeviceTest, device: Option<&str>)
 }
 
 /// The worker's next message other than a diagnostic record, or `None`
-/// when none comes before `until`.
+/// when none comes before `until`. Panics when the worker's channel closed:
+/// every caller stops reading at `Left` or `Failed`, so a closed channel
+/// means that the worker ended without its last message.
 fn next_message(link: &mut CallWorkerLink, until: Instant) -> Option<FromWorker> {
+    use tokio::sync::mpsc::error::TryRecvError;
     while Instant::now() < until {
         match link.events.try_recv() {
             Ok(FromWorker::Diagnostic { .. }) => {}
             Ok(message) => return Some(message),
-            Err(_) => thread::sleep(Duration::from_millis(10)),
+            Err(TryRecvError::Empty) => thread::sleep(Duration::from_millis(10)),
+            Err(TryRecvError::Disconnected) => {
+                panic!("the worker ended without `Left` or `Failed`")
+            }
         }
     }
     None
@@ -137,7 +143,12 @@ fn microphone_during_tone(sink: Option<&str>) -> (Vec<FromWorker>, Vec<FromWorke
         let running = message == FromWorker::Connected;
         let end = is_end(&message);
         heard.push(message);
-        if running || end {
+        if end {
+            // The microphone failed: no tone, and no more to read.
+            microphone.finish(Duration::from_secs(5));
+            return (heard, Vec::new());
+        }
+        if running {
             break;
         }
     }
@@ -214,8 +225,8 @@ fn given_the_sound_server_when_devices_are_tested_in_the_container_then_they_run
     assert!(ran(&stopped), "{stopped:?}");
 
     let (heard, speaker) = microphone_during_tone(None);
-    assert!(ran(&speaker), "default sink: {speaker:?}");
     assert!(ran(&heard), "microphone: {heard:?}");
+    assert!(ran(&speaker), "default sink: {speaker:?}");
     assert!(
         loud(&heard),
         "the microphone heard the default sink: {heard:?}"
@@ -234,8 +245,8 @@ fn given_the_sound_server_when_devices_are_tested_in_the_container_then_they_run
         "{other} is listed: {sinks:?}"
     );
     let (heard, speaker) = microphone_during_tone(Some(&other));
-    assert!(ran(&speaker), "{other}: {speaker:?}");
     assert!(ran(&heard), "microphone: {heard:?}");
+    assert!(ran(&speaker), "{other}: {speaker:?}");
     assert!(
         !loud(&heard),
         "the tone on {other} did not reach the default sink: {heard:?}"
