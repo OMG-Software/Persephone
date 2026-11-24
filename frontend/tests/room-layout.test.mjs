@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
-import { mainMenuItems, menuTarget, roomMenuItems } from '../src/menu.ts';
+import { exitWhenSaved, mainMenuItems, menuTarget, roomMenuItems } from '../src/menu.ts';
 import {
   SIDEBAR_DEFAULT,
   SIDEBAR_MAX,
@@ -283,4 +283,17 @@ test('GIVEN readers with presence WHEN joined THEN each row keeps a known status
     null
   );
   assert.deepEqual(rows.map((row) => row.presence), ['online', 'unavailable', 'offline', null, null]);
+});
+
+test('GIVEN a draft save WHEN Exit is chosen THEN Persephone exits only after the save, and stays open when it fails', async () => {
+  const order = [];
+  const exit = async () => { order.push('exit'); };
+  const saved = async () => { order.push('flush'); return true; };
+  assert.equal(await exitWhenSaved(saved, exit), true);
+  assert.deepEqual(order, ['flush', 'exit']);
+
+  order.length = 0;
+  assert.equal(await exitWhenSaved(async () => false, exit), false);
+  assert.equal(await exitWhenSaved(async () => { throw new Error('core gone'); }, exit), false);
+  assert.deepEqual(order, [], 'no exit without a saved draft');
 });

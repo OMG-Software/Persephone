@@ -51,7 +51,7 @@
   import Icon from './Icon.svelte';
   import IconAction from './IconAction.svelte';
   import Menu, { type MenuItem } from './Menu.svelte';
-  import { TRAY_UNAVAILABLE_TEXT, mainMenuItems, roomMenuItems } from './menu.ts';
+  import { EXIT_DRAFT_TEXT, TRAY_UNAVAILABLE_TEXT, exitWhenSaved, mainMenuItems, roomMenuItems } from './menu.ts';
   import MemberPanel from './MemberPanel.svelte';
   import {
     MEMBERS,
@@ -2718,7 +2718,12 @@
         lock: () => void toggleLock(),
         // A refusal keeps the windows shown; say why, so it is no lost click.
         tray: () => void minimiseToTray().catch(() => (error = TRAY_UNAVAILABLE_TEXT)),
-        exit: () => void exitApp().catch(() => {})
+        exit: () =>
+          void exitWhenSaved(() => draftKeeper.flush(), exitApp)
+            .then((exited) => {
+              if (!exited) error = EXIT_DRAFT_TEXT;
+            })
+            .catch(() => {})
       }
     )
   );
@@ -2847,6 +2852,11 @@
           <button type="button" class="secondary" onclick={discardDraft}>Discard draft</button>
           <button type="button" class="secondary" onclick={closeSettings}>Return to room</button>
         </div>
+      {/if}
+      <!-- Above every tab, so a failure from the menu or the call bar (the
+           call window, the tray, Exit) shows on any settings tab. -->
+      {#if error}
+        <p role="alert" class="error">{error}</p>
       {/if}
       {#if settingsTab === 'profile'}
         {#if signedIn && status.account.userId}
@@ -3069,9 +3079,6 @@
                 </div>
               {/if}
             </div>
-          {/if}
-          {#if error}
-            <p role="alert" class="error">{error}</p>
           {/if}
         </section>
       {/if}

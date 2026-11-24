@@ -40,6 +40,19 @@ export const EXIT_LABEL = 'Exit Persephone';
 export const TRAY_LABEL = 'Minimise to tray';
 /** Shown when the system cannot show a tray icon, so the windows stay. */
 export const TRAY_UNAVAILABLE_TEXT = 'This system cannot show a tray icon, so the windows stay open.';
+/** Shown when Exit waits for a draft that cannot be saved. */
+export const EXIT_DRAFT_TEXT = 'The draft could not be saved, so Persephone stays open. Retry or discard the draft, then exit again.';
+
+/**
+ * Exits only after the draft is saved: the host ends at once and does not
+ * wait for the page, so a draft still waiting for its save would be lost.
+ * Gives false, and does not exit, when the save fails.
+ */
+export async function exitWhenSaved(flush: () => Promise<boolean>, exit: () => Promise<void>): Promise<boolean> {
+  if (!(await flush().catch(() => false))) return false;
+  await exit();
+  return true;
+}
 
 /** What the main menu's commands do. */
 export type MainMenuActions = {
