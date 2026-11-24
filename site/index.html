@@ -105,9 +105,11 @@
         <p class="note">
           Calls are outside the first release's scope, but the source now has them: encrypted
           voice and video calls through MatrixRTC, with device tests, screen sharing and a
-          separate call window. Their designs are still proposed
+          separate call window. Most of their designs are still proposed
           (<a href="https://github.com/OMG-Software/Persephone/blob/main/docs/adr/0043-make-audio-calls-through-matrixrtc-in-a-contained-call-worker.md">ADR-0043</a>
-          and later). One live audio call with Element Call is recorded on Windows.
+          and later); the one that gets call tokens from the homeserver
+          (<a href="https://github.com/OMG-Software/Persephone/blob/main/docs/adr/0056-get-call-tokens-from-the-homeserver-when-it-issues-them.md">ADR-0056</a>)
+          is accepted. One live audio call with Element Call is recorded on Windows.
           A Diagnostics settings page shows connection health and an opt-in diagnostic log.
         </p>
         <p class="note">

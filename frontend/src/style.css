@@ -1757,7 +1757,8 @@ kbd {
   font-weight: 600;
 }
 
-/* Each path sets its own stroke width. */
+/* The mark is one filled path (BrandMark.svelte); its fill follows the
+   theme's accent. */
 .brand-mark path {
   fill: var(--accent);
 }

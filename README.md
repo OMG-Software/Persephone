@@ -90,7 +90,8 @@ On Windows, the app can do these things today:
 - Make end-to-end encrypted voice and video calls through MatrixRTC, in a
   contained call worker that never gets the Matrix token or keys
   ([ADR-0043](docs/adr/0043-make-audio-calls-through-matrixrtc-in-a-contained-call-worker.md)
-  and later, all still proposed). Calls are outside the first release's
+  and later; ADR-0056, call tokens from the homeserver, is accepted, and the
+  others are still proposed). Calls are outside the first release's
   scope. One live audio call with Element Call is
   [recorded](docs/evidence/live-calls.md); the camera picture in the
   contained worker is [checked](docs/evidence/camera-windows.md). Settings
