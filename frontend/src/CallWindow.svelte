@@ -79,7 +79,7 @@
 
   function take(next: CallStatus) {
     status = next;
-    selfClose.status(inCall(next));
+    selfClose.status(inCall(next), next.phase === 'ended');
     if (next.phase !== 'active') {
       ownLevel = 0;
       levels = new Map();

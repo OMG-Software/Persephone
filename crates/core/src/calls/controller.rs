@@ -2768,7 +2768,15 @@ fn spawn_device_test(inner: Arc<Inner>) -> std::io::Result<std::thread::JoinHand
             }
             let job = plain(&inner.device_test).job.take();
             if let Some(job) = job {
-                run_device_test(&inner, job.generation, job.test, job.device, &job.stop);
+                let limit = device_test::TEST_LIMIT;
+                run_device_test(
+                    &inner,
+                    job.generation,
+                    job.test,
+                    job.device,
+                    &job.stop,
+                    limit,
+                );
             }
         })
 }
@@ -2807,7 +2815,9 @@ fn offer_devices(
 
 /// Runs device test `generation` on its own thread (ADR-0059): starts a
 /// worker, sends `TestDevice` and follows the answers until the worker ends,
-/// `stop` is set or [`device_test::TEST_LIMIT`] passes. A camera test's store
+/// `stop` is set or `limit` ([`device_test::TEST_LIMIT`]) passes. Only the
+/// user's stop ends a test that has not run as idle; the limit is no user
+/// stop, so it ends that test as failed. A camera test's store
 /// is the controller's picture store while no call runs. The worker gets the
 /// diagnostic log's switch before the test and on each change, and its
 /// records go to the log (ADR-0058), so a failing test leaves a record.
@@ -2817,6 +2827,7 @@ fn run_device_test(
     test: CallDeviceTestKind,
     device: Option<String>,
     stop: &AtomicBool,
+    limit: Duration,
 ) {
     let end = |state| inner.set_test(generation, |status| status.state = state);
     if stop.load(Ordering::SeqCst) {
@@ -2855,14 +2866,17 @@ fn run_device_test(
         })
     });
     let mut state = CallDeviceTestState::Starting;
-    let limit = std::time::Instant::now() + device_test::TEST_LIMIT;
+    let limit = std::time::Instant::now() + limit;
     let mut leave_by: Option<std::time::Instant> = None;
+    // Whether the `Leave` was the user's stop, not the limit.
+    let mut user_stopped = false;
     if sent.is_err() {
         state = CallDeviceTestState::Failed;
     }
     while !device_test::is_final(state) {
         let now = std::time::Instant::now();
         if leave_by.is_none() && (stop.load(Ordering::SeqCst) || now >= limit) {
+            user_stopped = stop.load(Ordering::SeqCst);
             let _ = link.send(ToWorker::Leave);
             leave_by = Some(now + device_test::LEAVE_WAIT);
         }
@@ -2882,8 +2896,7 @@ fn run_device_test(
                 message,
             }) => worker_record(level, &target, &message),
             Ok(message) => {
-                let stopped = leave_by.is_some();
-                if let Some(next) = device_test::next_state(state, &message, stopped) {
+                if let Some(next) = device_test::next_state(state, &message, user_stopped) {
                     state = next;
                     inner.set_test(generation, |status| status.state = next);
                 }
@@ -5134,6 +5147,18 @@ mod tests {
     struct ScriptHost {
         events: Mutex<Vec<FromWorker>>,
         sent: Mutex<Option<mpsc::Receiver<ToWorker>>>,
+        /// The worker's side, kept open so a test can answer later.
+        answers: Mutex<Option<mpsc::Sender<FromWorker>>>,
+    }
+
+    impl ScriptHost {
+        fn new(events: Vec<FromWorker>) -> Arc<Self> {
+            Arc::new(Self {
+                events: Mutex::new(events),
+                sent: Mutex::new(None),
+                answers: Mutex::new(None),
+            })
+        }
     }
 
     impl CallHost for ScriptHost {
@@ -5144,6 +5169,7 @@ mod tests {
                 answers.try_send(event).unwrap();
             }
             *self.sent.lock().unwrap() = Some(received);
+            *self.answers.lock().unwrap() = Some(answers);
             Ok(CallWorkerLink::from_parts(
                 commands,
                 events,
@@ -5167,10 +5193,7 @@ mod tests {
             target: "call_worker".into(),
             message: "no device".into(),
         };
-        let host = Arc::new(ScriptHost {
-            events: Mutex::new(vec![FromWorker::Connected, record, FromWorker::Left]),
-            sent: Mutex::new(None),
-        });
+        let host = ScriptHost::new(vec![FromWorker::Connected, record, FromWorker::Left]);
         let calls = controller(host.clone());
         plain(&calls.inner.device_test).generation = 1;
         let mic = Some("mic".to_owned());
@@ -5180,6 +5203,7 @@ mod tests {
             CallDeviceTestKind::Microphone,
             mic,
             &AtomicBool::new(false),
+            device_test::TEST_LIMIT,
         );
         assert_eq!(calls.device_test_status().state, CallDeviceTestState::Done);
         let mut sent = host
@@ -5198,6 +5222,62 @@ mod tests {
             sent.try_recv(),
             Ok(ToWorker::TestDevice { device: Some(id), .. }) if id == "mic"
         ));
+    }
+
+    /// GIVEN a test that never ran (a camera open that hangs) WHEN the
+    /// core's limit ends it THEN it is failed, so the page says why; WHEN
+    /// the user stops it THEN it is idle.
+    #[test]
+    fn given_a_test_ended_by_the_limit_then_it_failed_and_a_user_stop_is_idle() {
+        // The limit passes at once: the worker answers `Leave` with `Left`.
+        let host = ScriptHost::new(vec![FromWorker::Left]);
+        let calls = controller(host.clone());
+        plain(&calls.inner.device_test).generation = 1;
+        let stop = AtomicBool::new(false);
+        run_device_test(
+            &calls.inner,
+            1,
+            CallDeviceTestKind::Camera,
+            None,
+            &stop,
+            Duration::ZERO,
+        );
+        assert_eq!(
+            calls.device_test_status().state,
+            CallDeviceTestState::Failed
+        );
+
+        // The user stops it after the start; the worker answers the core's
+        // `Leave` with `Left`.
+        let host = ScriptHost::new(Vec::new());
+        let calls = controller(host.clone());
+        plain(&calls.inner.device_test).generation = 1;
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let mut seen_leave = false;
+                while !seen_leave {
+                    if let Some(sent) = host.sent.lock().unwrap().as_mut() {
+                        stop.store(true, Ordering::SeqCst);
+                        while let Ok(message) = sent.try_recv() {
+                            seen_leave |= matches!(message, ToWorker::Leave);
+                        }
+                    }
+                    std::thread::yield_now();
+                }
+                let answers = host.answers.lock().unwrap().clone().unwrap();
+                answers.try_send(FromWorker::Left).unwrap();
+            });
+            let limit = device_test::TEST_LIMIT;
+            run_device_test(
+                &calls.inner,
+                1,
+                CallDeviceTestKind::Camera,
+                None,
+                &stop,
+                limit,
+            );
+        });
+        assert_eq!(calls.device_test_status().state, CallDeviceTestState::Idle);
     }
 
     /// GIVEN test 2 is the newest WHEN a stop names test 1 THEN test 2 runs

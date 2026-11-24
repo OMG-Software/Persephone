@@ -14,10 +14,13 @@ export const CALL_WINDOW_CLOSE_MS = 4000;
  * When the call window closes itself (ADR-0060): `delay` after a call that
  * it saw ends. A window brought to the front in that time stays open, so a
  * click on the call bar's "Call window" is not lost; it then waits for the
- * user's Close or a next call.
+ * user's Close or a next call. A first status that is already `ended` is
+ * a call the window was opened for that ended before the window could
+ * read it, so it closes too.
  */
 export class SelfClose {
   #seen = false;
+  #first = true;
   #timer: ReturnType<typeof setTimeout> | undefined;
   readonly #close: () => void;
   readonly #delay: number;
@@ -27,8 +30,13 @@ export class SelfClose {
     this.#delay = delay;
   }
 
-  /** Follows the call: `running` is true while it joins or runs. */
-  status(running: boolean) {
+  /**
+   * Follows the call: `running` is true while it joins or runs, `ended`
+   * when a call has ended (not idle).
+   */
+  status(running: boolean, ended = false) {
+    if (this.#first && ended) this.#seen = true;
+    this.#first = false;
     if (running) {
       this.#seen = true;
       this.#cancel();

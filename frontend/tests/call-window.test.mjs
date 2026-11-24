@@ -147,3 +147,29 @@ test('GIVEN a call the window saw WHEN it ends THEN the window closes after the 
   assert.equal(closes, 2);
   close.stop();
 });
+
+test('GIVEN a window whose first status is an ended call WHEN it reads it THEN it closes after the delay; an idle first status or a later ended one does not', (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  let closes = 0;
+  // Opened for a call that ended before the first read.
+  const late = new SelfClose(() => (closes += 1), 4000);
+  late.status(false, true);
+  context.mock.timers.tick(4000);
+  assert.equal(closes, 1);
+
+  // Opened by hand with no call: it stays.
+  const idle = new SelfClose(() => (closes += 1), 4000);
+  idle.status(false, false);
+  idle.status(false, true);
+  context.mock.timers.tick(10000);
+  assert.equal(closes, 1, 'only the first status counts');
+
+  // Brought to the front during the delay: a later ended status does not
+  // arm it again.
+  const kept = new SelfClose(() => (closes += 1), 4000);
+  kept.status(false, true);
+  kept.shown();
+  kept.status(false, true);
+  context.mock.timers.tick(10000);
+  assert.equal(closes, 1);
+});

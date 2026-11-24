@@ -125,7 +125,8 @@ no media permissions, and a browser test would prove nothing about the worker.
 * The core runs one test at a time, on its own thread. A new test stops the
   old one and waits for its worker to end. A test is refused with `in_call`
   while a call runs or joins, and a join stops a running test. The core ends
-  any test after 100 seconds.
+  any test after 100 seconds. That is no user stop: a test that has not run
+  by then ends as `failed`, not `idle`, so the page says why.
 * Each status has an `id`, the number of its test (0 for none and for a
   refusal). `call_device_test_stop { id }` stops only that test while it is
   the newest, checked under the test lock, so a late stop from a closed page
