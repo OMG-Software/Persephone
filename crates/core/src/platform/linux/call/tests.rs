@@ -74,9 +74,10 @@ fn start_sound_test(audio: &WorkerAudio, test: DeviceTest, device: Option<&str>)
 }
 
 /// The worker's next message other than a diagnostic record, or `None`
-/// when none comes before `until`. Panics when the worker's channel closed:
-/// every caller stops reading at `Left` or `Failed`, so a closed channel
-/// means that the worker ended without its last message.
+/// when none comes before `until`. Panics when the worker's channel closed.
+/// No caller reads again after `Left` or `Failed` (`read_to_end` says when
+/// it saw one), so a closed channel means that the worker ended without
+/// its last message.
 fn next_message(link: &mut CallWorkerLink, until: Instant) -> Option<FromWorker> {
     use tokio::sync::mpsc::error::TryRecvError;
     while Instant::now() < until {
@@ -97,13 +98,14 @@ fn is_end(message: &FromWorker) -> bool {
 }
 
 /// Reads messages into `messages` up to `Left` or `Failed`, or until
-/// `until`. Sends `Leave` after each message for which `leave` is true.
+/// `until`, and says whether it read `Left` or `Failed`. Sends `Leave`
+/// after each message for which `leave` is true.
 fn read_to_end(
     link: &mut CallWorkerLink,
     messages: &mut Vec<FromWorker>,
     until: Instant,
     mut leave: impl FnMut(&FromWorker) -> bool,
-) {
+) -> bool {
     while let Some(message) = next_message(link, until) {
         if leave(&message) {
             let _ = link.send(ToWorker::Leave);
@@ -111,9 +113,10 @@ fn read_to_end(
         let end = is_end(&message);
         messages.push(message);
         if end {
-            return;
+            return true;
         }
     }
+    false
 }
 
 /// Runs one device test to its end (at most 10 seconds), with `Leave`
@@ -161,21 +164,28 @@ fn microphone_during_tone(sink: Option<&str>) -> (Vec<FromWorker>, Vec<FromWorke
                 |_| false,
             )
         });
+        // A microphone that ends early is not read again; the assertions
+        // then show its `Failed` or early `Left`.
+        let mut ended = false;
         while !tone.is_finished() {
             let soon = Instant::now() + Duration::from_millis(50);
-            if let Some(message) = next_message(&mut microphone, soon) {
-                heard.push(message);
+            if ended {
+                thread::sleep(Duration::from_millis(10));
+            } else {
+                ended = read_to_end(&mut microphone, &mut heard, soon, |_| false);
             }
+        }
+        // The last levels of the tone, then the stop.
+        if !ended {
+            let after = Instant::now() + Duration::from_millis(300);
+            ended = read_to_end(&mut microphone, &mut heard, after, |_| false);
+        }
+        if !ended {
+            let _ = microphone.send(ToWorker::Leave);
+            read_to_end(&mut microphone, &mut heard, until, |_| false);
         }
         tone.join().expect("the speaker test thread ends")
     });
-    // The last levels of the tone, then the stop.
-    let after = Instant::now() + Duration::from_millis(300);
-    while let Some(message) = next_message(&mut microphone, after) {
-        heard.push(message);
-    }
-    let _ = microphone.send(ToWorker::Leave);
-    read_to_end(&mut microphone, &mut heard, until, |_| false);
     microphone.finish(Duration::from_secs(5));
     (heard, speaker)
 }
