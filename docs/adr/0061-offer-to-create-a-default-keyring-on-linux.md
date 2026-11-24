@@ -91,9 +91,11 @@ for the other yes-or-no questions.
   environments. A core waits at most 5 seconds for the name. That is enough
   for a creation without prompts. It is short because the core opens the
   profile before any window shows, so a longer wait would hold a starting
-  core with no window. If another core still holds the name, the profile
-  stays locked with the reason "keyring busy", and Unlock can try again
-  after the user answers the other window. The bus releases the name when a
+  core with no window. The core asks for the name on its own connection,
+  where each reply of the bus has at most 1 second, so a bus that does not
+  answer cannot hold it much longer. If another core still holds the name,
+  the profile stays locked with the reason "keyring busy", and Unlock can
+  try again after the other core finishes. The bus releases the name when a
   core's connection closes. Cores that reach one provider through different
   buses, and cores from before this change, are not serialised (see the
   negative consequences).
@@ -116,8 +118,11 @@ with a fixed text that says what to do next:
 | `no_display` | The core cannot show its windows, so it cannot ask. |
 | `keyring_busy` | Another core of this user still holds the creation lock after the wait (see above). |
 
-These states are retryable: "Unlock" opens the profile again after the user
-fixes the cause. The other platforms keep `unsupported` for "no vault on this
+All but `no_display` are retryable: "Unlock" opens the profile again after
+the user fixes the cause. The core starts its window thread once and does
+not try again when there is no display, so for `no_display` the page offers
+no Unlock and says to start Persephone again in a session with a display.
+The other platforms keep `unsupported` for "no vault on this
 system". No text from the bus or the provider reaches the page.
 
 ### Positive Consequences

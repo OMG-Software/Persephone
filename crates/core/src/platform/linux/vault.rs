@@ -27,7 +27,8 @@
 //! passphrase-only fallback.
 //!
 //! A core creates the item only while it owns [`CREATION_NAME`] on the
-//! session bus ([`CreationLock`]), from its first search to its read-back.
+//! session bus ([`CreationLock`], on its own connection with a short reply
+//! timeout), from its first search to its read-back.
 //! The bus is what every core that reaches this Secret Service shares, so
 //! two such cores never create two items, whatever their environments: a
 //! core that waits for the name finds the item the other created. Without
@@ -81,8 +82,14 @@ pub const CREATION_NAME: &str = "io.github.omg_software.persephone.StoreKeyWrapC
 /// Longest wait for another core that owns [`CREATION_NAME`]: long enough
 /// for a creation without prompts, short enough that a core started while
 /// another asks its user is not held before its window opens. Then this
-/// attempt is [`VaultError::Busy`], and Unlock can try again.
+/// attempt is [`VaultError::Busy`], and Unlock can try again. One request
+/// that started before the end can add at most [`CREATION_CALL_TIMEOUT`].
 pub const CREATION_WAIT: Duration = Duration::from_secs(5);
+/// Longest wait for one reply of the bus while a core asks for
+/// [`CREATION_NAME`]. The bus answers this at once when it works; the
+/// general [`bus::METHOD_TIMEOUT`] would let a bus that does not answer hold
+/// a starting core for far longer than [`CREATION_WAIT`].
+pub const CREATION_CALL_TIMEOUT: Duration = Duration::from_secs(1);
 /// How often a waiting core asks for [`CREATION_NAME`] again.
 const CREATION_POLL: Duration = Duration::from_millis(100);
 
@@ -244,26 +251,34 @@ pub fn claim(reply: Option<RequestNameReply>, expired: bool) -> Claim {
     }
 }
 
-/// Ownership of [`CREATION_NAME`] on one connection. Every core that
-/// reaches this Secret Service through the same session bus asks for the
-/// same name, so at most one of them may create the item at a time. The bus
-/// releases the name when the connection closes, also when the process
+/// Ownership of [`CREATION_NAME`] on the lock's own connection. Every core
+/// that reaches this Secret Service through the same session bus asks for
+/// the same name, so at most one of them may create the item at a time. The
+/// bus releases the name when the connection closes, also when the process
 /// ends, so a stopped core leaves no stale lock.
-pub struct CreationLock<'c> {
-    connection: &'c Connection,
+pub struct CreationLock {
+    connection: Connection,
 }
 
-impl<'c> CreationLock<'c> {
-    /// Owns the name on `connection`, waiting at most `wait` for another
-    /// owner. Another owner after the wait is `Busy`; any other failure is
-    /// `Failed`.
-    pub fn acquire(connection: &'c Connection, wait: Duration) -> Result<Self, VaultError> {
+impl CreationLock {
+    /// Owns the name on a new connection to the bus at `address` (`None`:
+    /// the user's session bus), waiting at most `wait` for another owner.
+    /// Each call to the bus has at most [`CREATION_CALL_TIMEOUT`], so the
+    /// whole wait is at most `wait` plus one such call. Another owner after
+    /// the wait is `Busy`; any other failure, also a bus that does not
+    /// answer in time, is `Failed`.
+    pub fn acquire(address: Option<&str>, wait: Duration) -> Result<Self, VaultError> {
+        let connection = match address {
+            None => bus::session_with(CREATION_CALL_TIMEOUT),
+            Some(address) => bus::at_with(address, CREATION_CALL_TIMEOUT),
+        }
+        .map_err(connect_error)?;
         let deadline = Instant::now() + wait;
         loop {
             // The bus's own method, not zbus's wrapper: the wrapper turns
             // `Exists` into an error and adds signal matches on each try.
             let reply = bus_call(
-                connection,
+                &connection,
                 "RequestName",
                 &(CREATION_NAME, RequestNameFlags::DoNotQueue as u32),
             )
@@ -278,11 +293,11 @@ impl<'c> CreationLock<'c> {
     }
 }
 
-impl Drop for CreationLock<'_> {
+impl Drop for CreationLock {
     fn drop(&mut self) {
         // Closing the connection releases it too; this lets a waiting core
         // go on at once.
-        let _ = bus_call(self.connection, "ReleaseName", &(CREATION_NAME,));
+        let _ = bus_call(&self.connection, "ReleaseName", &(CREATION_NAME,));
     }
 }
 
@@ -353,7 +368,7 @@ impl SecretStore for SecretService {
         let session = Session::open(&connection)?;
         // Held until the read-back, through every wait for the user, so no
         // other core on this bus creates an item meanwhile.
-        let _creating = CreationLock::acquire(&connection, CREATION_WAIT)?;
+        let _creating = CreationLock::acquire(self.address.as_deref(), CREATION_WAIT)?;
         // Another process may have stored one since our caller looked.
         if let Some(stored) = load(&connection, &session)? {
             return Ok(stored);
@@ -994,24 +1009,23 @@ mod tests {
     }
 
     /// GIVEN a disposable bus (shared with the other live tests, so the
-    /// first claim may wait for them) WHEN one connection owns the creation
-    /// name THEN another connection, as another core would, waits and is
-    /// busy after its wait, and takes it while waiting once the first lets
-    /// go.
+    /// first claim may wait for them) WHEN one lock owns the creation name
+    /// THEN another lock, as another core's would, waits and is busy after
+    /// its wait, and takes it while waiting once the first lets go.
     #[test]
     #[ignore = "needs a disposable session bus"]
     fn given_a_disposable_keyring_then_the_creation_name_has_one_owner() {
-        let first = bus::at(&disposable_bus()).unwrap();
-        let second = bus::at(&disposable_bus()).unwrap();
-        let held = CreationLock::acquire(&first, Duration::from_secs(30)).unwrap();
+        let address = disposable_bus();
+        let held = CreationLock::acquire(Some(&address), Duration::from_secs(30)).unwrap();
         let started = Instant::now();
         assert!(matches!(
-            CreationLock::acquire(&second, Duration::from_millis(250)),
+            CreationLock::acquire(Some(&address), Duration::from_millis(250)),
             Err(VaultError::Busy)
         ));
         assert!(started.elapsed() >= Duration::from_millis(250));
-        let waiter =
-            thread::spawn(move || CreationLock::acquire(&second, Duration::from_secs(30)).is_ok());
+        let waiter = thread::spawn(move || {
+            CreationLock::acquire(Some(&address), Duration::from_secs(30)).is_ok()
+        });
         thread::sleep(Duration::from_millis(200));
         drop(held);
         assert!(waiter.join().unwrap(), "taken once the first lets go");

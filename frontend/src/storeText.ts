@@ -29,16 +29,17 @@ export const storeText: Record<StoreState, string> = {
     'Or choose Unlock and answer Yes to let Persephone ask the keyring to create one',
   no_display:
     'Local store locked: Persephone could not open its own window to ask. ' +
-    'Start Persephone in a desktop session with a display, then choose Unlock',
+    'Quit Persephone and start it again in a desktop session with a display',
   keyring_busy:
-    'Local store locked: another Persephone window is setting up the keyring. ' +
-    'Answer its questions there, then choose Unlock'
+    'Local store locked: another Persephone window is creating the keyring item. ' +
+    'Let it finish, and answer its questions if it asks, then choose Unlock'
 };
 
 /**
  * States the core can try to unlock from; the others need a restart or have
  * nothing to unlock. A missing Linux keyring part can be fixed while
- * Persephone runs, so Unlock tries again.
+ * Persephone runs, so Unlock tries again. A missing display cannot: the
+ * core starts its window thread once and does not try again.
  */
 export const unlockable: readonly StoreState[] = [
   'locked',
@@ -51,7 +52,6 @@ export const unlockable: readonly StoreState[] = [
   'no_session_bus',
   'no_secret_service',
   'no_default_keyring',
-  'no_display',
   'keyring_busy'
 ];
 

@@ -25,7 +25,7 @@
 //! | Another process holds the profile | `ProfileInUse` |
 //! | No vault or no prompt on this platform | `Unsupported` |
 //! | Linux: no session bus, Secret Service, default keyring or display | `NoSessionBus`, `NoSecretService`, `NoDefaultKeyring`, `NoDisplay` (ADR-0061) |
-//! | Linux: another core is creating the keyring item and asking its user | `KeyringBusy` (ADR-0061) |
+//! | Linux: another core still holds the keyring-item creation lock after the wait | `KeyringBusy` (ADR-0061) |
 //!
 //! Layout: `profile.lock`, `store-key.v2` ([`SEALED_KEY_FILE`]: magic plus the
 //! vault's blob of the sealed key), `store-key.v1` ([`VAULT_KEY_FILE`]: magic

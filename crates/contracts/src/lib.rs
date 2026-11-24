@@ -1996,10 +1996,13 @@ pub enum StoreState {
     /// creating one). Unlock may try again.
     NoDefaultKeyring,
     /// Linux: the core cannot show its own windows (no display), so it
-    /// cannot ask. Unlock may try again.
+    /// cannot ask. Its window thread starts once, so only a new start of
+    /// Persephone in a session with a display can open the profile.
     NoDisplay,
-    /// Linux: another Persephone window of this user is creating the
-    /// keyring item and is still asking its user. Unlock may try again.
+    /// Linux: another Persephone window of this user still holds the
+    /// keyring-item creation lock after the wait. It may be asking its user,
+    /// or a slow keyring may still be creating the item. Unlock may try
+    /// again.
     KeyringBusy,
 }
 
