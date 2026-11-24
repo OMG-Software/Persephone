@@ -1992,6 +1992,8 @@ impl CallController {
     /// Moves the running or joining call to another microphone and speaker
     /// (ADR-0059). Only the newest choice is sent, once the worker is
     /// connected; the worker's answer shows as the state's `device_change`.
+    /// After a failed change the same choice is sent again, so choosing a
+    /// device again (a headset plugged back in) reaches the worker.
     /// `NotInCall` without a call: the choice then applies to the next one.
     pub fn set_sound_devices(
         &self,
@@ -2002,13 +2004,21 @@ impl CallController {
             recording: recording.map(str::to_owned),
             playout: playout.map(str::to_owned),
         });
+        // Read before the call slot is taken, so no lock waits on the other.
+        let again = matches!(
+            &*self.inner.state.borrow(),
+            CallState::Active {
+                device_change: Some(_),
+                ..
+            }
+        );
         match &*self.inner.slot() {
             Slot::Running(run) => {
-                offer_devices(&run.devices, choice);
+                offer_devices(&run.devices, choice, again);
                 Ok(())
             }
             Slot::Joining(join) => {
-                offer_devices(&join.devices, choice);
+                offer_devices(&join.devices, choice, again);
                 Ok(())
             }
             Slot::Idle => Err(CallError::NotInCall),
@@ -2773,10 +2783,15 @@ fn take_newer_choice(
 
 /// Gives the call a microphone and speaker choice. The same choice as the
 /// last one changes nothing, so saving only the camera does not restart the
-/// sound of a running call.
-fn offer_devices(devices: &watch::Sender<Option<SoundDevices>>, choice: Option<SoundDevices>) {
+/// sound of a running call; with `again` (the last change failed) it is
+/// sent again.
+fn offer_devices(
+    devices: &watch::Sender<Option<SoundDevices>>,
+    choice: Option<SoundDevices>,
+    again: bool,
+) {
     devices.send_if_modified(|current| {
-        if *current == choice {
+        if *current == choice && !again {
             false
         } else {
             *current = choice;
@@ -5008,6 +5023,37 @@ mod tests {
                 recording: Some("mic-1".to_owned()),
                 playout: Some("spk-1".to_owned()),
             })
+        );
+    }
+
+    /// GIVEN a running call WHEN the same microphone and speaker are chosen
+    /// again THEN nothing is sent, so saving only the camera keeps the sound;
+    /// WHEN the last change failed THEN the same choice is sent again, so a
+    /// device plugged back in reaches the worker.
+    #[test]
+    fn given_a_failed_device_change_then_the_same_choice_is_sent_again() {
+        let calls = controller(FakeHost::new(true, None));
+        let (_store, _commands, _killed) = running_call(&calls, active_state());
+        let mut task = match &*calls.inner.slot() {
+            Slot::Running(run) => run.devices.subscribe(),
+            _ => unreachable!("the call runs"),
+        };
+        let choose = || calls.set_sound_devices(Some("mic-1"), Some("spk-1"));
+        assert_eq!(choose(), Ok(()));
+        assert!(task.has_changed().unwrap());
+        task.borrow_and_update();
+        assert_eq!(choose(), Ok(()));
+        assert!(!task.has_changed().unwrap(), "the same choice is not sent");
+
+        let mut failed = active_state();
+        if let CallState::Active { device_change, .. } = &mut failed {
+            *device_change = Some(CallDeviceChange::NotFound);
+        }
+        calls.inner.publish(failed);
+        assert_eq!(choose(), Ok(()));
+        assert!(
+            task.has_changed().unwrap(),
+            "after a failure it is sent again"
         );
     }
 

@@ -53,6 +53,8 @@ test('GIVEN a call with cameras on and off WHEN the grid is made THEN every devi
 test('GIVEN a call with no video WHEN the grid is made THEN you and each device show placeholders', () => {
   const cells = callGrid({ ...IDLE_CALL, phase: 'active', participants: [person('@a:s', 'A')] });
   assert.deepEqual(cells.map((cell) => cell.tile), [null, null]);
+  // A device's cell has the key that the roster and the tiles use.
+  assert.equal(cells[1].key, deviceKey('@a:s', 'A'));
 });
 
 test('GIVEN level lists WHEN parsed THEN only bounded lists pass, and a device left out is silent', () => {

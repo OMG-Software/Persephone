@@ -3,6 +3,7 @@
 // names the video tile that shows its camera, or none, and then the window
 // shows a placeholder. User IDs are untrusted text for text rendering only.
 import type { CallStatus } from '../../crates/contracts/generated/contracts';
+import { deviceKey } from './calls.ts';
 import { SCREEN_TILE } from './video.ts';
 
 /** The heading of the participant list. */
@@ -49,7 +50,7 @@ export function callGrid(status: CallStatus): CallCell[] {
         video.participant?.deviceId === person.deviceId
     );
     cells.push({
-      key: JSON.stringify([person.userId, person.deviceId]),
+      key: deviceKey(person.userId, person.deviceId),
       own: false,
       userId: person.userId,
       tile: tile?.tile ?? null,
