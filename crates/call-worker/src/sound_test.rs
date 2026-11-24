@@ -394,11 +394,13 @@ mod tests {
     /// GIVEN this Windows machine WHEN its default microphone is opened and
     /// stopped after half a second, and its default speaker is started and
     /// stopped at once THEN both run and the microphone reports levels. A
-    /// machine with no sound device (a build runner) reports
-    /// `DeviceNotFound` or `AudioDevice` instead, and a chosen ID that does
-    /// not exist is `DeviceNotFound`.
+    /// machine with no sound device reports `DeviceNotFound` or
+    /// `AudioDevice` instead. It records from the real microphone, so it is
+    /// not in the default run: `cargo test --locked -p
+    /// persephone-call-worker -- --ignored default_devices`.
     #[cfg(windows)]
     #[test]
+    #[ignore = "records from the real microphone and starts the real speaker"]
     fn given_this_machine_when_the_default_devices_are_tested_then_they_run() {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
@@ -440,6 +442,17 @@ mod tests {
             Ok(()) => {}
             Err(code) => assert!(no_device(code), "{code:?}"),
         }
+    }
+
+    /// GIVEN a chosen microphone ID that does not exist WHEN it is tested
+    /// THEN the answer is `DeviceNotFound`, and nothing is recorded.
+    #[cfg(windows)]
+    #[test]
+    fn given_an_unknown_microphone_id_then_it_is_not_found() {
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
+
+        use persephone_call_protocol::FailureCode;
 
         let stop = Arc::new(AtomicBool::new(true));
         assert_eq!(

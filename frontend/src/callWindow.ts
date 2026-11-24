@@ -10,6 +10,54 @@ import { SCREEN_TILE } from './video.ts';
 export const ROSTER_LABEL = 'Participants';
 /** How long the window shows the end of a call before it closes itself. */
 export const CALL_WINDOW_CLOSE_MS = 4000;
+/**
+ * When the call window closes itself (ADR-0060): `delay` after a call that
+ * it saw ends. A window brought to the front in that time stays open, so a
+ * click on the call bar's "Call window" is not lost; it then waits for the
+ * user's Close or a next call.
+ */
+export class SelfClose {
+  #seen = false;
+  #timer: ReturnType<typeof setTimeout> | undefined;
+  readonly #close: () => void;
+  readonly #delay: number;
+
+  constructor(close: () => void, delay = CALL_WINDOW_CLOSE_MS) {
+    this.#close = close;
+    this.#delay = delay;
+  }
+
+  /** Follows the call: `running` is true while it joins or runs. */
+  status(running: boolean) {
+    if (running) {
+      this.#seen = true;
+      this.#cancel();
+    } else if (this.#seen && this.#timer === undefined) {
+      this.#timer = setTimeout(() => {
+        this.#timer = undefined;
+        this.#seen = false;
+        this.#close();
+      }, this.#delay);
+    }
+  }
+
+  /** The window came to the front. Only a close that waits is dropped. */
+  shown() {
+    if (this.#timer === undefined) return;
+    this.#cancel();
+    this.#seen = false;
+  }
+
+  stop() {
+    this.#cancel();
+  }
+
+  #cancel() {
+    clearTimeout(this.#timer);
+    this.#timer = undefined;
+  }
+}
+
 /** Shown in the main window when the call window cannot open. */
 export const CALL_WINDOW_UNAVAILABLE_TEXT = 'The call window could not open. The call goes on in this window.';
 

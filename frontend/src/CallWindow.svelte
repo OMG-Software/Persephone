@@ -49,7 +49,7 @@
     volumeText,
     volumeValue
   } from './calls';
-  import { callGrid, CALL_WINDOW_CLOSE_MS, ROSTER_LABEL } from './callWindow';
+  import { callGrid, ROSTER_LABEL, SelfClose } from './callWindow';
   import Icon from './Icon.svelte';
   import PersonName from './PersonName.svelte';
   import { tileCanvas, tileLayout, type TileRef, type VideoPicture } from './video';
@@ -73,20 +73,13 @@
   let volumeDraft = $state<number | null>(null);
   // Numbers the status reads, so an older answer never replaces a newer one.
   let request = 0;
-  // Whether this window has seen the call run; it closes itself after that
-  // call ends.
-  let seenCall = false;
-  let closeTimer: ReturnType<typeof setTimeout> | undefined;
+  // The window closes itself after a call it saw ends, unless it is
+  // brought to the front in that time.
+  const selfClose = new SelfClose(() => void closeCallWindow().catch(() => {}));
 
   function take(next: CallStatus) {
     status = next;
-    if (inCall(next)) {
-      seenCall = true;
-      clearTimeout(closeTimer);
-      closeTimer = undefined;
-    } else if (seenCall && closeTimer === undefined) {
-      closeTimer = setTimeout(() => void closeCallWindow().catch(() => {}), CALL_WINDOW_CLOSE_MS);
-    }
+    selfClose.status(inCall(next));
     if (next.phase !== 'active') {
       ownLevel = 0;
       levels = new Map();
@@ -181,7 +174,7 @@
   fetcher.attach(show, clear);
   onDestroy(() => {
     fetcher.detach();
-    clearTimeout(closeTimer);
+    selfClose.stop();
   });
 
   const grid = $derived(callGrid(status));
@@ -208,6 +201,8 @@
   const screen = $derived(screenButton(status.screen));
   const volume = $derived(volumeDraft ?? status.volume);
 </script>
+
+<svelte:window onfocus={() => selfClose.shown()} />
 
 <main class="call-window">
   <header class="call-window-head">

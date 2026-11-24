@@ -2991,6 +2991,9 @@ pub fn generated_typescript() -> String {
     output.push_str(&format!(
         "\n/** Longest device ID in a call, in UTF-8 bytes. */\nexport const CALL_DEVICE_ID_BYTES_MAX = {CALL_DEVICE_ID_BYTES_MAX};\n"
     ));
+    output.push_str(&format!(
+        "\n/** The top of a call sound level meter. */\nexport const CALL_SOUND_LEVEL_MAX = {CALL_SOUND_LEVEL_MAX};\n"
+    ));
     output
 }
 

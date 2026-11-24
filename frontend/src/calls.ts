@@ -12,6 +12,7 @@ import type {
   CallDeviceTestStatus,
   CALL_DEVICE_ID_BYTES_MAX,
   CALL_PARTICIPANTS_MAX,
+  CALL_SOUND_LEVEL_MAX,
   CALL_USER_ID_BYTES_MAX,
   CallEnd,
   CallJoinError,
@@ -455,7 +456,7 @@ export function volumeText(percent: number): string {
  */
 export const SOUND_LEVEL_LABEL = 'Your microphone';
 /** The top of the meter: full scale, 0 dBFS. 0 is -60 dBFS or quieter. */
-export const SOUND_LEVEL_MAX = 100;
+export const SOUND_LEVEL_MAX: typeof CALL_SOUND_LEVEL_MAX = 100;
 /** From this level (-6 dBFS) the meter shows the sound as loud. */
 export const SOUND_LEVEL_LOUD = 90;
 

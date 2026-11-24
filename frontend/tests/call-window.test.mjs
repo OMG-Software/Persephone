@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { callGrid } from '../src/callWindow.ts';
+import { callGrid, SelfClose } from '../src/callWindow.ts';
 import {
   DEVICE_CHANGE_TEXT,
   DEVICE_TEST_LABEL,
@@ -101,4 +101,49 @@ test('GIVEN each device test state THEN only the newest test has a text, and eve
   assert.doesNotMatch(deviceTestText({ test: 'microphone', state: 'unavailable', stream: 0 }, 'microphone'), /privacy/);
   assert.deepEqual(Object.keys(DEVICE_TEST_LABEL), ['microphone', 'speaker', 'camera']);
   assert.deepEqual(Object.keys(DEVICE_CHANGE_TEXT).sort(), ['failed', 'not_found', 'unsupported']);
+});
+
+test('GIVEN a call the window saw WHEN it ends THEN the window closes after the delay, unless it is brought to the front first', (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  let closes = 0;
+  const close = new SelfClose(() => (closes += 1), 4000);
+
+  // No call seen: nothing closes.
+  close.status(false);
+  context.mock.timers.tick(5000);
+  assert.equal(closes, 0);
+
+  // A call that ends closes the window after the delay, once.
+  close.status(true);
+  close.status(false);
+  close.status(false);
+  context.mock.timers.tick(3999);
+  assert.equal(closes, 0);
+  context.mock.timers.tick(1);
+  assert.equal(closes, 1);
+
+  // Brought to the front during the delay: it stays, also after more
+  // status reads.
+  close.status(true);
+  close.status(false);
+  context.mock.timers.tick(2000);
+  close.shown();
+  close.status(false);
+  context.mock.timers.tick(10000);
+  assert.equal(closes, 1);
+
+  // Focus during the call does not stop the close after it.
+  close.status(true);
+  close.shown();
+  close.status(false);
+  context.mock.timers.tick(4000);
+  assert.equal(closes, 2);
+
+  // A new call during the delay keeps the window.
+  close.status(true);
+  close.status(false);
+  close.status(true);
+  context.mock.timers.tick(10000);
+  assert.equal(closes, 2);
+  close.stop();
 });

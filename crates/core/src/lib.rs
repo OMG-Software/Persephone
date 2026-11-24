@@ -120,6 +120,8 @@ const VIDEO_EVENT_GAP: Duration = Duration::from_millis(33);
 /// The shortest time between two `call_sound_level` events: about ten a
 /// second, the worker's own rate (ADR-0055).
 const SOUND_EVENT_GAP: Duration = Duration::from_millis(100);
+// The worker's meter and the page's have one top (ADR-0055).
+const _: () = assert!(persephone_call_protocol::MAX_SOUND_LEVEL == MAX_CALL_SOUND_LEVEL);
 
 /// Longest a `lock_session` call waits for admitted work before replying
 /// `locking`; the UI may call again to resume the wait. Covers one sync round.

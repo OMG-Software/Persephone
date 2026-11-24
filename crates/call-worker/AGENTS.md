@@ -39,4 +39,5 @@ The contained process that runs one call (ADR-0043). It joins one LiveKit room w
 ## Checks
 
 - `cargo test --locked -p persephone-call-worker`
+- On Windows, the real-device sound test only by choice, as it records from the microphone: `cargo test --locked -p persephone-call-worker -- --ignored default_devices`
 - `cargo clippy --locked -p persephone-call-worker --all-targets -- -D warnings`
