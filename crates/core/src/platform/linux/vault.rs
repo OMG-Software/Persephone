@@ -581,8 +581,9 @@ fn unlock(connection: &Connection, objects: &[OwnedObjectPath]) -> Result<(), Va
 }
 
 /// Runs the provider's prompt at `prompt` (`/`: none), waits for it to
-/// complete and returns its result, which [`created_collection`] reads;
-/// `None` when there is no prompt. A dismissed prompt, or one not answered
+/// complete and returns its result for a caller that needs it (only
+/// `CreateCollection`'s, for [`created_collection`]; `unlock` and
+/// `CreateItem` ignore it); `None` when there is no prompt. A dismissed prompt, or one not answered
 /// within [`PROMPT_TIMEOUT`] (then dismissed here), is `Failed`.
 fn complete(
     connection: &Connection,
