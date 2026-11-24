@@ -892,6 +892,7 @@ mod tests {
             ToWorker::SetDevices {
                 recording: None,
                 playout: None,
+                camera: None,
             },
         ] {
             assert!(!is_first_message_allowed(&message), "{message:?}");

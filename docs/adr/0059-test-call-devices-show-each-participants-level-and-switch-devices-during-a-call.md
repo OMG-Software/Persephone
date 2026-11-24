@@ -104,7 +104,12 @@ no media permissions, and a browser test would prove nothing about the worker.
 * The worker answers `DevicesSet { failure }`. The core shows a failure as the
   call status's `deviceChange` (`not_found`, `unsupported` or `failed`) until
   the next change. Linux reports `unsupported`: the PulseAudio path has no
-  switch yet. The camera change applies to the next camera start.
+  switch yet.
+* `SetDevices` also carries the camera choice. The worker keeps it, and the
+  call's next camera start opens it; a camera that is on keeps running until
+  it is turned off. On Linux a choice whose microphone and speaker equal the
+  join's is no sound change, so a change of the camera only does not report
+  `unsupported`.
 
 ### Device tests
 

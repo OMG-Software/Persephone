@@ -1085,7 +1085,7 @@ struct Joining {
     /// A microphone and speaker choice made while the call joins
     /// (ADR-0059). The call task gets the same channel and sends the
     /// newest choice once the worker is connected.
-    devices: watch::Sender<Option<SoundDevices>>,
+    devices: watch::Sender<Option<DeviceChoice>>,
 }
 
 struct RunHandle {
@@ -1106,15 +1106,17 @@ struct RunHandle {
     volume: watch::Sender<u8>,
     /// The latest microphone and speaker choice made during the call
     /// (ADR-0059). `None` until one is made.
-    devices: watch::Sender<Option<SoundDevices>>,
+    devices: watch::Sender<Option<DeviceChoice>>,
     task: Option<JoinHandle<()>>,
 }
 
-/// A microphone and speaker choice; `None` is the system default.
+/// A microphone, speaker and camera choice; `None` is the system default.
+/// The camera applies from the call's next camera start (ADR-0059).
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct SoundDevices {
+struct DeviceChoice {
     recording: Option<String>,
     playout: Option<String>,
+    camera: Option<String>,
 }
 
 /// What the page asks of a running call.
@@ -1329,7 +1331,7 @@ struct JoinGuard {
     room_id: OwnedRoomId,
     flags: Arc<Flags>,
     kill: Arc<Mutex<Option<Arc<dyn WorkerProcess>>>>,
-    devices: watch::Sender<Option<SoundDevices>>,
+    devices: watch::Sender<Option<DeviceChoice>>,
     armed: bool,
 }
 
@@ -1989,20 +1991,23 @@ impl CallController {
         }
     }
 
-    /// Moves the running or joining call to another microphone and speaker
-    /// (ADR-0059). Only the newest choice is sent, once the worker is
+    /// Moves the running or joining call to another microphone and speaker,
+    /// and gives it the camera for its next camera start (ADR-0059). Only
+    /// the newest choice is sent, once the worker is
     /// connected; the worker's answer shows as the state's `device_change`.
     /// After a failed change the same choice is sent again, so choosing a
     /// device again (a headset plugged back in) reaches the worker.
     /// `NotInCall` without a call: the choice then applies to the next one.
-    pub fn set_sound_devices(
+    pub fn set_devices(
         &self,
         recording: Option<&str>,
         playout: Option<&str>,
+        camera: Option<&str>,
     ) -> Result<(), CallError> {
-        let choice = Some(SoundDevices {
+        let choice = Some(DeviceChoice {
             recording: recording.map(str::to_owned),
             playout: playout.map(str::to_owned),
+            camera: camera.map(str::to_owned),
         });
         // Read before the call slot is taken, so no lock waits on the other.
         let again = matches!(
@@ -2464,7 +2469,7 @@ struct Call {
     volume: watch::Sender<u8>,
     /// A device change during the call (ADR-0059). The controller sends;
     /// the task subscribes.
-    devices: watch::Sender<Option<SoundDevices>>,
+    devices: watch::Sender<Option<DeviceChoice>>,
     /// The level of each other member that is not silent (ADR-0059), at
     /// most [`MAX_CALL_MEMBERS`], with the worker participant it came from.
     levels: BTreeMap<CallParticipantLevelKey, LevelSample>,
@@ -2771,8 +2776,8 @@ fn spawn_device_test(inner: Arc<Inner>) -> std::io::Result<std::thread::JoinHand
 /// Replaces a kept device choice with a newer one that waits unread in
 /// `devices`, so a retry sends the newest choice only.
 fn take_newer_choice(
-    devices: &mut watch::Receiver<Option<SoundDevices>>,
-    pending: &mut Option<(Instant, SoundDevices)>,
+    devices: &mut watch::Receiver<Option<DeviceChoice>>,
+    pending: &mut Option<(Instant, DeviceChoice)>,
 ) {
     if devices.has_changed().unwrap_or(false)
         && let Some(choice) = devices.borrow_and_update().clone()
@@ -2786,8 +2791,8 @@ fn take_newer_choice(
 /// sound of a running call; with `again` (the last change failed) it is
 /// sent again.
 fn offer_devices(
-    devices: &watch::Sender<Option<SoundDevices>>,
-    choice: Option<SoundDevices>,
+    devices: &watch::Sender<Option<DeviceChoice>>,
+    choice: Option<DeviceChoice>,
     again: bool,
 ) {
     devices.send_if_modified(|current| {
@@ -3706,12 +3711,13 @@ impl Call {
     /// replaces it.
     fn apply_devices(
         &self,
-        pending: &mut Option<(Instant, SoundDevices)>,
+        pending: &mut Option<(Instant, DeviceChoice)>,
     ) -> Result<(), EndReason> {
         if let Some((_, choice)) = pending.take() {
             let message = ToWorker::SetDevices {
                 recording: choice.recording.clone(),
                 playout: choice.playout.clone(),
+                camera: choice.camera.clone(),
             };
             if !self.queue_worker(message)? {
                 *pending = Some((Instant::now() + UNSENT_RETRY, choice));
@@ -3871,7 +3877,7 @@ impl Call {
         diagnostics.mark_changed();
         let mut pending_diagnostics: Option<(Instant, bool)> = None;
         // The newest device choice while the worker's queue is full.
-        let mut pending_devices: Option<(Instant, SoundDevices)> = None;
+        let mut pending_devices: Option<(Instant, DeviceChoice)> = None;
         self.start_keys(inner).await?;
         // A video join on the portal path asks for the camera now (the join
         // sent `camera_on: false`).
@@ -5005,12 +5011,12 @@ mod tests {
     fn given_a_joining_call_when_devices_change_then_the_task_gets_the_choice() {
         let calls = controller(FakeHost::new(true, None));
         assert_eq!(
-            calls.set_sound_devices(Some("mic-1"), None),
+            calls.set_devices(Some("mic-1"), None, None),
             Err(CallError::NotInCall)
         );
         let guard = calls.claim(room_id!("!r:example.org")).unwrap();
         assert_eq!(
-            calls.set_sound_devices(Some("mic-1"), Some("spk-1")),
+            calls.set_devices(Some("mic-1"), Some("spk-1"), Some("cam-1")),
             Ok(())
         );
         // The call task subscribes after the worker connects, as `run` does.
@@ -5019,9 +5025,10 @@ mod tests {
         assert!(task.has_changed().unwrap(), "an earlier choice is sent");
         assert_eq!(
             *task.borrow_and_update(),
-            Some(SoundDevices {
+            Some(DeviceChoice {
                 recording: Some("mic-1".to_owned()),
                 playout: Some("spk-1".to_owned()),
+                camera: Some("cam-1".to_owned()),
             })
         );
     }
@@ -5038,7 +5045,7 @@ mod tests {
             Slot::Running(run) => run.devices.subscribe(),
             _ => unreachable!("the call runs"),
         };
-        let choose = || calls.set_sound_devices(Some("mic-1"), Some("spk-1"));
+        let choose = || calls.set_devices(Some("mic-1"), Some("spk-1"), None);
         assert_eq!(choose(), Ok(()));
         assert!(task.has_changed().unwrap());
         task.borrow_and_update();
@@ -5705,9 +5712,10 @@ mod tests {
         );
         let (call, mut to_worker) = (fixture.call, fixture.to_worker);
         let now = Instant::now();
-        let choice = SoundDevices {
+        let choice = DeviceChoice {
             recording: Some("mic-2".to_owned()),
             playout: None,
+            camera: Some("cam-2".to_owned()),
         };
         let mut pending = Some((now, choice.clone()));
 
@@ -5722,7 +5730,8 @@ mod tests {
         assert_eq!(pending, None);
         assert!(matches!(
             to_worker.try_recv(),
-            Ok(ToWorker::SetDevices { recording: Some(id), playout: None }) if id == "mic-2"
+            Ok(ToWorker::SetDevices { recording: Some(id), playout: None, camera: Some(cam) })
+                if id == "mic-2" && cam == "cam-2"
         ));
 
         let mut pending = Some((now, choice));
@@ -5738,11 +5747,12 @@ mod tests {
     /// before anything is sent; with no newer choice the kept one stays.
     #[test]
     fn given_a_newer_choice_when_a_retry_is_due_then_only_the_newer_is_sent() {
-        let sender = watch::channel(None::<SoundDevices>).0;
+        let sender = watch::channel(None::<DeviceChoice>).0;
         let mut devices = sender.subscribe();
-        let choice = |id: &str| SoundDevices {
+        let choice = |id: &str| DeviceChoice {
             recording: Some(id.to_owned()),
             playout: None,
+            camera: None,
         };
         let mut pending = Some((Instant::now(), choice("mic-1")));
         take_newer_choice(&mut devices, &mut pending);

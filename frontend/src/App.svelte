@@ -50,7 +50,7 @@
   import Icon from './Icon.svelte';
   import IconAction from './IconAction.svelte';
   import Menu, { type MenuItem } from './Menu.svelte';
-  import { mainMenuItems, roomMenuItems } from './menu.ts';
+  import { TRAY_UNAVAILABLE_TEXT, mainMenuItems, roomMenuItems } from './menu.ts';
   import MemberPanel from './MemberPanel.svelte';
   import {
     MEMBERS,
@@ -2713,7 +2713,8 @@
         health: () => (healthOpen = true),
         settings: () => openSettings('security'),
         lock: () => void toggleLock(),
-        tray: () => void minimiseToTray().catch(() => {}),
+        // A refusal keeps the windows shown; say why, so it is no lost click.
+        tray: () => void minimiseToTray().catch(() => (error = TRAY_UNAVAILABLE_TEXT)),
         exit: () => void exitApp().catch(() => {})
       }
     )

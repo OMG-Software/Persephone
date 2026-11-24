@@ -38,6 +38,8 @@ export type MenuCommand = {
 
 export const EXIT_LABEL = 'Exit Persephone';
 export const TRAY_LABEL = 'Minimise to tray';
+/** Shown when the system cannot show a tray icon, so the windows stay. */
+export const TRAY_UNAVAILABLE_TEXT = 'This system cannot show a tray icon, so the windows stay open.';
 
 /** What the main menu's commands do. */
 export type MainMenuActions = {

@@ -2886,11 +2886,14 @@ impl Core {
                 .and_then(|saved| saved.volume);
             calls::devices::save(stores, &selection).await
         }) {
-            // A running call moves to the new microphone and speaker at once
-            // (ADR-0059); without a call the choice waits for the next one.
-            let _ = self
-                .calls
-                .set_sound_devices(selection.recording.as_deref(), selection.playout.as_deref());
+            // A running call moves to the new microphone and speaker at once,
+            // and opens the new camera at its next camera start (ADR-0059);
+            // without a call the choice waits for the next one.
+            let _ = self.calls.set_devices(
+                selection.recording.as_deref(),
+                selection.playout.as_deref(),
+                selection.camera.as_deref(),
+            );
             Outcome::Ok(serde_json::Value::Null)
         } else {
             Outcome::Error(ErrorCode::Internal)

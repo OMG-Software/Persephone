@@ -332,12 +332,14 @@ pub enum ToWorker {
         test: DeviceTest,
         device: Option<String>,
     },
-    /// Move the running call to another microphone and speaker. `None` is
-    /// the system default. The worker answers with [`FromWorker::DevicesSet`]
-    /// and keeps the call either way.
+    /// Move the running call to another microphone and speaker, and choose
+    /// the camera for the next camera start (ADR-0059). `None` is the system
+    /// default. The worker answers with [`FromWorker::DevicesSet`], about the
+    /// microphone and speaker, and keeps the call either way.
     SetDevices {
         recording: Option<String>,
         playout: Option<String>,
+        camera: Option<String>,
     },
 }
 
@@ -437,8 +439,13 @@ impl std::fmt::Debug for ToWorker {
                 .field("test", test)
                 .field("device", device)
                 .finish(),
-            Self::SetDevices { recording, playout } => f
+            Self::SetDevices {
+                recording,
+                playout,
+                camera,
+            } => f
                 .debug_struct("SetDevices")
+                .field("camera", camera)
                 .field("recording", recording)
                 .field("playout", playout)
                 .finish(),
@@ -1059,10 +1066,15 @@ impl ToWorker {
                 out.push(*test as u8);
                 put_str(&mut out, device.as_deref().unwrap_or(""));
             }
-            Self::SetDevices { recording, playout } => {
+            Self::SetDevices {
+                recording,
+                playout,
+                camera,
+            } => {
                 out.push(TO_SET_DEVICES);
                 put_str(&mut out, recording.as_deref().unwrap_or(""));
                 put_str(&mut out, playout.as_deref().unwrap_or(""));
+                put_str(&mut out, camera.as_deref().unwrap_or(""));
             }
         }
         out
@@ -1181,6 +1193,7 @@ impl ToWorker {
             TO_SET_DEVICES => Self::SetDevices {
                 recording: reader.device_choice()?,
                 playout: reader.device_choice()?,
+                camera: reader.device_choice()?,
             },
             _ => return Err(DecodeError::UnknownTag),
         };
@@ -1870,10 +1883,12 @@ mod tests {
             ToWorker::SetDevices {
                 recording: Some("m".to_owned()),
                 playout: None,
+                camera: None,
             },
             ToWorker::SetDevices {
                 recording: None,
                 playout: Some("p".to_owned()),
+                camera: Some("usb#cam".to_owned()),
             },
         ]
     }

@@ -157,6 +157,7 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
 
     // A microphone or speaker chosen by sound server name is checked before
     // audio starts; libwebrtc then opens its default stream (ADR-0049).
+    let joined_sound = (recording_device.clone(), playout_device.clone());
     let paths = match sound_paths(recording_device.as_deref(), playout_device.as_deref()).await {
         Ok(paths) => paths,
         Err(code) => return fail(output, code).await,
@@ -249,6 +250,7 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
         own_sids,
         publication: &publication,
         camera_device,
+        joined_sound,
         camera: None,
         stalled: None,
         gate: CameraGate::new(own_index),
@@ -532,6 +534,18 @@ fn device_switch(
         return Err(FailureCode::Unsupported);
     }
     Ok((wanted != current).then(|| wanted.clone()))
+}
+
+/// Whether a `SetDevices` sound choice is no change where no device changes
+/// during a call (Linux, ADR-0049): the same choice as the join. Elsewhere
+/// every choice goes to `switch_devices`, which finds what changes and
+/// switches a lost device again.
+fn sound_unchanged_here(
+    joined: &(Option<String>, Option<String>),
+    recording: &Option<String>,
+    playout: &Option<String>,
+) -> bool {
+    cfg!(target_os = "linux") && joined.0 == *recording && joined.1 == *playout
 }
 
 /// Moves the running call to other devices (`SetDevices`, ADR-0059). Both
@@ -939,7 +953,13 @@ struct Call<'a> {
     publication: &'a LocalTrackPublication,
     /// The SIDs of every own track (microphone and camera).
     own_sids: Vec<TrackSid>,
+    /// The camera the next camera start opens: the join's choice, then the
+    /// newest `SetDevices` choice (ADR-0059).
     camera_device: Option<String>,
+    /// The microphone and speaker choice of the join. On Linux no device
+    /// changes during a call, so a `SetDevices` with this choice (a change of
+    /// the camera only) is no sound change there.
+    joined_sound: (Option<String>, Option<String>),
     camera: Option<LocalCamera>,
     /// A capture that did not end in time after a stop (a blocked read on a
     /// stalled camera). Its frames are already revoked. No new camera opens
@@ -2545,17 +2565,28 @@ impl Call<'_> {
                 share,
             } => Ok(self.screen_off(share).await),
             ToWorker::Subscribe { index, url, jwt } => self.begin_other(index, url, jwt),
-            // A device change that fails keeps the call on its devices.
-            ToWorker::SetDevices { recording, playout } => Ok(vec![FromWorker::DevicesSet {
-                failure: switch_devices(
-                    self.audio,
-                    &self.media_defaults,
-                    &mut self.sound_devices,
-                    recording.as_deref(),
-                    playout.as_deref(),
-                )
-                .err(),
-            }]),
+            // A camera choice applies from the next camera start. A sound
+            // change that fails keeps the call on the devices it can.
+            ToWorker::SetDevices {
+                recording,
+                playout,
+                camera,
+            } => {
+                self.camera_device = camera;
+                let failure = if sound_unchanged_here(&self.joined_sound, &recording, &playout) {
+                    None
+                } else {
+                    switch_devices(
+                        self.audio,
+                        &self.media_defaults,
+                        &mut self.sound_devices,
+                        recording.as_deref(),
+                        playout.as_deref(),
+                    )
+                    .err()
+                };
+                Ok(vec![FromWorker::DevicesSet { failure }])
+            }
             ToWorker::Join { .. }
             | ToWorker::ListDevices
             | ToWorker::TestDevice { .. }
@@ -3405,6 +3436,27 @@ mod tests {
             device_switch(&unresolved, &devices(Some("mic-2"), None)),
             Ok(Some(devices(Some("mic-2"), None)))
         );
+    }
+
+    /// GIVEN the join's sound choice WHEN `SetDevices` carries it again (a
+    /// camera change only) or another one THEN only on Linux, where no
+    /// device changes during a call, the same choice is no sound change;
+    /// elsewhere every choice goes to the switch.
+    #[test]
+    fn given_the_joined_sound_choice_then_only_linux_skips_the_switch() {
+        let joined = (Some("mic-1".to_owned()), None);
+        let same = sound_unchanged_here(&joined, &Some("mic-1".to_owned()), &None);
+        assert_eq!(same, cfg!(target_os = "linux"));
+        assert!(!sound_unchanged_here(
+            &joined,
+            &Some("mic-2".to_owned()),
+            &None
+        ));
+        assert!(!sound_unchanged_here(
+            &joined,
+            &Some("mic-1".to_owned()),
+            &Some("spk".to_owned())
+        ));
     }
 
     /// A sound device fake that keeps LiveKit 0.11's capture state: the
