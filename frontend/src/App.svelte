@@ -30,6 +30,7 @@
     VOLUME_SAVE_TEXT,
     type ShownRing
   } from './calls';
+  import { CALL_WINDOW_UNAVAILABLE_TEXT } from './callWindow';
   import RoomTools from './RoomTools.svelte';
   import ConnectionHealth from './ConnectionHealth.svelte';
   import { callCamera, callDeafen, callDeclineRing, callDevices, callScreen, openCallWindow, callJoin, callLeave, callMute, callReadiness, callRings, callStatus, callVolume, changeRoom, roomMembers, jumpToDate, eventContext, setPinned, setRoomPreference, startConversation } from './bridge';
@@ -813,7 +814,9 @@
   let callWindowFor = false;
   $effect(() => {
     const joined = inCall(callState);
-    if (joined && !callWindowFor) void openCallWindow().catch(() => {});
+    // A window that cannot open leaves the call here; say so, so no window
+    // is missed without a reason.
+    if (joined && !callWindowFor) void openCallWindow().catch(() => (error = CALL_WINDOW_UNAVAILABLE_TEXT));
     callWindowFor = joined;
   });
   let callJoinText = $state<string | null>(null);
@@ -3198,7 +3201,7 @@
           onscreen={toggleScreen}
           onleave={leaveCall}
           ondismiss={dismissCall}
-          onwindow={() => void openCallWindow().catch(() => {})}
+          onwindow={() => void openCallWindow().catch(() => (error = CALL_WINDOW_UNAVAILABLE_TEXT))}
         />
         {#if cameraText}
           <p class="call-notice camera-notice error" role="alert">

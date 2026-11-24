@@ -60,7 +60,10 @@
   // one's level meter and a mark when their microphone is off. It may call
   // only the call commands; it has no rooms, names or keys. User IDs are
   // untrusted text and show as plain text. The main window keeps its call bar.
-  let status = $state<CallStatus>(IDLE_CALL);
+  // `initialStatus` is what shows before the first status read; the page
+  // mounts with none, so it starts idle.
+  let { initialStatus = IDLE_CALL }: { initialStatus?: CallStatus } = $props();
+  let status = $state<CallStatus>(untrack(() => initialStatus));
   let ownLevel = $state(0);
   let levels = $state<ReadonlyMap<string, number>>(new Map());
   let ticks = $state(0);

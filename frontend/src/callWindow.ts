@@ -10,6 +10,8 @@ import { SCREEN_TILE } from './video.ts';
 export const ROSTER_LABEL = 'Participants';
 /** How long the window shows the end of a call before it closes itself. */
 export const CALL_WINDOW_CLOSE_MS = 4000;
+/** Shown in the main window when the call window cannot open. */
+export const CALL_WINDOW_UNAVAILABLE_TEXT = 'The call window could not open. The call goes on in this window.';
 
 export type CallCell = {
   // Unique in the grid.
