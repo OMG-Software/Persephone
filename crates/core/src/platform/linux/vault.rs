@@ -240,11 +240,14 @@ pub fn default_collection(
     }
 }
 
-/// The object paths in the `Collections` property's value; `None` when it
-/// is not a list of object paths, or has more than [`MAX_COLLECTIONS`].
+/// The object paths in the `Collections` property's value, also inside a
+/// variant; `None` when it is not a list of object paths, or has more than
+/// [`MAX_COLLECTIONS`].
 pub fn collection_paths(value: &Value<'_>) -> Option<Vec<OwnedObjectPath>> {
-    let Value::Array(array) = value else {
-        return None;
+    let array = match value {
+        Value::Value(inner) => return collection_paths(inner),
+        Value::Array(array) => array,
+        _ => return None,
     };
     if array.inner().len() > MAX_COLLECTIONS {
         return None;
@@ -1128,6 +1131,11 @@ mod tests {
             ])
         );
         assert_eq!(collection_paths(&paths(&[])), Some(vec![]));
+        assert_eq!(
+            collection_paths(&Value::Value(Box::new(paths(&[LOGIN])))),
+            Some(vec![OwnedObjectPath::try_from(LOGIN).unwrap()]),
+            "inside a variant"
+        );
         assert_eq!(collection_paths(&Value::from(vec!["login"])), None);
         assert_eq!(collection_paths(&Value::from(LOGIN)), None);
         let many = vec![LOGIN; MAX_COLLECTIONS + 1];
@@ -1273,7 +1281,8 @@ mod tests {
     /// WHEN a secret is stored and the user says no THEN it is asked once,
     /// nothing is created and the reason is "no default keyring"; WHEN the
     /// user says yes but the keyring cannot show its password prompt THEN
-    /// the reason is the same, and still no default keyring exists.
+    /// the reason is the same, and still no default keyring exists; and the
+    /// provider's real `Collections` reply is read.
     #[test]
     #[ignore = "needs a disposable Secret Service provider without a default keyring"]
     fn given_a_disposable_provider_without_a_default_then_it_stays_locked() {
@@ -1288,5 +1297,11 @@ mod tests {
         assert_eq!(asked(), 1);
         let connection = bus::at(&disposable_bus()).unwrap();
         assert_eq!(Provider(&connection).read_default(), Ok(None));
+        // The "yes" above ends as "no default keyring" whether or not the
+        // list was read, so the real provider's reply is checked directly.
+        assert!(
+            Provider(&connection).collections().is_ok(),
+            "the real `Collections` reply is read"
+        );
     }
 }

@@ -156,10 +156,10 @@ system". No text from the bus or the provider reaches the page.
 * A user can choose an empty password in the keyring's prompt. The keyring
   then keeps its items unencrypted on disk. Persephone cannot see or refuse
   that choice. A copy of the profile and keyring files can then recover the
-  store key. Only the profile passphrase of ADR-0050 stops this copy, and
-  that passphrase is off by default. Turning it on does not change the store
-  key, so an older copy of `store-key.v1` with such a keyring still recovers
-  it (ADR-0050).
+  store key. The profile passphrase of ADR-0050 stops only a copy made
+  while it is on, and it is off by default. It does not stop an older copy:
+  turning it on does not change the store key, so an older `store-key.v1`
+  with such a keyring still recovers the key (ADR-0050).
 * The question adds one more core window on Linux. It is not shown on the
   other platforms.
 * The lock does not reach a core from before this change, or a core that
