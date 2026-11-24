@@ -91,10 +91,10 @@ for the other yes-or-no questions.
   reads could choose the second. The lock is on the bus because the bus is
   what every core that reaches the provider shares: a file under each
   process's data directory would not join cores with different
-  environments. A core waits at most 5 seconds for the name. That is enough
-  for a creation without prompts. It is short because the core opens the
-  profile before any window shows, so a longer wait would hold a starting
-  core with no window. The core asks for the name on its own connection,
+  environments. A core waits about 5 seconds for the name (at most 6: one
+  last request can take 1 second). That is enough for a creation without
+  prompts. It is short because the core opens the profile before any window
+  shows, so a longer wait would hold a starting core with no window. The core asks for the name on its own connection,
   where each reply of the bus has at most 1 second, so a bus that does not
   answer cannot hold it much longer. If another core still holds the name,
   the profile stays locked with the reason "keyring busy", and Unlock can
