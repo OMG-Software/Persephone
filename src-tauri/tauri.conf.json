@@ -66,7 +66,10 @@
         "depends": ["libpipewire-0.3-0t64 | libpipewire-0.3-0"]
       },
       "rpm": {
-        "depends": ["libpipewire-0.3.so.0()(64bit)"]
+        "depends": [
+          "libpipewire-0.3.so.0()(64bit)",
+          "libayatana-appindicator3.so.1()(64bit)"
+        ]
       }
     },
     "macOS": {

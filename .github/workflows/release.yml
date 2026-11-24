@@ -654,11 +654,15 @@ jobs:
 
       # check.yml's WebKitGTK headers, plus what the AppImage bundler needs:
       # `file` for linuxdeploy and librsvg2 for the GTK image loaders it copies.
+      # With Tauri's `tray-icon` feature, the bundler finds the tray library with
+      # pkg-config: it copies it into the AppImage and adds it to the .deb's
+      # dependencies, and it panics if the library is missing. The build itself
+      # loads the library only at run time, so check.yml does not need it.
       # Tauri's .deb and .rpm writers are part of the CLI.
       - name: Install Tauri prerequisites
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev build-essential pkg-config file librsvg2-dev libpipewire-0.3-dev libclang-dev
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev build-essential pkg-config file librsvg2-dev libayatana-appindicator3-dev libpipewire-0.3-dev libclang-dev
 
       # Ubuntu 22.04's PipeWire 0.3.48 headers are older than the pipewire
       # crates need. The script unpacks hash-pinned PipeWire 1.0.5 headers and
