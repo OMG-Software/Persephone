@@ -11,7 +11,7 @@
 <script lang="ts">
   import { onDestroy, untrack } from 'svelte';
   import type { CallVideoTile } from '../../crates/contracts/generated/contracts';
-  import { OWN_TILE_LABEL, PARTICIPANT_TILE_LABEL, SCREEN_TILE_LABEL } from './calls';
+  import { OWN_TILE_LABEL, PARTICIPANT_TILE_LABEL, SCREEN_TILE_LABEL, deviceKey } from './calls';
   import PersonName from './PersonName.svelte';
   import { SCREEN_TILE, tileCanvas, tileLayout, type TileRef, type VideoPicture } from './video';
 
@@ -71,7 +71,7 @@
   $effect(() => {
     const next: TileRef[] = shown.map((tile) => ({
       tile: tile.tile,
-      key: tile.own ? 'own' : `${tile.participant?.userId}/${tile.participant?.deviceId}`,
+      key: tile.own ? 'own' : tile.participant ? deviceKey(tile.participant.userId, tile.participant.deviceId) : 'none',
       stream: tile.stream
     }));
     untrack(() => fetcher.setTiles(next));

@@ -20,7 +20,8 @@ use livekit::{
     prelude::{
         AudioProcessingOptions, LocalAudioTrack, LocalTrack, LocalTrackPublication,
         LocalVideoTrack, Participant, PlatformAudio, PlayoutDeviceId, RecordingDeviceId,
-        RemoteAudioTrack, RemoteTrack, RemoteTrackPublication, TrackKind, TrackSid, TrackSource,
+        RemoteAudioTrack, RemoteParticipant, RemoteTrack, RemoteTrackPublication, TrackKind,
+        TrackSid, TrackSource,
     },
     rtc_engine::EngineError,
     webrtc::{
@@ -199,8 +200,8 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
         return EXIT_FAILED;
     }
     let mut tracker = SpeakingTracker::default();
-    for identity in room.remote_participants().keys() {
-        let change = RoomChange::Joined(0, identity.to_string());
+    for (identity, participant) in room.remote_participants() {
+        let change = RoomChange::Joined(0, identity.to_string(), microphone_on(&participant));
         for message in apply(change, &mut tracker) {
             if output.send(message).await.is_err() {
                 let _ = room.close().await;
@@ -1986,18 +1987,21 @@ impl Call<'_> {
                         up: true,
                     })
                     .await?;
-                for identity in room
+                for (identity, participant) in room
                     .remote_participants()
-                    .keys()
+                    .into_iter()
                     .take(MAX_PARTICIPANTS)
-                    .map(ToString::to_string)
-                    .filter(|identity| valid_identity(identity))
+                    .map(|(identity, participant)| (identity.to_string(), participant))
+                    .filter(|(identity, _)| valid_identity(identity))
                 {
                     self.output
                         .send(FromWorker::ParticipantJoined {
                             connection: index,
-                            identity,
+                            identity: identity.clone(),
                         })
+                        .await?;
+                    // No microphone counts as muted (ADR-0059).
+                    self.send_muted(index, identity, !microphone_on(&participant))
                         .await?;
                 }
                 events.insert(index, receiver);
@@ -3120,12 +3124,25 @@ fn describe_room_event_text(event: &RoomEvent) -> Option<(u8, String)> {
     })
 }
 
+/// Whether a remote participant has a microphone that is not muted. A
+/// participant that publishes none (listening only, or sharing a screen
+/// only) does not.
+fn microphone_on(participant: &RemoteParticipant) -> bool {
+    participant
+        .track_publications()
+        .values()
+        .any(|publication| {
+            publication.source() == TrackSource::Microphone && !publication.is_muted()
+        })
+}
+
 /// Reduces a room event to what the core is told. Everything else is dropped.
 fn room_change(connection: u8, event: &RoomEvent) -> Option<RoomChange> {
     match event {
         RoomEvent::ParticipantConnected(participant) => Some(RoomChange::Joined(
             connection,
             participant.identity().to_string(),
+            microphone_on(participant),
         )),
         RoomEvent::ParticipantDisconnected(participant) => Some(RoomChange::Left(
             connection,

@@ -186,7 +186,7 @@
   $effect(() => {
     const next: TileRef[] = status.video.map((tile) => ({
       tile: tile.tile,
-      key: tile.own ? 'own' : `${tile.participant?.userId}/${tile.participant?.deviceId}`,
+      key: tile.own ? 'own' : tile.participant ? deviceKey(tile.participant.userId, tile.participant.deviceId) : 'none',
       stream: tile.stream
     }));
     untrack(() => fetcher.setTiles(next));

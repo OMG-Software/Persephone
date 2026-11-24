@@ -154,7 +154,10 @@ pub fn sound_path(
 /// What the worker saw in the room, reduced to what it reports.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RoomChange {
-    Joined(u8, String),
+    /// A participant joined; `true` when it has a microphone that is not
+    /// muted. No microphone counts as muted (ADR-0059): later microphone
+    /// track events keep the mark current.
+    Joined(u8, String, bool),
     Left(u8, String),
     /// The complete set of current speakers of one connection.
     Speakers(u8, Vec<String>),
@@ -248,11 +251,18 @@ impl SpeakingTracker {
 /// [`valid_identity`] are ignored.
 pub fn apply(change: RoomChange, tracker: &mut SpeakingTracker) -> Vec<FromWorker> {
     match change {
-        RoomChange::Joined(connection, identity) if valid_identity(&identity) => {
-            vec![FromWorker::ParticipantJoined {
-                connection,
-                identity,
-            }]
+        RoomChange::Joined(connection, identity, microphone) if valid_identity(&identity) => {
+            vec![
+                FromWorker::ParticipantJoined {
+                    connection,
+                    identity: identity.clone(),
+                },
+                FromWorker::ParticipantMuted {
+                    connection,
+                    identity,
+                    muted: !microphone,
+                },
+            ]
         }
         RoomChange::Left(connection, identity) if valid_identity(&identity) => {
             tracker.forget(connection, &identity);
@@ -897,13 +907,32 @@ mod tests {
         let mut tracker = SpeakingTracker::default();
         assert_eq!(
             apply(
-                RoomChange::Joined(0, "@a:example.org:D".into()),
+                RoomChange::Joined(0, "@a:example.org:D".into(), true),
                 &mut tracker
             ),
-            vec![FromWorker::ParticipantJoined {
+            vec![
+                FromWorker::ParticipantJoined {
+                    connection: 0,
+                    identity: "@a:example.org:D".into()
+                },
+                FromWorker::ParticipantMuted {
+                    connection: 0,
+                    identity: "@a:example.org:D".into(),
+                    muted: false
+                }
+            ]
+        );
+        // A participant with no microphone, or a muted one, shows as muted.
+        assert_eq!(
+            apply(
+                RoomChange::Joined(0, "@b:example.org:D".into(), false),
+                &mut tracker
+            )[1],
+            FromWorker::ParticipantMuted {
                 connection: 0,
-                identity: "@a:example.org:D".into()
-            }]
+                identity: "@b:example.org:D".into(),
+                muted: true
+            }
         );
         assert_eq!(
             apply(RoomChange::Left(0, "@a:example.org:D".into()), &mut tracker),
@@ -912,7 +941,13 @@ mod tests {
                 identity: "@a:example.org:D".into()
             }]
         );
-        assert!(apply(RoomChange::Joined(0, "bad\u{7}".into()), &mut tracker).is_empty());
+        assert!(
+            apply(
+                RoomChange::Joined(0, "bad\u{7}".into(), false),
+                &mut tracker
+            )
+            .is_empty()
+        );
     }
 
     #[test]
@@ -922,13 +957,20 @@ mod tests {
         let mut tracker = SpeakingTracker::default();
         assert_eq!(
             apply(
-                RoomChange::Joined(2, "@c:other.example:D".into()),
+                RoomChange::Joined(2, "@c:other.example:D".into(), true),
                 &mut tracker
             ),
-            vec![FromWorker::ParticipantJoined {
-                connection: 2,
-                identity: "@c:other.example:D".into()
-            }]
+            vec![
+                FromWorker::ParticipantJoined {
+                    connection: 2,
+                    identity: "@c:other.example:D".into()
+                },
+                FromWorker::ParticipantMuted {
+                    connection: 2,
+                    identity: "@c:other.example:D".into(),
+                    muted: false
+                }
+            ]
         );
         assert_eq!(
             apply(
