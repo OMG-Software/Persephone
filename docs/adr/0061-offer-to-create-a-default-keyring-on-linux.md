@@ -64,19 +64,30 @@ create one, and that the keyring will then ask for a new password in its own
 window. "No" is the default button, and closing the window answers "No", as
 for the other yes-or-no questions.
 
-* **Yes:** the core calls `CreateCollection` with the label "Login" and the
-  alias `default`. It completes the provider's `Prompt` object with the same
-  handling as the unlock prompt of ADR-0010, dismissed after 5 minutes without
-  an answer. It keeps the path of the new collection (from the method's
-  reply, or from the prompt's result when the provider prompts) and then
-  reads the alias again. The new collection is used only if the provider
-  now names it `default`, and the item is then created as before.
+* **Yes:** the question can stay open for minutes, so the core first reads
+  the alias again. If another program made a default meanwhile, the core
+  uses it as on any start (ADR-0010) and does not call `CreateCollection`:
+  for an alias that already exists, the provider returns that collection
+  and may set the new label on it, which would rename the user's keyring.
+  Otherwise the core reads the provider's list of collections, then calls
+  `CreateCollection` with the label "Login" and the alias `default`. It
+  completes the provider's `Prompt` object with the same handling as the
+  unlock prompt of ADR-0010, dismissed after 5 minutes without an answer.
+  It takes the path that the provider gives back (from the method's reply,
+  or from the prompt's result when the provider prompts). This attempt
+  created that collection only if the path was not in the list from just
+  before. The core uses it only then, and only if the provider now names
+  it `default`. The item is then created as before.
 * **No, a closed window, a dismissed or unanswered keyring prompt, a
   provider that refuses `CreateCollection` (some KWallet and KeePassXC
   setups), a provider that does not make the new collection the default,
-  or an alias that names another collection by then (another program
-  changed it):** the profile stays locked with the reason "no default
-  keyring".
+  a path that was already in the list (a default made in the moment
+  between the second alias read and the creation), or an alias that names
+  another collection by then (another program changed it):** the profile
+  stays locked with the reason "no default keyring". In the second-to-last
+  case, a provider that follows the specification may already have set the
+  label "Login" on that collection; the window for this is the time between
+  two bus calls.
 * Persephone asks at most once in each open attempt. "Unlock" on the page is
   a new attempt and can ask again.
 * Persephone never calls `SetAlias`, so it never changes which of the user's
@@ -144,8 +155,9 @@ system". No text from the bus or the provider reaches the page.
   login, when Persephone opens the profile.
 * A user can choose an empty password in the keyring's prompt. The keyring
   then keeps its items unencrypted on disk. Persephone cannot see or refuse
-  that choice. The passphrase of ADR-0050 is then the only layer that a copy
-  of the files does not bypass.
+  that choice. A copy of the profile and keyring files can then recover the
+  store key. Only the profile passphrase of ADR-0050 stops this copy, and
+  that passphrase is off by default.
 * The question adds one more core window on Linux. It is not shown on the
   other platforms.
 * The lock does not reach a core from before this change, or a core that

@@ -77,6 +77,8 @@ pub const ENCODED_BYTES: usize = 2 * SECRET_BYTES;
 pub const PROMPT_TIMEOUT: Duration = Duration::from_secs(300);
 /// Most matching items accepted in one search; more is refused.
 const MAX_ITEMS: usize = 64;
+/// Most collections accepted in the provider's list; more is refused.
+const MAX_COLLECTIONS: usize = 256;
 /// The session-bus name a core owns while it may create the item.
 pub const CREATION_NAME: &str = "io.github.omg_software.persephone.StoreKeyWrapCreation";
 /// Longest wait for another core that owns [`CREATION_NAME`]: long enough
@@ -198,16 +200,24 @@ pub fn creation_error(error: VaultError) -> VaultError {
 pub trait Keyrings {
     /// The collection the `default` alias names, `None` for none.
     fn read_default(&self) -> Result<Option<OwnedObjectPath>, VaultError>;
+    /// Every collection the provider has now.
+    fn collections(&self) -> Result<Vec<OwnedObjectPath>, VaultError>;
     /// Asks the provider to create a collection with the `default` alias,
-    /// waits for its prompt, if any, and returns the collection it made.
+    /// waits for its prompt, if any, and returns the collection it gives
+    /// back.
     fn create_default(&self) -> Result<OwnedObjectPath, VaultError>;
 }
 
 /// The default collection. When there is none, asks once with `ask`, and
-/// only after a yes has the provider create one; afterwards the created
-/// collection is used only if the provider now names it `default`. Another
-/// collection under the alias (another client changed it meanwhile) is not
-/// used (ADR-0061).
+/// only after a yes has the provider create one (ADR-0061).
+///
+/// The question can stay open for minutes. A default that another program
+/// made meanwhile is used as at the start, without `CreateCollection`: for
+/// an alias that exists, the provider returns that collection and may set
+/// the new label on it. Otherwise the collection that `CreateCollection`
+/// gives back is used only if it was not in the provider's list just
+/// before (so this attempt created it) and the `default` alias now names
+/// it. Anything else is "no default keyring".
 pub fn default_collection(
     keyrings: &impl Keyrings,
     ask: Ask,
@@ -216,11 +226,37 @@ pub fn default_collection(
         return Ok(collection);
     }
     creation_allowed(ask())?;
+    if let Some(collection) = keyrings.read_default()? {
+        return Ok(collection);
+    }
+    let before = keyrings.collections().map_err(creation_error)?;
     let created = keyrings.create_default().map_err(creation_error)?;
+    if before.contains(&created) {
+        return Err(VaultError::Missing(Missing::DefaultKeyring));
+    }
     match keyrings.read_default()? {
         Some(collection) if collection == created => Ok(collection),
         _ => Err(VaultError::Missing(Missing::DefaultKeyring)),
     }
+}
+
+/// The object paths in the `Collections` property's value; `None` when it
+/// is not a list of object paths, or has more than [`MAX_COLLECTIONS`].
+pub fn collection_paths(value: &Value<'_>) -> Option<Vec<OwnedObjectPath>> {
+    let Value::Array(array) = value else {
+        return None;
+    };
+    if array.inner().len() > MAX_COLLECTIONS {
+        return None;
+    }
+    array
+        .inner()
+        .iter()
+        .map(|path| match path {
+            Value::ObjectPath(path) => Some(path.clone().into()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// The collection that `CreateCollection` made: the path in its reply or,
@@ -543,6 +579,18 @@ impl Keyrings for Provider<'_> {
         Ok((collection.as_str() != NONE).then_some(collection))
     }
 
+    fn collections(&self) -> Result<Vec<OwnedObjectPath>, VaultError> {
+        let reply = call(
+            self.0,
+            SERVICE_PATH,
+            "org.freedesktop.DBus.Properties",
+            "Get",
+            &(SERVICE_INTERFACE, "Collections"),
+        )?;
+        let value: OwnedValue = reply.body().deserialize().map_err(|_| VaultError::Failed)?;
+        collection_paths(&value).ok_or(VaultError::Failed)
+    }
+
     /// `CreateCollection` with the label [`NEW_KEYRING_LABEL`] and the
     /// `default` alias. The provider asks for the keyring's password in its
     /// own prompt; Persephone neither sees nor sets it.
@@ -781,6 +829,9 @@ mod tests {
     /// creation, what `CreateCollection` does, and what was called.
     struct Fake {
         before: Result<Option<&'static str>, VaultError>,
+        /// The alias after the question, before any creation.
+        during: Option<&'static str>,
+        existing: Vec<&'static str>,
         create: Result<&'static str, VaultError>,
         after: Option<&'static str>,
         calls: std::cell::RefCell<Vec<&'static str>>,
@@ -790,6 +841,8 @@ mod tests {
         fn new(before: Option<&'static str>) -> Self {
             Self {
                 before: Ok(before),
+                during: before,
+                existing: vec![OTHER],
                 create: Ok(LOGIN),
                 after: Some(LOGIN),
                 calls: std::cell::RefCell::default(),
@@ -803,9 +856,12 @@ mod tests {
     impl Keyrings for Fake {
         fn read_default(&self) -> Result<Option<OwnedObjectPath>, VaultError> {
             let created = self.calls.borrow().contains(&"create");
+            let read_before = self.calls.borrow().contains(&"read");
             self.calls.borrow_mut().push("read");
             let path = if created {
                 self.after
+            } else if read_before {
+                self.during
             } else {
                 match &self.before {
                     Ok(path) => *path,
@@ -816,6 +872,15 @@ mod tests {
                 }
             };
             Ok(path.map(|path| OwnedObjectPath::try_from(path).unwrap()))
+        }
+
+        fn collections(&self) -> Result<Vec<OwnedObjectPath>, VaultError> {
+            self.calls.borrow_mut().push("list");
+            Ok(self
+                .existing
+                .iter()
+                .map(|path| OwnedObjectPath::try_from(*path).unwrap())
+                .collect())
         }
 
         fn create_default(&self) -> Result<OwnedObjectPath, VaultError> {
@@ -883,7 +948,10 @@ mod tests {
         let fake = Fake::new(None);
         assert_eq!(default_collection(&fake, yes).unwrap().as_str(), LOGIN);
         assert_eq!(asked(), 1);
-        assert_eq!(*fake.calls.borrow(), ["read", "create", "read"]);
+        assert_eq!(
+            *fake.calls.borrow(),
+            ["read", "read", "list", "create", "read"]
+        );
     }
 
     /// GIVEN no default collection WHEN the user says no, closes the window,
@@ -932,7 +1000,7 @@ mod tests {
                 Some(VaultError::Missing(reason))
             );
             assert_eq!(asked(), 1);
-            assert_eq!(*fake.calls.borrow(), ["read", "create"]);
+            assert_eq!(*fake.calls.borrow(), ["read", "read", "list", "create"]);
         }
     }
 
@@ -951,7 +1019,10 @@ mod tests {
             Some(VaultError::Missing(Missing::DefaultKeyring))
         );
         assert_eq!(asked(), 1);
-        assert_eq!(*fake.calls.borrow(), ["read", "create", "read"]);
+        assert_eq!(
+            *fake.calls.borrow(),
+            ["read", "read", "list", "create", "read"]
+        );
     }
 
     /// GIVEN a yes WHEN the provider creates a collection but the `default`
@@ -969,7 +1040,10 @@ mod tests {
             Some(VaultError::Missing(Missing::DefaultKeyring))
         );
         assert_eq!(asked(), 1);
-        assert_eq!(*fake.calls.borrow(), ["read", "create", "read"]);
+        assert_eq!(
+            *fake.calls.borrow(),
+            ["read", "read", "list", "create", "read"]
+        );
     }
 
     /// GIVEN `CreateCollection`'s reply and prompt result THEN the created
@@ -997,6 +1071,67 @@ mod tests {
         for prompted in [None, Some(object(NONE)), Some(Value::from("login"))] {
             assert_eq!(created_collection(path(NONE), prompted.as_ref()), None);
         }
+    }
+
+    /// GIVEN a yes WHEN another program made a default while the question
+    /// was open THEN that default is used, and nothing is created or
+    /// relabelled.
+    #[test]
+    fn given_a_default_made_during_the_question_then_it_is_used_without_creating() {
+        asked();
+        let fake = Fake {
+            during: Some(OTHER),
+            ..Fake::new(None)
+        };
+        assert_eq!(default_collection(&fake, yes).unwrap().as_str(), OTHER);
+        assert_eq!(asked(), 1);
+        assert_eq!(*fake.calls.borrow(), ["read", "read"]);
+    }
+
+    /// GIVEN a yes WHEN `CreateCollection` gives back a collection that
+    /// existed before (a default made in the last moment) THEN it is not
+    /// used, also when the alias names it, and the reason is "no default
+    /// keyring".
+    #[test]
+    fn given_an_existing_collection_from_creation_then_it_is_not_used() {
+        asked();
+        let fake = Fake {
+            create: Ok(OTHER),
+            after: Some(OTHER),
+            ..Fake::new(None)
+        };
+        assert_eq!(
+            default_collection(&fake, yes).err(),
+            Some(VaultError::Missing(Missing::DefaultKeyring))
+        );
+        assert_eq!(*fake.calls.borrow(), ["read", "read", "list", "create"]);
+    }
+
+    /// GIVEN the `Collections` property THEN its object paths are read; a
+    /// value that is not a list of object paths, or one over the limit, is
+    /// refused.
+    #[test]
+    fn given_collection_lists_then_only_bounded_paths_are_read() {
+        let paths = |paths: &[&'static str]| {
+            Value::from(
+                paths
+                    .iter()
+                    .map(|path| zbus::zvariant::ObjectPath::try_from(*path).unwrap())
+                    .collect::<Vec<_>>(),
+            )
+        };
+        assert_eq!(
+            collection_paths(&paths(&[LOGIN, OTHER])),
+            Some(vec![
+                OwnedObjectPath::try_from(LOGIN).unwrap(),
+                OwnedObjectPath::try_from(OTHER).unwrap()
+            ])
+        );
+        assert_eq!(collection_paths(&paths(&[])), Some(vec![]));
+        assert_eq!(collection_paths(&Value::from(vec!["login"])), None);
+        assert_eq!(collection_paths(&Value::from(LOGIN)), None);
+        let many = vec![LOGIN; MAX_COLLECTIONS + 1];
+        assert_eq!(collection_paths(&paths(&many)), None);
     }
 
     /// GIVEN `ReadAlias` that fails or finds no provider THEN that error
