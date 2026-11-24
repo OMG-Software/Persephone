@@ -1080,6 +1080,10 @@ struct Joining {
     flags: Arc<Flags>,
     /// The worker, once it runs, so the end of the session can kill it.
     kill: Arc<Mutex<Option<Arc<dyn WorkerProcess>>>>,
+    /// A microphone and speaker choice made while the call joins
+    /// (ADR-0059). The call task gets the same channel and sends the
+    /// newest choice once the worker is connected.
+    devices: watch::Sender<Option<SoundDevices>>,
 }
 
 struct RunHandle {
@@ -1293,6 +1297,7 @@ struct JoinGuard {
     room_id: OwnedRoomId,
     flags: Arc<Flags>,
     kill: Arc<Mutex<Option<Arc<dyn WorkerProcess>>>>,
+    devices: watch::Sender<Option<SoundDevices>>,
     armed: bool,
 }
 
@@ -1412,17 +1417,22 @@ impl CallController {
         } else {
             None
         };
+        // A refusal is the reply only. It is not the test's status, so it
+        // does not stay after the call ends, and nothing that runs stops.
+        if let Some(state) = refused {
+            return CallDeviceTestStatus {
+                test: Some(test),
+                state,
+                stream: 0,
+            };
+        }
         slot.stop.store(true, Ordering::SeqCst);
         slot.generation += 1;
         slot.status = CallDeviceTestStatus {
             test: Some(test),
-            state: refused.unwrap_or(CallDeviceTestState::Starting),
+            state: CallDeviceTestState::Starting,
             stream: 0,
         };
-        let status = slot.status.clone();
-        if refused.is_some() {
-            return status;
-        }
         let stop = Arc::new(AtomicBool::new(false));
         slot.stop = stop.clone();
         let previous = slot.thread.take();
@@ -1494,11 +1504,13 @@ impl CallController {
         let id = self.inner.next_id.fetch_add(1, Ordering::SeqCst) + 1;
         let flags = Arc::new(Flags::default());
         let kill = Arc::new(Mutex::new(None));
+        let devices = watch::channel(None).0;
         *slot = Slot::Joining(Joining {
             id,
             room_id: room_id.to_owned(),
             flags: flags.clone(),
             kill: kill.clone(),
+            devices: devices.clone(),
         });
         drop(slot);
         // The call needs the devices: a device test ends.
@@ -1512,6 +1524,7 @@ impl CallController {
             room_id: room_id.to_owned(),
             flags,
             kill,
+            devices,
             armed: true,
         })
     }
@@ -1549,7 +1562,7 @@ impl CallController {
         };
         let mut setup = Setup::new(client.clone(), guard.flags.clone(), proxy);
         let prepared = self
-            .prepare(&scope, client, room_id, &access, &mut setup, &guard.kill)
+            .prepare(&scope, client, room_id, &access, &mut setup, &guard)
             .await;
         let call = match prepared {
             Ok(call) => call,
@@ -1615,7 +1628,8 @@ impl CallController {
         room_id: &RoomId,
         access: &Access,
         setup: &mut Setup,
-        kill: &Mutex<Option<Arc<dyn WorkerProcess>>>,
+        // The join's worker slot and device channel.
+        guard: &JoinGuard,
     ) -> Result<Call, CallError> {
         let flags = &access.flags;
         flags.halt()?;
@@ -1649,7 +1663,7 @@ impl CallController {
             scope.devices.playout.as_deref(),
         );
         let link = start_worker(&self.inner.host, audio).await?;
-        *plain(kill) = Some(link.kill_handle());
+        *plain(&guard.kill) = Some(link.kill_handle());
         // Pictures go to the store from now on; the store ends with the call.
         let store = link.video();
         if let Some(notifier) = plain(&self.inner.video_listener).clone() {
@@ -1848,7 +1862,7 @@ impl CallController {
             camera_wanted: Arc::new(AtomicBool::new(scope.video)),
             audio: AudioWants::default(),
             volume: watch::channel(scope.devices.volume()).0,
-            devices: watch::channel(None).0,
+            devices: guard.devices.clone(),
             levels: BTreeMap::new(),
             portal: None,
             portal_capture: false,
@@ -1937,24 +1951,29 @@ impl CallController {
         }
     }
 
-    /// Moves the running call to another microphone and speaker (ADR-0059).
-    /// Only the newest choice is sent; the worker's answer shows as the
-    /// state's `device_change`. `NotInCall` without a call: the choice then
-    /// applies to the next one.
+    /// Moves the running or joining call to another microphone and speaker
+    /// (ADR-0059). Only the newest choice is sent, once the worker is
+    /// connected; the worker's answer shows as the state's `device_change`.
+    /// `NotInCall` without a call: the choice then applies to the next one.
     pub fn set_sound_devices(
         &self,
         recording: Option<&str>,
         playout: Option<&str>,
     ) -> Result<(), CallError> {
+        let choice = Some(SoundDevices {
+            recording: recording.map(str::to_owned),
+            playout: playout.map(str::to_owned),
+        });
         match &*self.inner.slot() {
             Slot::Running(run) => {
-                run.devices.send_replace(Some(SoundDevices {
-                    recording: recording.map(str::to_owned),
-                    playout: playout.map(str::to_owned),
-                }));
+                run.devices.send_replace(choice);
                 Ok(())
             }
-            _ => Err(CallError::NotInCall),
+            Slot::Joining(join) => {
+                join.devices.send_replace(choice);
+                Ok(())
+            }
+            Slot::Idle => Err(CallError::NotInCall),
         }
     }
 
@@ -3677,8 +3696,10 @@ impl Call {
         // there was none, the worker gets the Join's volume again.
         let mut volume = self.volume.subscribe();
         volume.mark_changed();
-        // A device choice made since the join; the join used the saved one.
+        // A device choice made since the join started; the join used the
+        // saved one. A choice made before this point is sent at once.
         let mut devices = self.devices.subscribe();
+        devices.mark_changed();
         // The diagnostic log's switch, sent at once and on each change.
         let mut diagnostics = crate::diagnostics::global().watch();
         diagnostics.mark_changed();
@@ -4794,6 +4815,50 @@ mod tests {
         };
         let watched = run.volume.subscribe();
         assert_eq!(*watched.borrow(), 70, "only the newest value is kept");
+    }
+
+    /// GIVEN a call that is still joining WHEN the microphone and speaker
+    /// change THEN the choice waits on the join's channel, and a task that
+    /// subscribes later still sees it; WHEN no call runs THEN it is
+    /// `NotInCall` and applies to the next call.
+    #[test]
+    fn given_a_joining_call_when_devices_change_then_the_task_gets_the_choice() {
+        let calls = controller(FakeHost::new(true, None));
+        assert_eq!(
+            calls.set_sound_devices(Some("mic-1"), None),
+            Err(CallError::NotInCall)
+        );
+        let guard = calls.claim(room_id!("!r:example.org")).unwrap();
+        assert_eq!(
+            calls.set_sound_devices(Some("mic-1"), Some("spk-1")),
+            Ok(())
+        );
+        // The call task subscribes after the worker connects, as `run` does.
+        let mut task = guard.devices.subscribe();
+        task.mark_changed();
+        assert!(task.has_changed().unwrap(), "an earlier choice is sent");
+        assert_eq!(
+            *task.borrow_and_update(),
+            Some(SoundDevices {
+                recording: Some("mic-1".to_owned()),
+                playout: Some("spk-1".to_owned()),
+            })
+        );
+    }
+
+    /// GIVEN a call that runs WHEN a device test is asked for THEN the reply
+    /// is `in_call`, and the test's status stays as it was, so the refusal
+    /// does not stay after the call ends.
+    #[test]
+    fn given_a_running_call_when_a_device_test_is_asked_then_the_refusal_is_not_kept() {
+        let calls = controller(FakeHost::new(true, None));
+        let (_store, _commands, _killed) = running_call(&calls, active_state());
+        let reply = calls.start_device_test(CallDeviceTestKind::Microphone, None);
+        assert_eq!(reply.state, CallDeviceTestState::InCall);
+        assert_eq!(reply.test, Some(CallDeviceTestKind::Microphone));
+        let kept = calls.device_test_status();
+        assert_eq!(kept.state, CallDeviceTestState::Idle);
+        assert_eq!(kept.test, None);
     }
 
     /// GIVEN a running call whose command queue is full

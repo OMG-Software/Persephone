@@ -291,7 +291,7 @@
             </div>
           </li>
         {/if}
-        {#each status.participants as person (person.userId + '/' + person.deviceId)}
+        {#each status.participants as person (deviceKey(person.userId, person.deviceId))}
           {@const level = levels.get(deviceKey(person.userId, person.deviceId)) ?? 0}
           <li>
             <span class="call-roster-name"><PersonName userId={person.userId} /></span>

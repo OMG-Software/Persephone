@@ -143,7 +143,7 @@
             <Icon name="screen" />
             {screen.label}
           </button>
-          <button type="button" class="secondary call-window" onclick={onwindow}>
+          <button type="button" class="secondary call-window-open" onclick={onwindow}>
             <Icon name="video" />
             Call window
           </button>

@@ -3567,6 +3567,14 @@ mark {
   margin: 0;
 }
 
+/* Opens the call window (ADR-0060). Not `.call-window`: that is the call
+   window page's root. */
+.call-window-open {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 /* The shared screen is wider than a camera tile, so text on it can be read. */
 .video-tile.screen {
   grid-column: span 2;
