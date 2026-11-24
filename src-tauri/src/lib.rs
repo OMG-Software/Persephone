@@ -43,13 +43,14 @@ pub mod launcher;
 
 use core_link::{Band, CoreError, CoreLink, Video};
 use persephone_contracts::{
-    AccountChange, AccountSettings, AccountStatus, AppStatus, CallDevices, CallReadiness,
-    CallRings, CallStatus, ContactStatus, ConversationStart, DeviceList, DiagnosticsStatus,
-    DisplayName, HomeserverFound, ImagePick, ImageView, InviteList, JoinedRoom, NewSessions,
-    NotificationLevel, NotificationSettings, PendingMessage, ProfileList, ProxySetting,
-    PublicRoomPage, RoomActivity, RoomChange, RoomCreation, RoomIdentityChanges, RoomInvite,
-    RoomList, RoomMembers, RoomPicture, RoomReaders, RoomServers, RoomSettings, SecurityStatus,
-    StoreState, ThreePidList, ThreePidMedium, TimelinePage, UserSearch,
+    AccountChange, AccountSettings, AccountStatus, AppStatus, CallDeviceTestKind,
+    CallDeviceTestStatus, CallDevices, CallParticipantLevel, CallReadiness, CallRings, CallStatus,
+    ContactStatus, ConversationStart, DeviceList, DiagnosticsStatus, DisplayName, HomeserverFound,
+    ImagePick, ImageView, InviteList, JoinedRoom, NewSessions, NotificationLevel,
+    NotificationSettings, PendingMessage, ProfileList, ProxySetting, PublicRoomPage, RoomActivity,
+    RoomChange, RoomCreation, RoomIdentityChanges, RoomInvite, RoomList, RoomMembers, RoomPicture,
+    RoomReaders, RoomServers, RoomSettings, SecurityStatus, StoreState, ThreePidList,
+    ThreePidMedium, TimelinePage, UserSearch,
 };
 use persephone_core_protocol::{
     CALL_VIDEO_TILES, COUNTRY_CODE_BYTES, Call, DiagnosticRecord, ErrorCode, Event,
@@ -61,7 +62,7 @@ use persephone_core_protocol::{
     MAX_PHONE_NUMBER_BYTES, MAX_PROFILES, MAX_PROXY_BYTES, MAX_REACTION_KEY_BYTES,
     MAX_ROOM_ID_BYTES, MAX_ROOM_NAME_BYTES, MAX_SEARCH_TERM_BYTES, MAX_SERVER_NAME_BYTES,
     MAX_THREE_PID_ADDRESS_BYTES, MAX_USER_ID_BYTES, MAX_USERNAME_BYTES, RecordSource,
-    call_video_within_limits, room_change_within_limits,
+    call_video_within_limits, levels_within_limits, room_change_within_limits,
 };
 use serde::de::DeserializeOwned;
 use std::{
@@ -72,13 +73,16 @@ use std::{
     },
 };
 use tauri::{
-    AppHandle, Manager, Runtime, State, Url, WebviewUrl, WebviewWindowBuilder,
+    AppHandle, Manager, Runtime, State, Url, Webview, WebviewUrl, WebviewWindowBuilder,
     ipc::{Channel, InvokeBody, Response},
     webview::{NewWindowResponse, PageLoadEvent},
 };
 
 /// The label the `main` capability is bound to.
 pub const MAIN_WINDOW: &str = "main";
+
+/// The label the `call` capability is bound to: the call window (ADR-0060).
+pub const CALL_WINDOW: &str = "call";
 
 /// Argument the core passes when it starts the UI.
 pub const STARTED_BY_CORE: &str = "--started-by-core";
@@ -373,13 +377,19 @@ struct Toasts {
 /// channel is kept only after the core accepted the room, so this map is
 /// bounded the same way. Desktop notifications go to the toaster, never to
 /// a page channel.
+///
+/// Each window (`main` and `call`, ADR-0060) has its own session, sound
+/// level and level channels, under its label. Only the app's own windows
+/// exist, so these maps hold at most two entries.
 #[derive(Default)]
 pub struct Subscriptions {
     channels: Mutex<HashMap<String, Channel<()>>>,
-    session: Mutex<Option<Channel<&'static str>>>,
-    /// The page's channel for the call's sound level meter (ADR-0055): a
-    /// number from 0 to `MAX_CALL_SOUND_LEVEL`, nothing else.
-    sound_level: Mutex<Option<Channel<u8>>>,
+    session: Mutex<HashMap<String, Channel<&'static str>>>,
+    /// Each page's channel for the call's own sound level meter (ADR-0055):
+    /// a number from 0 to `MAX_CALL_SOUND_LEVEL`, nothing else.
+    sound_level: Mutex<HashMap<String, Channel<u8>>>,
+    /// Each page's channel for the other devices' levels (ADR-0059).
+    levels: Mutex<HashMap<String, Channel<Vec<CallParticipantLevel>>>>,
     toasts: Mutex<Toasts>,
     capture: Arc<capture::CaptureState>,
 }
@@ -391,16 +401,41 @@ impl Subscriptions {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn session(&self) -> MutexGuard<'_, Option<Channel<&'static str>>> {
+    fn session(&self) -> MutexGuard<'_, HashMap<String, Channel<&'static str>>> {
         self.session
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn sound_level(&self) -> MutexGuard<'_, Option<Channel<u8>>> {
+    fn sound_level(&self) -> MutexGuard<'_, HashMap<String, Channel<u8>>> {
         self.sound_level
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn levels(&self) -> MutexGuard<'_, HashMap<String, Channel<Vec<CallParticipantLevel>>>> {
+        self.levels
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Tells every page's session channel about `what`.
+    fn tell_sessions(&self, what: &'static str) {
+        for channel in self.session().values() {
+            let _ = channel.send(what);
+        }
+    }
+
+    /// Drops the channels of the window `label`. The main window's room
+    /// channels go with it; their rooms come back for the core to release.
+    fn forget_window(&self, label: &str) -> Vec<String> {
+        self.session().remove(label);
+        self.sound_level().remove(label);
+        self.levels().remove(label);
+        if label != MAIN_WINDOW {
+            return Vec::new();
+        }
+        self.channels().drain().map(|(room, _)| room).collect()
     }
 
     /// The wanted capture protection, which a new session turns on again.
@@ -438,61 +473,39 @@ impl Subscriptions {
                 // until the settings say otherwise.
                 self.capture.protect();
                 self.channels().clear();
-                if let Some(channel) = self.session().as_ref() {
-                    let _ = channel.send("session");
-                }
+                self.tell_sessions("session");
             }
-            Event::RoomListChanged {} => {
-                if let Some(channel) = self.session().as_ref() {
-                    let _ = channel.send("rooms");
-                }
-            }
-            Event::SecurityChanged {} => {
-                if let Some(channel) = self.session().as_ref() {
-                    let _ = channel.send("security");
-                }
-            }
-            Event::AccountChanged {} => {
-                if let Some(channel) = self.session().as_ref() {
-                    let _ = channel.send("account");
-                }
-            }
-            Event::CallChanged {} => {
-                if let Some(channel) = self.session().as_ref() {
-                    let _ = channel.send("calls");
-                }
-            }
-            Event::CallVideo {} => {
-                if let Some(channel) = self.session().as_ref() {
-                    let _ = channel.send("callVideo");
-                }
-            }
+            Event::RoomListChanged {} => self.tell_sessions("rooms"),
+            Event::SecurityChanged {} => self.tell_sessions("security"),
+            Event::AccountChanged {} => self.tell_sessions("account"),
+            Event::CallChanged {} => self.tell_sessions("calls"),
+            Event::CallVideo {} => self.tell_sessions("callVideo"),
+            Event::CallDeviceTestChanged {} => self.tell_sessions("deviceTest"),
             // A number only; one over the top is dropped.
             Event::CallSoundLevel { level } => {
                 if level > MAX_CALL_SOUND_LEVEL {
                     return;
                 }
-                if let Some(channel) = self.sound_level().as_ref() {
+                for channel in self.sound_level().values() {
                     let _ = channel.send(level);
                 }
             }
-            Event::RingsChanged {} => {
-                if let Some(channel) = self.session().as_ref() {
-                    let _ = channel.send("rings");
+            // Bounded IDs and levels only; anything else is dropped.
+            Event::CallLevels { levels } => {
+                if !levels_within_limits(&levels) {
+                    return;
+                }
+                for channel in self.levels().values() {
+                    let _ = channel.send(levels.clone());
                 }
             }
-            Event::ModulesChanged {} => {
-                if let Some(channel) = self.session().as_ref() {
-                    let _ = channel.send("modules");
-                }
-            }
+            Event::RingsChanged {} => self.tell_sessions("rings"),
+            Event::ModulesChanged {} => self.tell_sessions("modules"),
             // The UI host's own records follow the switch; the page asks for
             // `diagnostics_status` (ADR-0058).
             Event::DiagnosticsChanged { on } => {
                 diagnostics::global().set_on(on);
-                if let Some(channel) = self.session().as_ref() {
-                    let _ = channel.send("diagnostics");
-                }
+                self.tell_sessions("diagnostics");
             }
             // Names only; the core bounds them, and so does this check.
             Event::Notification { room, sender, call } => {
@@ -555,16 +568,23 @@ async fn unsubscribe_room(
     relay::<()>(core.inner(), Call::Unsubscribe { room_id }).await
 }
 
-/// Registers the page's session channel and its call sound level channel,
-/// replacing any earlier ones.
+/// Registers the page's session channel, its call sound level channel and
+/// its channel for the other devices' levels, replacing the earlier ones of
+/// the same window.
 #[tauri::command]
-fn watch_session(
+fn watch_session<R: Runtime>(
+    webview: Webview<R>,
     subscriptions: State<'_, Arc<Subscriptions>>,
     on_change: Channel<&'static str>,
     on_sound_level: Channel<u8>,
+    on_levels: Channel<Vec<CallParticipantLevel>>,
 ) {
-    *subscriptions.session() = Some(on_change);
-    *subscriptions.sound_level() = Some(on_sound_level);
+    let label = webview.label().to_owned();
+    subscriptions.session().insert(label.clone(), on_change);
+    subscriptions
+        .sound_level()
+        .insert(label.clone(), on_sound_level);
+    subscriptions.levels().insert(label, on_levels);
 }
 
 /// Locks the core's session. Replies with the resulting state; `locking`
@@ -1688,6 +1708,59 @@ async fn call_devices(core: State<'_, CoreLink>) -> Result<CallDevices, String> 
     relay(core.inner(), Call::CallDevices {}).await
 }
 
+/// Starts a test of one call device (ADR-0059); null is the system default.
+/// The core checks the ID again.
+#[tauri::command]
+async fn call_device_test(
+    core: State<'_, CoreLink>,
+    test: CallDeviceTestKind,
+    device: Option<String>,
+) -> Result<CallDeviceTestStatus, String> {
+    let call = Call::CallDeviceTest { test, device };
+    if !call_video_within_limits(&call) {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), call).await
+}
+
+/// Stops the device test that runs (ADR-0059).
+#[tauri::command]
+async fn call_device_test_stop(core: State<'_, CoreLink>) -> Result<(), String> {
+    relay(core.inner(), Call::CallDeviceTestStop {}).await
+}
+
+/// The newest device test (ADR-0059).
+#[tauri::command]
+async fn call_device_test_status(
+    core: State<'_, CoreLink>,
+) -> Result<CallDeviceTestStatus, String> {
+    relay(core.inner(), Call::CallDeviceTestStatus {}).await
+}
+
+/// Opens the call window (ADR-0060), or brings it to the front. It shows
+/// the bundled call page only.
+#[tauri::command]
+async fn open_call_window<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(CALL_WINDOW) {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+        return Ok(());
+    }
+    create_call_window(&app)
+        .map(drop)
+        .map_err(|_| UNAVAILABLE.to_string())
+}
+
+/// Closes the call window, if it is open (ADR-0060).
+#[tauri::command]
+async fn close_call_window<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(CALL_WINDOW) {
+        window.destroy().map_err(|_| UNAVAILABLE.to_string())?;
+    }
+    Ok(())
+}
+
 /// Saves the call microphone, speaker and camera as device IDs; null is the
 /// system default. The core checks the IDs again.
 #[tauri::command]
@@ -1937,15 +2010,63 @@ async fn exit_app<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
     Ok(())
 }
 
-/// Drops every subscription when the page (re)loads: the new page holds none
-/// of the old channels, and the core's slots would otherwise stay taken.
-fn reset_subscriptions(core: &CoreLink, subscriptions: &Subscriptions) {
-    subscriptions.session().take();
-    let rooms: Vec<String> = subscriptions
-        .channels()
-        .drain()
-        .map(|(room, _)| room)
-        .collect();
+/// The ID of the tray icon that brings the app back.
+const TRAY_ID: &str = "persephone";
+
+/// Hides the app's windows and shows a tray icon; a click on the icon
+/// brings them back. If the platform has no tray (some Linux desktops), the
+/// windows stay shown and the command fails, so the app is never left with
+/// no way back. The icon shows only the app's own icon and name.
+#[tauri::command]
+async fn minimise_to_tray<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    if app.tray_by_id(TRAY_ID).is_none() {
+        let icon = app
+            .default_window_icon()
+            .cloned()
+            .ok_or_else(|| UNAVAILABLE.to_string())?;
+        tauri::tray::TrayIconBuilder::with_id(TRAY_ID)
+            .icon(icon)
+            .tooltip("Persephone")
+            .on_tray_icon_event(|tray, event| {
+                if let tauri::tray::TrayIconEvent::Click {
+                    button: tauri::tray::MouseButton::Left,
+                    button_state: tauri::tray::MouseButtonState::Up,
+                    ..
+                } = event
+                {
+                    restore_from_tray(tray.app_handle());
+                }
+            })
+            .build(&app)
+            .map_err(|_| UNAVAILABLE.to_string())?;
+    }
+    for label in [CALL_WINDOW, MAIN_WINDOW] {
+        if let Some(window) = app.get_webview_window(label) {
+            let _ = window.hide();
+        }
+    }
+    Ok(())
+}
+
+/// Shows the app's windows again and removes the tray icon.
+fn restore_from_tray<R: Runtime>(app: &AppHandle<R>) {
+    for label in [CALL_WINDOW, MAIN_WINDOW] {
+        if let Some(window) = app.get_webview_window(label) {
+            let _ = window.unminimize();
+            let _ = window.show();
+        }
+    }
+    if let Some(main) = app.get_webview_window(MAIN_WINDOW) {
+        let _ = main.set_focus();
+    }
+    let _ = app.remove_tray_by_id(TRAY_ID);
+}
+
+/// Drops a window's subscriptions when its page (re)loads or the window
+/// goes: the new page holds none of the old channels, and the core's slots
+/// would otherwise stay taken. Rooms belong to the main window only.
+fn reset_subscriptions(core: &CoreLink, subscriptions: &Subscriptions, label: &str) {
+    let rooms = subscriptions.forget_window(label);
     if rooms.is_empty() {
         return;
     }
@@ -2106,13 +2227,20 @@ pub fn configure<R: Runtime>(
             profile_list,
             add_profile,
             switch_profile,
-            exit_app
+            exit_app,
+            minimise_to_tray,
+            call_device_test,
+            call_device_test_stop,
+            call_device_test_status,
+            open_call_window,
+            close_call_window
         ])
         .on_page_load(|webview, payload| {
             if payload.event() == PageLoadEvent::Started {
                 reset_subscriptions(
                     webview.state::<CoreLink>().inner(),
                     webview.state::<Arc<Subscriptions>>().inner(),
+                    webview.label(),
                 );
             }
         })
@@ -2132,7 +2260,7 @@ pub fn configure<R: Runtime>(
         })
 }
 
-/// Hides the main window from capture, and again whenever the wanted state
+/// Hides a window from capture, and again whenever the wanted state
 /// changes (ADR-0045). The call runs on the window's thread, in the order the
 /// changes were made.
 #[cfg(windows)]
@@ -2144,14 +2272,17 @@ fn hide_from_capture<R: Runtime>(
         Ok(hwnd) => {
             let hwnd = hwnd.0 as isize;
             let app = window.app_handle().clone();
-            state.set_applier(Box::new(move |on| {
-                if app
-                    .run_on_main_thread(move || capture::apply_to_window(hwnd, on))
-                    .is_err()
-                {
-                    eprintln!("persephone-ui: cannot hide the window from capture");
-                }
-            }));
+            state.set_window_applier(
+                window.label(),
+                Box::new(move |on| {
+                    if app
+                        .run_on_main_thread(move || capture::apply_to_window(hwnd, on))
+                        .is_err()
+                    {
+                        eprintln!("persephone-ui: cannot hide the window from capture");
+                    }
+                }),
+            );
         }
         Err(_) => eprintln!("persephone-ui: cannot hide the window from capture"),
     }
@@ -2201,11 +2332,56 @@ pub fn toast_text(room: &str, sender: &str) -> (String, String) {
 
 /// Creates the main window: bundled app only, no navigation away from it and
 /// no new windows. `setup` calls this; tests call it directly because the mock
-/// runtime does not run the event loop that triggers `setup`.
+/// runtime does not run the event loop that triggers `setup`. When the main
+/// window goes, the call window goes too, so the app ends.
 pub fn create_main_window<R: Runtime, M: Manager<R>>(
     manager: &M,
 ) -> tauri::Result<tauri::WebviewWindow<R>> {
-    main_window(manager).build()
+    let window = main_window(manager).build()?;
+    let app = window.app_handle().clone();
+    window.on_window_event(move |event| {
+        if matches!(event, tauri::WindowEvent::Destroyed)
+            && let Some(call) = app.get_webview_window(CALL_WINDOW)
+        {
+            let _ = call.destroy();
+        }
+    });
+    Ok(window)
+}
+
+/// Creates the call window (ADR-0060) with the same rules as the main
+/// window: the bundled call page only, no navigation away and no new
+/// windows. Its capture protection follows the main window's, and its
+/// subscriptions go when it closes.
+pub fn create_call_window<R: Runtime, M: Manager<R>>(
+    manager: &M,
+) -> tauri::Result<tauri::WebviewWindow<R>> {
+    let window = call_window(manager).build()?;
+    #[cfg(windows)]
+    hide_from_capture(&window, &window.state::<Arc<capture::CaptureState>>());
+    let app = window.app_handle().clone();
+    window.on_window_event(move |event| {
+        if matches!(event, tauri::WindowEvent::Destroyed) {
+            app.state::<Arc<Subscriptions>>()
+                .capture()
+                .remove_window_applier(CALL_WINDOW);
+            reset_subscriptions(
+                app.state::<CoreLink>().inner(),
+                app.state::<Arc<Subscriptions>>().inner(),
+                CALL_WINDOW,
+            );
+        }
+    });
+    Ok(window)
+}
+
+fn call_window<R: Runtime, M: Manager<R>>(manager: &M) -> WebviewWindowBuilder<'_, R, M> {
+    WebviewWindowBuilder::new(manager, CALL_WINDOW, WebviewUrl::App("call.html".into()))
+        .title("Persephone call")
+        .inner_size(960.0, 640.0)
+        .min_inner_size(480.0, 360.0)
+        .on_navigation(is_app_url)
+        .on_new_window(|_, _| NewWindowResponse::Deny)
 }
 
 fn main_window<R: Runtime, M: Manager<R>>(manager: &M) -> WebviewWindowBuilder<'_, R, M> {

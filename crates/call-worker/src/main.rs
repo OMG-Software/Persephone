@@ -3,8 +3,8 @@
 //! One process runs one call. It checks its own containment, reports the
 //! result in `Ready`, and then reads core messages from stdin and writes
 //! worker messages to stdout, both as media-protocol Control frames. The
-//! first message must be `Join` or `ListDevices`, after any number of
-//! `SetDiagnostics`. Stdout is the frame channel: nothing else may write to
+//! first message must be `Join`, `ListDevices` or `TestDevice`, after any
+//! number of `SetDiagnostics`. Stdout is the frame channel: nothing else may write to
 //! it, and the worker writes nothing to stderr. Diagnostic records go to the
 //! core over stdout only while the core has turned them on (ADR-0058).
 //!
@@ -26,6 +26,7 @@ mod pulse;
 mod screen;
 mod session;
 mod sound_defaults;
+mod sound_test;
 mod video;
 
 use std::io;
@@ -117,6 +118,9 @@ async fn run(bits: u32, output: Output) -> u8 {
     std::thread::spawn(move || read_loop(input_tx));
     match first_message(&mut input, |on| diagnostics::global().set_on(on)).await {
         Some(Input::Message(ToWorker::ListDevices)) => session::list_devices(&output).await,
+        Some(Input::Message(first @ ToWorker::TestDevice { .. })) => {
+            session::test_device(first, &mut input, &output).await
+        }
         Some(Input::Message(first)) if mapping::is_first_message_allowed(&first) => {
             session::run(first, &mut input, &output).await
         }

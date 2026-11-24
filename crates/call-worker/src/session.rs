@@ -19,8 +19,8 @@ use livekit::{
     options::{TrackPublishOptions, VideoCodec, VideoEncoding},
     prelude::{
         AudioProcessingOptions, LocalAudioTrack, LocalTrack, LocalTrackPublication,
-        LocalVideoTrack, PlatformAudio, RemoteAudioTrack, RemoteTrack, RemoteTrackPublication,
-        TrackSid, TrackSource,
+        LocalVideoTrack, Participant, PlatformAudio, RemoteAudioTrack, RemoteTrack,
+        RemoteTrackPublication, TrackKind, TrackSid, TrackSource,
     },
     rtc_engine::EngineError,
     webrtc::{
@@ -38,9 +38,9 @@ use livekit::{
 };
 use livekit_signaling::SignalError;
 use persephone_call_protocol::{
-    CameraState, FailureCode, FrameKeyMsg, FromWorker, MAX_OTHER_CONNECTIONS, MAX_PARTICIPANTS,
-    MAX_SCREEN_FPS, MAX_VIDEO_FPS, MAX_VIDEO_PIXELS, MAX_VIDEO_SIDE, SCREEN_TILE, ScreenState,
-    ScreenTarget, ToWorker, VIDEO_TILES,
+    CameraState, DeviceTest, FailureCode, FrameKeyMsg, FromWorker, MAX_OTHER_CONNECTIONS,
+    MAX_PARTICIPANTS, MAX_SCREEN_FPS, MAX_VIDEO_FPS, MAX_VIDEO_PIXELS, MAX_VIDEO_SIDE, SCREEN_TILE,
+    ScreenState, ScreenTarget, ToWorker, VIDEO_TILES,
 };
 use tokio::sync::mpsc::{self, Receiver, UnboundedReceiver};
 use tokio::task::JoinHandle;
@@ -51,15 +51,16 @@ use zeroize::Zeroizing;
 use crate::camera::{self, CapturedFrame, Format};
 use crate::containment;
 use crate::mapping::{
-    ConnectFault, LevelGate, Playout, RoomChange, Slot, Slots, SoundPath, SpeakingTracker, apply,
-    bounded_device_list, choose_device, failure_for_connect, sound_level, system_default,
-    valid_identity,
+    ConnectFault, LevelMeters, Levels, Playout, RoomChange, Slot, Slots, SoundPath,
+    SpeakingTracker, apply, bounded_device_list, choose_device, failure_for_connect,
+    system_default, valid_identity,
 };
 #[cfg(target_os = "linux")]
 use crate::mapping::{pulse_device_list, sound_path};
 use crate::output::{Closed, Output, PictureSink};
 use crate::screen;
 use crate::sound_defaults;
+use crate::sound_test;
 use crate::video::{
     Added, OWN_TILE, RateLimiter, ScreenQueue, TileAssigner, fit_for_tile, fit_publish_box,
     fit_within_box, quarter_turns, rgba_len,
@@ -78,6 +79,11 @@ const SCREEN_MAX_BITRATE: u64 = 1_500_000;
 const SPEAKING_TICK: Duration = Duration::from_millis(100);
 /// The longest one sound level measurement may take (ADR-0055).
 const SOUND_MEASURE_TIMEOUT: Duration = Duration::from_millis(500);
+/// The most remote audio tracks measured at once: two for each participant
+/// (a microphone and a screen share's sound).
+const MAX_MEASURED_TRACKS: usize = 2 * MAX_PARTICIPANTS;
+/// How long a camera test shows the camera when nothing stops it.
+const CAMERA_TEST_TIME: Duration = Duration::from_secs(30);
 
 /// Why the call ended.
 enum End {
@@ -159,6 +165,7 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
         &audio,
         listed(recording_device.as_deref(), paths[0]),
         listed(playout_device.as_deref(), paths[1]),
+        Selection::BeforeStart,
     ) {
         return fail(output, code).await;
     }
@@ -216,7 +223,7 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
     // results can wait.
     let (connect_tx, connect_done) = mpsc::channel::<Connected>(usize::from(MAX_OTHER_CONNECTIONS));
     // At most one sound level measurement runs, so one result can wait.
-    let (sound_tx, mut sound_done) = mpsc::channel::<Option<f64>>(1);
+    let (sound_tx, mut sound_done) = mpsc::channel::<Option<Levels>>(1);
     let mut others_inbox = OtherInbox {
         events: OtherEvents::default(),
         connected: connect_done,
@@ -225,6 +232,7 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
         room: &room,
         provider: &provider,
         identity: &own,
+        audio: &audio,
         output,
         own_sids,
         publication: &publication,
@@ -392,13 +400,24 @@ async fn sound_paths(
     Ok([SoundPath::Listed; 2])
 }
 
+/// When the devices are chosen: before the sound starts, or during a call,
+/// where recording and playout stop, change and start again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Selection {
+    BeforeStart,
+    DuringCall,
+}
+
 /// Applies the chosen microphone and speaker. `None` opens the system's
 /// default for media where it is listed (`sound_defaults`); a chosen device
-/// that is missing is `DeviceNotFound`, never another device.
+/// that is missing is `DeviceNotFound`, never another device. Both choices
+/// are checked before either device changes. During a call a `None` whose
+/// default is not listed keeps the device in use.
 fn select_devices(
     audio: &PlatformAudio,
     recording: Option<&str>,
     playout: Option<&str>,
+    when: Selection,
 ) -> Result<(), FailureCode> {
     let (default_playout, default_recording) = if recording.is_none() || playout.is_none() {
         sound_defaults::media_defaults()
@@ -407,35 +426,287 @@ fn select_devices(
     };
     let recording_devices: Vec<_> = audio.recording_devices().collect();
     let ids = || recording_devices.iter().map(|device| device.id.as_str());
-    let wanted = match recording {
+    let wanted_recording = match recording {
         Some(_) => choose_device(recording, ids())?,
         None => system_default(default_recording.as_deref(), ids()),
     };
-    if let Some(wanted) = wanted {
-        let device = recording_devices
-            .iter()
-            .find(|device| device.id.as_str() == wanted)
-            .ok_or(FailureCode::DeviceNotFound)?;
-        audio
-            .set_recording_device(&device.id)
-            .map_err(|_| FailureCode::DeviceNotFound)?;
-    }
     let playout_devices: Vec<_> = audio.playout_devices().collect();
     let ids = || playout_devices.iter().map(|device| device.id.as_str());
-    let wanted = match playout {
+    let wanted_playout = match playout {
         Some(_) => choose_device(playout, ids())?,
         None => system_default(default_playout.as_deref(), ids()),
     };
-    if let Some(wanted) = wanted {
-        let device = playout_devices
-            .iter()
-            .find(|device| device.id.as_str() == wanted)
-            .ok_or(FailureCode::DeviceNotFound)?;
-        audio
-            .set_playout_device(&device.id)
-            .map_err(|_| FailureCode::DeviceNotFound)?;
+    let recording_device = wanted_recording
+        .map(|wanted| {
+            recording_devices
+                .iter()
+                .find(|device| device.id.as_str() == wanted)
+                .ok_or(FailureCode::DeviceNotFound)
+        })
+        .transpose()?;
+    let playout_device = wanted_playout
+        .map(|wanted| {
+            playout_devices
+                .iter()
+                .find(|device| device.id.as_str() == wanted)
+                .ok_or(FailureCode::DeviceNotFound)
+        })
+        .transpose()?;
+    if let Some(device) = recording_device {
+        match when {
+            Selection::BeforeStart => audio.set_recording_device(&device.id),
+            Selection::DuringCall => audio.switch_recording_device(&device.id),
+        }
+        .map_err(|_| FailureCode::DeviceNotFound)?;
+    }
+    if let Some(device) = playout_device {
+        match when {
+            Selection::BeforeStart => audio.set_playout_device(&device.id),
+            Selection::DuringCall => audio.switch_playout_device(&device.id),
+        }
+        .map_err(|_| FailureCode::DeviceNotFound)?;
     }
     Ok(())
+}
+
+/// Moves the running call to other devices (`SetDevices`, ADR-0059). On
+/// Linux the sound server stream was chosen when the worker started
+/// (ADR-0049), so a change applies to the next call only.
+fn switch_devices(
+    audio: &PlatformAudio,
+    recording: Option<&str>,
+    playout: Option<&str>,
+) -> Result<(), FailureCode> {
+    if cfg!(target_os = "linux") {
+        return Err(FailureCode::Unsupported);
+    }
+    select_devices(audio, recording, playout, Selection::DuringCall)
+}
+
+/// What a device test's thread reports.
+enum TestNote {
+    Started,
+    Level(f64),
+    Done(Result<(), FailureCode>),
+}
+
+/// Runs one device test (`TestDevice`, ADR-0059), then ends. It connects
+/// to nothing. The microphone and speaker tests use `sound_test`; the camera
+/// test shows the camera on tile 0. `Leave` or a closed input ends a test
+/// early; any other message but the diagnostic switch is a protocol failure.
+pub async fn test_device(first: ToWorker, input: &mut Receiver<Input>, output: &Output) -> u8 {
+    let ToWorker::TestDevice { test, device } = first else {
+        return fail(output, FailureCode::Protocol).await;
+    };
+    // The test needs no new socket, so the second stage comes first (Linux).
+    if !containment::apply_stage2() && !cfg!(feature = "dev-uncontained") {
+        return fail(output, FailureCode::Containment).await;
+    }
+    match test {
+        DeviceTest::Camera => test_camera(device, input, output).await,
+        DeviceTest::Microphone | DeviceTest::Speaker => {
+            test_sound(test, device, input, output).await
+        }
+    }
+}
+
+/// What the input asks during a device test.
+enum TestInput {
+    /// Go on.
+    Continue,
+    /// End the test.
+    Stop,
+    Bad,
+}
+
+fn test_input(message: Option<Input>) -> TestInput {
+    match message {
+        Some(Input::Message(ToWorker::SetDiagnostics { on })) => {
+            crate::diagnostics::global().set_on(on);
+            TestInput::Continue
+        }
+        Some(Input::Message(ToWorker::Leave)) | Some(Input::Eof) | None => TestInput::Stop,
+        Some(Input::Message(_)) | Some(Input::Bad) => TestInput::Bad,
+    }
+}
+
+async fn test_sound(
+    test: DeviceTest,
+    device: Option<String>,
+    input: &mut Receiver<Input>,
+    output: &Output,
+) -> u8 {
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (notes_tx, mut notes) = mpsc::channel::<TestNote>(16);
+    let thread_stop = stop.clone();
+    let spawned = std::thread::Builder::new()
+        .name("device-test".to_owned())
+        .spawn(move || {
+            let started = notes_tx.clone();
+            let levels = notes_tx.clone();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match test {
+                DeviceTest::Microphone => sound_test::listen(
+                    device.as_deref(),
+                    &thread_stop,
+                    || {
+                        let _ = started.try_send(TestNote::Started);
+                    },
+                    // A full queue drops a level; the next one follows.
+                    |level| {
+                        let _ = levels.try_send(TestNote::Level(level));
+                    },
+                ),
+                DeviceTest::Speaker | DeviceTest::Camera => {
+                    sound_test::play_tone(device.as_deref(), &thread_stop, || {
+                        let _ = started.try_send(TestNote::Started);
+                    })
+                }
+            }))
+            .unwrap_or(Err(FailureCode::Internal));
+            let _ = notes_tx.blocking_send(TestNote::Done(result));
+        });
+    if spawned.is_err() {
+        return fail(output, FailureCode::Internal).await;
+    }
+    let mut meters = LevelMeters::default();
+    let mut bad = false;
+    loop {
+        tokio::select! {
+            note = notes.recv() => match note {
+                Some(TestNote::Started) => {
+                    if output.send(FromWorker::Connected).await.is_err() {
+                        stop.store(true, std::sync::atomic::Ordering::Release);
+                    }
+                }
+                Some(TestNote::Level(linear)) => {
+                    if let Some(message) = meters.own(linear, std::time::Instant::now())
+                        && output.send(message).await.is_err()
+                    {
+                        stop.store(true, std::sync::atomic::Ordering::Release);
+                    }
+                }
+                Some(TestNote::Done(Ok(()))) if !bad => {
+                    let _ = output.send(FromWorker::Left).await;
+                    return EXIT_DONE;
+                }
+                Some(TestNote::Done(Ok(()))) => return fail(output, FailureCode::Protocol).await,
+                Some(TestNote::Done(Err(code))) => return fail(output, code).await,
+                None => return fail(output, FailureCode::Internal).await,
+            },
+            message = input.recv(), if !stop.load(std::sync::atomic::Ordering::Acquire) => {
+                match test_input(message) {
+                    TestInput::Continue => {}
+                    TestInput::Stop => stop.store(true, std::sync::atomic::Ordering::Release),
+                    TestInput::Bad => {
+                        bad = true;
+                        stop.store(true, std::sync::atomic::Ordering::Release);
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn test_camera(device: Option<String>, input: &mut Receiver<Input>, output: &Output) -> u8 {
+    let pictures = output.pictures();
+    let mut limiter = RateLimiter::default();
+    let (ended_tx, mut ended) = mpsc::channel::<()>(1);
+    let (open_tx, mut opened) = mpsc::channel::<Opened<camera::Capture, CameraState>>(1);
+    // No portal grant comes with a test: the portal path reports
+    // `Unavailable`, the other paths open the camera directly.
+    let started = spawn_open(open_tx, 0, CameraState::Unavailable, move || {
+        camera::open(
+            device.as_deref(),
+            camera::Grant::default(),
+            move |frame| {
+                if !limiter.admit(std::time::Instant::now()) {
+                    return;
+                }
+                if let Some(picture) = fitted_i420(&frame)
+                    && let Some((width, height, rgba)) = to_rgba(OWN_TILE, &picture)
+                {
+                    pictures.put(OWN_TILE, 0, width, height, rgba);
+                }
+            },
+            move || {
+                let _ = ended_tx.try_send(());
+            },
+        )
+    });
+    if started.is_err() {
+        return fail(output, FailureCode::Internal).await;
+    }
+    // The open blocks on its thread; `Leave` meanwhile ends the test, and the
+    // late result is dropped there, which releases the camera.
+    let capture = loop {
+        tokio::select! {
+            done = opened.recv() => match done.map(|done| done.result) {
+                Some(Ok(capture)) => break capture,
+                Some(Err(state)) => {
+                    if output.send(FromWorker::Camera { state }).await.is_ok() {
+                        let _ = output.send(FromWorker::Left).await;
+                    }
+                    return EXIT_DONE;
+                }
+                None => return fail(output, FailureCode::Internal).await,
+            },
+            message = input.recv() => match test_input(message) {
+                TestInput::Continue => {}
+                TestInput::Stop => {
+                    let _ = output.send(FromWorker::Left).await;
+                    return EXIT_DONE;
+                }
+                TestInput::Bad => return fail(output, FailureCode::Protocol).await,
+            },
+        }
+    };
+    let mut code = None;
+    if output.send(FromWorker::Connected).await.is_err()
+        || output
+            .send(FromWorker::Camera {
+                state: CameraState::On,
+            })
+            .await
+            .is_err()
+    {
+        code = Some(FailureCode::Internal);
+    }
+    let limit = tokio::time::sleep(CAMERA_TEST_TIME);
+    tokio::pin!(limit);
+    while code.is_none() {
+        tokio::select! {
+            () = &mut limit => break,
+            _ = ended.recv() => break,
+            message = input.recv() => match test_input(message) {
+                TestInput::Continue => {}
+                TestInput::Stop => break,
+                TestInput::Bad => code = Some(FailureCode::Protocol),
+            },
+        }
+    }
+    // Stopping joins the capture thread, which blocks.
+    let held = tokio::task::spawn_blocking(move || capture.stop().is_some())
+        .await
+        .unwrap_or(true);
+    output.clear_picture(OWN_TILE);
+    if let Some(code) = code {
+        return fail(output, code).await;
+    }
+    let state = if held {
+        CameraState::Unavailable
+    } else {
+        CameraState::Off
+    };
+    for message in [
+        FromWorker::VideoStopped { tile: OWN_TILE },
+        FromWorker::Camera { state },
+        FromWorker::Left,
+    ] {
+        if output.send(message).await.is_err() {
+            return EXIT_FAILED;
+        }
+    }
+    EXIT_DONE
 }
 
 /// Everything the call changes after it is connected.
@@ -443,6 +714,8 @@ struct Call<'a> {
     room: &'a Room,
     provider: &'a KeyProvider,
     identity: &'a ParticipantIdentity,
+    /// The microphone and speaker, for a change during the call.
+    audio: &'a PlatformAudio,
     output: &'a Output,
     /// The microphone's publication.
     publication: &'a LocalTrackPublication,
@@ -491,41 +764,43 @@ struct Call<'a> {
     /// The volume and deafen state of every remote audio track, on every
     /// connection (ADR-0055).
     playout: Playout,
-    /// The level meter's measurement of the received sound (ADR-0055).
+    /// The level meters' measurement of the own and received sound
+    /// (ADR-0055, ADR-0059).
     sound: SoundProbe,
 }
 
-/// Measures the received sound for the level meter (ADR-0055). At most one
-/// measurement runs, on its own task, so the event loop never waits for it.
+/// Measures the own and the received sound for the level meters (ADR-0055,
+/// ADR-0059). At most one measurement runs, on its own task, so the event
+/// loop never waits for it.
 struct SoundProbe {
-    /// A measurement reports the loudest linear level here, or `None` when
-    /// it did not finish.
-    done: mpsc::Sender<Option<f64>>,
+    /// A measurement reports its levels here, or `None` when it did not
+    /// finish.
+    done: mpsc::Sender<Option<Levels>>,
     task: Option<JoinHandle<()>>,
-    gate: LevelGate,
+    meters: LevelMeters,
 }
 
-/// One measurement's report. Dropping it sends the level, or `None`, so the
-/// task reports once however it ends: done, timed out or unwound. Only one
-/// measurement runs and the slot is freed only by its report, so the channel
-/// of one place has room.
+/// One measurement's report. Dropping it sends the levels, or `None`, so
+/// the task reports once however it ends: done, timed out or unwound. Only
+/// one measurement runs and the slot is freed only by its report, so the
+/// channel of one place has room.
 struct SoundReport {
-    done: mpsc::Sender<Option<f64>>,
-    level: Option<f64>,
+    done: mpsc::Sender<Option<Levels>>,
+    levels: Option<Levels>,
 }
 
 impl Drop for SoundReport {
     fn drop(&mut self) {
-        let _ = self.done.try_send(self.level.take());
+        let _ = self.done.try_send(self.levels.take());
     }
 }
 
 impl SoundProbe {
-    fn new(done: mpsc::Sender<Option<f64>>) -> Self {
+    fn new(done: mpsc::Sender<Option<Levels>>) -> Self {
         Self {
             done,
             task: None,
-            gate: LevelGate::default(),
+            meters: LevelMeters::default(),
         }
     }
 
@@ -539,7 +814,7 @@ impl SoundProbe {
     /// the level, or `None` when it timed out or unwound.
     fn start<F>(&mut self, measure: F, limit: Duration) -> bool
     where
-        F: std::future::Future<Output = f64> + Send + 'static,
+        F: std::future::Future<Output = Levels> + Send + 'static,
     {
         if self.is_busy() {
             return false;
@@ -548,43 +823,63 @@ impl SoundProbe {
         self.task = Some(tokio::spawn(async move {
             // Reports when dropped, also if the measurement unwinds, so the
             // slot is always freed. A timeout reports `None`, not silence.
-            let mut report = SoundReport { done, level: None };
-            report.level = tokio::time::timeout(limit, measure).await.ok();
+            let mut report = SoundReport { done, levels: None };
+            report.levels = tokio::time::timeout(limit, measure).await.ok();
         }));
         true
     }
 
     /// A measurement's report arrived: the slot is free. One that did not
-    /// finish (`None`) changes nothing, so the meter keeps its level until
-    /// the next one.
-    fn end(&mut self, linear: Option<f64>) -> Option<FromWorker> {
+    /// finish (`None`) changes nothing, so the meters keep their levels
+    /// until the next one.
+    fn end(&mut self, levels: Option<Levels>) -> Vec<FromWorker> {
         self.task = None;
-        self.gate
-            .next(sound_level(linear?), std::time::Instant::now())
+        match levels {
+            Some(levels) => self.meters.next(&levels, std::time::Instant::now()),
+            None => Vec::new(),
+        }
     }
 }
 
-/// The loudest `audioLevel` (0.0 to 1.0) of the tracks' inbound streams.
-/// WebRTC measures it on the audio as it is played, after the call volume:
+/// The levels of the own microphone and of each remote participant.
+///
+/// The own level is the `audioLevel` of the microphone's media source: the
+/// sound as it is sent, so it is silence while muted. A remote level is the
+/// loudest `audioLevel` of the participant's inbound streams. WebRTC
+/// measures it on the audio as it is played, after the call volume:
 /// `ChannelReceive::GetAudioFrameWithInfo` scales the frame by the output
 /// gain (`set_volume`) before `output_audio_level_.ComputeLevel`, and a
 /// disabled (deafened) track sets that gain to 0
-/// (`AudioRtpReceiver::Reconfigure`). So the meter follows the slider and is
-/// empty while deafened. A track whose statistics cannot be read counts as
-/// silent.
-async fn loudest_level(tracks: Vec<RemoteAudioTrack>) -> f64 {
-    let mut loudest = 0.0_f64;
-    for track in tracks {
-        let Ok(stats) = track.get_stats().await else {
-            continue;
-        };
+/// (`AudioRtpReceiver::Reconfigure`). A track whose statistics cannot be read
+/// counts as silent.
+async fn measure_levels(
+    own: Option<LocalAudioTrack>,
+    remote: Vec<(u8, String, RemoteAudioTrack)>,
+) -> Levels {
+    let mut levels = Levels::default();
+    if let Some(track) = own
+        && let Ok(stats) = track.get_stats().await
+    {
         for stat in stats {
-            if let RtcStats::InboundRtp(inbound) = stat {
-                loudest = loudest.max(inbound.inbound.audio_level);
+            if let RtcStats::MediaSource(source) = stat
+                && source.source.kind == "audio"
+            {
+                levels.own = levels.own.max(source.audio.audio_level);
             }
         }
     }
-    loudest
+    for (connection, identity, track) in remote {
+        let mut loudest = 0.0_f64;
+        if let Ok(stats) = track.get_stats().await {
+            for stat in stats {
+                if let RtcStats::InboundRtp(inbound) = stat {
+                    loudest = loudest.max(inbound.inbound.audio_level);
+                }
+            }
+        }
+        levels.remote.push((connection, identity, loudest));
+    }
+    levels
 }
 
 /// The connections to other SFUs (ADR-0054). They subscribe only: nothing
@@ -1646,19 +1941,58 @@ impl Call<'_> {
         tracks
     }
 
-    /// Starts a measurement of the received sound, unless one runs. With no
-    /// remote audio the level is silence at once.
-    fn measure_sound(&mut self) -> Option<FromWorker> {
+    /// Every subscribed remote audio track with its connection and its
+    /// participant's identity, at most [`MAX_MEASURED_TRACKS`].
+    fn remote_audio_by_participant(&self) -> Vec<(u8, String, RemoteAudioTrack)> {
+        let rooms = std::iter::once((0, self.room)).chain(self.others.open_indexed());
+        let mut tracks = Vec::new();
+        for (connection, room) in rooms {
+            for (identity, participant) in room.remote_participants() {
+                for publication in participant.track_publications().values() {
+                    if tracks.len() >= MAX_MEASURED_TRACKS {
+                        return tracks;
+                    }
+                    if let Some(RemoteTrack::Audio(track)) = publication.track() {
+                        tracks.push((connection, identity.to_string(), track));
+                    }
+                }
+            }
+        }
+        tracks
+    }
+
+    /// Starts a measurement of the own and the received sound, unless one
+    /// runs.
+    fn measure_sound(&mut self) {
         if self.sound.is_busy() {
-            return None;
+            return;
         }
-        let tracks = self.remote_audio();
-        if tracks.is_empty() {
-            return self.sound.gate.next(0, std::time::Instant::now());
-        }
+        let own = match self.publication.track() {
+            Some(LocalTrack::Audio(track)) => Some(track),
+            _ => None,
+        };
+        let remote = self.remote_audio_by_participant();
         self.sound
-            .start(loudest_level(tracks), SOUND_MEASURE_TIMEOUT);
-        None
+            .start(measure_levels(own, remote), SOUND_MEASURE_TIMEOUT);
+    }
+
+    /// Tells the core whether a remote participant's microphone is muted.
+    async fn send_muted(
+        &self,
+        connection: u8,
+        identity: String,
+        muted: bool,
+    ) -> Result<(), Closed> {
+        if !valid_identity(&identity) {
+            return Ok(());
+        }
+        self.output
+            .send(FromWorker::ParticipantMuted {
+                connection,
+                identity,
+                muted,
+            })
+            .await
     }
 
     /// Gives every subscribed remote audio track the call's playout.
@@ -1705,10 +2039,46 @@ impl Call<'_> {
         match event {
             RoomEvent::TrackSubscribed {
                 track: RemoteTrack::Audio(track),
-                ..
+                publication,
+                participant,
             } => {
                 play_remote_audio(track, self.playout);
-                Ok(())
+                if publication.source() != TrackSource::Microphone {
+                    return Ok(());
+                }
+                self.send_muted(
+                    connection,
+                    participant.identity().to_string(),
+                    publication.is_muted(),
+                )
+                .await
+            }
+            RoomEvent::TrackUnsubscribed {
+                track: RemoteTrack::Audio(_),
+                publication,
+                participant,
+            } if publication.source() == TrackSource::Microphone => {
+                // No microphone counts as muted.
+                self.send_muted(connection, participant.identity().to_string(), true)
+                    .await
+            }
+            RoomEvent::TrackMuted {
+                participant: Participant::Remote(participant),
+                publication,
+            } if publication.kind() == TrackKind::Audio
+                && publication.source() == TrackSource::Microphone =>
+            {
+                self.send_muted(connection, participant.identity().to_string(), true)
+                    .await
+            }
+            RoomEvent::TrackUnmuted {
+                participant: Participant::Remote(participant),
+                publication,
+            } if publication.kind() == TrackKind::Audio
+                && publication.source() == TrackSource::Microphone =>
+            {
+                self.send_muted(connection, participant.identity().to_string(), false)
+                    .await
             }
             RoomEvent::TrackSubscribed {
                 track: RemoteTrack::Video(track),
@@ -1897,9 +2267,14 @@ impl Call<'_> {
                 share,
             } => Ok(self.screen_off(share).await),
             ToWorker::Subscribe { index, url, jwt } => self.begin_other(index, url, jwt),
-            ToWorker::Join { .. } | ToWorker::ListDevices | ToWorker::Leave => {
-                Err(FailureCode::Protocol)
-            }
+            // A device change that fails keeps the call on its devices.
+            ToWorker::SetDevices { recording, playout } => Ok(vec![FromWorker::DevicesSet {
+                failure: switch_devices(self.audio, recording.as_deref(), playout.as_deref()).err(),
+            }]),
+            ToWorker::Join { .. }
+            | ToWorker::ListDevices
+            | ToWorker::TestDevice { .. }
+            | ToWorker::Leave => Err(FailureCode::Protocol),
         }
     }
 }
@@ -2097,7 +2472,7 @@ async fn event_loop(
     screens: &mut ScreenInbox,
     others: &mut OtherInbox,
     tracker: &mut SpeakingTracker,
-    sound_done: &mut Receiver<Option<f64>>,
+    sound_done: &mut Receiver<Option<Levels>>,
 ) -> End {
     let mut tick = interval(SPEAKING_TICK);
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -2179,12 +2554,10 @@ async fn event_loop(
                     return End::Failed(FailureCode::Internal);
                 }
             }
-            Some(linear) = sound_done.recv() => {
-                outgoing.extend(call.sound.end(linear));
+            Some(levels) = sound_done.recv() => {
+                outgoing.extend(call.sound.end(levels));
             }
-            _ = tick.tick() => {
-                outgoing.extend(call.measure_sound());
-            }
+            _ = tick.tick() => call.measure_sound(),
         }
         outgoing.extend(tracker.poll(Instant::now().into_std()));
         let disconnected = outgoing.iter().any(|message| {
@@ -2743,18 +3116,18 @@ mod tests {
     /// never keeps the slot.
     #[tokio::test]
     async fn given_measurement_endings_then_each_reports_once() {
-        let (tx, mut rx) = mpsc::channel::<Option<f64>>(1);
+        let (tx, mut rx) = mpsc::channel::<Option<Levels>>(1);
         drop(SoundReport {
             done: tx.clone(),
-            level: Some(0.5),
+            levels: Some(own(0.5)),
         });
-        assert_eq!(rx.recv().await, Some(Some(0.5)));
+        assert_eq!(rx.recv().await, Some(Some(own(0.5))));
 
         let done = tx.clone();
         tokio::spawn(async move {
-            let mut report = SoundReport { done, level: None };
-            report.level =
-                tokio::time::timeout(Duration::from_millis(1), std::future::pending::<f64>())
+            let mut report = SoundReport { done, levels: None };
+            report.levels =
+                tokio::time::timeout(Duration::from_millis(1), std::future::pending::<Levels>())
                     .await
                     .ok();
         })
@@ -2764,7 +3137,7 @@ mod tests {
 
         let done = tx.clone();
         let unwound = tokio::spawn(async move {
-            let _report = SoundReport { done, level: None };
+            let _report = SoundReport { done, levels: None };
             panic!("statistics read failed");
         });
         assert!(unwound.await.is_err());
@@ -2778,36 +3151,67 @@ mod tests {
     /// without a message.
     #[tokio::test]
     async fn given_sound_measurements_then_one_runs_and_every_end_frees_it() {
-        let (tx, mut rx) = mpsc::channel::<Option<f64>>(1);
+        let (tx, mut rx) = mpsc::channel::<Option<Levels>>(1);
         let mut probe = SoundProbe::new(tx);
         let long = Duration::from_secs(5);
 
-        assert!(probe.start(async { 0.5 }, long));
-        assert!(!probe.start(async { 1.0 }, long), "one runs at a time");
+        assert!(probe.start(async { own(0.5) }, long));
+        assert!(!probe.start(async { own(1.0) }, long), "one runs at a time");
         let report = rx.recv().await.expect("a report");
-        assert_eq!(report, Some(0.5));
+        assert_eq!(report, Some(own(0.5)));
         assert!(probe.is_busy(), "busy until the report is taken");
         let first = probe.end(report);
-        assert!(matches!(first, Some(FromWorker::SoundLevel { level }) if level > 0));
+        assert!(matches!(first.as_slice(), [FromWorker::SoundLevel { level }] if *level > 0));
         assert!(!probe.is_busy());
 
-        assert!(probe.start(async { 0.5 }, long));
+        assert!(probe.start(async { own(0.5) }, long));
         let same = rx.recv().await.expect("a report");
-        assert_eq!(probe.end(same), None, "an unchanged level is not sent");
+        assert!(probe.end(same).is_empty(), "an unchanged level is not sent");
 
-        assert!(probe.start(std::future::pending::<f64>(), Duration::from_millis(1)));
+        assert!(probe.start(std::future::pending::<Levels>(), Duration::from_millis(1)));
         let timed_out = rx.recv().await.expect("a report");
         assert_eq!(timed_out, None);
-        assert_eq!(probe.end(timed_out), None, "a timeout is not silence");
+        assert!(probe.end(timed_out).is_empty(), "a timeout is not silence");
         assert!(!probe.is_busy());
 
         assert!(probe.start(async { panic!("statistics read failed") }, long));
         let unwound = rx.recv().await.expect("a report");
         assert_eq!(unwound, None);
-        assert_eq!(probe.end(unwound), None);
-        assert!(probe.start(async { 0.0 }, long), "the slot is free again");
+        assert!(probe.end(unwound).is_empty());
+        assert!(
+            probe.start(async { own(0.0) }, long),
+            "the slot is free again"
+        );
         let silent = rx.recv().await.expect("a report");
-        assert_eq!(probe.end(silent), Some(FromWorker::SoundLevel { level: 0 }));
+        assert_eq!(probe.end(silent), [FromWorker::SoundLevel { level: 0 }]);
+    }
+
+    fn own(linear: f64) -> Levels {
+        Levels {
+            own: linear,
+            remote: Vec::new(),
+        }
+    }
+
+    /// GIVEN test input WHEN it is read THEN the diagnostic switch goes on,
+    /// `Leave` and a closed input stop, and any other message is refused.
+    #[test]
+    fn given_device_test_input_then_only_leave_and_the_switch_are_served() {
+        assert!(matches!(
+            test_input(Some(Input::Message(ToWorker::SetDiagnostics { on: false }))),
+            TestInput::Continue
+        ));
+        assert!(matches!(
+            test_input(Some(Input::Message(ToWorker::Leave))),
+            TestInput::Stop
+        ));
+        assert!(matches!(test_input(Some(Input::Eof)), TestInput::Stop));
+        assert!(matches!(test_input(None), TestInput::Stop));
+        assert!(matches!(
+            test_input(Some(Input::Message(ToWorker::SetMuted { muted: true }))),
+            TestInput::Bad
+        ));
+        assert!(matches!(test_input(Some(Input::Bad)), TestInput::Bad));
     }
 
     /// GIVEN room events that need no participant WHEN described THEN each

@@ -31,7 +31,7 @@
   } from './calls';
   import RoomTools from './RoomTools.svelte';
   import ConnectionHealth from './ConnectionHealth.svelte';
-  import { callCamera, callDeafen, callDeclineRing, callDevices, callScreen, callJoin, callLeave, callMute, callReadiness, callRings, callStatus, callVolume, changeRoom, roomMembers, jumpToDate, eventContext, setPinned, setRoomPreference, startConversation } from './bridge';
+  import { callCamera, callDeafen, callDeclineRing, callDevices, callScreen, openCallWindow, callJoin, callLeave, callMute, callReadiness, callRings, callStatus, callVolume, changeRoom, roomMembers, jumpToDate, eventContext, setPinned, setRoomPreference, startConversation } from './bridge';
   import { LEAVE_NOT_DONE, LEAVE_QUESTION, LEAVING_TEXT, leaveAfterDraftFlush } from './roomLeave';
   import type { FocusedTimeline, ImagePick } from '../../crates/contracts/generated/contracts';
   import LocalSearch from './LocalSearch.svelte';
@@ -127,6 +127,7 @@
     pasteImage,
     sendImage,
     exitApp,
+    minimiseToTray,
     lockSession,
     pendingMessages,
     retryMessage,
@@ -801,8 +802,20 @@
   // call ends, so a new call never starts with an old level.
   let callSoundLevel = $state(0);
   function takeSoundLevel(level: number) {
-    callSoundLevel = callState.phase === 'active' ? level : 0;
+    // A device test's microphone level shows in Settings while no call runs.
+    callSoundLevel = callState.phase === 'active' || callState.phase === 'idle' ? level : 0;
   }
+  // Goes up each time a device test changes (ADR-0059).
+  let deviceTestTicks = $state(0);
+  // The call window opens when a call starts joining (ADR-0060). It opens
+  // once per call: closing it during the call keeps it closed until the call
+  // bar's "Call window" button.
+  let callWindowFor = false;
+  $effect(() => {
+    const joined = inCall(callState);
+    if (joined && !callWindowFor) void openCallWindow().catch(() => {});
+    callWindowFor = joined;
+  });
   let callJoinText = $state<string | null>(null);
   let cameraText = $state<string | null>(null);
   let screenText = $state<string | null>(null);
@@ -820,7 +833,7 @@
   // A camera failure is about the call that is running; it goes when that
   // call ends.
   $effect(() => {
-    if (callState.phase !== 'active') callSoundLevel = 0;
+    if (callState.phase !== 'active' && callState.phase !== 'idle') callSoundLevel = 0;
     if (callState.phase === 'ended' || callState.phase === 'idle') {
       cameraRequest += 1;
       cameraText = null;
@@ -1743,7 +1756,7 @@
     // Without the channel the page could keep showing a locked session, so it
     // loads nothing.
     try {
-      await watchSession(reset, refreshRooms, refreshSecurity, refreshModules, () => callRefresher.request(), () => (callVideoTicks += 1), refreshRings, refreshAccount, takeSoundLevel);
+      await watchSession(reset, refreshRooms, refreshSecurity, refreshModules, () => callRefresher.request(), () => (callVideoTicks += 1), refreshRings, refreshAccount, takeSoundLevel, () => {}, () => (deviceTestTicks += 1));
     } catch {
       unavailable = true;
       return;
@@ -2699,6 +2712,7 @@
         health: () => (healthOpen = true),
         settings: () => openSettings('security'),
         lock: () => void toggleLock(),
+        tray: () => void minimiseToTray().catch(() => {}),
         exit: () => void exitApp().catch(() => {})
       }
     )
@@ -2895,7 +2909,7 @@
             </p>
             <div class="panel">
               <h3>Devices</h3>
-              <CallDevices />
+              <CallDevices soundLevel={callSoundLevel} testTicks={deviceTestTicks} videoTicks={callVideoTicks} />
             </div>
           {:else}
             <p class="lede">No account is signed in. Call devices belong to an account, so there are none to choose.</p>
@@ -3182,6 +3196,7 @@
           onscreen={toggleScreen}
           onleave={leaveCall}
           ondismiss={dismissCall}
+          onwindow={() => void openCallWindow().catch(() => {})}
         />
         {#if cameraText}
           <p class="call-notice camera-notice error" role="alert">

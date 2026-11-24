@@ -138,6 +138,12 @@ fn main() {
             "add_profile",
             "switch_profile",
             "exit_app",
+            "minimise_to_tray",
+            "call_device_test",
+            "call_device_test_stop",
+            "call_device_test_status",
+            "open_call_window",
+            "close_call_window",
         ]));
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         attributes = attributes

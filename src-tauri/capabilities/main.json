@@ -1,6 +1,6 @@
 {
   "identifier": "main",
-  "description": "The main window may call the app's view, subscription, session lock, profile reset, sign-in, registration, sign-out, encryption, audio call, sending, image, conversation, room, room settings, account, account change, notification level, profile, window display and exit commands and nothing else: no core plugin, notification plugin, event, window, path or webview permissions.",
+  "description": "The main window may call the app's view, subscription, session lock, profile reset, sign-in, registration, sign-out, encryption, audio call, sending, image, conversation, room, room settings, account, account change, notification level, profile, window display, call window, device test, tray and exit commands and nothing else: no core plugin, notification plugin, event, window, path or webview permissions.",
   "windows": ["main"],
   "permissions": [
     "allow-app-status",
@@ -38,6 +38,9 @@
     "allow-diagnostic-records",
     "allow-call-devices",
     "allow-set-call-devices",
+    "allow-call-device-test",
+    "allow-call-device-test-stop",
+    "allow-call-device-test-status",
     "allow-register",
     "allow-sign-out",
     "allow-security-status",
@@ -53,6 +56,8 @@
     "allow-call-status",
     "allow-call-rings",
     "allow-call-decline-ring",
+    "allow-open-call-window",
+    "allow-close-call-window",
     "allow-set-up-encryption",
     "allow-recover-with-key",
     "allow-send-message",
@@ -127,6 +132,7 @@
     "allow-profile-list",
     "allow-add-profile",
     "allow-switch-profile",
-    "allow-exit-app"
+    "allow-exit-app",
+    "allow-minimise-to-tray"
   ]
 }

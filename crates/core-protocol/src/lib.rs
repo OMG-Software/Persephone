@@ -328,6 +328,22 @@ pub enum Call {
     DiscoverHomeserver {
         server_name: String,
     },
+    /// Test one call device in a contained call worker (ADR-0059): listen
+    /// on a microphone, play a tone on a speaker or show a camera. `device`
+    /// is a platform device ID of at most [`MAX_CALL_DEVICE_ID_BYTES`], or
+    /// null for the system default. Replies the test's status at once;
+    /// `call_device_test_changed` follows each change. A test that runs is
+    /// stopped first. Refused with the state `in_call` while a call runs.
+    CallDeviceTest {
+        test: persephone_contracts::CallDeviceTestKind,
+        /// Required, though it may be null.
+        #[serde(deserialize_with = "Option::deserialize")]
+        device: Option<String>,
+    },
+    /// Stop the device test that runs, if any. Replies null.
+    CallDeviceTestStop {},
+    /// The newest device test's status.
+    CallDeviceTestStatus {},
     /// Sign in to this homeserver through its OAuth 2.0 provider (OIDC,
     /// ADR-0030). The core asks in its own window before the provider's page
     /// opens in the browser; the password goes to the provider, never here.
@@ -1076,6 +1092,17 @@ pub enum Event {
     CallSoundLevel {
         level: u8,
     },
+    /// The sound of the other devices in the call changed (ADR-0059): each
+    /// device that is not silent now, at most [`MAX_CALL_LEVELS`], with
+    /// validated IDs and a level of 0 to [`MAX_CALL_SOUND_LEVEL`]. Empty
+    /// when the call ends. Coalesced like `CallSoundLevel`.
+    CallLevels {
+        #[serde(deserialize_with = "bounded_levels")]
+        levels: Vec<persephone_contracts::CallParticipantLevel>,
+    },
+    /// A device test started, changed or ended (ADR-0059): ask for
+    /// `call_device_test_status`. Content-free and coalesced.
+    CallDeviceTestChanged {},
     /// An incoming call ring started, ended or changed (ADR-0052): ask for
     /// `call_rings`. Content-free and coalesced like `CallChanged`.
     RingsChanged {},
@@ -1102,6 +1129,30 @@ pub enum Event {
         #[serde(default)]
         call: bool,
     },
+}
+
+/// Most devices in one `call_levels` event: the most call participants.
+pub const MAX_CALL_LEVELS: usize = persephone_contracts::CALL_PARTICIPANTS_MAX;
+
+/// Whether every level names a device with bounded IDs and is in range.
+pub fn levels_within_limits(levels: &[persephone_contracts::CallParticipantLevel]) -> bool {
+    levels.len() <= MAX_CALL_LEVELS
+        && levels.iter().all(|level| {
+            level.user_id.len() <= MAX_USER_ID_BYTES
+                && level.device_id.len() <= MAX_DEVICE_ID_BYTES
+                && level.level <= MAX_CALL_SOUND_LEVEL
+        })
+}
+
+fn bounded_levels<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<persephone_contracts::CallParticipantLevel>, D::Error> {
+    let levels = Vec::<persephone_contracts::CallParticipantLevel>::deserialize(deserializer)?;
+    if levels_within_limits(&levels) {
+        Ok(levels)
+    } else {
+        Err(serde::de::Error::custom("call levels out of bounds"))
+    }
 }
 
 /// Most records in one `diagnostic_records` call.
@@ -1336,6 +1387,11 @@ pub fn call_video_within_limits(call: &Call) -> bool {
                 && *stream <= MAX_SAFE_TIMESTAMP
         }
         Call::SetCallDevices { camera, .. } => camera.as_ref().is_none_or(|id| {
+            !id.is_empty()
+                && id.len() <= MAX_CALL_DEVICE_ID_BYTES
+                && !id.chars().any(char::is_control)
+        }),
+        Call::CallDeviceTest { device, .. } => device.as_ref().is_none_or(|id| {
             !id.is_empty()
                 && id.len() <= MAX_CALL_DEVICE_ID_BYTES
                 && !id.chars().any(char::is_control)
@@ -3934,6 +3990,65 @@ mod timeline_events_wire_tests {
             )
             .is_err()
         );
+    }
+
+    /// GIVEN call level events WHEN read THEN bounded ones are kept, and a
+    /// level over the top, too many devices or an overlong ID is refused.
+    #[test]
+    fn given_call_level_events_then_only_bounded_ones_are_read() {
+        let event = |levels: serde_json::Value| {
+            serde_json::from_value::<CoreMessage>(
+                serde_json::json!({"event": {"call_levels": {"levels": levels}}}),
+            )
+        };
+        let one = |level: u32, user: &str| serde_json::json!({"userId": user, "deviceId": "D", "level": level});
+        assert!(event(serde_json::json!([])).is_ok());
+        assert!(event(serde_json::json!([one(100, "@a:example.org")])).is_ok());
+        assert!(event(serde_json::json!([one(101, "@a:example.org")])).is_err());
+        let long = format!("@{}:example.org", "a".repeat(MAX_USER_ID_BYTES));
+        assert!(event(serde_json::json!([one(1, &long)])).is_err());
+        let many: Vec<_> = (0..=MAX_CALL_LEVELS)
+            .map(|_| one(1, "@a:example.org"))
+            .collect();
+        assert!(event(serde_json::Value::Array(many)).is_err());
+        let wire =
+            serde_json::to_string(&CoreMessage::Event(Event::CallDeviceTestChanged {})).unwrap();
+        assert_eq!(wire, r#"{"event":{"call_device_test_changed":{}}}"#);
+    }
+
+    /// GIVEN device test commands WHEN read THEN each has its wire form, the
+    /// device is required (null allowed), and a bad ID is refused by the
+    /// limit check.
+    #[test]
+    fn given_device_test_commands_then_they_read_and_are_bounded() {
+        let read = |text: &str| serde_json::from_str::<Request>(text);
+        let test =
+            read(r#"{"id":1,"call":{"command":"call_device_test","test":"camera","device":null}}"#)
+                .expect("a test");
+        assert_eq!(
+            test.call,
+            Call::CallDeviceTest {
+                test: persephone_contracts::CallDeviceTestKind::Camera,
+                device: None,
+            }
+        );
+        assert!(read(r#"{"id":1,"call":{"command":"call_device_test","test":"camera"}}"#).is_err());
+        assert!(
+            read(r#"{"id":1,"call":{"command":"call_device_test","test":"x","device":null}}"#)
+                .is_err()
+        );
+        assert!(read(r#"{"id":1,"call":{"command":"call_device_test_stop"}}"#).is_ok());
+        assert!(read(r#"{"id":1,"call":{"command":"call_device_test_status"}}"#).is_ok());
+        let with = |device: &str| Call::CallDeviceTest {
+            test: persephone_contracts::CallDeviceTestKind::Microphone,
+            device: Some(device.to_owned()),
+        };
+        assert!(call_video_within_limits(&with("{0.0.1.00000000}.{a}")));
+        assert!(!call_video_within_limits(&with("")));
+        assert!(!call_video_within_limits(&with("a\nb")));
+        assert!(!call_video_within_limits(&with(
+            &"a".repeat(MAX_CALL_DEVICE_ID_BYTES + 1)
+        )));
     }
 
     /// GIVEN a diagnostics event THEN its wire form carries only `on`.

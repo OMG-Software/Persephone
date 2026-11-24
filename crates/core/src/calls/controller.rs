@@ -32,7 +32,7 @@ use super::video::{Notifier, Picture, VideoStore};
 use super::worker::{
     CallHost, CallWorkerLink, StartError, WorkerAudio, WorkerExit, WorkerProcess, exit_is_crash,
 };
-use super::{MAX_CALL_MEMBERS, keys::FrameKey};
+use super::{MAX_CALL_MEMBERS, device_test, keys::FrameKey};
 use crate::session::Admission;
 use matrix_sdk::{
     Client, RoomState,
@@ -48,7 +48,10 @@ use persephone_call_protocol::{
     CameraState, FailureCode, FrameKeyMsg, FromWorker, MAX_VOLUME_PERCENT, ScreenState, ToWorker,
     TurnServer, VIDEO_TILES,
 };
-use persephone_contracts::{CallCamera, CallParticipantRef, CallScreen, CallVideoTile};
+use persephone_contracts::{
+    CallCamera, CallDeviceChange, CallDeviceTestKind, CallDeviceTestState, CallDeviceTestStatus,
+    CallParticipantLevel, CallParticipantRef, CallScreen, CallVideoTile,
+};
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet, VecDeque},
     future::Future,
@@ -168,6 +171,9 @@ pub struct Participant {
     pub keyed: bool,
     /// It shares its screen (ADR-0053); a display hint from the sender.
     pub sharing: bool,
+    /// Its microphone is muted or it has none (ADR-0059); a hint from the
+    /// sender.
+    pub muted: bool,
 }
 
 /// The call as the page sees it. It holds no secret and no peer text.
@@ -196,6 +202,8 @@ pub enum CallState {
         /// The other member of a direct chat declined this call's ring
         /// (ADR-0052). The call goes on.
         ring_declined: bool,
+        /// The last device change of this call failed (ADR-0059).
+        device_change: Option<CallDeviceChange>,
     },
     Ended {
         room_id: OwnedRoomId,
@@ -364,6 +372,9 @@ struct View {
     /// Other devices only.
     members: Vec<ActiveMember>,
     speaking: HashSet<String>,
+    /// Worker identities whose microphone is muted or absent (ADR-0059),
+    /// current members only, from the connection that speaks for them.
+    mic_muted: HashSet<String>,
     keyed: HashSet<String>,
     camera: CallCamera,
     /// The own screen share.
@@ -387,6 +398,8 @@ struct View {
     video_streams: [u64; VIDEO_TILES as usize],
     /// The ring this call sent was declined (ADR-0052).
     ring_declined: bool,
+    /// The last device change failed (ADR-0059).
+    device_change: Option<CallDeviceChange>,
 }
 
 /// Remote video tiles: tiles 1 to 4 are cameras, tile 5 is the screen share.
@@ -405,6 +418,7 @@ impl View {
             volume: MAX_VOLUME_PERCENT,
             members: Vec::new(),
             speaking: HashSet::new(),
+            mic_muted: HashSet::new(),
             keyed: HashSet::new(),
             camera: if video {
                 CallCamera::Starting
@@ -417,6 +431,7 @@ impl View {
             other: OtherSfus::default(),
             video_streams: Default::default(),
             ring_declined: false,
+            device_change: None,
         }
     }
 
@@ -482,6 +497,7 @@ impl View {
             .flat_map(|m| m.backend_identities.iter().map(String::as_str))
             .collect();
         self.speaking.retain(|id| backends.contains(id.as_str()));
+        self.mic_muted.retain(|id| backends.contains(id.as_str()));
         self.keyed.retain(|id| present.contains(id.as_str()));
         // `sharing` keeps hints of identities that are not members yet: the
         // worker can hear of a share before the membership arrives.
@@ -617,14 +633,58 @@ impl View {
         tiles
     }
 
+    /// The member whose sound level the worker reports, as the page names
+    /// it: only a current member, and only from the connection that speaks
+    /// for it.
+    fn level_member(&self, connection: u8, identity: &str) -> Option<CallParticipantLevelKey> {
+        if !self.accepts(connection, identity) {
+            return None;
+        }
+        self.backend_member(identity)
+            .map(|member| (member.user_id.to_string(), member.device_id.to_string()))
+    }
+
     fn apply(&mut self, event: &FromWorker) -> Applied {
         match event {
             // A record goes to the diagnostic log, never to the view.
-            // A sound level goes to the level meter, never to the view.
+            // A sound level goes to the level meters, never to the view.
             FromWorker::Ready { .. }
             | FromWorker::ParticipantJoined { .. }
             | FromWorker::Diagnostic { .. }
-            | FromWorker::SoundLevel { .. } => Applied::Same,
+            | FromWorker::SoundLevel { .. }
+            | FromWorker::ParticipantLevel { .. } => Applied::Same,
+            FromWorker::ParticipantMuted {
+                connection,
+                identity,
+                muted,
+            } => {
+                if !self.accepts(*connection, identity) {
+                    return Applied::Same;
+                }
+                let changed = if *muted {
+                    self.mic_muted.len() < persephone_call_protocol::MAX_PARTICIPANTS
+                        && self.mic_muted.insert(identity.clone())
+                } else {
+                    self.mic_muted.remove(identity)
+                };
+                if changed {
+                    Applied::Changed
+                } else {
+                    Applied::Same
+                }
+            }
+            FromWorker::DevicesSet { failure } => {
+                let change = failure.map(|code| match code {
+                    FailureCode::DeviceNotFound => CallDeviceChange::NotFound,
+                    FailureCode::Unsupported => CallDeviceChange::Unsupported,
+                    _ => CallDeviceChange::Failed,
+                });
+                if self.device_change == change {
+                    return Applied::Same;
+                }
+                self.device_change = change;
+                Applied::Changed
+            }
             FromWorker::Camera { state } => self.set_camera(match state {
                 CameraState::Off => CallCamera::Off,
                 CameraState::On => CallCamera::On,
@@ -726,9 +786,10 @@ impl View {
                 identity,
             } => {
                 let video = self.forget_video(*connection, identity);
-                let speaking =
-                    self.accepts(*connection, identity) && self.speaking.remove(identity);
-                if speaking || video {
+                let accepted = self.accepts(*connection, identity);
+                let speaking = accepted && self.speaking.remove(identity);
+                let muted = accepted && self.mic_muted.remove(identity);
+                if speaking || video || muted {
                     Applied::Changed
                 } else {
                     Applied::Same
@@ -814,12 +875,17 @@ impl View {
                         .keyed
                         .contains(&participant_identity(&m.user_id, &m.device_id)),
                     sharing: self.is_sharing(m),
+                    muted: m
+                        .backend_identities
+                        .iter()
+                        .any(|id| self.mic_muted.contains(id)),
                 })
                 .collect(),
             camera: self.camera,
             screen: self.screen,
             video: self.video_tiles(),
             ring_declined: self.ring_declined,
+            device_change: self.device_change,
         }
     }
 }
@@ -1032,7 +1098,17 @@ struct RunHandle {
     /// The latest playout volume. A watch keeps only the newest value, so a
     /// fast slider never fills the command queue.
     volume: watch::Sender<u8>,
+    /// The latest microphone and speaker choice made during the call
+    /// (ADR-0059). `None` until one is made.
+    devices: watch::Sender<Option<SoundDevices>>,
     task: Option<JoinHandle<()>>,
+}
+
+/// A microphone and speaker choice; `None` is the system default.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SoundDevices {
+    recording: Option<String>,
+    playout: Option<String>,
 }
 
 /// What the page asks of a running call.
@@ -1059,8 +1135,23 @@ enum Command {
 
 /// Tells the owner of the controller that the state changed.
 type Listener = Arc<dyn Fn() + Send + Sync>;
-/// Takes the call's sound level, 0 to `MAX_SOUND_LEVEL` (ADR-0055).
-pub type SoundListener = Arc<dyn Fn(u8) + Send + Sync>;
+/// Takes the call's sound levels (ADR-0055, ADR-0059).
+pub type SoundListener = Arc<dyn Fn(SoundUpdate) + Send + Sync>;
+
+/// A member as the page names it: user ID and device ID.
+type CallParticipantLevelKey = (String, String);
+
+/// A change of the level meters. Not call state: the page gets the newest
+/// one only.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SoundUpdate {
+    /// The own microphone, 0 to `MAX_SOUND_LEVEL`, as it is sent. In a
+    /// device test (ADR-0059) the tested microphone.
+    Own(u8),
+    /// Every other device that is not silent now, at most
+    /// [`MAX_CALL_MEMBERS`]. Empty when the call ends.
+    Participants(Vec<CallParticipantLevel>),
+}
 
 struct Inner {
     host: Arc<dyn CallHost>,
@@ -1075,9 +1166,41 @@ struct Inner {
     /// [`CallController::set_sound_listener`].
     sound_listener: Mutex<Option<SoundListener>>,
     /// The picture store of the running worker, from its start to the end of
-    /// the call or join.
+    /// the call or join, or of a camera test while no call runs (ADR-0059).
     video: Mutex<Option<VideoStore>>,
     next_id: AtomicU64,
+    /// The newest device test (ADR-0059).
+    device_test: Mutex<DeviceTestSlot>,
+    /// Tells the owner that the device test changed.
+    test_listener: Mutex<Option<Listener>>,
+}
+
+/// The newest device test and what ends it.
+struct DeviceTestSlot {
+    status: CallDeviceTestStatus,
+    /// Numbers the tests; a test changes the status only while it is the
+    /// newest.
+    generation: u64,
+    /// Set to end the running test.
+    stop: Arc<AtomicBool>,
+    /// The thread of the newest test. The next test waits for it, so two
+    /// tests never hold a device at once.
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Default for DeviceTestSlot {
+    fn default() -> Self {
+        Self {
+            status: CallDeviceTestStatus {
+                test: None,
+                state: CallDeviceTestState::Idle,
+                stream: 0,
+            },
+            generation: 0,
+            stop: Arc::new(AtomicBool::new(true)),
+            thread: None,
+        }
+    }
 }
 
 impl Inner {
@@ -1108,6 +1231,30 @@ impl Inner {
         });
         if changed {
             self.notify();
+        }
+    }
+
+    /// Sets the status of device test `generation`, if it is still the
+    /// newest, and tells the test listener. Called with no lock held.
+    fn set_test(&self, generation: u64, change: impl FnOnce(&mut CallDeviceTestStatus)) {
+        let changed = {
+            let mut slot = plain(&self.device_test);
+            if slot.generation != generation {
+                return;
+            }
+            let before = slot.status.clone();
+            change(&mut slot.status);
+            slot.status != before
+        };
+        if changed && let Some(listener) = plain(&self.test_listener).clone() {
+            listener();
+        }
+    }
+
+    /// Gives the sound listener a level of the own side.
+    fn own_level(&self, level: u8) {
+        if let Some(listener) = plain(&self.sound_listener).clone() {
+            listener(SoundUpdate::Own(level));
         }
     }
 
@@ -1193,6 +1340,8 @@ impl CallController {
                 sound_listener: Mutex::new(None),
                 video: Mutex::new(None),
                 next_id: AtomicU64::new(0),
+                device_test: Mutex::new(DeviceTestSlot::default()),
+                test_listener: Mutex::new(None),
             }),
         }
     }
@@ -1221,6 +1370,77 @@ impl CallController {
     /// not call the controller. The level is not part of the call state.
     pub fn set_sound_listener(&self, listener: SoundListener) {
         *plain(&self.inner.sound_listener) = Some(listener);
+    }
+
+    /// Calls `listener` after each change of the device test's status, on
+    /// the test's thread. It must not block and must not call the controller.
+    pub fn set_test_listener(&self, listener: Listener) {
+        *plain(&self.inner.test_listener) = Some(listener);
+    }
+
+    /// The newest device test (ADR-0059).
+    pub fn device_test_status(&self) -> CallDeviceTestStatus {
+        plain(&self.inner.device_test).status.clone()
+    }
+
+    /// Ends the device test that runs, if any. Its status follows when the
+    /// worker has ended.
+    pub fn stop_device_test(&self) {
+        plain(&self.inner.device_test)
+            .stop
+            .store(true, Ordering::SeqCst);
+    }
+
+    /// Starts a device test (ADR-0059) and returns its first status. A test
+    /// that runs is stopped, and the new one waits for its end. While a call
+    /// runs or joins the test is refused (`in_call`); where calls are not
+    /// supported it is `unsupported`. The worker connects to nothing.
+    pub fn start_device_test(
+        &self,
+        test: CallDeviceTestKind,
+        device: Option<String>,
+    ) -> CallDeviceTestStatus {
+        // The test lock first, then the call check: a join that starts after
+        // the check stops this test, because its stop takes the same lock
+        // after the join holds the call slot. No path holds the call slot
+        // while it waits for the test lock.
+        let mut slot = plain(&self.inner.device_test);
+        let refused = if !self.inner.host.supported() {
+            Some(CallDeviceTestState::Unsupported)
+        } else if !matches!(*self.inner.slot(), Slot::Idle) {
+            Some(CallDeviceTestState::InCall)
+        } else {
+            None
+        };
+        slot.stop.store(true, Ordering::SeqCst);
+        slot.generation += 1;
+        slot.status = CallDeviceTestStatus {
+            test: Some(test),
+            state: refused.unwrap_or(CallDeviceTestState::Starting),
+            stream: 0,
+        };
+        let status = slot.status.clone();
+        if refused.is_some() {
+            return status;
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        slot.stop = stop.clone();
+        let previous = slot.thread.take();
+        let inner = self.inner.clone();
+        let generation = slot.generation;
+        let spawned = std::thread::Builder::new()
+            .name("call-device-test".to_owned())
+            .spawn(move || {
+                if let Some(previous) = previous {
+                    let _ = previous.join();
+                }
+                run_device_test(&inner, generation, test, device, &stop);
+            });
+        match spawned {
+            Ok(thread) => slot.thread = Some(thread),
+            Err(_) => slot.status.state = CallDeviceTestState::Failed,
+        }
+        slot.status.clone()
     }
 
     /// The newest picture of stream `stream` on `tile` with a number above
@@ -1281,6 +1501,8 @@ impl CallController {
             kill: kill.clone(),
         });
         drop(slot);
+        // The call needs the devices: a device test ends.
+        self.stop_device_test();
         self.inner.publish(CallState::Joining {
             room_id: room_id.to_owned(),
         });
@@ -1342,6 +1564,7 @@ impl CallController {
         let camera_wanted = call.camera_wanted.clone();
         let screen_control = call.screen_control.clone();
         let volume = call.volume.clone();
+        let devices = call.devices.clone();
         let mut call = Some(call);
         let halted = {
             // `leave` and the end of the session set their flag under this
@@ -1368,6 +1591,7 @@ impl CallController {
                         camera_wanted,
                         screen_control,
                         volume,
+                        devices,
                         task: Some(task),
                     });
                     guard.armed = false;
@@ -1624,6 +1848,8 @@ impl CallController {
             camera_wanted: Arc::new(AtomicBool::new(scope.video)),
             audio: AudioWants::default(),
             volume: watch::channel(scope.devices.volume()).0,
+            devices: watch::channel(None).0,
+            levels: BTreeMap::new(),
             portal: None,
             portal_capture: false,
             portal_sent: false,
@@ -1705,6 +1931,27 @@ impl CallController {
         match &*self.inner.slot() {
             Slot::Running(run) => {
                 run.volume.send_replace(percent.min(MAX_VOLUME_PERCENT));
+                Ok(())
+            }
+            _ => Err(CallError::NotInCall),
+        }
+    }
+
+    /// Moves the running call to another microphone and speaker (ADR-0059).
+    /// Only the newest choice is sent; the worker's answer shows as the
+    /// state's `device_change`. `NotInCall` without a call: the choice then
+    /// applies to the next one.
+    pub fn set_sound_devices(
+        &self,
+        recording: Option<&str>,
+        playout: Option<&str>,
+    ) -> Result<(), CallError> {
+        match &*self.inner.slot() {
+            Slot::Running(run) => {
+                run.devices.send_replace(Some(SoundDevices {
+                    recording: recording.map(str::to_owned),
+                    playout: playout.map(str::to_owned),
+                }));
                 Ok(())
             }
             _ => Err(CallError::NotInCall),
@@ -2145,6 +2392,12 @@ struct Call {
     audio: AudioWants,
     /// The playout volume. The controller sends; the task subscribes.
     volume: watch::Sender<u8>,
+    /// A device change during the call (ADR-0059). The controller sends;
+    /// the task subscribes.
+    devices: watch::Sender<Option<SoundDevices>>,
+    /// The level of each other member that is not silent (ADR-0059), at
+    /// most [`MAX_CALL_MEMBERS`].
+    levels: BTreeMap<CallParticipantLevelKey, u8>,
     /// The camera portal access request in flight (Linux portal path).
     /// Dropping it (the call ends) cancels the request.
     portal: Option<PortalTask>,
@@ -2405,6 +2658,96 @@ async fn refine_worker_stop(call: &Call) -> EndReason {
     stop_reason(exit)
 }
 
+/// Runs device test `generation` on its own thread (ADR-0059): starts a
+/// worker, sends `TestDevice` and follows the answers until the worker ends,
+/// `stop` is set or [`device_test::TEST_LIMIT`] passes. A camera test's store
+/// is the controller's picture store while no call runs.
+fn run_device_test(
+    inner: &Arc<Inner>,
+    generation: u64,
+    test: CallDeviceTestKind,
+    device: Option<String>,
+    stop: &AtomicBool,
+) {
+    let end = |state| inner.set_test(generation, |status| status.state = state);
+    if stop.load(Ordering::SeqCst) {
+        end(CallDeviceTestState::Idle);
+        return;
+    }
+    // No sound server name: Linux tests no microphone or speaker yet.
+    let Ok(mut link) = inner.host.start(&WorkerAudio::default()) else {
+        end(CallDeviceTestState::Failed);
+        return;
+    };
+    let store = link.video();
+    let camera = test == CallDeviceTestKind::Camera;
+    if camera {
+        store.sync(true, [false; REMOTE_TILES]);
+        if let Some(notifier) = plain(&inner.video_listener).clone() {
+            store.set_notifier(notifier);
+        }
+        // Under the slot lock, so a join that starts now replaces it.
+        let slot = inner.slot();
+        let mut video = plain(&inner.video);
+        if matches!(*slot, Slot::Idle) && video.is_none() {
+            *video = Some(store.clone());
+        }
+        drop(video);
+        drop(slot);
+        let stream = store.stream(0);
+        inner.set_test(generation, |status| status.stream = stream);
+    }
+    let sent = link.send(ToWorker::TestDevice {
+        test: device_test::worker_test(test),
+        device,
+    });
+    let mut state = CallDeviceTestState::Starting;
+    let limit = std::time::Instant::now() + device_test::TEST_LIMIT;
+    let mut leave_by: Option<std::time::Instant> = None;
+    if sent.is_err() {
+        state = CallDeviceTestState::Failed;
+    }
+    while !device_test::is_final(state) {
+        let now = std::time::Instant::now();
+        if leave_by.is_none() && (stop.load(Ordering::SeqCst) || now >= limit) {
+            let _ = link.send(ToWorker::Leave);
+            leave_by = Some(now + device_test::LEAVE_WAIT);
+        }
+        if leave_by.is_some_and(|by| now >= by) {
+            state = CallDeviceTestState::Failed;
+            break;
+        }
+        match link.events.try_recv() {
+            Ok(FromWorker::SoundLevel { level }) => inner.own_level(level),
+            Ok(message) => {
+                let stopped = leave_by.is_some();
+                if let Some(next) = device_test::next_state(state, &message, stopped) {
+                    state = next;
+                    inner.set_test(generation, |status| status.state = next);
+                }
+            }
+            Err(mpsc::error::TryRecvError::Empty) => std::thread::sleep(device_test::POLL),
+            Err(mpsc::error::TryRecvError::Disconnected) => {
+                state = CallDeviceTestState::Failed;
+            }
+        }
+    }
+    link.finish(device_test::FINISH_TIMEOUT);
+    if camera {
+        let mut video = plain(&inner.video);
+        if video.as_ref().is_some_and(|shown| shown.is_same(&store)) {
+            *video = None;
+        }
+        drop(video);
+        store.close();
+    }
+    inner.own_level(0);
+    inner.set_test(generation, |status| {
+        status.state = state;
+        status.stream = 0;
+    });
+}
+
 async fn run_call(
     inner: Arc<Inner>,
     id: u64,
@@ -2433,6 +2776,11 @@ async fn run_call(
         flags.ended.store(true, Ordering::SeqCst);
     }
     call.finish(flags.ended()).await;
+    // The meters show nothing once the call is over.
+    if let Some(listener) = plain(&inner.sound_listener).clone() {
+        listener(SoundUpdate::Own(0));
+        listener(SoundUpdate::Participants(Vec::new()));
+    }
     guard.armed = false;
     // After the end of the session the slot is free and the state shows it.
     if inner.release(id) {
@@ -2887,8 +3235,17 @@ impl Call {
         // call state (ADR-0055). The reader already bounded it.
         if let FromWorker::SoundLevel { level } = event {
             if let Some(listener) = plain(&inner.sound_listener).clone() {
-                listener(*level);
+                listener(SoundUpdate::Own(*level));
             }
+            return Ok(());
+        }
+        if let FromWorker::ParticipantLevel {
+            connection,
+            identity,
+            level,
+        } = event
+        {
+            self.participant_level(inner, *connection, identity, *level);
             return Ok(());
         }
         // A camera that is not on has no capture left: its remote is used up.
@@ -2925,6 +3282,40 @@ impl Call {
             self.publish(inner);
         }
         Ok(())
+    }
+
+    /// Keeps one member's level and gives the meters every level when it
+    /// changed. Only a current member counts; silence removes it.
+    fn participant_level(&mut self, inner: &Inner, connection: u8, identity: &str, level: u8) {
+        let Some(key) = self.view.level_member(connection, identity) else {
+            return;
+        };
+        let changed = if level == 0 {
+            self.levels.remove(&key).is_some()
+        } else if self.levels.len() < MAX_CALL_MEMBERS || self.levels.contains_key(&key) {
+            self.levels.insert(key, level) != Some(level)
+        } else {
+            false
+        };
+        if changed {
+            self.send_levels(inner);
+        }
+    }
+
+    /// Gives the meters the levels of the members now.
+    fn send_levels(&self, inner: &Inner) {
+        if let Some(listener) = plain(&inner.sound_listener).clone() {
+            listener(SoundUpdate::Participants(
+                self.levels
+                    .iter()
+                    .map(|((user_id, device_id), level)| CallParticipantLevel {
+                        user_id: user_id.clone(),
+                        device_id: device_id.clone(),
+                        level: *level,
+                    })
+                    .collect(),
+            ));
+        }
     }
 
     /// Looks for members on other SFUs and acts on what the user has and has
@@ -3286,6 +3677,8 @@ impl Call {
         // there was none, the worker gets the Join's volume again.
         let mut volume = self.volume.subscribe();
         volume.mark_changed();
+        // A device choice made since the join; the join used the saved one.
+        let mut devices = self.devices.subscribe();
         // The diagnostic log's switch, sent at once and on each change.
         let mut diagnostics = crate::diagnostics::global().watch();
         diagnostics.mark_changed();
@@ -3324,6 +3717,15 @@ impl Call {
                 Ok(()) = volume.changed() => {
                     let percent = *volume.borrow_and_update();
                     self.volume_changed(inner, percent)?;
+                }
+                Ok(()) = devices.changed() => {
+                    let choice = devices.borrow_and_update().clone();
+                    if let Some(choice) = choice {
+                        self.send_worker(ToWorker::SetDevices {
+                            recording: choice.recording,
+                            playout: choice.playout,
+                        })?;
+                    }
                 }
                 Ok(()) = diagnostics.changed() => {
                     let on = *diagnostics.borrow_and_update();
@@ -4440,6 +4842,7 @@ mod tests {
             camera_wanted: Arc::new(AtomicBool::new(false)),
             screen_control: Arc::default(),
             volume: watch::channel(MAX_VOLUME_PERCENT).0,
+            devices: watch::channel(None).0,
             task: None,
         });
         calls.stop_for_session_end();
@@ -4614,6 +5017,8 @@ mod tests {
             camera_wanted: Arc::new(AtomicBool::new(false)),
             audio: AudioWants::default(),
             volume: watch::channel(MAX_VOLUME_PERCENT).0,
+            devices: watch::channel(None).0,
+            levels: BTreeMap::new(),
             portal: None,
             portal_capture: false,
             portal_sent: false,
@@ -5094,7 +5499,7 @@ mod tests {
         }));
         let levels = Arc::new(Mutex::new(Vec::new()));
         let heard = levels.clone();
-        calls.set_sound_listener(Arc::new(move |level| plain(&heard).push(level)));
+        calls.set_sound_listener(Arc::new(move |update| plain(&heard).push(update)));
         let inner = calls.inner.clone();
         let mut call = fixture.call;
         call.worker_event(&inner, &FromWorker::Connected).unwrap();
@@ -5105,7 +5510,7 @@ mod tests {
             assert_eq!(call.worker_event(&inner, &message), Ok(()));
             assert_eq!(call.view.apply(&message), Applied::Same);
         }
-        assert_eq!(*plain(&levels), [0, 55, 100]);
+        assert_eq!(*plain(&levels), [0, 55, 100].map(SoundUpdate::Own));
         assert_eq!(call.view.state(), state);
         assert_eq!(changes.load(Ordering::SeqCst), before);
     }
@@ -5364,6 +5769,7 @@ mod tests {
             camera_wanted: call.camera_wanted.clone(),
             screen_control: call.screen_control.clone(),
             volume: call.volume.clone(),
+            devices: call.devices.clone(),
             task: None,
         });
         run_call(
@@ -5596,6 +6002,7 @@ mod tests {
             camera_wanted: Arc::new(AtomicBool::new(false)),
             screen_control: Arc::default(),
             volume: watch::channel(MAX_VOLUME_PERCENT).0,
+            devices: watch::channel(None).0,
             task: None,
         });
         calls.inner.publish(state);
@@ -5613,6 +6020,7 @@ mod tests {
             screen: CallScreen::Off,
             video: Vec::new(),
             ring_declined: false,
+            device_change: None,
         }
     }
 
@@ -5685,6 +6093,7 @@ mod tests {
                 stream: 0,
             }],
             ring_declined: false,
+            device_change: None,
         });
         assert!(calls.video_picture(0, 0, store.stream(0)).is_some());
         assert_eq!(calls.set_camera(false), Ok(()));

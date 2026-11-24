@@ -3,6 +3,7 @@
 This area inherits `../AGENTS.md`.
 
 - Build a locally bundled Svelte UI. Keep `vite.config.js` output in `../.local/build/frontend`, relative asset URLs, no inline assets, and no production source maps unless a reviewed requirement changes them.
+- There are two pages: `index.html` (`src/main.ts`, the main window) and `call.html` (`src/call.ts`, the call window of ADR-0060). The call window may call only the commands in `src-tauri/capabilities/call.json`; do not use other bridge calls in `CallWindow.svelte`.
 - Put all Tauri API access in `src/bridge/index.ts` or another module under `src/bridge/`. Components use the typed bridge. Do not call `invoke`, Tauri globals, or host APIs directly from components.
 - Import public DTOs from `../crates/contracts/generated/contracts.ts`. Change Rust definitions and run the exporter when the DTO contract changes. TypeScript types do not validate runtime input or authorize commands.
 - Render names and message bodies as escaped text. Preserve bidirectional isolation in `src/Message.svelte`, `src/RoomList.svelte`, and `src/Timeline.svelte`. Do not use `{@html}`, HTML insertion APIs, automatic previews, or arbitrary remote images.

@@ -5,9 +5,14 @@
 import type {
   CallCamera,
   CallDevice,
+  CallDeviceChange,
   CallDevices,
+  CallDeviceTestKind,
+  CallDeviceTestState,
+  CallDeviceTestStatus,
   CallEnd,
   CallJoinError,
+  CallParticipantLevel,
   CallPhase,
   CallReadiness,
   CallScreen,
@@ -97,7 +102,8 @@ export const IDLE_CALL: CallStatus = {
   camera: 'off',
   screen: 'off',
   video: [],
-  ringDeclined: false
+  ringDeclined: false,
+  deviceChange: null
 };
 
 /** This account is in a call, or joining one. */
@@ -439,8 +445,12 @@ export function volumeText(percent: number): string {
   return `${volumeValue(percent)}%`;
 }
 
-/** The label of the call's sound level meter, under the call volume (ADR-0055). */
-export const SOUND_LEVEL_LABEL = 'Call sound';
+/**
+ * The label of the own microphone's level meter (ADR-0055, ADR-0059): it
+ * shows what the microphone picks up, so a silent meter means the call does
+ * not hear you.
+ */
+export const SOUND_LEVEL_LABEL = 'Your microphone';
 /** The top of the meter: full scale, 0 dBFS. 0 is -60 dBFS or quieter. */
 export const SOUND_LEVEL_MAX = 100;
 /** From this level (-6 dBFS) the meter shows the sound as loud. */
@@ -620,3 +630,108 @@ export function ringsAnnouncement(rings: readonly ShownRing[]): string {
 export function ringsKey(rings: readonly ShownRing[]): string {
   return rings.map((ring) => ring.ringId).join(',');
 }
+
+/** The most devices one levels message names: the most call participants. */
+export const MAX_CALL_LEVELS = 32;
+/** The longest user or device ID, in UTF-8 bytes. */
+const MAX_ID_BYTES = 255;
+
+const utf8Bytes = (text: string) => new TextEncoder().encode(text).byteLength;
+
+/**
+ * The other devices' levels the host sent (ADR-0059), or `null` when the
+ * value is anything but a list of at most {@link MAX_CALL_LEVELS} entries with
+ * a bounded user ID, device ID and a whole level from 0 to
+ * {@link SOUND_LEVEL_MAX}. Extra fields are refused too.
+ */
+export function parseLevels(value: unknown): CallParticipantLevel[] | null {
+  if (!Array.isArray(value) || value.length > MAX_CALL_LEVELS) return null;
+  const levels: CallParticipantLevel[] = [];
+  for (const entry of value) {
+    if (typeof entry !== 'object' || entry === null) return null;
+    const keys = Object.keys(entry);
+    if (keys.length !== 3) return null;
+    const { userId, deviceId, level } = entry as Record<string, unknown>;
+    if (typeof userId !== 'string' || typeof deviceId !== 'string') return null;
+    if (utf8Bytes(userId) > MAX_ID_BYTES || utf8Bytes(deviceId) > MAX_ID_BYTES) return null;
+    if (parseSoundLevel(level) === null) return null;
+    levels.push({ userId, deviceId, level: level as number });
+  }
+  return levels;
+}
+
+/** The key of one device in a call, for level lookups. */
+export function deviceKey(userId: string, deviceId: string): string {
+  return JSON.stringify([userId, deviceId]);
+}
+
+/**
+ * The newest level of each device. Each message names the devices that are
+ * not silent, so a device it leaves out is silent now.
+ */
+export function levelMap(levels: readonly CallParticipantLevel[]): Map<string, number> {
+  return new Map(levels.map((entry) => [deviceKey(entry.userId, entry.deviceId), entry.level]));
+}
+
+/** Read beside a participant whose microphone is off (ADR-0059). */
+export const PARTICIPANT_MUTED_LABEL = 'Microphone off';
+
+/** What a failed device change in a call means (ADR-0059). */
+export const DEVICE_CHANGE_TEXT: Record<CallDeviceChange, string> = {
+  not_found: 'The chosen microphone or speaker is not connected. The call keeps the one it had.',
+  unsupported: 'This system cannot change the microphone or speaker during a call. The change applies to the next call.',
+  failed: 'The microphone or speaker could not be changed. The call keeps the one it had.'
+};
+
+/** The buttons that start each device test. */
+export const DEVICE_TEST_LABEL: Record<CallDeviceTestKind, string> = {
+  microphone: 'Test microphone',
+  speaker: 'Test speaker',
+  camera: 'Test camera'
+};
+export const DEVICE_TEST_STOP_LABEL = 'Stop test';
+
+/** What a running test asks of the user. */
+const RUNNING_TEXT: Record<CallDeviceTestKind, string> = {
+  microphone: 'Speak now. The meter moves when Persephone hears your microphone.',
+  speaker: 'Playing a tone. You should hear it now.',
+  camera: 'The camera picture shows below when Persephone can use the camera.'
+};
+
+/** What an ended test found. */
+const DONE_TEXT: Record<CallDeviceTestKind, string> = {
+  microphone: 'The microphone test ended. If the meter did not move, Persephone did not hear the microphone.',
+  speaker: 'The tone played. If you heard nothing, check the speaker and its volume.',
+  camera: 'The camera test ended.'
+};
+
+/** The test's state as text, for the states every test shares. */
+const STATE_TEXT: Record<Exclude<CallDeviceTestState, 'running' | 'done'>, string> = {
+  idle: '',
+  starting: 'Starting the test…',
+  not_found: 'The chosen device is not connected.',
+  denied: 'Your system did not allow Persephone to use this device. Check its privacy settings.',
+  unsupported: 'This test is not available on this system yet.',
+  unavailable: 'The device could not start. Another app may be using it.',
+  in_call: 'Leave the call to test a device.',
+  failed: 'The test could not run.'
+};
+
+/**
+ * The text beside the `kind` test's button, or '' when that test is not
+ * the newest one.
+ */
+export function deviceTestText(status: CallDeviceTestStatus, kind: CallDeviceTestKind): string {
+  if (status.test !== kind) return '';
+  if (status.state === 'running') return RUNNING_TEXT[kind];
+  if (status.state === 'done') return DONE_TEXT[kind];
+  return STATE_TEXT[status.state];
+}
+
+/** Whether the test runs or starts, so its button stops it. */
+export function deviceTestActive(status: CallDeviceTestStatus, kind: CallDeviceTestKind): boolean {
+  return status.test === kind && (status.state === 'starting' || status.state === 'running');
+}
+
+/** No device test yet. */
+export const IDLE_DEVICE_TEST: CallDeviceTestStatus = { test: null, state: 'idle', stream: 0 };

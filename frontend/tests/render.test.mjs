@@ -254,7 +254,7 @@ test('GIVEN an active call and a sound level WHEN the call bar renders THEN a me
   const slider = quiet.indexOf('type="range"');
   const meter = quiet.indexOf('role="meter"');
   assert.ok(slider >= 0 && meter > slider, 'the meter comes right after the volume slider');
-  assert.match(quiet, /aria-label="Call sound"/);
+  assert.match(quiet, /aria-label="Your microphone"/);
   assert.match(quiet, /aria-valuenow="50"/);
   assert.match(quiet, /aria-valuetext="−30 dB"/);
   assert.match(quiet, /scaleX\(0\.5\)/);

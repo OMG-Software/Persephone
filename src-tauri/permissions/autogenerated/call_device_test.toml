@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-call-device-test"
+description = "Enables the call_device_test command without any pre-configured scope."
+commands.allow = ["call_device_test"]
+
+[[permission]]
+identifier = "deny-call-device-test"
+description = "Denies the call_device_test command without any pre-configured scope."
+commands.deny = ["call_device_test"]

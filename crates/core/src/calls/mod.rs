@@ -24,6 +24,8 @@
 //!   servers, so the page can say a call is not possible before it starts.
 //! * [`devices`]: the saved microphone, speaker and camera, and the device
 //!   list a contained worker reports.
+//! * [`device_test`]: what a device test's worker messages mean for the
+//!   page (ADR-0059).
 //! * [`video`]: the newest picture on each video tile, kept apart from the
 //!   worker's blocking event queue (ADR-0048).
 //! * [`delayed`]: the delayed leave (MSC4140) that ends a membership when the
@@ -43,6 +45,7 @@
 
 pub mod controller;
 pub mod delayed;
+pub mod device_test;
 pub mod devices;
 pub mod encryption_keys;
 pub mod incoming;

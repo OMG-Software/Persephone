@@ -2378,6 +2378,87 @@ pub struct CallParticipant {
     /// It shares its screen (ADR-0053). The sender's label is only a
     /// display hint; shown as text.
     pub sharing: bool,
+    /// Its microphone is muted, or it sends no sound (ADR-0059). Its own
+    /// claim: shown as a hint only.
+    #[serde(default)]
+    pub muted: bool,
+}
+
+/// The top of a call sound level meter (ADR-0055): 0 dBFS. 0 is -60 dBFS
+/// or quieter.
+pub const CALL_SOUND_LEVEL_MAX: u8 = 100;
+
+fn call_sound_level<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u8, D::Error> {
+    let value = u8::deserialize(deserializer)?;
+    if value <= CALL_SOUND_LEVEL_MAX {
+        Ok(value)
+    } else {
+        Err(D::Error::custom("sound level over the top"))
+    }
+}
+
+/// The sound of one other device in the call now, as it is played
+/// (ADR-0059): 0 to [`CALL_SOUND_LEVEL_MAX`]. A device that is not listed
+/// is silent.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CallParticipantLevel {
+    pub user_id: String,
+    pub device_id: String,
+    #[serde(deserialize_with = "call_sound_level")]
+    pub level: u8,
+}
+
+/// What a device test checks (ADR-0059).
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CallDeviceTestKind {
+    /// Listens on the microphone and shows its level.
+    Microphone,
+    /// Plays a short tone on the speaker.
+    Speaker,
+    /// Shows the camera's picture.
+    Camera,
+}
+
+/// How a device test goes or went (ADR-0059).
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CallDeviceTestState {
+    /// No test ran since the start.
+    Idle,
+    /// The contained call process starts and opens the device.
+    Starting,
+    /// The device runs.
+    Running,
+    /// The test ended normally: the device worked.
+    Done,
+    /// The chosen device is not connected.
+    NotFound,
+    /// The system's privacy settings do not let Persephone use it.
+    Denied,
+    /// This system cannot run this test.
+    Unsupported,
+    /// The device is busy or could not be opened.
+    Unavailable,
+    /// A call runs; its devices are tested by the call itself.
+    InCall,
+    /// The test could not run.
+    Failed,
+}
+
+/// The newest device test (ADR-0059). `stream` is the camera picture
+/// stream of tile 0 while a camera test runs, else 0; the page asks for
+/// `call_video_frame` with it.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CallDeviceTestStatus {
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub test: Option<CallDeviceTestKind>,
+    pub state: CallDeviceTestState,
+    #[serde(deserialize_with = "safe_u64")]
+    #[ts(type = "number")]
+    pub stream: u64,
 }
 
 /// Why a call ended.
@@ -2552,6 +2633,23 @@ pub struct CallStatus {
     /// (ADR-0052). The call goes on until the user leaves.
     #[serde(default)]
     pub ring_declined: bool,
+    /// The last change of the microphone or speaker during this call failed
+    /// (ADR-0059): the call keeps the devices it had. Null after a change
+    /// that worked, and before any.
+    #[serde(default)]
+    pub device_change: Option<CallDeviceChange>,
+}
+
+/// Why a device change during a call did not apply (ADR-0059).
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CallDeviceChange {
+    /// The chosen device is not connected.
+    NotFound,
+    /// This system changes devices only for the next call.
+    Unsupported,
+    /// The device could not be opened.
+    Failed,
 }
 
 /// Most incoming rings at once (ADR-0052).
@@ -2603,6 +2701,7 @@ impl CallStatus {
             screen: CallScreen::Off,
             video: Vec::new(),
             ring_declined: false,
+            device_change: None,
         }
     }
 }
@@ -2751,12 +2850,17 @@ pub fn generated_typescript() -> String {
         format!("export {}", CallReadiness::decl(&config)),
         format!("export {}", CallPhase::decl(&config)),
         format!("export {}", CallParticipant::decl(&config)),
+        format!("export {}", CallParticipantLevel::decl(&config)),
+        format!("export {}", CallDeviceTestKind::decl(&config)),
+        format!("export {}", CallDeviceTestState::decl(&config)),
+        format!("export {}", CallDeviceTestStatus::decl(&config)),
         format!("export {}", CallEnd::decl(&config)),
         format!("export {}", CallJoinError::decl(&config)),
         format!("export {}", CallCamera::decl(&config)),
         format!("export {}", CallScreen::decl(&config)),
         format!("export {}", CallParticipantRef::decl(&config)),
         format!("export {}", CallVideoTile::decl(&config)),
+        format!("export {}", CallDeviceChange::decl(&config)),
         format!("export {}", CallStatus::decl(&config)),
         format!("export {}", CallIntent::decl(&config)),
         format!("export {}", CallRing::decl(&config)),
@@ -2956,8 +3060,15 @@ mod personal_contract_tests {
     fn call_contracts_refuse_unknown_fields_and_codes() {
         assert_eq!(
             serde_json::to_string(&CallStatus::idle()).unwrap(),
-            r#"{"phase":"idle","roomId":null,"muted":false,"deafened":false,"volume":100,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[],"ringDeclined":false}"#
+            r#"{"phase":"idle","roomId":null,"muted":false,"deafened":false,"volume":100,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[],"ringDeclined":false,"deviceChange":null}"#
         );
+        // A status without the newer fields still reads (ADR-0059).
+        let older: CallStatus = serde_json::from_str(
+            r#"{"phase":"active","roomId":"!r:example.invalid","muted":false,"deafened":false,"volume":100,"participants":[{"userId":"@a:example.invalid","deviceId":"D","speaking":false,"reachable":true,"keyed":true,"sharing":false}],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[],"ringDeclined":false}"#,
+        )
+        .unwrap();
+        assert!(!older.participants[0].muted);
+        assert_eq!(older.device_change, None);
         for wire in [
             r#"{"phase":"idle","roomId":null,"muted":false,"deafened":false,"volume":100,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[],"token":"x"}"#,
             r#"{"phase":"paused","roomId":null,"muted":false,"deafened":false,"volume":100,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[]}"#,

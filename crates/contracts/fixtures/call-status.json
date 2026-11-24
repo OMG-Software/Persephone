@@ -11,7 +11,8 @@
       "speaking": true,
       "reachable": true,
       "keyed": false,
-      "sharing": true
+      "sharing": true,
+      "muted": true
     }
   ],
   "ended": null,
@@ -44,5 +45,6 @@
       "stream": 3
     }
   ],
-  "ringDeclined": true
+  "ringDeclined": true,
+  "deviceChange": "not_found"
 }

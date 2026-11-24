@@ -12,7 +12,7 @@ use persephone_media_protocol::{
 };
 use zeroize::Zeroizing;
 
-pub const VERSION: u8 = 9;
+pub const VERSION: u8 = 10;
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 /// Longest diagnostic record target (ADR-0058).
 pub const MAX_DIAGNOSTIC_TARGET_BYTES: usize = 64;
@@ -322,6 +322,45 @@ pub enum ToWorker {
     SetDiagnostics {
         on: bool,
     },
+    /// Only as the first message: test one device, then exit (ADR-0059).
+    /// `device` is the chosen ID; `None` is the system default. The worker
+    /// sends `Connected` once the device runs, then `SoundLevel` for a
+    /// microphone, or `Camera` and tile 0 pictures for a camera, and `Left`
+    /// when the test ends by itself or after `Leave`; `Failed` when the
+    /// device cannot be used.
+    TestDevice {
+        test: DeviceTest,
+        device: Option<String>,
+    },
+    /// Move the running call to another microphone and speaker. `None` is
+    /// the system default. The worker answers with [`FromWorker::DevicesSet`]
+    /// and keeps the call either way.
+    SetDevices {
+        recording: Option<String>,
+        playout: Option<String>,
+    },
+}
+
+/// The device that [`ToWorker::TestDevice`] tests. A closed set.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum DeviceTest {
+    Microphone = 1,
+    Speaker = 2,
+    Camera = 3,
+}
+
+impl TryFrom<u8> for DeviceTest {
+    type Error = DecodeError;
+
+    fn try_from(value: u8) -> Result<Self, DecodeError> {
+        Ok(match value {
+            1 => Self::Microphone,
+            2 => Self::Speaker,
+            3 => Self::Camera,
+            _ => return Err(DecodeError::InvalidValue),
+        })
+    }
 }
 
 impl std::fmt::Debug for ToWorker {
@@ -393,6 +432,16 @@ impl std::fmt::Debug for ToWorker {
             Self::SetDiagnostics { on } => {
                 f.debug_struct("SetDiagnostics").field("on", on).finish()
             }
+            Self::TestDevice { test, device } => f
+                .debug_struct("TestDevice")
+                .field("test", test)
+                .field("device", device)
+                .finish(),
+            Self::SetDevices { recording, playout } => f
+                .debug_struct("SetDevices")
+                .field("recording", recording)
+                .field("playout", playout)
+                .finish(),
         }
     }
 }
@@ -411,6 +460,12 @@ pub enum FailureCode {
     Internal = 8,
     /// The chosen microphone or speaker is not connected.
     DeviceNotFound = 9,
+    /// This system cannot run the asked device test or device change
+    /// (ADR-0059).
+    Unsupported = 10,
+    /// The system's privacy settings do not let the worker use the device
+    /// (ADR-0059).
+    DeviceDenied = 11,
 }
 
 impl TryFrom<u8> for FailureCode {
@@ -427,6 +482,8 @@ impl TryFrom<u8> for FailureCode {
             7 => Self::Protocol,
             8 => Self::Internal,
             9 => Self::DeviceNotFound,
+            10 => Self::Unsupported,
+            11 => Self::DeviceDenied,
             _ => return Err(DecodeError::InvalidValue),
         })
     }
@@ -539,6 +596,26 @@ pub enum FromWorker {
     SoundLevel {
         level: u8,
     },
+    /// The sound of one remote participant now, as WebRTC measures it for
+    /// playout (after the call volume): 0 to [`MAX_SOUND_LEVEL`]. Sent when
+    /// it changes, and an unchanged level above 0 again once a second.
+    ParticipantLevel {
+        connection: u8,
+        identity: String,
+        level: u8,
+    },
+    /// A remote participant's microphone is muted, or it has none (`true`),
+    /// or it is on.
+    ParticipantMuted {
+        connection: u8,
+        identity: String,
+        muted: bool,
+    },
+    /// The answer to [`ToWorker::SetDevices`]: `None` when the call now uses
+    /// the chosen devices, else why it keeps the ones it had.
+    DevicesSet {
+        failure: Option<FailureCode>,
+    },
     Failed {
         code: FailureCode,
     },
@@ -618,6 +695,8 @@ const TO_SUBSCRIBE: u8 = 10;
 const TO_SET_DEAFENED: u8 = 11;
 const TO_SET_VOLUME: u8 = 12;
 const TO_SET_DIAGNOSTICS: u8 = 13;
+const TO_TEST_DEVICE: u8 = 14;
+const TO_SET_DEVICES: u8 = 15;
 
 // Tags of worker to core messages.
 const FROM_READY: u8 = 1;
@@ -639,6 +718,9 @@ const FROM_CONNECTION: u8 = 16;
 const FROM_DEAFENED: u8 = 17;
 const FROM_DIAGNOSTIC: u8 = 18;
 const FROM_SOUND_LEVEL: u8 = 19;
+const FROM_PARTICIPANT_LEVEL: u8 = 20;
+const FROM_PARTICIPANT_MUTED: u8 = 21;
+const FROM_DEVICES_SET: u8 = 22;
 
 #[derive(Clone, Copy)]
 enum CharRule {
@@ -967,6 +1049,16 @@ impl ToWorker {
                 out.push(TO_SET_DIAGNOSTICS);
                 out.push(u8::from(*on));
             }
+            Self::TestDevice { test, device } => {
+                out.push(TO_TEST_DEVICE);
+                out.push(*test as u8);
+                put_str(&mut out, device.as_deref().unwrap_or(""));
+            }
+            Self::SetDevices { recording, playout } => {
+                out.push(TO_SET_DEVICES);
+                put_str(&mut out, recording.as_deref().unwrap_or(""));
+                put_str(&mut out, playout.as_deref().unwrap_or(""));
+            }
         }
         out
     }
@@ -1077,6 +1169,14 @@ impl ToWorker {
                 percent: reader.volume()?,
             },
             TO_SET_DIAGNOSTICS => Self::SetDiagnostics { on: reader.bool()? },
+            TO_TEST_DEVICE => Self::TestDevice {
+                test: DeviceTest::try_from(reader.u8()?)?,
+                device: reader.device_choice()?,
+            },
+            TO_SET_DEVICES => Self::SetDevices {
+                recording: reader.device_choice()?,
+                playout: reader.device_choice()?,
+            },
             _ => return Err(DecodeError::UnknownTag),
         };
         reader.finish()?;
@@ -1166,6 +1266,30 @@ impl FromWorker {
             Self::SoundLevel { level } => {
                 out.push(FROM_SOUND_LEVEL);
                 out.push(*level);
+            }
+            Self::ParticipantLevel {
+                connection,
+                identity,
+                level,
+            } => {
+                out.push(FROM_PARTICIPANT_LEVEL);
+                out.push(*connection);
+                put_str(&mut out, identity);
+                out.push(*level);
+            }
+            Self::ParticipantMuted {
+                connection,
+                identity,
+                muted,
+            } => {
+                out.push(FROM_PARTICIPANT_MUTED);
+                out.push(*connection);
+                put_str(&mut out, identity);
+                out.push(u8::from(*muted));
+            }
+            Self::DevicesSet { failure } => {
+                out.push(FROM_DEVICES_SET);
+                out.push(failure.map_or(0, |code| code as u8));
             }
             Self::Failed { code } => {
                 out.push(FROM_FAILED);
@@ -1267,6 +1391,22 @@ impl FromWorker {
             },
             FROM_SOUND_LEVEL => Self::SoundLevel {
                 level: reader.sound_level()?,
+            },
+            FROM_PARTICIPANT_LEVEL => Self::ParticipantLevel {
+                connection: reader.connection()?,
+                identity: reader.identity()?,
+                level: reader.sound_level()?,
+            },
+            FROM_PARTICIPANT_MUTED => Self::ParticipantMuted {
+                connection: reader.connection()?,
+                identity: reader.identity()?,
+                muted: reader.bool()?,
+            },
+            FROM_DEVICES_SET => Self::DevicesSet {
+                failure: match reader.u8()? {
+                    0 => None,
+                    code => Some(FailureCode::try_from(code)?),
+                },
             },
             FROM_FAILED => Self::Failed {
                 code: FailureCode::try_from(reader.u8()?)?,
@@ -1710,6 +1850,26 @@ mod tests {
             },
             ToWorker::SetDiagnostics { on: true },
             ToWorker::SetDiagnostics { on: false },
+            ToWorker::TestDevice {
+                test: DeviceTest::Microphone,
+                device: None,
+            },
+            ToWorker::TestDevice {
+                test: DeviceTest::Speaker,
+                device: Some("{0.0.0.00000000}.{6a2c}".to_owned()),
+            },
+            ToWorker::TestDevice {
+                test: DeviceTest::Camera,
+                device: Some("usb#cam".to_owned()),
+            },
+            ToWorker::SetDevices {
+                recording: Some("m".to_owned()),
+                playout: None,
+            },
+            ToWorker::SetDevices {
+                recording: None,
+                playout: Some("p".to_owned()),
+            },
         ]
     }
 
@@ -1738,6 +1898,20 @@ mod tests {
             FromWorker::SoundLevel { level: 0 },
             FromWorker::SoundLevel {
                 level: MAX_SOUND_LEVEL,
+            },
+            FromWorker::ParticipantLevel {
+                connection: 2,
+                identity: "@bob:example.org:D".to_owned(),
+                level: MAX_SOUND_LEVEL,
+            },
+            FromWorker::ParticipantMuted {
+                connection: 0,
+                identity: "@bob:example.org:D".to_owned(),
+                muted: true,
+            },
+            FromWorker::DevicesSet { failure: None },
+            FromWorker::DevicesSet {
+                failure: Some(FailureCode::DeviceNotFound),
             },
             FromWorker::Left,
             FromWorker::Devices {
@@ -1859,7 +2033,7 @@ mod tests {
                 rotation: 0,
             },
         ];
-        for code in 1..=9 {
+        for code in 1..=11 {
             all.push(FromWorker::Failed {
                 code: FailureCode::try_from(code).unwrap(),
             });
@@ -1923,7 +2097,7 @@ mod tests {
             width: 0,
             height: 0,
         };
-        write_frame(&mut wire, header, &[10, 1]).unwrap();
+        write_frame(&mut wire, header, &[11, 1]).unwrap();
         let result: Result<FromWorker, _> =
             read_message(&mut Cursor::new(wire), &ResourceBudgets::default());
         assert_eq!(result, Err(ReadError::Decode(DecodeError::UnknownVersion)));
@@ -2062,11 +2236,11 @@ mod tests {
             Err(DecodeError::UnknownTag)
         );
         assert_eq!(
-            ToWorker::decode(&[VERSION, 14]),
+            ToWorker::decode(&[VERSION, 16]),
             Err(DecodeError::UnknownTag)
         );
         assert_eq!(
-            FromWorker::decode(&[VERSION, 20]),
+            FromWorker::decode(&[VERSION, 23]),
             Err(DecodeError::UnknownTag)
         );
         assert_eq!(FromWorker::decode(&[]), Err(DecodeError::Truncated));
@@ -2084,7 +2258,7 @@ mod tests {
             Err(DecodeError::InvalidValue)
         );
         assert_eq!(
-            FromWorker::decode(&[VERSION, FROM_FAILED, 10]),
+            FromWorker::decode(&[VERSION, FROM_FAILED, 12]),
             Err(DecodeError::InvalidValue)
         );
         assert_eq!(
@@ -2682,7 +2856,7 @@ mod tests {
     /// 640x360 at 15 per second.
     #[test]
     fn given_tiles_when_limits_asked_then_screen_differs_from_camera() {
-        assert_eq!((VIDEO_TILES, SCREEN_TILE, VERSION), (6, 5, 9));
+        assert_eq!((VIDEO_TILES, SCREEN_TILE, VERSION), (6, 5, 10));
         assert_eq!(MAX_SCREEN_BYTES, 3_686_400);
         assert_eq!(MAX_SCREEN_PIXELS, 921_600);
         for tile in 0..SCREEN_TILE {
@@ -3052,13 +3226,13 @@ mod tests {
         );
     }
 
-    /// GIVEN a message of the previous wire versions (6 to 8)
+    /// GIVEN a message of the previous wire versions (6 to 9)
     /// WHEN it is decoded in either direction
     /// THEN the version is refused.
     #[test]
     fn given_older_wire_versions_when_decoded_then_they_are_refused() {
-        assert_eq!(VERSION, 9);
-        for old in [6, 7, 8] {
+        assert_eq!(VERSION, 10);
+        for old in [6, 7, 8, 9] {
             assert_eq!(
                 ToWorker::decode(&[old, TO_LEAVE]),
                 Err(DecodeError::UnknownVersion)
@@ -3136,6 +3310,42 @@ mod tests {
             Err(DecodeError::InvalidValue)
         );
         assert!(FromWorker::decode(&[VERSION, FROM_SOUND_LEVEL]).is_err());
+    }
+
+    /// GIVEN version 10 messages with a value outside their closed sets
+    /// WHEN they are decoded
+    /// THEN each is rejected: an unknown device test, a participant level
+    /// over the top or on a connection past the last, and an unknown
+    /// failure code in `DevicesSet`.
+    #[test]
+    fn given_device_and_level_messages_out_of_range_then_they_are_rejected() {
+        for test in [0, 4, u8::MAX] {
+            assert_eq!(
+                ToWorker::decode(&[VERSION, TO_TEST_DEVICE, test, 0, 0]),
+                Err(DecodeError::InvalidValue),
+                "test {test}"
+            );
+        }
+        let level = |connection: u8, level: u8| {
+            let mut body = vec![VERSION, FROM_PARTICIPANT_LEVEL, connection];
+            put_str(&mut body, "@bob:example.org:D");
+            body.push(level);
+            FromWorker::decode(&body)
+        };
+        assert!(level(0, MAX_SOUND_LEVEL).is_ok());
+        assert_eq!(
+            level(0, MAX_SOUND_LEVEL + 1),
+            Err(DecodeError::InvalidValue)
+        );
+        assert_eq!(
+            level(MAX_OTHER_CONNECTIONS + 1, 0),
+            Err(DecodeError::InvalidValue)
+        );
+        assert_eq!(
+            FromWorker::decode(&[VERSION, FROM_DEVICES_SET, 200]),
+            Err(DecodeError::InvalidValue)
+        );
+        assert!(FromWorker::decode(&[VERSION, FROM_DEVICES_SET]).is_err());
     }
 
     /// GIVEN diagnostic records with a bad level, an empty or long target, a

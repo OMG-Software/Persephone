@@ -45,34 +45,39 @@ test('GIVEN an open menu WHEN a key does not move focus or nothing can take it T
 
 const chosen = [];
 const actions = Object.fromEntries(
-  ['explore', 'groups', 'search', 'drafts', 'ignored', 'health', 'settings', 'lock', 'exit'].map((name) => [name, () => chosen.push(name)])
+  ['explore', 'groups', 'search', 'drafts', 'ignored', 'health', 'settings', 'lock', 'tray', 'exit'].map((name) => [name, () => chosen.push(name)])
 );
 const mainMenu = (state) =>
   mainMenuItems({ signedIn: true, canLock: true, switching: false, confirmingSignOut: false, ...state }, actions);
 
-test('GIVEN a signed-in account WHEN the main menu opens THEN Settings and Lock Persephone follow the account tools, and Exit ends it', () => {
+test('GIVEN a signed-in account WHEN the main menu opens THEN Settings and Lock Persephone follow the account tools, and Minimise to tray and Exit end it', () => {
   const items = mainMenu({});
   assert.deepEqual(items.map((item) => item.label), [
     'Explore public rooms', 'Room groups', 'Search cached messages', 'Saved drafts', 'Ignored users', 'Connection health',
-    'Settings', 'Lock Persephone', 'Exit Persephone'
+    'Settings', 'Lock Persephone', 'Minimise to tray', 'Exit Persephone'
   ]);
   assert.equal(items[6].separated, true, 'a line sets Settings and Lock apart');
-  assert.equal(items.at(-1).separated, true, 'a line sets Exit apart');
+  assert.equal(items.at(-2).separated, true, 'a line sets the tray and Exit apart');
+  assert.equal(Boolean(items.at(-1).separated), false);
   chosen.length = 0;
-  for (const item of items.slice(-3)) item.onselect();
-  assert.deepEqual(chosen, ['settings', 'lock', 'exit']);
-  assert.equal(items.at(-2).disabled, false);
+  for (const item of items.slice(-4)) item.onselect();
+  assert.deepEqual(chosen, ['settings', 'lock', 'tray', 'exit']);
+  assert.equal(items.at(-3).disabled, false);
 });
 
 test('GIVEN no account WHEN the main menu opens THEN Settings and Exit are still there and nothing else is', () => {
   const items = mainMenu({ signedIn: false, canLock: false });
-  assert.deepEqual(items.map((item) => [item.label, Boolean(item.separated)]), [['Settings', false], ['Exit Persephone', true]]);
+  assert.deepEqual(items.map((item) => [item.label, Boolean(item.separated)]), [
+    ['Settings', false],
+    ['Minimise to tray', true],
+    ['Exit Persephone', false]
+  ]);
 });
 
 test('GIVEN the session is changing or the sign-out question is open WHEN the main menu opens THEN Lock is disabled', () => {
-  const working = mainMenu({ switching: true }).at(-2);
+  const working = mainMenu({ switching: true }).at(-3);
   assert.deepEqual([working.label, working.disabled], ['Working…', true]);
-  const asking = mainMenu({ confirmingSignOut: true }).at(-2);
+  const asking = mainMenu({ confirmingSignOut: true }).at(-3);
   assert.deepEqual([asking.label, asking.disabled], ['Lock Persephone', true]);
 });
 

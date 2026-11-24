@@ -1,8 +1,29 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
-  import type { CallDevices } from '../../crates/contracts/generated/contracts';
-  import { callDevices, callVolume, setCallDevices } from './bridge';
+  import { onDestroy, onMount, untrack } from 'svelte';
+  import type {
+    CallDeviceTestKind,
+    CallDeviceTestStatus,
+    CallDevices
+  } from '../../crates/contracts/generated/contracts';
   import {
+    callDevices,
+    callDeviceTest,
+    callDeviceTestStatus,
+    callDeviceTestStop,
+    callVolume,
+    setCallDevices
+  } from './bridge';
+  import CallVideo from './CallVideo.svelte';
+  import {
+    DEVICE_TEST_LABEL,
+    DEVICE_TEST_STOP_LABEL,
+    deviceTestActive,
+    deviceTestText,
+    IDLE_DEVICE_TEST,
+    SOUND_LEVEL_LABEL,
+    SOUND_LEVEL_LOUD,
+    SOUND_LEVEL_MAX,
+    soundLevelText,
     deviceChoice,
     deviceOptions,
     deviceValue,
@@ -18,6 +39,72 @@
   // ADR-0055). The core lists the devices through a
   // contained worker and keeps the choice with the profile. Device names come
   // from the operating system: they are shown as plain text only.
+  //
+  // Each device has a test (ADR-0059): a contained worker listens on the
+  // chosen microphone (the meter moves), plays a tone on the chosen speaker,
+  // or shows the chosen camera. `soundLevel` is the own level the core sends,
+  // `testTicks` goes up when a test changes and `videoTicks` when a camera
+  // picture waits.
+  let {
+    soundLevel = 0,
+    testTicks = 0,
+    videoTicks = 0
+  }: { soundLevel?: number; testTicks?: number; videoTicks?: number } = $props();
+
+  let test = $state<CallDeviceTestStatus>(IDLE_DEVICE_TEST);
+  let testBusy = $state(false);
+  // Numbers the test requests, so an older answer never replaces a newer one.
+  let testRequest = 0;
+
+  async function readTest() {
+    const mine = ++testRequest;
+    try {
+      const next = await callDeviceTestStatus();
+      if (mine === testRequest) test = next;
+    } catch {
+      // The status stays as it was; the next change reads it again.
+    }
+  }
+
+  $effect(() => {
+    testTicks;
+    untrack(() => void readTest());
+  });
+
+  // Starts the `kind` test with the device its menu shows, or stops it.
+  async function runTest(kind: CallDeviceTestKind) {
+    if (testBusy) return;
+    testBusy = true;
+    const mine = ++testRequest;
+    try {
+      if (deviceTestActive(test, kind)) {
+        await callDeviceTestStop();
+      } else {
+        const menu = kind === 'microphone' ? recording : kind === 'speaker' ? playout : camera;
+        const next = await callDeviceTest(kind, deviceChoice(menu));
+        if (mine === testRequest) test = next;
+      }
+    } catch (reason) {
+      failure = failures[String(reason)] ?? 'The test could not start.';
+    } finally {
+      testBusy = false;
+    }
+  }
+
+  // Leaving the settings ends a test that runs.
+  onDestroy(() => {
+    if (test.state === 'starting' || test.state === 'running') void callDeviceTestStop().catch(() => {});
+  });
+
+  const testing = $derived(test.state === 'starting' || test.state === 'running');
+  const micLevel = $derived(deviceTestActive(test, 'microphone') ? soundLevel : 0);
+  const cameraTiles = $derived(
+    test.test === 'camera' && test.state === 'running'
+      ? [{ tile: 0, participant: null, own: true, stream: test.stream }]
+      : []
+  );
+  const noNames: ReadonlyMap<string, string> = new Map();
+
   let devices = $state<CallDevices | null>(null);
   let recording = $state('');
   let playout = $state('');
@@ -154,6 +241,43 @@
     />
     {#if devices}
       <p class="note">{devicesNote(devices)}</p>
+    {/if}
+    <h4 class="device-tests-title">Test your devices</h4>
+    <p class="note">Each test uses the device chosen above. It does not join a call.</p>
+    {#each ['microphone', 'speaker', 'camera'] as const as kind (kind)}
+      {@const active = deviceTestActive(test, kind)}
+      {@const text = deviceTestText(test, kind)}
+      <div class="device-test">
+        <button
+          type="button"
+          class="secondary"
+          aria-pressed={active}
+          disabled={!devices || busy || testBusy || (testing && !active)}
+          onclick={() => runTest(kind)}
+        >
+          {active ? DEVICE_TEST_STOP_LABEL : DEVICE_TEST_LABEL[kind]}
+        </button>
+        {#if kind === 'microphone' && active}
+          <div
+            class="call-level"
+            class:loud={micLevel >= SOUND_LEVEL_LOUD}
+            role="meter"
+            aria-label={SOUND_LEVEL_LABEL}
+            aria-valuemin="0"
+            aria-valuemax={SOUND_LEVEL_MAX}
+            aria-valuenow={micLevel}
+            aria-valuetext={soundLevelText(micLevel)}
+          >
+            <span class="call-level-fill" style:transform="scaleX({micLevel / SOUND_LEVEL_MAX})"></span>
+          </div>
+        {/if}
+        {#if text !== ''}
+          <p class="note" role="status">{text}</p>
+        {/if}
+      </div>
+    {/each}
+    {#if cameraTiles.length > 0}
+      <CallVideo tiles={cameraTiles} names={noNames} ticks={videoTicks} />
     {/if}
     <div class="actions">
       <button type="button" class="secondary" disabled={busy} onclick={load}>

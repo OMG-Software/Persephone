@@ -65,6 +65,8 @@
 * [0055 - Add deafen and a call volume to calls](0055-add-deafen-and-a-call-volume-to-calls.md)
 * [0057 - Share presence at most once a second and show contacts' presence](0057-share-presence-at-most-once-a-second-and-show-contacts-presence.md)
 * [0058 - Write a diagnostic log only when the user turns it on](0058-write-a-diagnostic-log-only-when-the-user-turns-it-on.md)
+* [0059 - Test call devices, show each participant's level and switch devices during a call](0059-test-call-devices-show-each-participants-level-and-switch-devices-during-a-call.md)
+* [0060 - Show calls in a separate call window](0060-show-calls-in-a-separate-call-window.md)
 
 ## Superseded Records
 

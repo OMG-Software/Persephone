@@ -25,7 +25,7 @@ before(async () => {
   hostArguments = new Map();
   for (const [, name, parameters] of host.matchAll(/async fn ([a-z_]+)(?:<[^>]*>)?\(([^)]*)\)/g)) {
     const names = [...parameters.matchAll(/([a-z_]+):\s*([A-Za-z]+)/g)]
-      .filter(([, , type]) => !['State', 'Window', 'WebviewWindow', 'AppHandle'].includes(type))
+      .filter(([, , type]) => !['State', 'Window', 'Webview', 'WebviewWindow', 'AppHandle'].includes(type))
       .map(([, parameter]) => camel(parameter));
     hostArguments.set(name, names.sort());
   }
@@ -111,6 +111,13 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
     [() => bridge.setDisplayName('Al'), 'set_display_name', { name: 'Al' }],
     [() => bridge.deviceList(), 'device_list', {}],
     [() => bridge.exitApp(), 'exit_app', {}],
+    [() => bridge.minimiseToTray(), 'minimise_to_tray', {}],
+    [() => bridge.openCallWindow(), 'open_call_window', {}],
+    [() => bridge.closeCallWindow(), 'close_call_window', {}],
+    [() => bridge.callDeviceTest('microphone', null), 'call_device_test', { test: 'microphone', device: null }],
+    [() => bridge.callDeviceTest('camera', 'cam-1'), 'call_device_test', { test: 'camera', device: 'cam-1' }],
+    [() => bridge.callDeviceTestStop(), 'call_device_test_stop', {}],
+    [() => bridge.callDeviceTestStatus(), 'call_device_test_status', {}],
     [() => bridge.accountSettings(), 'account_settings', {}],
     [() => bridge.roomDraft('!r:s'), 'room_draft', { roomId: '!r:s' }],
     [() => bridge.roomDrafts(), 'room_drafts', {}],
@@ -377,6 +384,7 @@ test('GIVEN a paste that is not one PNG or JPEG of 1 byte to 20 MiB WHEN attache
 test('GIVEN session channel messages WHEN delivered THEN each reaches its own callback and only an unknown message counts as a session change', async () => {
   let channel;
   let levelChannel;
+  let othersChannel;
   const asked = [];
   mockIPC((command, args) => {
     asked.push(command);
@@ -384,6 +392,7 @@ test('GIVEN session channel messages WHEN delivered THEN each reaches its own ca
     assert.equal(command, 'watch_session');
     channel = args.onChange;
     levelChannel = args.onSoundLevel;
+    othersChannel = args.onLevels;
     return null;
   });
   const seen = [];
@@ -396,8 +405,28 @@ test('GIVEN session channel messages WHEN delivered THEN each reaches its own ca
     () => seen.push('callVideo'),
     () => seen.push('rings'),
     () => seen.push('account'),
-    (level) => seen.push(`level ${level}`)
+    (level) => seen.push(`level ${level}`),
+    (levels) => seen.push(`others ${JSON.stringify(levels)}`),
+    () => seen.push('deviceTest')
   );
+  // The other devices' levels: a bounded list reaches the page, anything
+  // else is dropped whole.
+  const bob = { userId: '@bob:s', deviceId: 'B', level: 30 };
+  for (const value of [
+    [bob],
+    [],
+    [{ ...bob, level: 101 }],
+    [{ ...bob, extra: 1 }],
+    [{ ...bob, userId: 'x'.repeat(256) }],
+    Array(33).fill(bob),
+    { 0: bob },
+    null
+  ]) {
+    othersChannel.onmessage(value);
+  }
+  assert.deepEqual(seen.splice(0), [`others ${JSON.stringify([bob])}`, 'others []']);
+  channel.onmessage('deviceTest');
+  assert.deepEqual(seen.splice(0), ['deviceTest']);
   // The sound level has its own channel: a number from 0 to 100 reaches the
   // page, anything else is dropped and is never a session change.
   for (const value of [0, 42, 100, 101, -1, 4.5, '42', null]) levelChannel.onmessage(value);
