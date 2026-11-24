@@ -89,12 +89,18 @@ no media permissions, and a browser test would prove nothing about the worker.
   that is not connected is `DeviceNotFound`, and the call keeps the devices it
   has. It never falls back to the default device for a selected one.
 * LiveKit 0.11 stops a device before it opens the new one, and a failed
-  open leaves it stopped. After such a failure the worker switches back to
-  the old devices and starts the microphone again. Playout has no public
-  start, so the worker cannot confirm that the old speaker plays again. A
-  device it could not restore is switched again by the next change, even to
-  the same choice. The answer is then `failed`, and the page says that the
-  sound may have stopped.
+  open leaves it stopped. A switch while a device is stopped only selects
+  it. After a failed microphone the worker switches back to the old one and
+  starts capture again. A microphone switch counts only when capture runs
+  after it. The call always has a published microphone, so this never opens
+  a microphone that the call did not use. A device it could not restore is
+  switched again by the next change, even to the same choice. The answer is
+  then `failed`, and the page says that the sound may have stopped.
+* Playout has no public start in LiveKit 0.11. After a failed speaker the
+  worker selects the old speaker again, but playout stays stopped. The
+  speaker is lost for the rest of the call: each later change selects the
+  chosen speaker and answers `failed`, and the page asks the user to rejoin
+  the call.
 * The worker answers `DevicesSet { failure }`. The core shows a failure as the
   call status's `deviceChange` (`not_found`, `unsupported` or `failed`) until
   the next change. Linux reports `unsupported`: the PulseAudio path has no

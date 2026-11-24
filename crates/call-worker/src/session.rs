@@ -568,10 +568,13 @@ trait SwitchAudio {
 }
 
 /// `SwitchAudio` on LiveKit's platform audio. LiveKit 0.11 stops a device
-/// before it opens the new one, and a failed open leaves it stopped. A
-/// stopped microphone starts again with `start_recording`. Playout has no
-/// public start, so a speaker switch back only selects the old speaker;
-/// the worker cannot confirm that it plays again (ADR-0059).
+/// before it opens the new one, and a failed open leaves it stopped; a
+/// switch while the device is stopped only selects it. A stopped
+/// microphone starts again with `start_recording`. The call always has a
+/// published microphone (the join fails without one, and mute only mutes
+/// the publication), so this never opens a microphone the call did not
+/// use. Playout has no public start, so a stopped speaker stays stopped
+/// until the call is joined again (ADR-0059).
 struct LiveAudio<'a>(&'a PlatformAudio);
 
 impl SwitchAudio for LiveAudio<'_> {
@@ -592,14 +595,19 @@ impl SwitchAudio for LiveAudio<'_> {
 /// Switches the microphone, then the speaker, to `next`, and keeps
 /// `current` as the devices the call uses. Each failure is `AudioDevice`.
 ///
-/// * A failed microphone may have stopped capture: the old microphone is
-///   switched back and started again. Where that fails, or where there is
-///   no old ID (libwebrtc's own default), capture starts on what is
-///   selected, and `recording_lost` is set.
-/// * A failed speaker goes back to the old speaker; when it cannot,
-///   `playout_lost` is set. The microphone, if it moved, goes back too.
-///   Where it cannot, `current` names the new microphone and
-///   `recording_lost` is set; with no old ID the new microphone stays.
+/// * A microphone switch counts only when capture runs after it, so a
+///   lost microphone that LiveKit only selects is started again or stays
+///   lost. A failed microphone may have stopped capture: the old
+///   microphone is switched back and started again. Where that fails, or
+///   where there is no old ID (libwebrtc's own default), capture starts on
+///   what is selected, and `recording_lost` is set.
+/// * A failed speaker stopped playout, which cannot start again, so
+///   `playout_lost` is set. The old speaker is selected again for when
+///   playout starts. The microphone, if it moved, goes back too. Where it
+///   cannot, `current` names the new microphone and `recording_lost` is
+///   set; with no old ID the new microphone stays.
+/// * A lost speaker is only selected by a later switch: it stays lost and
+///   the change reports `AudioDevice`, so the page asks to rejoin.
 ///
 /// A lost device is switched again by the next change, even to the same
 /// choice.
@@ -617,19 +625,17 @@ fn apply_switch(
         .clone()
         .filter(|_| next.playout != current.playout || current.playout_lost);
     if let Some(id) = &recording
-        && !audio.switch_recording(id)
+        && !(audio.switch_recording(id) && audio.restart_recording())
     {
         current.recording_lost = !restore_recording(audio, current.recording.as_deref());
         return Err(FailureCode::AudioDevice);
     }
-    if let Some(id) = &playout
-        && !audio.switch_playout(id)
-    {
-        let back = current
-            .playout
-            .as_deref()
-            .is_some_and(|old| audio.switch_playout(old));
-        current.playout_lost = !back;
+    let speaker = playout.as_deref().map(|id| audio.switch_playout(id));
+    if speaker == Some(false) {
+        if let Some(old) = current.playout.as_deref() {
+            audio.switch_playout(old);
+        }
+        current.playout_lost = true;
         if recording.is_some() {
             match current.recording.as_deref() {
                 // libwebrtc's own default has no ID to go back to; the new
@@ -644,6 +650,14 @@ fn apply_switch(
                 }
             }
         }
+        return Err(FailureCode::AudioDevice);
+    }
+    if speaker == Some(true) && current.playout_lost {
+        // Selected only: playout stays stopped. The microphone, if it
+        // moved, runs.
+        current.recording.clone_from(&next.recording);
+        current.recording_lost = false;
+        current.playout.clone_from(&next.playout);
         return Err(FailureCode::AudioDevice);
     }
     *current = next;
@@ -3315,20 +3329,25 @@ mod tests {
         );
     }
 
-    /// A sound device fake: the IDs that switch, whether a restart starts
-    /// capture, and every call in order.
+    /// A sound device fake that keeps LiveKit 0.11's capture state: the
+    /// IDs that switch, whether a restart starts capture, whether capture
+    /// runs, and every call in order. A failed microphone switch stops
+    /// capture; a switch while it is stopped only selects.
     #[derive(Default)]
     struct FakeAudio {
         mics: Vec<&'static str>,
         speakers: Vec<&'static str>,
         restarts: bool,
+        capturing: bool,
         calls: Vec<String>,
     }
 
     impl SwitchAudio for FakeAudio {
         fn switch_recording(&mut self, id: &str) -> bool {
             self.calls.push(format!("mic {id}"));
-            self.mics.contains(&id)
+            let opened = self.mics.contains(&id);
+            self.capturing &= opened;
+            opened
         }
 
         fn switch_playout(&mut self, id: &str) -> bool {
@@ -3338,15 +3357,17 @@ mod tests {
 
         fn restart_recording(&mut self) -> bool {
             self.calls.push("restart".to_owned());
-            self.restarts
+            self.capturing |= self.restarts;
+            self.capturing
         }
     }
 
     /// GIVEN a change of both devices WHEN each switch succeeds or fails
-    /// THEN `current` names the devices the call uses, a failed switch
-    /// starts the old device again, and a device that cannot be started
-    /// again is marked lost, so the next change switches it even to the
-    /// same choice.
+    /// THEN `current` names the devices the call uses, a failed microphone
+    /// switch starts the old microphone again, a failed speaker is lost,
+    /// and a lost device is switched again by the next change, even to the
+    /// same choice. A lost microphone counts as back only when capture
+    /// runs; a lost speaker stays lost.
     #[test]
     fn given_a_device_switch_then_current_names_the_devices_in_use() {
         let devices = |recording: Option<&str>, playout: Option<&str>| SoundDevices {
@@ -3365,6 +3386,7 @@ mod tests {
             mics: mics.to_vec(),
             speakers: speakers.to_vec(),
             restarts,
+            capturing: true,
             calls: Vec::new(),
         };
         let failed = Err(FailureCode::AudioDevice);
@@ -3372,7 +3394,8 @@ mod tests {
         // Both switch.
         let mut audio = fake(&["mic-2"], &["spk-2"], true);
         assert_eq!(run(&from, &mut audio), (Ok(()), next.clone()));
-        assert_eq!(audio.calls, ["mic mic-2", "speaker spk-2"]);
+        assert_eq!(audio.calls, ["mic mic-2", "restart", "speaker spk-2"]);
+        assert!(audio.capturing);
 
         // The new microphone fails: the old one is switched back and started.
         let mut audio = fake(&["mic-1"], &["spk-2"], true);
@@ -3385,13 +3408,17 @@ mod tests {
         assert_eq!(result, failed);
         assert!(current.recording_lost && !current.playout_lost);
 
-        // The speaker fails: both go back to the old devices.
+        // The speaker fails: both go back to the old devices, and the
+        // speaker is lost, as its playout stopped.
         let mut audio = fake(&["mic-1", "mic-2"], &["spk-1"], true);
-        assert_eq!(run(&from, &mut audio), (failed, from.clone()));
+        let mut lost_speaker = from.clone();
+        lost_speaker.playout_lost = true;
+        assert_eq!(run(&from, &mut audio), (failed, lost_speaker));
         assert_eq!(
             audio.calls,
             [
                 "mic mic-2",
+                "restart",
                 "speaker spk-2",
                 "speaker spk-1",
                 "mic mic-1",
@@ -3426,7 +3453,33 @@ mod tests {
         lost.recording_lost = true;
         let mut audio = fake(&["mic-2"], &["spk-2"], true);
         assert_eq!(run(&lost, &mut audio), (Ok(()), next.clone()));
-        assert_eq!(audio.calls, ["mic mic-2"]);
+        assert_eq!(audio.calls, ["mic mic-2", "restart"]);
+
+        // A lost microphone that the switch only selects is started; when
+        // capture does not start, it stays lost.
+        let mut audio = fake(&["mic-2"], &["spk-2"], true);
+        audio.capturing = false;
+        assert_eq!(run(&lost, &mut audio), (Ok(()), next.clone()));
+        assert!(audio.capturing);
+        let mut audio = fake(&["mic-2"], &["spk-2"], false);
+        audio.capturing = false;
+        let (result, current) = run(&lost, &mut audio);
+        assert_eq!(result, failed);
+        assert!(current.recording_lost && !audio.capturing);
+
+        // A lost speaker is only selected: it stays lost, and the
+        // microphone that moved is kept.
+        let mut lost = devices(Some("mic-1"), Some("spk-2"));
+        lost.playout_lost = true;
+        let mut audio = fake(&["mic-2"], &["spk-2"], true);
+        let (result, current) = run(&lost, &mut audio);
+        assert_eq!(result, failed);
+        assert_eq!(audio.calls, ["mic mic-2", "restart", "speaker spk-2"]);
+        assert_eq!(
+            (current.recording.as_deref(), current.playout.as_deref()),
+            (Some("mic-2"), Some("spk-2"))
+        );
+        assert!(current.playout_lost && !current.recording_lost);
         assert_eq!(
             device_switch(&lost, &next),
             Ok(Some(next.clone())),

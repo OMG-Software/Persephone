@@ -615,7 +615,9 @@ pub enum FromWorker {
     /// the chosen devices, else why the change failed. `DeviceNotFound` and
     /// `Unsupported` change nothing. After `AudioDevice` the worker has
     /// tried to go back to the old devices, but the microphone may be the
-    /// new one and the sound may have stopped (ADR-0059).
+    /// new one and the sound may have stopped. A failed speaker stays
+    /// stopped until the call is joined again, so each later change answers
+    /// `AudioDevice` (ADR-0059).
     DevicesSet {
         failure: Option<FailureCode>,
     },
