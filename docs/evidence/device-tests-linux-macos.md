@@ -74,17 +74,27 @@ ignored `PULSE_SINK` would fail the test. The microphone was a monitor, not
 real capture hardware. No camera test ran: the portal camera grant for a
 camera test was not exercised.
 
-The same commands, with the same results, passed at `586eb97` and
-`907386b`, the two earlier versions of the stronger `sound` test (before it
-failed at once on a closed worker channel, and before it stopped reading a
-worker after its last message).
-Earlier runs of this pull request, at `7586758` and `894ef32`, had the same
-counts for the commands that they shared, with an older `sound` test. That
-test stopped each run when it started and did not check levels or the
-chosen sink. An earlier run of the same script found that a sink loaded
-from a separate SSH session was gone when the test ran; likely the sound
-server stopped with that session, because the user has no linger. The run above loaded
-the sinks in the script itself.
+The table and the list above are the run at `812ba0d` only.
+
+### Earlier runs
+
+Each earlier run was its own run on the same VM, on 24 November 2026, of the
+source at its own commit. None of them certifies `812ba0d`; they show how
+the `sound` test changed.
+
+* `7586758` and `894ef32`: the commands of the table without the
+  `platform::linux::call` run and the negative control, all exit 0. Their
+  `sound` test was older: it stopped each run when the device started and
+  did not check levels or a chosen sink.
+* `586eb97`, first run: both `sound` runs exited 101 at the check that
+  `OTHER` is listed. The worker listed only `pulse:auto_null`: the two
+  sinks, loaded from a separate SSH session, were gone. Likely the sound
+  server stopped with that session, because the user has no linger. The
+  later runs load the sinks in the run script.
+* `586eb97`, second run, and `907386b`: the commands of the table, with
+  the same exits and counts as above. The `sound` test then waited to its
+  deadline on a closed worker channel (`586eb97`), or could read a worker
+  again after its last message (`907386b`).
 
 ### PulseAudio header values
 
