@@ -1163,8 +1163,18 @@ fn bounded_levels<'de, D: serde::Deserializer<'de>>(
             mut seq: A,
         ) -> Result<Self::Value, A::Error> {
             let mut levels = Vec::new();
-            while let Some(level) = seq.next_element::<WireLevel>()? {
-                if levels.len() == MAX_CALL_LEVELS || level.level > MAX_CALL_SOUND_LEVEL {
+            loop {
+                // A full list only checks for one more entry, unbuilt.
+                if levels.len() == MAX_CALL_LEVELS {
+                    if seq.next_element::<serde::de::IgnoredAny>()?.is_some() {
+                        return Err(serde::de::Error::custom("call levels out of bounds"));
+                    }
+                    return Ok(levels);
+                }
+                let Some(level) = seq.next_element::<WireLevel>()? else {
+                    return Ok(levels);
+                };
+                if level.level > MAX_CALL_SOUND_LEVEL {
                     return Err(serde::de::Error::custom("call levels out of bounds"));
                 }
                 levels.push(persephone_contracts::CallParticipantLevel {
@@ -1173,7 +1183,6 @@ fn bounded_levels<'de, D: serde::Deserializer<'de>>(
                     level: level.level,
                 });
             }
-            Ok(levels)
         }
     }
     deserializer.deserialize_seq(Levels)
@@ -4076,6 +4085,16 @@ mod timeline_events_wire_tests {
             serde_json::to_vec(&serde_json::json!({"event": {"call_levels": {"levels": full}}}))
                 .unwrap();
         assert!(serde_json::from_slice::<CoreMessage>(&bytes).is_ok());
+        // An entry past the limit is refused unbuilt, whatever it holds.
+        let mut over: Vec<_> = (0..MAX_CALL_LEVELS)
+            .map(|_| one(1, "@a:example.org"))
+            .collect();
+        over.push(serde_json::json!({"anything": [1, 2, 3]}));
+        let error = event(serde_json::Value::Array(over)).unwrap_err();
+        assert!(
+            error.to_string().contains("call levels out of bounds"),
+            "{error}"
+        );
         let longest = "a".repeat(MAX_USER_ID_BYTES);
         assert!(event(serde_json::json!([one(1, &longest)])).is_ok());
         let device = "D".repeat(MAX_DEVICE_ID_BYTES + 1);

@@ -13,7 +13,7 @@
   import type { CallVideoTile } from '../../crates/contracts/generated/contracts';
   import { OWN_TILE_LABEL, PARTICIPANT_TILE_LABEL, SCREEN_TILE_LABEL } from './calls';
   import PersonName from './PersonName.svelte';
-  import { SCREEN_TILE, tileLayout, type TileRef, type VideoPicture } from './video';
+  import { SCREEN_TILE, tileCanvas, tileLayout, type TileRef, type VideoPicture } from './video';
 
   // The video tiles of the call: the own camera (mirrored, labelled "You"),
   // up to four other cameras and the one remote screen share (tile 5).
@@ -85,14 +85,7 @@
 
   onDestroy(() => fetcher.detach());
 
-  function canvasRef(node: HTMLCanvasElement, tile: number) {
-    canvases[tile] = node;
-    return {
-      destroy() {
-        if (canvases[tile] === node) canvases[tile] = undefined;
-      }
-    };
-  }
+  const canvasRef = (node: HTMLCanvasElement, tile: number) => tileCanvas(canvases, node, tile);
 </script>
 
 {#if shown.length > 0}

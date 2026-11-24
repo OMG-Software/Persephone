@@ -498,11 +498,9 @@ fn device_switch(
 }
 
 /// Moves the running call to other devices (`SetDevices`, ADR-0059). Both
-/// choices are checked before either device changes. When the speaker
-/// fails after the microphone moved, the microphone goes back, so a failed
-/// change keeps the call on the devices it had. On Linux the sound server
-/// stream was chosen when the worker started (ADR-0049), so a change
-/// applies to the next call only.
+/// choices are checked before either device changes; `apply_switch` then
+/// changes them. On Linux the sound server stream was chosen when the
+/// worker started (ADR-0049), so a change applies to the next call only.
 fn switch_devices(
     audio: &PlatformAudio,
     current: &mut SoundDevices,
@@ -517,27 +515,57 @@ fn switch_devices(
         return Ok(());
     };
     // Both IDs are found before either device changes.
-    let recording = match &next.recording {
-        Some(id) if next.recording != current.recording => Some(recording_id(audio, id)?),
-        _ => None,
-    };
-    let playout = match &next.playout {
-        Some(id) if next.playout != current.playout => Some(playout_id(audio, id)?),
-        _ => None,
-    };
-    if let Some(id) = &recording {
-        audio
-            .switch_recording_device(id)
-            .map_err(|_| FailureCode::AudioDevice)?;
+    if let Some(id) = &next.recording {
+        recording_id(audio, id)?;
     }
-    if let Some(id) = &playout
-        && audio.switch_playout_device(id).is_err()
+    if let Some(id) = &next.playout {
+        playout_id(audio, id)?;
+    }
+    apply_switch(
+        current,
+        next,
+        |id| recording_id(audio, id).is_ok_and(|id| audio.switch_recording_device(&id).is_ok()),
+        |id| playout_id(audio, id).is_ok_and(|id| audio.switch_playout_device(&id).is_ok()),
+    )
+}
+
+/// Switches the microphone, then the speaker, to `next`, and keeps
+/// `current` as the devices the call uses. A failed microphone changes
+/// nothing. When the speaker fails after the microphone moved, the
+/// microphone goes back to the device it had. Where it cannot go back (it
+/// was libwebrtc's own default, which has no ID, or the switch back
+/// fails), `current` names the new microphone, so it never names a device
+/// that the call no longer uses. Each failure is `AudioDevice`.
+fn apply_switch(
+    current: &mut SoundDevices,
+    next: SoundDevices,
+    mut switch_recording: impl FnMut(&str) -> bool,
+    mut switch_playout: impl FnMut(&str) -> bool,
+) -> Result<(), FailureCode> {
+    let recording = next
+        .recording
+        .as_deref()
+        .filter(|_| next.recording != current.recording);
+    if let Some(id) = recording
+        && !switch_recording(id)
     {
-        if recording.is_some()
-            && let Some(previous) = &current.recording
-            && let Ok(previous) = recording_id(audio, previous)
-        {
-            let _ = audio.switch_recording_device(&previous);
+        return Err(FailureCode::AudioDevice);
+    }
+    let playout = next
+        .playout
+        .as_deref()
+        .filter(|_| next.playout != current.playout);
+    if let Some(id) = playout
+        && !switch_playout(id)
+    {
+        if recording.is_some() {
+            let back = current
+                .recording
+                .as_deref()
+                .is_some_and(&mut switch_recording);
+            if !back {
+                current.recording = next.recording;
+            }
         }
         return Err(FailureCode::AudioDevice);
     }
@@ -3176,6 +3204,83 @@ mod tests {
             device_switch(&unresolved, &devices(Some("mic-2"), None)),
             Ok(Some(devices(Some("mic-2"), None)))
         );
+    }
+
+    /// GIVEN a change of both devices WHEN each switch succeeds or fails
+    /// THEN `current` always names the devices the call uses: success moves
+    /// both; a failed microphone changes nothing; a failed speaker puts the
+    /// microphone back; and where the microphone cannot go back (no ID, or
+    /// the switch back fails) `current` names the new microphone.
+    #[test]
+    fn given_a_device_switch_then_current_names_the_devices_in_use() {
+        let devices = |recording: Option<&str>, playout: Option<&str>| SoundDevices {
+            recording: recording.map(str::to_owned),
+            playout: playout.map(str::to_owned),
+        };
+        let next = devices(Some("mic-2"), Some("spk-2"));
+        let run = |start: SoundDevices, mic_ok: &[&str], spk_ok: bool| {
+            let mut current = start;
+            let mut mics = Vec::new();
+            let result = apply_switch(
+                &mut current,
+                next.clone(),
+                |id| {
+                    mics.push(id.to_owned());
+                    mic_ok.contains(&id)
+                },
+                |_| spk_ok,
+            );
+            (result, current, mics)
+        };
+        let from = devices(Some("mic-1"), Some("spk-1"));
+
+        let (result, current, mics) = run(from.clone(), &["mic-1", "mic-2"], true);
+        assert_eq!((result, current), (Ok(()), next.clone()));
+        assert_eq!(mics, ["mic-2"]);
+
+        let (result, current, _) = run(from.clone(), &[], true);
+        assert_eq!(
+            (result, current),
+            (Err(FailureCode::AudioDevice), from.clone())
+        );
+
+        let (result, current, mics) = run(from.clone(), &["mic-1", "mic-2"], false);
+        assert_eq!(
+            (result, current),
+            (Err(FailureCode::AudioDevice), from.clone())
+        );
+        assert_eq!(mics, ["mic-2", "mic-1"], "the microphone goes back");
+
+        let (result, current, mics) = run(from.clone(), &["mic-2"], false);
+        assert_eq!(
+            (result, current),
+            (
+                Err(FailureCode::AudioDevice),
+                devices(Some("mic-2"), Some("spk-1"))
+            )
+        );
+        assert_eq!(mics, ["mic-2", "mic-1"], "the switch back was tried");
+
+        let (result, current, mics) = run(devices(None, Some("spk-1")), &["mic-2"], false);
+        assert_eq!(
+            (result, current),
+            (
+                Err(FailureCode::AudioDevice),
+                devices(Some("mic-2"), Some("spk-1"))
+            )
+        );
+        assert_eq!(mics, ["mic-2"], "no ID to go back to");
+
+        // Only the speaker changes: a failure leaves the microphone alone.
+        let (result, current, mics) = run(devices(Some("mic-2"), Some("spk-1")), &[], false);
+        assert_eq!(
+            (result, current),
+            (
+                Err(FailureCode::AudioDevice),
+                devices(Some("mic-2"), Some("spk-1"))
+            )
+        );
+        assert!(mics.is_empty());
     }
 
     /// GIVEN a Windows machine with speakers or microphones WHEN the worker

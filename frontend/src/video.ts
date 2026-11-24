@@ -274,3 +274,25 @@ export function tileLayout(width: number, height: number, rotation: number, mirr
   const flip = mirrored ? ' scaleX(-1)' : '';
   return { ratio, canvasPercent, transform: `translate(-50%, -50%)${flip} rotate(${turn}deg)` };
 }
+
+/**
+ * Keeps `node` registered in `canvases` under its tile, as a Svelte action:
+ * a kept cell can move to another tile (the worker reuses freed tiles), so
+ * `update` moves the registration. A tile that another canvas has taken
+ * since is left alone.
+ */
+export function tileCanvas<T>(canvases: Record<number, T | undefined>, node: T, tile: number) {
+  let current = tile;
+  canvases[current] = node;
+  return {
+    update(next: number) {
+      if (next === current) return;
+      if (canvases[current] === node) canvases[current] = undefined;
+      current = next;
+      canvases[current] = node;
+    },
+    destroy() {
+      if (canvases[current] === node) canvases[current] = undefined;
+    }
+  };
+}

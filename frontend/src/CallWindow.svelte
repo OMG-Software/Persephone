@@ -52,7 +52,7 @@
   import { callGrid, CALL_WINDOW_CLOSE_MS, ROSTER_LABEL } from './callWindow';
   import Icon from './Icon.svelte';
   import PersonName from './PersonName.svelte';
-  import { tileLayout, type TileRef, type VideoPicture } from './video';
+  import { tileCanvas, tileLayout, type TileRef, type VideoPicture } from './video';
 
   // The call window (ADR-0060): a grid with a tile for you and for each other
   // device in the call, its camera picture or a placeholder, and a list of
@@ -197,23 +197,8 @@
     untrack(() => fetcher.poke());
   });
 
-  // A kept cell can move to another tile (the worker reuses freed tiles),
-  // so the canvas follows its tile number.
-  function canvasRef(node: HTMLCanvasElement, tile: number) {
-    let current = tile;
-    canvases[current] = node;
-    return {
-      update(next: number) {
-        if (next === current) return;
-        if (canvases[current] === node) canvases[current] = undefined;
-        current = next;
-        canvases[current] = node;
-      },
-      destroy() {
-        if (canvases[current] === node) canvases[current] = undefined;
-      }
-    };
-  }
+  // A kept cell can move to another tile, so the canvas follows its tile.
+  const canvasRef = (node: HTMLCanvasElement, tile: number) => tileCanvas(canvases, node, tile);
 
   const joined = $derived(inCall(status));
   const camera = $derived(cameraButton(status.camera));

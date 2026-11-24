@@ -680,7 +680,7 @@ export const PARTICIPANT_MUTED_LABEL = 'Microphone off';
 /** What a failed device change in a call means (ADR-0059). */
 export const DEVICE_CHANGE_TEXT: Record<CallDeviceChange, string> = {
   not_found: 'The chosen microphone or speaker is not connected. The call keeps the one it had.',
-  unsupported: 'This system cannot change the microphone or speaker during a call. The change applies to the next call.',
+  unsupported: 'This change cannot be made during a call on this system. It applies to the next call.',
   failed: 'The microphone or speaker could not be changed. The call keeps the one it had.'
 };
 

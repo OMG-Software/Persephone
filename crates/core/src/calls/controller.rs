@@ -1192,6 +1192,10 @@ struct DeviceTestSlot {
     /// The thread of the newest test. The next test waits for it, so two
     /// tests never hold a device at once.
     thread: Option<std::thread::JoinHandle<()>>,
+    /// The thread that the next test thread waits for. A new thread takes
+    /// it when it starts; when no thread could start, it stays here for the
+    /// next one, so no test thread is ever left unwaited.
+    previous: Option<std::thread::JoinHandle<()>>,
     /// The test that the newest thread runs once the test before it ended.
     /// `Some` while that thread still waits: a newer test then replaces
     /// this job and starts no thread, so at most two test threads exist.
@@ -1217,6 +1221,7 @@ impl Default for DeviceTestSlot {
             generation: 0,
             stop: Arc::new(AtomicBool::new(true)),
             thread: None,
+            previous: None,
             job: None,
         }
     }
@@ -1460,26 +1465,7 @@ impl CallController {
         if slot.job.replace(job).is_some() {
             return slot.status.clone();
         }
-        let previous = slot.thread.take();
-        let inner = self.inner.clone();
-        let spawned = std::thread::Builder::new()
-            .name("call-device-test".to_owned())
-            .spawn(move || {
-                if let Some(previous) = previous {
-                    let _ = previous.join();
-                }
-                let job = plain(&inner.device_test).job.take();
-                if let Some(job) = job {
-                    run_device_test(&inner, job.generation, job.test, job.device, &job.stop);
-                }
-            });
-        match spawned {
-            Ok(thread) => slot.thread = Some(thread),
-            Err(_) => {
-                slot.job = None;
-                slot.status.state = CallDeviceTestState::Failed;
-            }
-        }
+        start_test_thread(&mut slot, &self.inner, spawn_device_test);
         slot.status.clone()
     }
 
@@ -2708,6 +2694,45 @@ async fn refine_worker_stop(call: &Call) -> EndReason {
     .await
     .unwrap_or(None);
     stop_reason(exit)
+}
+
+/// Starts the thread for the job in `slot` with `spawn`. No thread still
+/// waits (the job was empty before this request), so a thread kept as
+/// `previous` was left by a thread that could not start, and `thread` is
+/// then empty. A failed start keeps `previous` for the next thread and ends
+/// the job as `failed`.
+fn start_test_thread(
+    slot: &mut DeviceTestSlot,
+    inner: &Arc<Inner>,
+    spawn: impl FnOnce(Arc<Inner>) -> std::io::Result<std::thread::JoinHandle<()>>,
+) {
+    if let Some(thread) = slot.thread.take() {
+        slot.previous = Some(thread);
+    }
+    match spawn(inner.clone()) {
+        Ok(thread) => slot.thread = Some(thread),
+        Err(_) => {
+            slot.job = None;
+            slot.status.state = CallDeviceTestState::Failed;
+        }
+    }
+}
+
+/// A device test thread: it waits for the thread before it, then runs the
+/// newest job, if one is left.
+fn spawn_device_test(inner: Arc<Inner>) -> std::io::Result<std::thread::JoinHandle<()>> {
+    std::thread::Builder::new()
+        .name("call-device-test".to_owned())
+        .spawn(move || {
+            let previous = plain(&inner.device_test).previous.take();
+            if let Some(previous) = previous {
+                let _ = previous.join();
+            }
+            let job = plain(&inner.device_test).job.take();
+            if let Some(job) = job {
+                run_device_test(&inner, job.generation, job.test, job.device, &job.stop);
+            }
+        })
 }
 
 /// Gives the call a microphone and speaker choice. The same choice as the
@@ -4983,6 +5008,39 @@ mod tests {
         assert_eq!(job.generation, slot.generation);
         assert_eq!(job.test, CallDeviceTestKind::Speaker);
         assert_eq!(job.device.as_deref(), Some("spk"));
+    }
+
+    /// GIVEN a test thread that still runs WHEN the next test thread cannot
+    /// start THEN the running thread is kept as `previous` and the test is
+    /// `failed`; WHEN a later thread starts THEN it takes that thread and
+    /// waits for it, so no test thread is left unwaited.
+    #[test]
+    fn given_a_failed_test_thread_start_then_the_running_thread_is_still_waited_for() {
+        let calls = controller(FakeHost::new(true, None));
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+        let running = std::thread::spawn(move || {
+            let _ = wait.recv();
+        });
+        let mut slot = plain(&calls.inner.device_test);
+        slot.thread = Some(running);
+        slot.status.state = CallDeviceTestState::Starting;
+        start_test_thread(&mut slot, &calls.inner, |_| {
+            Err(std::io::Error::other("no thread"))
+        });
+        assert!(slot.thread.is_none());
+        assert!(slot.previous.is_some(), "the running thread is kept");
+        assert_eq!(slot.status.state, CallDeviceTestState::Failed);
+
+        slot.status.state = CallDeviceTestState::Starting;
+        start_test_thread(&mut slot, &calls.inner, spawn_device_test);
+        let next = slot.thread.take().expect("the next thread starts");
+        drop(slot);
+        release.send(()).unwrap();
+        next.join().unwrap();
+        assert!(
+            plain(&calls.inner.device_test).previous.is_none(),
+            "the next thread took the running one and waited for it"
+        );
     }
 
     /// GIVEN a running call whose command queue is full
