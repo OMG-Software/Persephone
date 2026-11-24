@@ -3,25 +3,39 @@
 Checked 24 November 2026. Decision:
 [ADR-0059](../adr/0059-test-call-devices-show-each-participants-level-and-switch-devices-during-a-call.md),
 amendment of 24 November 2026. Source: branch `claude/device-tests-linux-macos`
-(pull request 98) at commit `894ef32b26d9e0fe7697171a63760a700a559075`,
-`--locked`.
-`Cargo.lock` SHA-256:
+(pull request 98) at commit `586eb9711d9dc4d66aaa2a0f4655fe922c19825f`,
+`--locked`. Later commits of the pull request change only comments and
+documentation. `Cargo.lock` SHA-256:
 `cd6f78ba4e2b5e67d47009c6c1fef8e24e444e008ed808126d26ba9f13eec525`
 (unchanged by the change). Debug builds, rustc 1.99.1.
 
 **Result: on Linux the microphone and speaker tests run in the contained call
-worker against a real sound server, a chosen `pulse:` sink runs, and a sink
-name the server does not have fails with `DeviceNotFound`. The macOS code was
+worker against a real sound server. The tone plays to its end, the microphone
+reads it, a tone on a chosen `pulse:` sink does not reach the default sink,
+and a sink name the server does not have fails with `DeviceNotFound`. The
+macOS code was
 compiled and linted for an Apple target only; it was not linked or run on a
 Mac.**
 
 ## Linux
 
 Linux Mint 22.3, kernel 7.0.0-44-generic, PulseAudio protocol served by
-PipeWire 1.0.5 (`pipewire-pulse`) with its null sink `auto_null` as the only
-sink and its monitor as the default source. No microphone hardware and no
-camera. clang 21.1.8, libwebrtc `webrtc-a545de4` fetched by
-`python3 tools/dev.py webrtc` (exit 0).
+PipeWire 1.0.5 (`pipewire-pulse`). No microphone hardware and no camera.
+clang 21.1.8, libwebrtc `webrtc-a545de4` fetched by
+`python3 tools/dev.py webrtc` (exit 0). The run script first loaded two null
+sinks and set the defaults:
+
+```sh
+pactl load-module module-null-sink sink_name=persephone_main
+pactl load-module module-null-sink sink_name=persephone_other
+pactl set-default-sink persephone_main
+pactl set-default-source persephone_main.monitor
+```
+
+`pactl info` then showed `Default Sink: persephone_main` and
+`Default Source: persephone_main.monitor`, and both sinks were still listed
+after the last command. `PERSEPHONE_TEST_OTHER_SINK` is shortened to `OTHER`
+in the table.
 
 | Command | Exit |
 | --- | --- |
@@ -30,29 +44,44 @@ camera. clang 21.1.8, libwebrtc `webrtc-a545de4` fetched by
 | `cargo clippy --locked -p persephone-call-worker --all-targets -- -D warnings` | 0 |
 | `cargo test --locked -p persephone-call-worker -- --ignored default_devices` (1 passed) | 0 |
 | `cargo test --locked -p persephone-core --lib device_test` (9 passed) | 0 |
-| `cargo test --locked -p persephone-core --lib platform::linux::call -- --ignored sound` (1 passed) | 0 |
+| `cargo test --locked -p persephone-core --lib platform::linux::call` (3 passed, 1 ignored) | 0 |
+| `OTHER=pulse:persephone_other cargo test --locked -p persephone-core --lib platform::linux::call -- --ignored sound` (1 passed) | 0 |
+| Negative control: the same with `OTHER=pulse:persephone_main` (the default sink) | 101, as expected |
 | `cargo clippy --locked -p persephone-core --all-targets -- -D warnings` | 0 |
 
-The commands ran in a scratch clone checked out at the commit above; `git status` showed no changed
-tracked file. The same commands also passed at the previous commit,
-`7586758`, with the same counts. `cargo fmt --all -- --check` did not run on
-this machine: rustfmt is not installed for the 1.99.1 toolchain there. It
-passed on Windows.
+The commands ran in a scratch clone checked out at the commit above; `git
+status` showed no changed tracked file. `cargo fmt --all -- --check` did not
+run on this machine: rustfmt is not installed for the 1.99.1 toolchain there.
+It passed on Windows.
 
 The `default_devices` test runs the test code in the test process, without
-containment. The `sound` test starts the built worker through the Linux
+containment. The `sound` test starts each built worker through the Linux
 broker, as the core does: stage 1 before any input, the sound server stream
-opened, then stage 2. It checks four runs:
+opened, then stage 2. It checks:
 
-* the default microphone: `Connected`, then `Left` after `Leave`;
-* the default speaker: `Connected`, then `Left`;
-* the first sink that the worker lists, chosen by its `pulse:` ID and passed
-  as `PULSE_SINK`: `Connected`, then `Left`;
+* the default speaker, stopped when it runs: `Connected`, then `Left`;
+* the default microphone while a second worker plays the tone on the default
+  sink to its own end: the speaker gives `Connected`, then `Left` with no
+  `Leave`, and the microphone reports a level above 0;
+* the same with the tone on the sink in `OTHER`, chosen by its `pulse:` ID and
+  passed as `PULSE_SINK`: the speaker runs to its own `Left`, and the
+  microphone reports no level above 0;
 * `pulse:persephone_no_such_sink`: only `Failed(DeviceNotFound)`.
 
-Because the only source was a monitor, the microphone level was not checked
-for sound. No camera test ran: the portal camera grant for a camera test was
-not exercised.
+The negative control names the default sink as `OTHER`. It failed at the
+silence check, with microphone levels of 79 and 80 while the tone played.
+This shows that the check finds a tone on the default sink, so a worker that
+ignored `PULSE_SINK` would fail the test. The microphone was a monitor, not
+real capture hardware. No camera test ran: the portal camera grant for a
+camera test was not exercised.
+
+Earlier runs of this pull request, at `7586758` and `894ef32`, had the same
+counts for the commands that they shared, with an older `sound` test. That
+test stopped each run when it started and did not check levels or the
+chosen sink. An earlier run of the same script found that a sink loaded
+from a separate SSH session was gone when the test ran; likely the sound
+server stopped with that session, because the user has no linger. The run above loaded
+the sinks in the script itself.
 
 ### PulseAudio header values
 

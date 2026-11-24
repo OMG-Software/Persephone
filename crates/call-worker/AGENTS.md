@@ -41,5 +41,5 @@ The contained process that runs one call (ADR-0043). It joins one LiveKit room w
 
 - `cargo test --locked -p persephone-call-worker`
 - On Windows and Linux, the real-device sound test only by choice, as it records from the microphone: `cargo test --locked -p persephone-call-worker -- --ignored default_devices`
-- On Linux, the contained sound tests (both stages, real sound server) after `cargo build -p persephone-call-worker`: `cargo test --locked -p persephone-core --lib platform::linux::call -- --ignored sound`
+- On Linux, the contained sound tests (both stages, real sound server) after `cargo build -p persephone-call-worker`. They need the default source to be the monitor of the default sink, and a second sink: `PERSEPHONE_TEST_OTHER_SINK=pulse:<second sink> cargo test --locked -p persephone-core --lib platform::linux::call -- --ignored sound`. The test's doc comment shows a `pactl` setup.
 - `cargo clippy --locked -p persephone-call-worker --all-targets -- -D warnings`

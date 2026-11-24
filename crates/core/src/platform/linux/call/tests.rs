@@ -184,8 +184,12 @@ fn microphone_during_tone(sink: Option<&str>) -> (Vec<FromWorker>, Vec<FromWorke
 ///   the tone went to the chosen sink and not to the default sink;
 /// * a sink name the server does not have fails with `DeviceNotFound`.
 ///
-/// For example, on a headless `pipewire-pulse`:
+/// For example, on a headless `pipewire-pulse` (its `auto_null` goes away
+/// when a real sink loads):
+/// `pactl load-module module-null-sink sink_name=persephone_main`,
 /// `pactl load-module module-null-sink sink_name=persephone_other`,
+/// `pactl set-default-sink persephone_main`,
+/// `pactl set-default-source persephone_main.monitor`,
 /// `cargo build -p persephone-call-worker`, then
 /// `PERSEPHONE_TEST_OTHER_SINK=pulse:persephone_other cargo test --locked -p persephone-core --lib platform::linux::call -- --ignored sound`.
 #[test]
