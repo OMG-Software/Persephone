@@ -934,3 +934,6 @@ export const timelinePageFixture = {
     }
   ]
 } as const satisfies TimelinePage;
+
+/** Most other devices a call shows. */
+export const CALL_PARTICIPANTS_MAX = 32;

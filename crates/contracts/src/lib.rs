@@ -2973,6 +2973,11 @@ pub fn generated_typescript() -> String {
         "export const timelinePageFixture = {} as const satisfies TimelinePage;\n",
         serde_json::to_string_pretty(&sample_timeline_page()).expect("DTO serializes")
     ));
+    // The page types its own copy as this literal, so a change here fails
+    // its type check instead of dropping every level list.
+    output.push_str(&format!(
+        "\n/** Most other devices a call shows. */\nexport const CALL_PARTICIPANTS_MAX = {CALL_PARTICIPANTS_MAX};\n"
+    ));
     output
 }
 

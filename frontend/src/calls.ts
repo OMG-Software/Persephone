@@ -10,6 +10,7 @@ import type {
   CallDeviceTestKind,
   CallDeviceTestState,
   CallDeviceTestStatus,
+  CALL_PARTICIPANTS_MAX,
   CallEnd,
   CallJoinError,
   CallParticipantLevel,
@@ -644,8 +645,12 @@ export function ringsKey(rings: readonly ShownRing[]): string {
   return rings.map((ring) => ring.ringId).join(',');
 }
 
-/** The most devices one levels message names: the most call participants. */
-export const MAX_CALL_LEVELS = 32;
+/**
+ * The most devices one levels message names: the contract's
+ * `CALL_PARTICIPANTS_MAX`. Its type is that constant's literal, so a change of
+ * the contract fails the type check here.
+ */
+export const MAX_CALL_LEVELS: typeof CALL_PARTICIPANTS_MAX = 32;
 /** The longest user or device ID, in UTF-8 bytes. */
 const MAX_ID_BYTES = 255;
 

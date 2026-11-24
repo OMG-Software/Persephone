@@ -49,8 +49,8 @@ use persephone_call_protocol::{
     TurnServer, VIDEO_TILES,
 };
 use persephone_contracts::{
-    CallCamera, CallDeviceChange, CallDeviceTestKind, CallDeviceTestState, CallDeviceTestStatus,
-    CallParticipantLevel, CallParticipantRef, CallScreen, CallVideoTile,
+    CALL_PARTICIPANTS_MAX, CallCamera, CallDeviceChange, CallDeviceTestKind, CallDeviceTestState,
+    CallDeviceTestStatus, CallParticipantLevel, CallParticipantRef, CallScreen, CallVideoTile,
 };
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet, VecDeque},
@@ -3448,12 +3448,14 @@ impl Call {
         }
     }
 
-    /// Gives the meters the levels of the members now.
+    /// Gives the meters the levels of the members now, at most
+    /// `CALL_PARTICIPANTS_MAX`, so the list is never refused as too long.
     fn send_levels(&self, inner: &Inner) {
         if let Some(listener) = plain(&inner.sound_listener).clone() {
             listener(SoundUpdate::Participants(
                 self.levels
                     .iter()
+                    .take(CALL_PARTICIPANTS_MAX)
                     .map(|((user_id, device_id), sample)| CallParticipantLevel {
                         user_id: user_id.clone(),
                         device_id: device_id.clone(),

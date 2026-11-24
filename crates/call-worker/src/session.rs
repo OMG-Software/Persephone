@@ -80,6 +80,12 @@ const SCREEN_MAX_BITRATE: u64 = 1_500_000;
 const SPEAKING_TICK: Duration = Duration::from_millis(100);
 /// The longest one sound level measurement may take (ADR-0055).
 const SOUND_MEASURE_TIMEOUT: Duration = Duration::from_millis(500);
+/// The time one measurement has to read statistics: the own microphone
+/// first, then the remote tracks. It is shorter than
+/// [`SOUND_MEASURE_TIMEOUT`], so a slow remote read never drops the own
+/// level (ADR-0059).
+const SOUND_READ_BUDGET: Duration = Duration::from_millis(400);
+const _: () = assert!(SOUND_READ_BUDGET.as_millis() < SOUND_MEASURE_TIMEOUT.as_millis());
 /// The most remote audio tracks measured at once: two for each participant
 /// (a microphone and a screen share's sound).
 const MAX_MEASURED_TRACKS: usize = 2 * MAX_PARTICIPANTS;
@@ -696,10 +702,17 @@ pub async fn test_device(first: ToWorker, input: &mut Receiver<Input>, output: &
     }
     match test {
         DeviceTest::Camera => test_camera(device, input, output).await,
-        DeviceTest::Microphone | DeviceTest::Speaker => {
-            test_sound(test, device, input, output).await
-        }
+        DeviceTest::Microphone => test_sound(SoundTest::Microphone, device, input, output).await,
+        DeviceTest::Speaker => test_sound(SoundTest::Speaker, device, input, output).await,
     }
+}
+
+/// The device tests that use sound, so a camera test can never reach the
+/// tone or the microphone.
+#[derive(Clone, Copy)]
+enum SoundTest {
+    Microphone,
+    Speaker,
 }
 
 /// What the input asks during a device test.
@@ -723,7 +736,7 @@ fn test_input(message: Option<Input>) -> TestInput {
 }
 
 async fn test_sound(
-    test: DeviceTest,
+    test: SoundTest,
     device: Option<String>,
     input: &mut Receiver<Input>,
     output: &Output,
@@ -737,7 +750,7 @@ async fn test_sound(
             let started = notes_tx.clone();
             let levels = notes_tx.clone();
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match test {
-                DeviceTest::Microphone => sound_test::listen(
+                SoundTest::Microphone => sound_test::listen(
                     device.as_deref(),
                     &thread_stop,
                     || {
@@ -748,7 +761,7 @@ async fn test_sound(
                         let _ = levels.try_send(TestNote::Level(level));
                     },
                 ),
-                DeviceTest::Speaker | DeviceTest::Camera => {
+                SoundTest::Speaker => {
                     sound_test::play_tone(device.as_deref(), &thread_stop, || {
                         let _ = started.try_send(TestNote::Started);
                     })
@@ -1048,14 +1061,16 @@ impl SoundProbe {
 /// gain (`set_volume`) before `output_audio_level_.ComputeLevel`, and a
 /// disabled (deafened) track sets that gain to 0
 /// (`AudioRtpReceiver::Reconfigure`). A track whose statistics cannot be read
-/// counts as silent.
+/// by `deadline` counts as silent, so one slow read never holds back the
+/// own level or the other tracks' levels.
 async fn measure_levels(
     own: Option<LocalAudioTrack>,
     remote: Vec<(u8, String, RemoteAudioTrack)>,
+    deadline: tokio::time::Instant,
 ) -> Levels {
     let mut levels = Levels::default();
     if let Some(track) = own
-        && let Ok(stats) = track.get_stats().await
+        && let Some(Ok(stats)) = read_by(deadline, track.get_stats()).await
     {
         for stat in stats {
             if let RtcStats::MediaSource(source) = stat
@@ -1067,7 +1082,7 @@ async fn measure_levels(
     }
     for (connection, identity, track) in remote {
         let mut loudest = 0.0_f64;
-        if let Ok(stats) = track.get_stats().await {
+        if let Some(Ok(stats)) = read_by(deadline, track.get_stats()).await {
             for stat in stats {
                 if let RtcStats::InboundRtp(inbound) = stat {
                     loudest = loudest.max(inbound.inbound.audio_level);
@@ -1077,6 +1092,18 @@ async fn measure_levels(
         levels.remote.push((connection, identity, loudest));
     }
     levels
+}
+
+/// `read`'s output when it finishes by `deadline`, else `None`. A read
+/// whose deadline has passed is never started.
+async fn read_by<F: std::future::Future>(
+    deadline: tokio::time::Instant,
+    read: F,
+) -> Option<F::Output> {
+    if tokio::time::Instant::now() >= deadline {
+        return None;
+    }
+    tokio::time::timeout_at(deadline, read).await.ok()
 }
 
 /// The connections to other SFUs (ADR-0054). They subscribe only: nothing
@@ -2172,8 +2199,9 @@ impl Call<'_> {
             _ => None,
         };
         let remote = self.remote_audio_by_participant();
+        let deadline = tokio::time::Instant::now() + SOUND_READ_BUDGET;
         self.sound
-            .start(measure_levels(own, remote), SOUND_MEASURE_TIMEOUT);
+            .start(measure_levels(own, remote, deadline), SOUND_MEASURE_TIMEOUT);
     }
 
     /// Tells the core whether a remote participant's microphone is muted.
@@ -3601,6 +3629,23 @@ mod tests {
             own: linear,
             remote: Vec::new(),
         }
+    }
+
+    /// GIVEN a statistics read and a deadline WHEN the read finishes in
+    /// time, does not, or its deadline has passed THEN it gives its output,
+    /// `None` at the deadline, and `None` without starting, so one slow
+    /// read never holds back the own level.
+    #[tokio::test]
+    async fn given_a_read_deadline_then_a_late_read_counts_as_unread() {
+        let soon = tokio::time::Instant::now() + Duration::from_secs(5);
+        assert_eq!(read_by(soon, async { 7 }).await, Some(7));
+        let short = tokio::time::Instant::now() + Duration::from_millis(5);
+        assert_eq!(read_by(short, std::future::pending::<u8>()).await, None);
+        let passed = tokio::time::Instant::now();
+        let never = std::future::poll_fn(|_| -> std::task::Poll<u8> {
+            panic!("a read after its deadline is not started")
+        });
+        assert_eq!(read_by(passed, never).await, None);
     }
 
     /// GIVEN test input WHEN it is read THEN the diagnostic switch goes on,
