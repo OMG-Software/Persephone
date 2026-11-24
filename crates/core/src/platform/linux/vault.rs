@@ -26,12 +26,14 @@
 //! Either way the profile stays locked: there is no kernel keyring, file or
 //! passphrase-only fallback.
 //!
-//! Every core of the user creates the item only while it holds the
-//! [`CreationLock`], from its first search to its read-back, so two cores
-//! never create two items: a core that waits for the lock finds the item the
-//! other created. Without the lock, a core that waits for the user's answer
-//! could create a second item after another core already returned the first,
-//! and later reads could choose the second (ADR-0061).
+//! A core creates the item only while it owns [`CREATION_NAME`] on the
+//! session bus ([`CreationLock`]), from its first search to its read-back.
+//! The bus is what every core that reaches this Secret Service shares, so
+//! two such cores never create two items, whatever their environments: a
+//! core that waits for the name finds the item the other created. Without
+//! it, a core that waits for its user's answer could create a second item
+//! after another core already returned the first, and later reads could
+//! choose the second (ADR-0061).
 //!
 //! The secret is copied into zbus's message buffers on its way to and from
 //! the provider; those copies are outside the zeroing guarantee.
@@ -42,16 +44,13 @@ use crate::credentials::PromptError;
 use crate::vault::{Missing, VaultError};
 use std::{
     collections::HashMap,
-    ffi::OsString,
-    fs::{DirBuilder, File, OpenOptions, TryLockError},
-    os::unix::fs::{DirBuilderExt, OpenOptionsExt},
-    path::{Path, PathBuf},
     sync::mpsc,
     thread,
     time::{Duration, Instant},
 };
 use zbus::{
     blocking::{Connection, Proxy, proxy::Builder as ProxyBuilder},
+    fdo::{RequestNameFlags, RequestNameReply},
     message::Message,
     proxy::CacheProperties,
     zvariant::{DynamicType, OwnedObjectPath, OwnedValue, Value},
@@ -77,14 +76,14 @@ pub const ENCODED_BYTES: usize = 2 * SECRET_BYTES;
 pub const PROMPT_TIMEOUT: Duration = Duration::from_secs(300);
 /// Most matching items accepted in one search; more is refused.
 const MAX_ITEMS: usize = 64;
-/// Longest wait for another core of the same user that holds the
-/// [`CreationLock`] (it may be waiting for its user's answers). Then this
-/// attempt fails, and Unlock can try again.
+/// The session-bus name a core owns while it may create the item.
+pub const CREATION_NAME: &str = "io.github.omg_software.persephone.StoreKeyWrapCreation";
+/// Longest wait for another core that owns [`CREATION_NAME`] (it may be
+/// waiting for its user's answers). Then this attempt fails, and Unlock can
+/// try again.
 pub const CREATION_WAIT: Duration = Duration::from_secs(15 * 60);
-/// How often a waiting core tries the [`CreationLock`] again.
+/// How often a waiting core asks for [`CREATION_NAME`] again.
 const CREATION_POLL: Duration = Duration::from_millis(100);
-/// The lock file's name, in the user's `persephone` data directory.
-const CREATION_LOCK: &str = "store-key-wrap.lock";
 
 const SECRETS: &str = "org.freedesktop.secrets";
 const SERVICE_PATH: &str = "/org/freedesktop/secrets";
@@ -214,62 +213,87 @@ pub fn default_collection(
 }
 
 /// The item every process uses when more than one matches (an older core
-/// without the [`CreationLock`] that stored at the same moment): the
-/// smallest object path. Items keep their paths, so every reader picks the
+/// without the [`CreationLock`] that stored at the same moment, or a core on
+/// another bus to the same provider): the smallest object path. Items keep their paths, so every reader picks the
 /// same one.
 pub fn canonical(items: &[OwnedObjectPath]) -> Option<&OwnedObjectPath> {
     items.iter().min_by(|a, b| a.as_str().cmp(b.as_str()))
 }
 
-/// The lock file for `$XDG_DATA_HOME` (else `$HOME/.local/share`): one for
-/// each user, like the item. `None` without an absolute base directory.
-pub fn creation_lock_path(
-    xdg_data_home: Option<OsString>,
-    home: Option<OsString>,
-) -> Option<PathBuf> {
-    super::data_home(xdg_data_home, home).map(|base| base.join("persephone").join(CREATION_LOCK))
+/// What one request for [`CREATION_NAME`] leaves: the name is ours, another
+/// core owns it and there is time to wait, or anything else (a refusal, a
+/// failed call, or a queue entry that `DoNotQueue` rules out), which fails.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Claim {
+    Owned,
+    Wait,
+    Refused,
 }
 
-/// An exclusive advisory lock (`flock`) on the user's lock file. Every core
-/// holds it while it may create the item. The kernel releases it when the
-/// file closes, also when the process ends, so a stopped core leaves no
-/// stale lock.
-pub struct CreationLock {
-    _file: File,
+/// The [`Claim`] for one reply to `RequestName`, when the wait has (or has
+/// not) `expired`.
+pub fn claim(reply: Option<RequestNameReply>, expired: bool) -> Claim {
+    match reply {
+        Some(RequestNameReply::PrimaryOwner) => Claim::Owned,
+        Some(RequestNameReply::Exists) if !expired => Claim::Wait,
+        _ => Claim::Refused,
+    }
 }
 
-impl CreationLock {
-    /// Takes the lock at `path`, waiting at most `wait` for another holder.
-    /// The directory is created owner-only, and the file owner-only and
-    /// never through a symbolic link. A longer wait or any other failure is
-    /// `Failed`.
-    pub fn acquire(path: &Path, wait: Duration) -> Result<Self, VaultError> {
-        let failed = |_| VaultError::Failed;
-        let parent = path.parent().ok_or(VaultError::Failed)?;
-        DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(parent)
-            .map_err(failed)?;
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(path)
-            .map_err(failed)?;
+/// Ownership of [`CREATION_NAME`] on one connection. Every core that
+/// reaches this Secret Service through the same session bus asks for the
+/// same name, so at most one of them may create the item at a time. The bus
+/// releases the name when the connection closes, also when the process
+/// ends, so a stopped core leaves no stale lock.
+pub struct CreationLock<'c> {
+    connection: &'c Connection,
+}
+
+impl<'c> CreationLock<'c> {
+    /// Owns the name on `connection`, waiting at most `wait` for another
+    /// owner. A longer wait or any other failure is `Failed`.
+    pub fn acquire(connection: &'c Connection, wait: Duration) -> Result<Self, VaultError> {
         let deadline = Instant::now() + wait;
         loop {
-            match file.try_lock() {
-                Ok(()) => return Ok(Self { _file: file }),
-                Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
-                    thread::sleep(CREATION_POLL);
-                }
-                Err(_) => return Err(VaultError::Failed),
+            // The bus's own method, not zbus's wrapper: the wrapper turns
+            // `Exists` into an error and adds signal matches on each try.
+            let reply = bus_call(
+                connection,
+                "RequestName",
+                &(CREATION_NAME, RequestNameFlags::DoNotQueue as u32),
+            )
+            .and_then(|reply| reply.body().deserialize::<RequestNameReply>().ok());
+            match claim(reply, Instant::now() >= deadline) {
+                Claim::Owned => return Ok(Self { connection }),
+                Claim::Wait => thread::sleep(CREATION_POLL),
+                Claim::Refused => return Err(VaultError::Failed),
             }
         }
     }
+}
+
+impl Drop for CreationLock<'_> {
+    fn drop(&mut self) {
+        // Closing the connection releases it too; this lets a waiting core
+        // go on at once.
+        let _ = bus_call(self.connection, "ReleaseName", &(CREATION_NAME,));
+    }
+}
+
+/// One method call to the message bus itself; `None` when it fails.
+fn bus_call<B>(connection: &Connection, method: &str, body: &B) -> Option<Message>
+where
+    B: serde::Serialize + DynamicType,
+{
+    connection
+        .call_method(
+            Some("org.freedesktop.DBus"),
+            "/org/freedesktop/DBus",
+            Some("org.freedesktop.DBus"),
+            method,
+            body,
+        )
+        .ok()
 }
 
 /// The wrapping secret's Secret Service item, reached over the session
@@ -322,10 +346,8 @@ impl SecretStore for SecretService {
         let connection = self.connect()?;
         let session = Session::open(&connection)?;
         // Held until the read-back, through every wait for the user, so no
-        // other core creates an item meanwhile.
-        let lock = creation_lock_path(std::env::var_os("XDG_DATA_HOME"), std::env::var_os("HOME"))
-            .ok_or(VaultError::Failed)?;
-        let _creating = CreationLock::acquire(&lock, CREATION_WAIT)?;
+        // other core on this bus creates an item meanwhile.
+        let _creating = CreationLock::acquire(&connection, CREATION_WAIT)?;
         // Another process may have stored one since our caller looked.
         if let Some(stored) = load(&connection, &session)? {
             return Ok(stored);
@@ -659,64 +681,33 @@ mod tests {
         assert_eq!(canonical(&[]), None);
     }
 
-    /// GIVEN data directory settings THEN the lock file is in the user's
-    /// `persephone` data directory, and only an absolute base is used.
+    /// GIVEN replies to `RequestName` THEN only primary ownership takes the
+    /// lock; another owner waits until the wait expires, and a queue entry,
+    /// an existing own claim or a failed call fails.
     #[test]
-    fn given_data_directories_then_the_lock_is_per_user() {
+    fn given_name_replies_then_only_primary_ownership_takes_the_lock() {
         assert_eq!(
-            creation_lock_path(Some("/x/data".into()), Some("/home/a".into())),
-            Some(PathBuf::from("/x/data/persephone/store-key-wrap.lock"))
+            claim(Some(RequestNameReply::PrimaryOwner), false),
+            Claim::Owned
         );
         assert_eq!(
-            creation_lock_path(Some("data".into()), Some("/home/a".into())),
-            Some(PathBuf::from(
-                "/home/a/.local/share/persephone/store-key-wrap.lock"
-            ))
+            claim(Some(RequestNameReply::PrimaryOwner), true),
+            Claim::Owned
         );
-        assert_eq!(creation_lock_path(None, Some("home".into())), None);
-        assert_eq!(creation_lock_path(None, None), None);
-    }
-
-    /// GIVEN a core that holds the creation lock WHEN another tries THEN it
-    /// waits, fails after its wait, and gets the lock once the first lets
-    /// go, also while it is already waiting; the file is owner-only.
-    #[test]
-    fn given_a_held_creation_lock_then_another_core_waits_for_it() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("persephone").join(CREATION_LOCK);
-        let first = CreationLock::acquire(&path, Duration::ZERO).unwrap();
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o600);
-        let started = Instant::now();
-        assert!(matches!(
-            CreationLock::acquire(&path, Duration::from_millis(250)),
-            Err(VaultError::Failed)
-        ));
-        assert!(started.elapsed() >= Duration::from_millis(250));
-        let waiter = {
-            let path = path.clone();
-            thread::spawn(move || CreationLock::acquire(&path, Duration::from_secs(30)).is_ok())
-        };
-        thread::sleep(Duration::from_millis(200));
-        drop(first);
-        assert!(waiter.join().unwrap(), "taken once the first lets go");
-        assert!(CreationLock::acquire(&path, Duration::ZERO).is_ok());
-    }
-
-    /// GIVEN a symbolic link where the lock file goes THEN it is refused,
-    /// never followed.
-    #[test]
-    fn given_a_link_at_the_lock_path_then_it_is_refused() {
-        let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("elsewhere");
-        std::fs::write(&target, b"").unwrap();
-        let path = dir.path().join(CREATION_LOCK);
-        std::os::unix::fs::symlink(&target, &path).unwrap();
-        assert!(matches!(
-            CreationLock::acquire(&path, Duration::ZERO),
-            Err(VaultError::Failed)
-        ));
+        assert_eq!(claim(Some(RequestNameReply::Exists), false), Claim::Wait);
+        assert_eq!(claim(Some(RequestNameReply::Exists), true), Claim::Refused);
+        for expired in [false, true] {
+            assert_eq!(
+                claim(Some(RequestNameReply::InQueue), expired),
+                Claim::Refused
+            );
+            assert_eq!(
+                claim(Some(RequestNameReply::AlreadyOwner), expired),
+                Claim::Refused
+            );
+            assert_eq!(claim(None, expired), Claim::Refused);
+        }
+        assert!(zbus::names::WellKnownName::try_from(CREATION_NAME).is_ok());
     }
 
     /// GIVEN no reachable session bus (an address with nothing behind it)
@@ -994,6 +985,53 @@ mod tests {
             vault.unprotect(&blob).unwrap().as_slice(),
             b"sealed store key"
         );
+    }
+
+    /// GIVEN a disposable bus (shared with the other live tests, so the
+    /// first claim may wait for them) WHEN one connection owns the creation
+    /// name THEN another connection, as another core would, waits and fails
+    /// after its wait, and takes it while waiting once the first lets go.
+    #[test]
+    #[ignore = "needs a disposable session bus"]
+    fn given_a_disposable_keyring_then_the_creation_name_has_one_owner() {
+        let first = bus::at(&disposable_bus()).unwrap();
+        let second = bus::at(&disposable_bus()).unwrap();
+        let held = CreationLock::acquire(&first, Duration::from_secs(30)).unwrap();
+        let started = Instant::now();
+        assert!(matches!(
+            CreationLock::acquire(&second, Duration::from_millis(250)),
+            Err(VaultError::Failed)
+        ));
+        assert!(started.elapsed() >= Duration::from_millis(250));
+        let waiter =
+            thread::spawn(move || CreationLock::acquire(&second, Duration::from_secs(30)).is_ok());
+        thread::sleep(Duration::from_millis(200));
+        drop(held);
+        assert!(waiter.join().unwrap(), "taken once the first lets go");
+    }
+
+    /// GIVEN a disposable unlocked keyring WHEN several cores, each with its
+    /// own connection, store different secrets at once THEN they all get the
+    /// same secret, and exactly one item exists.
+    #[test]
+    #[ignore = "needs a disposable Secret Service provider on the session bus"]
+    fn given_a_disposable_keyring_then_racing_cores_share_one_secret() {
+        let cores: Vec<_> = (0..4u8)
+            .map(|index| {
+                thread::spawn(move || {
+                    let store = SecretService::at(disposable_bus(), never_asked);
+                    *store.store_new(&[40 + index; SECRET_BYTES]).unwrap()
+                })
+            })
+            .collect();
+        let secrets: Vec<_> = cores.into_iter().map(|core| core.join().unwrap()).collect();
+        assert!(
+            secrets.iter().all(|secret| *secret == secrets[0]),
+            "one secret"
+        );
+        let connection = bus::at(&disposable_bus()).unwrap();
+        let (unlocked, locked) = search(&connection).unwrap();
+        assert_eq!(unlocked.len() + locked.len(), 1, "one item");
     }
 
     /// GIVEN a disposable GNOME Keyring with no default keyring

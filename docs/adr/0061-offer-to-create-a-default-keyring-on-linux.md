@@ -78,15 +78,21 @@ for the other yes-or-no questions.
   a new attempt and can ask again.
 * Persephone never calls `SetAlias`, so it never changes which of the user's
   existing keyrings is the default.
-* **One creator at a time.** Each core of the user takes an exclusive
-  advisory lock (`flock`) on `$XDG_DATA_HOME/persephone/store-key-wrap.lock`
-  (owner-only, never through a symbolic link) before its first search for the
-  item, and holds it through the question, the keyring prompts, `CreateItem`
-  and the read-back. Without it, a core that waits for its user's answer
-  could create a second item after another core had already wrapped a key
-  with the first, and later reads could choose the second. A core waits at
-  most 15 minutes for the lock, then fails, and Unlock can try again. The
-  kernel releases the lock when a core ends.
+* **One creator at a time.** Before its first search for the item, each core
+  takes the session-bus name
+  `io.github.omg_software.persephone.StoreKeyWrapCreation` (`RequestName`
+  with `DoNotQueue`, asked again every 100 ms). It holds the name through the
+  question, the keyring prompts, `CreateItem` and the read-back. Without
+  this, a core that waits for its user's answer could create a second item
+  after another core had already wrapped a key with the first, and later
+  reads could choose the second. The lock is on the bus because the bus is
+  what every core that reaches the provider shares: a file under each
+  process's data directory would not join cores with different
+  environments. A core waits at most 15 minutes for the name, then fails,
+  and Unlock can try again. The bus releases the name when a core's
+  connection closes. Cores that reach one provider through different buses,
+  and cores from before this change, are not serialised; they keep the
+  "smallest object path" rule of ADR-0010.
 
 The question is asked only when a new secret must be stored (a new profile,
 or a profile whose wrap is written again). A profile whose secret is already
