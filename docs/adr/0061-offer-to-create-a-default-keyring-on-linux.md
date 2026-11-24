@@ -91,8 +91,8 @@ for the other yes-or-no questions.
   environments. A core waits at most 15 minutes for the name, then fails,
   and Unlock can try again. The bus releases the name when a core's
   connection closes. Cores that reach one provider through different buses,
-  and cores from before this change, are not serialised; they keep the
-  "smallest object path" rule of ADR-0010.
+  and cores from before this change, are not serialised (see the negative
+  consequences).
 
 The question is asked only when a new secret must be stored (a new profile,
 or a profile whose wrap is written again). A profile whose secret is already
@@ -135,6 +135,16 @@ system". No text from the bus or the provider reaches the page.
   of the files does not bypass.
 * The question adds one more core window on Linux. It is not shown on the
   other platforms.
+* The lock does not reach a core from before this change, or a core that
+  reaches the same provider through another bus. If such a core creates its
+  own item while a current core creates one, and its item has the smaller
+  object path, later reads choose it, and the key that the current core
+  wrapped no longer opens (`key_unreadable`). This needs two cores of one
+  user to store the first secret at the same moment, one of them uncoordinated.
+  Old binaries cannot be made to take the lock. Choosing the oldest item
+  instead of the smallest path would change the rule of ADR-0010 that older
+  cores still follow, so they would disagree about the item; the owner can
+  decide on that separately.
 * While one core waits for its user's answers, a second core that must store
   a new secret shows "Unlocking" until the first finishes, for at most 15
   minutes.
