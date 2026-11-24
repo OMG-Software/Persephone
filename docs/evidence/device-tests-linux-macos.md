@@ -3,9 +3,8 @@
 Checked 24 November 2026. Decision:
 [ADR-0059](../adr/0059-test-call-devices-show-each-participants-level-and-switch-devices-during-a-call.md),
 amendment of 24 November 2026. Source: branch `claude/device-tests-linux-macos`
-(pull request 98) at commit `907386bc4dd97bff3eb6a27e7de7360e1d32704f`,
-`--locked`. Later commits of the pull request change only comments and
-documentation. `Cargo.lock` SHA-256:
+(pull request 98) at commit `812ba0dee0693898ed01af1decd6266cd39e8a84`,
+`--locked`. The run covers that snapshot only. `Cargo.lock` SHA-256:
 `cd6f78ba4e2b5e67d47009c6c1fef8e24e444e008ed808126d26ba9f13eec525`
 (unchanged by the change). Debug builds, rustc 1.99.1.
 
@@ -69,14 +68,16 @@ opened, then stage 2. It checks:
 * `pulse:persephone_no_such_sink`: only `Failed(DeviceNotFound)`.
 
 The negative control names the default sink as `OTHER`. It failed at the
-silence check, with microphone levels of 80 while the tone played.
+silence check, with microphone levels of 79 and 80 while the tone played.
 This shows that the check finds a tone on the default sink, so a worker that
 ignored `PULSE_SINK` would fail the test. The microphone was a monitor, not
 real capture hardware. No camera test ran: the portal camera grant for a
 camera test was not exercised.
 
-The same commands passed at `586eb97`, before the test failed fast on a
-closed worker channel; its negative control showed levels of 79 and 80.
+The same commands, with the same results, passed at `586eb97` and
+`907386b`, the two earlier versions of the stronger `sound` test (before it
+failed at once on a closed worker channel, and before it stopped reading a
+worker after its last message).
 Earlier runs of this pull request, at `7586758` and `894ef32`, had the same
 counts for the commands that they shared, with an older `sound` test. That
 test stopped each run when it started and did not check levels or the
