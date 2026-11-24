@@ -612,8 +612,11 @@ impl SwitchAudio for LiveAudio<'_> {
 ///   playout starts. The microphone, if it moved, goes back too. Where it
 ///   cannot, `current` names the new microphone and `recording_lost` is
 ///   set; with no old ID the new microphone stays.
-/// * A lost speaker is only selected by a later switch: it stays lost and
-///   the change reports `AudioDevice`, so the page asks to rejoin.
+/// * A lost microphone chosen as libwebrtc's own default (no ID) has
+///   capture started on what is selected, or stays lost.
+/// * A lost speaker is only selected by a later switch, or not at all when
+///   the choice has no ID: it stays lost and the change reports
+///   `AudioDevice`, so the page asks to rejoin.
 ///
 /// A lost device is switched again by the next change, even to the same
 /// choice.
@@ -634,6 +637,11 @@ fn apply_switch(
         && !(audio.switch_recording(id) && audio.restart_recording())
     {
         current.recording_lost = !restore_recording(audio, current.recording.as_deref());
+        return Err(FailureCode::AudioDevice);
+    }
+    // A lost microphone with no ID to switch to (libwebrtc's own default):
+    // capture starts on what is selected, or the microphone stays lost.
+    if recording.is_none() && current.recording_lost && !audio.restart_recording() {
         return Err(FailureCode::AudioDevice);
     }
     let speaker = playout.as_deref().map(|id| audio.switch_playout(id));
@@ -658,9 +666,9 @@ fn apply_switch(
         }
         return Err(FailureCode::AudioDevice);
     }
-    if speaker == Some(true) && current.playout_lost {
-        // Selected only: playout stays stopped. The microphone, if it
-        // moved, runs.
+    if current.playout_lost {
+        // Selected only, or nothing to select (no ID): playout stays
+        // stopped. The microphone, if it moved, runs.
         current.recording.clone_from(&next.recording);
         current.recording_lost = false;
         current.playout.clone_from(&next.playout);
@@ -1087,8 +1095,18 @@ async fn measure_levels(
                 .fold(0.0_f64, f64::max)
         });
     }
-    for (connection, identity, track) in remote {
-        let loudest = read_by(deadline, track.get_stats()).await.map(|stats| {
+    let (sources, reads): (Vec<_>, Vec<_>) = remote
+        .into_iter()
+        .map(|(connection, identity, track)| {
+            (
+                (connection, identity),
+                async move { track.get_stats().await },
+            )
+        })
+        .unzip();
+    for ((connection, identity), stats) in sources.into_iter().zip(read_all(deadline, reads).await)
+    {
+        let loudest = stats.map(|stats| {
             stats
                 .into_iter()
                 .flatten()
@@ -1101,6 +1119,29 @@ async fn measure_levels(
         levels.remote.push((connection, identity, loudest));
     }
     levels
+}
+
+/// Runs every read at once, each bounded by `deadline` (`read_by`), and
+/// gives their outputs in order: `None` for a read that did not finish in
+/// time. One slow read never keeps another from starting. The reads are at
+/// most [`MAX_MEASURED_TRACKS`], and dropping this ends them all.
+async fn read_all<F>(deadline: tokio::time::Instant, reads: Vec<F>) -> Vec<Option<F::Output>>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let mut out: Vec<Option<F::Output>> =
+        std::iter::repeat_with(|| None).take(reads.len()).collect();
+    let mut running = tokio::task::JoinSet::new();
+    for (index, read) in reads.into_iter().enumerate() {
+        running.spawn(async move { (index, read_by(deadline, read).await) });
+    }
+    while let Some(done) = running.join_next().await {
+        if let Ok((index, output)) = done {
+            out[index] = output;
+        }
+    }
+    out
 }
 
 /// `read`'s output when it finishes by `deadline`, else `None`. A read
@@ -3522,6 +3563,29 @@ mod tests {
             Ok(Some(next.clone())),
             "a lost device is not the same as the choice"
         );
+
+        // A lost microphone or speaker chosen with no ID: the microphone
+        // counts as back only when capture starts; the speaker stays lost.
+        let mut lost_default = devices(None, Some("spk-1"));
+        lost_default.recording_lost = true;
+        for (restarts, back) in [(false, false), (true, true)] {
+            let mut audio = fake(&[], &["spk-1"], restarts);
+            audio.capturing = false;
+            let mut current = lost_default.clone();
+            let result = apply_switch(&mut current, devices(None, Some("spk-1")), &mut audio);
+            assert_eq!(result.is_ok(), back);
+            assert_eq!(current.recording_lost, !back);
+            assert_eq!(audio.capturing, back);
+            assert_eq!(audio.calls, ["restart"]);
+        }
+        let mut lost_speaker = devices(Some("mic-1"), None);
+        lost_speaker.playout_lost = true;
+        let mut audio = fake(&["mic-1"], &[], true);
+        let mut current = lost_speaker.clone();
+        let result = apply_switch(&mut current, devices(Some("mic-1"), None), &mut audio);
+        assert_eq!(result, failed);
+        assert!(current.playout_lost, "no ID cannot start playout");
+        assert!(audio.calls.is_empty());
     }
 
     /// GIVEN a Windows machine with speakers or microphones WHEN the worker
@@ -3655,6 +3719,24 @@ mod tests {
             panic!("a read after its deadline is not started")
         });
         assert_eq!(read_by(passed, never).await, None);
+    }
+
+    /// GIVEN a slow read before two quick ones WHEN they are read under one
+    /// deadline THEN the quick ones are still read, in order, and only the
+    /// slow one is `None`.
+    #[tokio::test]
+    async fn given_a_slow_read_then_the_other_reads_still_finish() {
+        type Read = std::pin::Pin<Box<dyn std::future::Future<Output = u8> + Send>>;
+        let reads: Vec<Read> = vec![
+            Box::pin(std::future::pending::<u8>()),
+            Box::pin(async {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                2
+            }),
+            Box::pin(async { 3 }),
+        ];
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(300);
+        assert_eq!(read_all(deadline, reads).await, [None, Some(2), Some(3)]);
     }
 
     /// GIVEN test input WHEN it is read THEN the diagnostic switch goes on,
