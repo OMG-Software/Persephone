@@ -2638,8 +2638,10 @@ pub struct CallStatus {
     #[serde(default)]
     pub ring_declined: bool,
     /// The last change of the microphone or speaker during this call failed
-    /// (ADR-0059): the call keeps the devices it had. Null after a change
-    /// that worked, and before any.
+    /// (ADR-0059). After `not_found` and `unsupported` the call keeps the
+    /// devices it had. After `failed` the microphone may be the new one and
+    /// the sound may have stopped. Null after a change that worked, and
+    /// before any.
     #[serde(default)]
     pub device_change: Option<CallDeviceChange>,
 }
@@ -2652,7 +2654,8 @@ pub enum CallDeviceChange {
     NotFound,
     /// This system changes devices only for the next call.
     Unsupported,
-    /// The device could not be opened.
+    /// The device could not be opened. The microphone may be the new one,
+    /// and the sound may have stopped.
     Failed,
 }
 

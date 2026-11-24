@@ -23,6 +23,7 @@
     liveRings,
     nextRingEnd,
     shownRings,
+    shownSoundLevel,
     videoCallButton,
     CallOperations,
     LatestOnly,
@@ -797,13 +798,12 @@
   let volumeDraft = $state<number | null>(null);
   // Goes up each time the core says a new video picture is waiting.
   let callVideoTicks = $state(0);
-  // The running call's sound level meter (ADR-0055): 0 to 100. A level that
-  // arrives outside an active call is dropped, and it goes back to 0 when the
-  // call ends, so a new call never starts with an old level.
+  // The own microphone level (ADR-0055, ADR-0059): 0 to 100. It is the
+  // call's level while a call is active and a device test's level while no
+  // call runs, also right after a call ended. It is 0 while a call joins.
   let callSoundLevel = $state(0);
   function takeSoundLevel(level: number) {
-    // A device test's microphone level shows in Settings while no call runs.
-    callSoundLevel = callState.phase === 'active' || callState.phase === 'idle' ? level : 0;
+    callSoundLevel = shownSoundLevel(callState.phase, level);
   }
   // Goes up each time a device test changes (ADR-0059).
   let deviceTestTicks = $state(0);
@@ -833,7 +833,8 @@
   // A camera failure is about the call that is running; it goes when that
   // call ends.
   $effect(() => {
-    if (callState.phase !== 'active' && callState.phase !== 'idle') callSoundLevel = 0;
+    // Only written, never read here, so a level change does not run this.
+    if (callState.phase === 'joining') callSoundLevel = 0;
     if (callState.phase === 'ended' || callState.phase === 'idle') {
       cameraRequest += 1;
       cameraText = null;

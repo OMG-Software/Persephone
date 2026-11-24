@@ -467,6 +467,18 @@ export function parseSoundLevel(value: unknown): number | null {
     : null;
 }
 
+/**
+ * The own microphone level the page shows (ADR-0055, ADR-0059). It is 0
+ * while a call joins, so a new call never starts with an old level. In every
+ * other phase it shows: the call's own level while the call is active, and a
+ * device test's level while no call runs, also while the bar still shows how
+ * the last call ended. The core sends 0 when a call ends, and the call bar
+ * shows no meter after the end.
+ */
+export function shownSoundLevel(phase: CallPhase, level: number): number {
+  return phase === 'joining' ? 0 : level;
+}
+
 /** The meter's spoken value: "Silent", else the level in decibels below full scale. */
 export function soundLevelText(level: number): string {
   if (level <= 0) return 'Silent';
