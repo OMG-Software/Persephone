@@ -184,7 +184,8 @@ class LinuxLiveTest(unittest.TestCase):
         self.assertFalse([command for command, _ in commands if "--ignored" in command])
 
     def test_given_linux_live_then_the_live_tests_run_instrumented_before_the_report(self):
-        with mock.patch.dict(dev.os.environ, {"DISPLAY": ":0", "WAYLAND_DISPLAY": "wayland-0"}):
+        desktop = {"DISPLAY": ":0", "WAYLAND_DISPLAY": "wayland-0", "GNOME_KEYRING_CONTROL": "/run/user/1000/keyring"}
+        with mock.patch.dict(dev.os.environ, desktop):
             commands = coverage("--linux-live")
         names = [command for command, _ in commands]
         report = names.index(next(c for c in names if c[:3] == ["cargo", "llvm-cov", "report"]))
@@ -201,6 +202,8 @@ class LinuxLiveTest(unittest.TestCase):
         # find the user's running keyring; both are removed after the run.
         for keyring in (unlocked, bare):
             self.assertEqual(keyring[0][:2], ["dbus-run-session", "--"])
+            # GNOME Keyring reads this before XDG_RUNTIME_DIR.
+            self.assertNotIn("GNOME_KEYRING_CONTROL", keyring[1])
             self.assertEqual(keyring[1]["CARGO_LLVM_COV"], "1", "instrumented")
             data = Path(keyring[1]["XDG_DATA_HOME"])
             self.assertEqual(data.parent, dev.LIVE_DATA)

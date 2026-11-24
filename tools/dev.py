@@ -46,6 +46,9 @@ def linux_live_tests(cargo_flags, environment):
     daemon through `$XDG_RUNTIME_DIR/keyring/control`, and would otherwise
     unlock and use the user's. It holds only sockets, so it is in the system
     temporary directory, which supports them wherever the repository is.
+    `GNOME_KEYRING_CONTROL` is removed too: GNOME Keyring reads it before
+    `$XDG_RUNTIME_DIR`, so an inherited value would attach to the desktop's
+    daemon.
 
     A second new GNOME Keyring is started without `--unlock`, so it has no
     default keyring, for the create-keyring refusals (ADR-0061). It runs
@@ -58,17 +61,18 @@ def linux_live_tests(cargo_flags, environment):
     # Secret Service on the private bus.
     unlocked = "printf %s disposable | gnome-keyring-daemon --unlock --components=secrets >/dev/null && "
     started = 'gnome-keyring-daemon --start --components=secrets >/dev/null && exec "$@"'
-    no_display = {"DISPLAY", "WAYLAND_DISPLAY"}
+    own_keyring = {"GNOME_KEYRING_CONTROL"}
+    no_display = own_keyring | {"DISPLAY", "WAYLAND_DISPLAY"}
     LIVE_DATA.mkdir(parents=True, exist_ok=True)
-    for start, test, keep in (
-        (unlocked + started, "given_a_disposable_keyring_then", lambda name: True),
-        (started, "given_a_disposable_provider_without_a_default", lambda name: name not in no_display),
+    for start, test, removed in (
+        (unlocked + started, "given_a_disposable_keyring_then", own_keyring),
+        (started, "given_a_disposable_provider_without_a_default", no_display),
     ):
         with (
             tempfile.TemporaryDirectory(dir=LIVE_DATA) as data,
             tempfile.TemporaryDirectory(prefix="persephone-keyring-") as runtime,
         ):
-            keyring = {name: value for name, value in environment.items() if keep(name)}
+            keyring = {name: value for name, value in environment.items() if name not in removed}
             keyring.update(XDG_DATA_HOME=data, XDG_RUNTIME_DIR=runtime)
             run(["dbus-run-session", "--", "sh", "-c", start, "sh", *live, vault + test], keyring)
 

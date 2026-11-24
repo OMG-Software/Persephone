@@ -26,6 +26,13 @@
 //! Either way the profile stays locked: there is no kernel keyring, file or
 //! passphrase-only fallback.
 //!
+//! Every core of the user creates the item only while it holds the
+//! [`CreationLock`], from its first search to its read-back, so two cores
+//! never create two items: a core that waits for the lock finds the item the
+//! other created. Without the lock, a core that waits for the user's answer
+//! could create a second item after another core already returned the first,
+//! and later reads could choose the second (ADR-0061).
+//!
 //! The secret is copied into zbus's message buffers on its way to and from
 //! the provider; those copies are outside the zeroing guarantee.
 
@@ -33,7 +40,16 @@ use super::super::unix::{SECRET_BYTES, SecretStore};
 use super::bus::{self, BusError};
 use crate::credentials::PromptError;
 use crate::vault::{Missing, VaultError};
-use std::{collections::HashMap, sync::mpsc, thread, time::Duration};
+use std::{
+    collections::HashMap,
+    ffi::OsString,
+    fs::{DirBuilder, File, OpenOptions, TryLockError},
+    os::unix::fs::{DirBuilderExt, OpenOptionsExt},
+    path::{Path, PathBuf},
+    sync::mpsc,
+    thread,
+    time::{Duration, Instant},
+};
 use zbus::{
     blocking::{Connection, Proxy, proxy::Builder as ProxyBuilder},
     message::Message,
@@ -61,6 +77,14 @@ pub const ENCODED_BYTES: usize = 2 * SECRET_BYTES;
 pub const PROMPT_TIMEOUT: Duration = Duration::from_secs(300);
 /// Most matching items accepted in one search; more is refused.
 const MAX_ITEMS: usize = 64;
+/// Longest wait for another core of the same user that holds the
+/// [`CreationLock`] (it may be waiting for its user's answers). Then this
+/// attempt fails, and Unlock can try again.
+pub const CREATION_WAIT: Duration = Duration::from_secs(15 * 60);
+/// How often a waiting core tries the [`CreationLock`] again.
+const CREATION_POLL: Duration = Duration::from_millis(100);
+/// The lock file's name, in the user's `persephone` data directory.
+const CREATION_LOCK: &str = "store-key-wrap.lock";
 
 const SECRETS: &str = "org.freedesktop.secrets";
 const SERVICE_PATH: &str = "/org/freedesktop/secrets";
@@ -189,11 +213,63 @@ pub fn default_collection(
         .ok_or(VaultError::Missing(Missing::DefaultKeyring))
 }
 
-/// The item every process uses when more than one matches (two cores that
-/// stored at the same moment): the smallest object path. Items keep their
-/// paths, so every reader picks the same one.
+/// The item every process uses when more than one matches (an older core
+/// without the [`CreationLock`] that stored at the same moment): the
+/// smallest object path. Items keep their paths, so every reader picks the
+/// same one.
 pub fn canonical(items: &[OwnedObjectPath]) -> Option<&OwnedObjectPath> {
     items.iter().min_by(|a, b| a.as_str().cmp(b.as_str()))
+}
+
+/// The lock file for `$XDG_DATA_HOME` (else `$HOME/.local/share`): one for
+/// each user, like the item. `None` without an absolute base directory.
+pub fn creation_lock_path(
+    xdg_data_home: Option<OsString>,
+    home: Option<OsString>,
+) -> Option<PathBuf> {
+    super::data_home(xdg_data_home, home).map(|base| base.join("persephone").join(CREATION_LOCK))
+}
+
+/// An exclusive advisory lock (`flock`) on the user's lock file. Every core
+/// holds it while it may create the item. The kernel releases it when the
+/// file closes, also when the process ends, so a stopped core leaves no
+/// stale lock.
+pub struct CreationLock {
+    _file: File,
+}
+
+impl CreationLock {
+    /// Takes the lock at `path`, waiting at most `wait` for another holder.
+    /// The directory is created owner-only, and the file owner-only and
+    /// never through a symbolic link. A longer wait or any other failure is
+    /// `Failed`.
+    pub fn acquire(path: &Path, wait: Duration) -> Result<Self, VaultError> {
+        let failed = |_| VaultError::Failed;
+        let parent = path.parent().ok_or(VaultError::Failed)?;
+        DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(parent)
+            .map_err(failed)?;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)
+            .map_err(failed)?;
+        let deadline = Instant::now() + wait;
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(Self { _file: file }),
+                Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                    thread::sleep(CREATION_POLL);
+                }
+                Err(_) => return Err(VaultError::Failed),
+            }
+        }
+    }
 }
 
 /// The wrapping secret's Secret Service item, reached over the session
@@ -245,6 +321,11 @@ impl SecretStore for SecretService {
     ) -> Result<Zeroizing<[u8; SECRET_BYTES]>, VaultError> {
         let connection = self.connect()?;
         let session = Session::open(&connection)?;
+        // Held until the read-back, through every wait for the user, so no
+        // other core creates an item meanwhile.
+        let lock = creation_lock_path(std::env::var_os("XDG_DATA_HOME"), std::env::var_os("HOME"))
+            .ok_or(VaultError::Failed)?;
+        let _creating = CreationLock::acquire(&lock, CREATION_WAIT)?;
         // Another process may have stored one since our caller looked.
         if let Some(stored) = load(&connection, &session)? {
             return Ok(stored);
@@ -275,8 +356,8 @@ impl SecretStore for SecretService {
         let (_item, prompt): (OwnedObjectPath, OwnedObjectPath) =
             reply.body().deserialize().map_err(|_| VaultError::Failed)?;
         complete(&connection, &prompt)?;
-        // Read back whichever item is canonical now, so racing processes
-        // agree on one secret.
+        // Read back the item that later reads choose; under the lock it is
+        // the one just created, unless an older core raced without it.
         load(&connection, &session)?.ok_or(VaultError::Failed)
     }
 }
@@ -576,6 +657,66 @@ mod tests {
         reversed.reverse();
         assert_eq!(canonical(&reversed), canonical(&items));
         assert_eq!(canonical(&[]), None);
+    }
+
+    /// GIVEN data directory settings THEN the lock file is in the user's
+    /// `persephone` data directory, and only an absolute base is used.
+    #[test]
+    fn given_data_directories_then_the_lock_is_per_user() {
+        assert_eq!(
+            creation_lock_path(Some("/x/data".into()), Some("/home/a".into())),
+            Some(PathBuf::from("/x/data/persephone/store-key-wrap.lock"))
+        );
+        assert_eq!(
+            creation_lock_path(Some("data".into()), Some("/home/a".into())),
+            Some(PathBuf::from(
+                "/home/a/.local/share/persephone/store-key-wrap.lock"
+            ))
+        );
+        assert_eq!(creation_lock_path(None, Some("home".into())), None);
+        assert_eq!(creation_lock_path(None, None), None);
+    }
+
+    /// GIVEN a core that holds the creation lock WHEN another tries THEN it
+    /// waits, fails after its wait, and gets the lock once the first lets
+    /// go, also while it is already waiting; the file is owner-only.
+    #[test]
+    fn given_a_held_creation_lock_then_another_core_waits_for_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("persephone").join(CREATION_LOCK);
+        let first = CreationLock::acquire(&path, Duration::ZERO).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        let started = Instant::now();
+        assert!(matches!(
+            CreationLock::acquire(&path, Duration::from_millis(250)),
+            Err(VaultError::Failed)
+        ));
+        assert!(started.elapsed() >= Duration::from_millis(250));
+        let waiter = {
+            let path = path.clone();
+            thread::spawn(move || CreationLock::acquire(&path, Duration::from_secs(30)).is_ok())
+        };
+        thread::sleep(Duration::from_millis(200));
+        drop(first);
+        assert!(waiter.join().unwrap(), "taken once the first lets go");
+        assert!(CreationLock::acquire(&path, Duration::ZERO).is_ok());
+    }
+
+    /// GIVEN a symbolic link where the lock file goes THEN it is refused,
+    /// never followed.
+    #[test]
+    fn given_a_link_at_the_lock_path_then_it_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("elsewhere");
+        std::fs::write(&target, b"").unwrap();
+        let path = dir.path().join(CREATION_LOCK);
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        assert!(matches!(
+            CreationLock::acquire(&path, Duration::ZERO),
+            Err(VaultError::Failed)
+        ));
     }
 
     /// GIVEN no reachable session bus (an address with nothing behind it)

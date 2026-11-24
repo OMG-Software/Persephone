@@ -78,6 +78,15 @@ for the other yes-or-no questions.
   a new attempt and can ask again.
 * Persephone never calls `SetAlias`, so it never changes which of the user's
   existing keyrings is the default.
+* **One creator at a time.** Each core of the user takes an exclusive
+  advisory lock (`flock`) on `$XDG_DATA_HOME/persephone/store-key-wrap.lock`
+  (owner-only, never through a symbolic link) before its first search for the
+  item, and holds it through the question, the keyring prompts, `CreateItem`
+  and the read-back. Without it, a core that waits for its user's answer
+  could create a second item after another core had already wrapped a key
+  with the first, and later reads could choose the second. A core waits at
+  most 15 minutes for the lock, then fails, and Unlock can try again. The
+  kernel releases the lock when a core ends.
 
 The question is asked only when a new secret must be stored (a new profile,
 or a profile whose wrap is written again). A profile whose secret is already
@@ -120,6 +129,9 @@ system". No text from the bus or the provider reaches the page.
   of the files does not bypass.
 * The question adds one more core window on Linux. It is not shown on the
   other platforms.
+* While one core waits for its user's answers, a second core that must store
+  a new secret shows "Unlocking" until the first finishes, for at most 15
+  minutes.
 * A provider that creates the collection but does not set the alias leaves
   the profile locked, although a new collection exists. The user can make it
   the default in the keyring manager.
