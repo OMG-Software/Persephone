@@ -106,3 +106,30 @@ test('GIVEN each test state WHEN the meter and preview are made THEN they show o
   assert.equal(testLive(status(1, 'speaker', 'starting')), true);
   assert.equal(testLive(status(1, 'speaker', 'unavailable')), false);
 });
+
+test('GIVEN a start whose reply a newer read hides WHEN the settings close THEN the started test is still stopped, by its ID', async () => {
+  const core = bridge();
+  const shown = [];
+  const tests = new DeviceTests(core.commands, (next) => shown.push(next), IDLE_DEVICE_TEST);
+  const started = tests.run('microphone', null);
+  void tests.read();
+  core.next('start').resolve(status(6, 'microphone', 'starting'));
+  await started;
+  core.next('status').resolve(IDLE_DEVICE_TEST);
+  await turn();
+  assert.deepEqual(shown, [IDLE_DEVICE_TEST], 'the newer read is shown');
+  tests.close();
+  assert.deepEqual(core.calls.at(-1), ['stop', 6]);
+
+  // A started test that has ended needs no stop.
+  const ended = bridge();
+  const done = new DeviceTests(ended.commands, () => {}, IDLE_DEVICE_TEST);
+  const run = done.run('speaker', null);
+  ended.next('start').resolve(status(7, 'speaker', 'running'));
+  await run;
+  void done.read();
+  ended.next('status').resolve(status(7, 'speaker', 'done'));
+  await turn();
+  done.close();
+  assert.deepEqual(ended.calls.map((call) => call[0]), ['start', 'status']);
+});

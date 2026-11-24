@@ -38,12 +38,16 @@ export function testTiles(status: CallDeviceTestStatus): CallStatus['video'] {
  * request has a number, so an older answer never replaces a newer one. When
  * the page closes, a test that runs is stopped, and a start that answers
  * later is stopped too: only that test, by its ID, so a test of a reopened
- * page keeps running.
+ * page keeps running. The test this page started is kept apart from the
+ * status it shows, so a newer read that hides a start's reply still leaves
+ * that test to stop on close.
  */
 export class DeviceTests {
   #request = 0;
   #closed = false;
   #shown: CallDeviceTestStatus;
+  // The ID of the live test this page started, until it ends or is stopped.
+  #started: number | null = null;
   readonly #bridge: DeviceTestBridge;
   readonly #show: (status: CallDeviceTestStatus) => void;
 
@@ -54,6 +58,7 @@ export class DeviceTests {
   }
 
   #take(mine: number, next: CallDeviceTestStatus) {
+    if (next.id === this.#started && !testLive(next)) this.#started = null;
     if (mine !== this.#request || this.#closed) return;
     this.#shown = next;
     this.#show(next);
@@ -76,10 +81,12 @@ export class DeviceTests {
   async run(kind: CallDeviceTestKind, device: string | null) {
     const mine = ++this.#request;
     if (deviceTestActive(this.#shown, kind)) {
+      if (this.#shown.id === this.#started) this.#started = null;
       await this.#bridge.stop();
       return;
     }
     const next = await this.#bridge.start(kind, device);
+    if (testLive(next)) this.#started = next.id;
     if (this.#closed) {
       if (testLive(next)) void this.#bridge.stop(next.id).catch(() => {});
       return;
@@ -87,9 +94,12 @@ export class DeviceTests {
     this.#take(mine, next);
   }
 
-  /** The page closes: the test it shows stops, by its ID. */
+  /** The page closes: the test it shows and the one it started stop, by ID. */
   close() {
     this.#closed = true;
-    if (testLive(this.#shown)) void this.#bridge.stop(this.#shown.id).catch(() => {});
+    const live = new Set<number>();
+    if (testLive(this.#shown)) live.add(this.#shown.id);
+    if (this.#started !== null) live.add(this.#started);
+    for (const id of live) void this.#bridge.stop(id).catch(() => {});
   }
 }

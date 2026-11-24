@@ -2859,13 +2859,27 @@ fn run_device_test(
     }
     let mut diagnostics = crate::diagnostics::global().watch();
     let on = *diagnostics.borrow_and_update();
-    let sent = link.send(ToWorker::SetDiagnostics { on }).and_then(|()| {
-        link.send(ToWorker::TestDevice {
-            test: device_test::worker_test(test),
-            device,
+    // The order rule: a stop recorded while the worker started (its ready
+    // wait can take seconds) ends the test here, before `TestDevice`, so no
+    // device opens. A later stop reaches the worker as `Leave` after
+    // `TestDevice`; the worker may open the device, and closes it when it
+    // reads `Leave`.
+    let stopped_early = stop.load(Ordering::SeqCst);
+    let sent = if stopped_early {
+        Ok(())
+    } else {
+        link.send(ToWorker::SetDiagnostics { on }).and_then(|()| {
+            link.send(ToWorker::TestDevice {
+                test: device_test::worker_test(test),
+                device,
+            })
         })
-    });
-    let mut state = CallDeviceTestState::Starting;
+    };
+    let mut state = if stopped_early {
+        CallDeviceTestState::Idle
+    } else {
+        CallDeviceTestState::Starting
+    };
     let limit = std::time::Instant::now() + limit;
     let mut leave_by: Option<std::time::Instant> = None;
     // Whether the `Leave` was the user's stop, not the limit.
@@ -5149,6 +5163,8 @@ mod tests {
         sent: Mutex<Option<mpsc::Receiver<ToWorker>>>,
         /// The worker's side, kept open so a test can answer later.
         answers: Mutex<Option<mpsc::Sender<FromWorker>>>,
+        /// Set during the start, as a stop that comes while it waits.
+        stop_on_start: Mutex<Option<Arc<AtomicBool>>>,
     }
 
     impl ScriptHost {
@@ -5157,6 +5173,7 @@ mod tests {
                 events: Mutex::new(events),
                 sent: Mutex::new(None),
                 answers: Mutex::new(None),
+                stop_on_start: Mutex::new(None),
             })
         }
     }
@@ -5170,6 +5187,9 @@ mod tests {
             }
             *self.sent.lock().unwrap() = Some(received);
             *self.answers.lock().unwrap() = Some(answers);
+            if let Some(stop) = self.stop_on_start.lock().unwrap().as_ref() {
+                stop.store(true, Ordering::SeqCst);
+            }
             Ok(CallWorkerLink::from_parts(
                 commands,
                 events,
@@ -5278,6 +5298,40 @@ mod tests {
             );
         });
         assert_eq!(calls.device_test_status().state, CallDeviceTestState::Idle);
+    }
+
+    /// GIVEN a stop recorded while the test worker starts WHEN the worker is
+    /// ready THEN no `TestDevice` is sent, so no device opens, and the test
+    /// ends as idle.
+    #[test]
+    fn given_a_stop_during_the_worker_start_then_no_device_opens() {
+        let host = ScriptHost::new(Vec::new());
+        let stop = Arc::new(AtomicBool::new(false));
+        *host.stop_on_start.lock().unwrap() = Some(stop.clone());
+        let calls = controller(host.clone());
+        plain(&calls.inner.device_test).generation = 1;
+        let limit = device_test::TEST_LIMIT;
+        run_device_test(
+            &calls.inner,
+            1,
+            CallDeviceTestKind::Microphone,
+            None,
+            &stop,
+            limit,
+        );
+        assert_eq!(calls.device_test_status().state, CallDeviceTestState::Idle);
+        let mut sent = host
+            .sent
+            .lock()
+            .unwrap()
+            .take()
+            .expect("the worker started");
+        while let Ok(message) = sent.try_recv() {
+            assert!(
+                !matches!(message, ToWorker::TestDevice { .. }),
+                "no device test is sent"
+            );
+        }
     }
 
     /// GIVEN test 2 is the newest WHEN a stop names test 1 THEN test 2 runs
