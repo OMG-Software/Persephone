@@ -162,8 +162,11 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
     fn listed(wanted: Option<&str>, path: SoundPath) -> Option<&str> {
         wanted.filter(|_| path == SoundPath::Listed)
     }
+    // Read once, before the event loop: a change during the call reuses it.
+    let media_defaults = MediaDefaults::read();
     let sound_devices = match select_devices(
         &audio,
+        &media_defaults,
         listed(recording_device.as_deref(), paths[0]),
         listed(playout_device.as_deref(), paths[1]),
     ) {
@@ -235,6 +238,7 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
         identity: &own,
         audio: &audio,
         sound_devices,
+        media_defaults,
         output,
         own_sids,
         publication: &publication,
@@ -410,20 +414,35 @@ struct SoundDevices {
     playout: Option<String>,
 }
 
+/// The system's default speaker and microphone for media, as
+/// `sound_defaults::media_defaults` read them when the call started.
+/// Reading them is a blocking system query, so a change during the call
+/// uses this copy and never runs it in the event loop.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct MediaDefaults {
+    playout: Option<String>,
+    recording: Option<String>,
+}
+
+impl MediaDefaults {
+    /// Reads the defaults. It blocks, so call it before the event loop.
+    fn read() -> Self {
+        let (playout, recording) = sound_defaults::media_defaults();
+        Self { playout, recording }
+    }
+}
+
 /// Resolves the chosen microphone and speaker to listed device IDs. `None`
-/// is the system's default for media where it is listed (`sound_defaults`),
-/// else `None`. A chosen device that is missing is `DeviceNotFound`, never
+/// is the system's default for media where it is listed (`defaults`), else
+/// `None`. A chosen device that is missing is `DeviceNotFound`, never
 /// another device. Nothing changes here.
 fn resolve_devices(
     audio: &PlatformAudio,
+    defaults: &MediaDefaults,
     recording: Option<&str>,
     playout: Option<&str>,
 ) -> Result<SoundDevices, FailureCode> {
-    let (default_playout, default_recording) = if recording.is_none() || playout.is_none() {
-        sound_defaults::media_defaults()
-    } else {
-        (None, None)
-    };
+    let (default_playout, default_recording) = (&defaults.playout, &defaults.recording);
     let recording_devices: Vec<_> = audio.recording_devices().collect();
     let ids = || recording_devices.iter().map(|device| device.id.as_str());
     let recording = match recording {
@@ -462,10 +481,11 @@ fn playout_id(audio: &PlatformAudio, id: &str) -> Result<PlayoutDeviceId, Failur
 /// choices are checked before either device changes.
 fn select_devices(
     audio: &PlatformAudio,
+    defaults: &MediaDefaults,
     recording: Option<&str>,
     playout: Option<&str>,
 ) -> Result<SoundDevices, FailureCode> {
-    let wanted = resolve_devices(audio, recording, playout)?;
+    let wanted = resolve_devices(audio, defaults, recording, playout)?;
     if let Some(id) = &wanted.recording {
         audio
             .set_recording_device(&recording_id(audio, id)?)
@@ -504,6 +524,7 @@ fn device_switch(
 /// worker started (ADR-0049), so a change applies to the next call only.
 fn switch_devices(
     audio: &PlatformAudio,
+    defaults: &MediaDefaults,
     current: &mut SoundDevices,
     recording: Option<&str>,
     playout: Option<&str>,
@@ -511,7 +532,7 @@ fn switch_devices(
     if cfg!(target_os = "linux") {
         return Err(FailureCode::Unsupported);
     }
-    let wanted = resolve_devices(audio, recording, playout)?;
+    let wanted = resolve_devices(audio, defaults, recording, playout)?;
     let Some(next) = device_switch(current, &wanted)? else {
         return Ok(());
     };
@@ -809,6 +830,9 @@ struct Call<'a> {
     audio: &'a PlatformAudio,
     /// The devices the call uses now (ADR-0059).
     sound_devices: SoundDevices,
+    /// The system defaults read when the call started, for "System default"
+    /// during the call.
+    media_defaults: MediaDefaults,
     output: &'a Output,
     /// The microphone's publication.
     publication: &'a LocalTrackPublication,
@@ -2367,6 +2391,7 @@ impl Call<'_> {
             ToWorker::SetDevices { recording, playout } => Ok(vec![FromWorker::DevicesSet {
                 failure: switch_devices(
                     self.audio,
+                    &self.media_defaults,
                     &mut self.sound_devices,
                     recording.as_deref(),
                     playout.as_deref(),
