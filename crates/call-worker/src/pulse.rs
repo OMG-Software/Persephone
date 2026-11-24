@@ -116,7 +116,7 @@ struct Api {
 /// # Safety
 ///
 /// `F` must be the C signature of `name` in libpulse.
-unsafe fn symbol<F: Copy>(handle: *mut c_void, name: &CStr) -> Option<F> {
+pub(crate) unsafe fn symbol<F: Copy>(handle: *mut c_void, name: &CStr) -> Option<F> {
     // SAFETY: the handle is open and the name is a C string.
     let pointer = unsafe { libc::dlsym(handle, name.as_ptr()) };
     if pointer.is_null() {
@@ -126,15 +126,20 @@ unsafe fn symbol<F: Copy>(handle: *mut c_void, name: &CStr) -> Option<F> {
     Some(unsafe { std::mem::transmute_copy::<*mut c_void, F>(&pointer) })
 }
 
+/// The PulseAudio client library, or `None` when it is not installed. The
+/// handle is never closed, so symbols from it stay valid. The device tests
+/// (`sound_test.rs`) use it too.
+pub(crate) fn library() -> Option<*mut c_void> {
+    // SAFETY: a fixed library name; the handle is never closed.
+    let handle =
+        unsafe { libc::dlopen(c"libpulse.so.0".as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
+    (!handle.is_null()).then_some(handle)
+}
+
 fn api() -> Option<&'static Api> {
     static API: OnceLock<Option<Api>> = OnceLock::new();
     API.get_or_init(|| {
-        // SAFETY: a fixed library name; the handle is never closed.
-        let handle =
-            unsafe { libc::dlopen(c"libpulse.so.0".as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
-        if handle.is_null() {
-            return None;
-        }
+        let handle = library()?;
         // SAFETY: each type below is the C signature from pulse/*.h.
         unsafe {
             Some(Api {

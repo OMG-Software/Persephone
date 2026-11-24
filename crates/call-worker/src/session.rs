@@ -166,9 +166,6 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
         Ok(audio) => audio,
         Err(code) => return fail(output, code).await,
     };
-    fn listed(wanted: Option<&str>, path: SoundPath) -> Option<&str> {
-        wanted.filter(|_| path == SoundPath::Listed)
-    }
     // Read once, before the event loop: a change during the call reuses it.
     let media_defaults = MediaDefaults::read();
     let sound_devices = match select_devices(
@@ -402,6 +399,12 @@ fn launch_name(key: &str) -> Result<Option<String>, FailureCode> {
         Err(std::env::VarError::NotPresent) => Ok(None),
         Err(std::env::VarError::NotUnicode(_)) => Err(FailureCode::Protocol),
     }
+}
+
+/// The choice to open by device ID: none when the sound server name in the
+/// environment opens it (`SoundPath::ServerName`).
+fn listed(wanted: Option<&str>, path: SoundPath) -> Option<&str> {
+    wanted.filter(|_| path == SoundPath::Listed)
 }
 
 /// Other systems have no sound server names: every choice goes through
@@ -717,30 +720,56 @@ enum TestNote {
 }
 
 /// Runs one device test (`TestDevice`, ADR-0059), then ends. It connects
-/// to nothing. The microphone and speaker tests use `sound_test`; the camera
-/// test shows the camera on tile 0. `Leave` or a closed input ends a test
-/// early; any other message but the diagnostic switch is a protocol failure.
+/// to no server. The microphone and speaker tests use `sound_test`; the
+/// camera test shows the camera on tile 0. `Leave` or a closed input ends a
+/// test early; any other message but the diagnostic switch is a protocol
+/// failure.
 pub async fn test_device(first: ToWorker, input: &mut Receiver<Input>, output: &Output) -> u8 {
     let ToWorker::TestDevice { test, device } = first else {
         return fail(output, FailureCode::Protocol).await;
     };
-    // The test needs no new socket, so the second stage comes first (Linux).
+    // Only a sound test reaches the microphone or the tone.
+    let sound = match test {
+        DeviceTest::Camera => None,
+        DeviceTest::Microphone => Some(sound_test::Kind::Microphone),
+        DeviceTest::Speaker => Some(sound_test::Kind::Speaker),
+    };
+    // A sound test opens its device before the second stage (Linux), as a
+    // call does: the sound server connection is a new socket. The camera
+    // test needs no new socket.
+    let opened = match sound {
+        Some(kind) => match open_sound_test(kind, device.as_deref()).await {
+            Ok(opened) => Some(opened),
+            Err(code) => return fail(output, code).await,
+        },
+        None => None,
+    };
     if !containment::apply_stage2() && !cfg!(feature = "dev-uncontained") {
         return fail(output, FailureCode::Containment).await;
     }
-    match test {
-        DeviceTest::Camera => test_camera(device, input, output).await,
-        DeviceTest::Microphone => test_sound(SoundTest::Microphone, device, input, output).await,
-        DeviceTest::Speaker => test_sound(SoundTest::Speaker, device, input, output).await,
+    match opened {
+        Some(opened) => test_sound(opened, input, output).await,
+        None => test_camera(device, input, output).await,
     }
 }
 
-/// The device tests that use sound, so a camera test can never reach the
-/// tone or the microphone.
-#[derive(Clone, Copy)]
-enum SoundTest {
-    Microphone,
-    Speaker,
+/// Opens the device of a sound test off the runtime threads; it blocks. The
+/// choice is checked as a call's is (`sound_paths`): on Linux a `pulse:`
+/// choice must be the sound server name in the launch environment and on
+/// the server now, and the test then opens the default stream, which goes
+/// to that name.
+async fn open_sound_test(
+    kind: sound_test::Kind,
+    device: Option<&str>,
+) -> Result<sound_test::Opened, FailureCode> {
+    let path = match kind {
+        sound_test::Kind::Microphone => sound_paths(device, None).await?[0],
+        sound_test::Kind::Speaker => sound_paths(None, device).await?[1],
+    };
+    let device = listed(device, path).map(str::to_owned);
+    tokio::task::spawn_blocking(move || sound_test::open(kind, device.as_deref()))
+        .await
+        .unwrap_or(Err(FailureCode::Internal))
 }
 
 /// What the input asks during a device test.
@@ -764,8 +793,7 @@ fn test_input(message: Option<Input>) -> TestInput {
 }
 
 async fn test_sound(
-    test: SoundTest,
-    device: Option<String>,
+    opened: sound_test::Opened,
     input: &mut Receiver<Input>,
     output: &Output,
 ) -> u8 {
@@ -777,9 +805,8 @@ async fn test_sound(
         .spawn(move || {
             let started = notes_tx.clone();
             let levels = notes_tx.clone();
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match test {
-                SoundTest::Microphone => sound_test::listen(
-                    device.as_deref(),
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                opened.run(
                     &thread_stop,
                     || {
                         let _ = started.try_send(TestNote::Started);
@@ -788,12 +815,7 @@ async fn test_sound(
                     |level| {
                         let _ = levels.try_send(TestNote::Level(level));
                     },
-                ),
-                SoundTest::Speaker => {
-                    sound_test::play_tone(device.as_deref(), &thread_stop, || {
-                        let _ = started.try_send(TestNote::Started);
-                    })
-                }
+                )
             }))
             .unwrap_or(Err(FailureCode::Internal));
             let _ = notes_tx.blocking_send(TestNote::Done(result));
@@ -845,12 +867,14 @@ async fn test_camera(device: Option<String>, input: &mut Receiver<Input>, output
     let mut limiter = RateLimiter::default();
     let (ended_tx, mut ended) = mpsc::channel::<()>(1);
     let (open_tx, mut opened) = mpsc::channel::<Opened<camera::Capture, CameraState>>(1);
-    // No portal grant comes with a test: the portal path reports
-    // `Unavailable`, the other paths open the camera directly.
+    // On the portal path (Linux) the core sends one remote before
+    // `TestDevice`; without it the portal path reports `Unavailable`. The
+    // other paths open the camera directly and take nothing.
+    let grant = camera::Grant::take();
     let started = spawn_open(open_tx, 0, CameraState::Unavailable, move || {
         camera::open(
             device.as_deref(),
-            camera::Grant::default(),
+            grant,
             move |frame| {
                 if !limiter.admit(std::time::Instant::now()) {
                     return;

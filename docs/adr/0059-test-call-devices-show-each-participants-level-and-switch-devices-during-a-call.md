@@ -121,10 +121,32 @@ no media permissions, and a browser test would prove nothing about the worker.
   default. The core starts a worker and sends `ToWorker::TestDevice` as its
   first message. That worker never connects to a server.
 * The microphone test listens for 15 seconds and sends the own level as in a
-  call. The speaker test plays a 440 Hz tone for 1.5 seconds. On Windows, both
-  use WASAPI in shared mode on the selected endpoint. The camera test opens
-  the camera as a call does and shows its pictures on video tile 0 for at
-  most 30 seconds.
+  call. The speaker test plays a 440 Hz tone for 1.5 seconds. The camera test
+  opens the camera as a call does and shows its pictures on video tile 0 for
+  at most 30 seconds. Each OS opens the microphone and speaker through the
+  layer its call audio uses:
+  * Windows: WASAPI in shared mode on the selected endpoint.
+  * Linux (amended 24 November 2026): one PulseAudio record or playback
+    stream through `libpulse.so.0`, which libwebrtc loads too (also with
+    `pipewire-pulse`). The test opens the default stream with no device
+    name, as libwebrtc does. A `pulse:` choice goes to the launch as for a
+    call: the core passes only the tested device's name, the broker sets
+    `PULSE_SOURCE` or `PULSE_SINK`, and the worker checks the name against
+    the environment and the server's list (`mapping::sound_path`) before it
+    opens the stream. The stream opens before containment stage 2, which
+    forbids a new `AF_UNIX` socket, and has `PA_STREAM_DONT_MOVE`. No
+    Landlock or seccomp rule changes.
+  * macOS (amended 24 November 2026): a Core Audio HAL I/O procedure on the
+    default device or on the device with the chosen UID, the layer that
+    libwebrtc's Mac audio module uses. A UID that names no device is
+    `DeviceNotFound`. The device is found before the microphone permission
+    is checked; a permission that was not asked yet asks the user and waits
+    at most 60 seconds, as for the camera. The call Seatbelt profile is
+    unchanged.
+  * Linux camera test (amended 24 November 2026): on the portal path the core
+    asks the camera portal and sends the remote before `TestDevice`, as the
+    device list does. The user's stop ends the portal wait. Without access
+    the camera is `unavailable`.
 * The core runs one test at a time, on its own thread. A new test stops the
   old one and waits for its worker to end. A test is refused with `in_call`
   while a call runs or joins, and a join stops a running test. The core ends
@@ -140,7 +162,9 @@ no media permissions, and a browser test would prove nothing about the worker.
   `call_device_test_status`.
 * `FailureCode::DeviceDenied` (wire value 11) is an operating system refusal,
   shown as `denied` with a pointer to the privacy settings. The microphone
-  and speaker tests report it. The camera path reports one `unavailable`
+  and speaker tests report it: `E_ACCESSDENIED` on Windows, `PA_ERR_ACCESS`
+  on Linux, and a refused or restricted microphone permission on macOS. The
+  camera path reports one `unavailable`
   for a camera another app holds and for one the privacy settings block,
   so the camera's `unavailable` text names both causes.
 * A camera that ran but was not released in time still ran: the test ends
@@ -157,9 +181,15 @@ no media permissions, and a browser test would prove nothing about the worker.
 
 ### Negative Consequences
 
-* The microphone and speaker tests are Windows only. Linux and macOS show
-  `unsupported`.
-* The camera test on Linux reports `unavailable`, because the portal camera
-  grant is not passed to a test worker.
+* The Linux and macOS sound tests use their own small native path, not
+  libwebrtc's audio module, because that module gives no level and plays no
+  sound without a connection. They open the same device through the same
+  system layer, but a passing test does not prove that libwebrtc opens it.
+* The macOS sound test was compiled for an Apple target only. It was not
+  linked or run on a Mac, and the Seatbelt profile was not measured with it.
+  The Linux sound tests ran in the contained worker against `pipewire-pulse`
+  ([evidence](../evidence/device-tests-linux-macos.md)); the Linux camera
+  test with the portal was not run.
+* The Linux camera test may show the desktop's camera portal dialog.
 * Linux cannot switch the microphone or speaker during a call.
 * Each test starts a worker process, which takes about a second.
