@@ -196,6 +196,16 @@ with `gpgv` and `sha256sum` on 19 November 2026. The release pocket does not
 change during noble's life; when noble leaves the archive, move the pins to
 another signed release.
 
+The "Minimise to tray" item (ADR-0060) needs Tauri's `tray-icon` feature. At
+run time, `libappindicator-sys` loads `libayatana-appindicator3.so.1`, or else
+`libappindicator3.so.1`, or else either name without the `.1`; it panics only
+if all four fail. The release jobs install `libayatana-appindicator3-dev`
+with `apt-get` (no hash pin, like their other packages), because the Tauri
+bundler finds the tray library with pkg-config and panics if it is missing.
+The bundler then copies the library into the AppImage and adds it to the
+package dependencies: `libayatana-appindicator3-1` in the `.deb` and
+`libayatana-appindicator3.so.1()(64bit)` in the `.rpm` (tauri-cli 2.12.3).
+
 The app's version line shows the build's revision: the first 12 hex digits of
 the checked-out commit, or `unknown` ([`crates/core/build.rs`](../crates/core/build.rs)).
 It does not show uncommitted changes. Without a usable Git checkout of this
