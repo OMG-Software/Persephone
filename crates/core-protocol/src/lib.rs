@@ -874,7 +874,7 @@ pub const MAX_THREE_PIDS: usize = 50;
 pub const MAX_NEW_SESSION_IDS: usize = 10;
 
 /// Longest device ID either side accepts in a call.
-pub const MAX_DEVICE_ID_BYTES: usize = 255;
+pub const MAX_DEVICE_ID_BYTES: usize = persephone_contracts::CALL_DEVICE_ID_BYTES_MAX;
 
 /// Longest room or sender name in a [`Event::Notification`], in bytes.
 pub const MAX_NOTIFICATION_NAME_BYTES: usize = 512;
@@ -981,7 +981,7 @@ pub const IMAGE_HANDLE_BYTES: usize = 32;
 pub const MAX_BAND_BYTES: u64 = MIB;
 
 /// Longest user ID either side accepts in a call (the Matrix limit).
-pub const MAX_USER_ID_BYTES: usize = 255;
+pub const MAX_USER_ID_BYTES: usize = persephone_contracts::CALL_USER_ID_BYTES_MAX;
 
 /// Longest verification flow ID either side accepts.
 pub const MAX_FLOW_ID_BYTES: usize = 128;

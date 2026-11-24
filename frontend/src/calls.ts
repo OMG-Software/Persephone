@@ -10,7 +10,9 @@ import type {
   CallDeviceTestKind,
   CallDeviceTestState,
   CallDeviceTestStatus,
+  CALL_DEVICE_ID_BYTES_MAX,
   CALL_PARTICIPANTS_MAX,
+  CALL_USER_ID_BYTES_MAX,
   CallEnd,
   CallJoinError,
   CallParticipantLevel,
@@ -651,8 +653,12 @@ export function ringsKey(rings: readonly ShownRing[]): string {
  * the contract fails the type check here.
  */
 export const MAX_CALL_LEVELS: typeof CALL_PARTICIPANTS_MAX = 32;
-/** The longest user or device ID, in UTF-8 bytes. */
-const MAX_ID_BYTES = 255;
+/**
+ * The longest user ID and device ID, in UTF-8 bytes: the contract's limits,
+ * typed as their literals so a change of the contract fails the type check.
+ */
+const MAX_USER_ID_BYTES: typeof CALL_USER_ID_BYTES_MAX = 255;
+const MAX_DEVICE_ID_BYTES: typeof CALL_DEVICE_ID_BYTES_MAX = 255;
 
 const utf8Bytes = (text: string) => new TextEncoder().encode(text).byteLength;
 
@@ -671,7 +677,7 @@ export function parseLevels(value: unknown): CallParticipantLevel[] | null {
     if (keys.length !== 3) return null;
     const { userId, deviceId, level } = entry as Record<string, unknown>;
     if (typeof userId !== 'string' || typeof deviceId !== 'string') return null;
-    if (utf8Bytes(userId) > MAX_ID_BYTES || utf8Bytes(deviceId) > MAX_ID_BYTES) return null;
+    if (utf8Bytes(userId) > MAX_USER_ID_BYTES || utf8Bytes(deviceId) > MAX_DEVICE_ID_BYTES) return null;
     if (parseSoundLevel(level) === null) return null;
     levels.push({ userId, deviceId, level: level as number });
   }
@@ -736,6 +742,14 @@ const STATE_TEXT: Record<Exclude<CallDeviceTestState, 'running' | 'done'>, strin
 };
 
 /**
+ * The camera's `unavailable` text. The camera path reports one state for an
+ * app that holds the camera and for the system's privacy settings, so the
+ * text names both (ADR-0059).
+ */
+const CAMERA_TEST_UNAVAILABLE_TEXT =
+  'The camera could not start. Another app may be using it, or your system’s privacy settings may block it.';
+
+/**
  * The text beside the `kind` test's button, or '' when that test is not
  * the newest one.
  */
@@ -743,6 +757,7 @@ export function deviceTestText(status: CallDeviceTestStatus, kind: CallDeviceTes
   if (status.test !== kind) return '';
   if (status.state === 'running') return RUNNING_TEXT[kind];
   if (status.state === 'done') return DONE_TEXT[kind];
+  if (kind === 'camera' && status.state === 'unavailable') return CAMERA_TEST_UNAVAILABLE_TEXT;
   return STATE_TEXT[status.state];
 }
 

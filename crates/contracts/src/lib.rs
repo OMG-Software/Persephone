@@ -2351,6 +2351,13 @@ pub struct CallReadiness {
 /// Most other devices a call shows.
 pub const CALL_PARTICIPANTS_MAX: usize = 32;
 
+/// Longest user ID either side accepts in a call, in UTF-8 bytes (the
+/// Matrix limit).
+pub const CALL_USER_ID_BYTES_MAX: usize = 255;
+
+/// Longest device ID either side accepts in a call, in UTF-8 bytes.
+pub const CALL_DEVICE_ID_BYTES_MAX: usize = 255;
+
 /// Where the call is.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -2977,6 +2984,12 @@ pub fn generated_typescript() -> String {
     // its type check instead of dropping every level list.
     output.push_str(&format!(
         "\n/** Most other devices a call shows. */\nexport const CALL_PARTICIPANTS_MAX = {CALL_PARTICIPANTS_MAX};\n"
+    ));
+    output.push_str(&format!(
+        "\n/** Longest user ID in a call, in UTF-8 bytes. */\nexport const CALL_USER_ID_BYTES_MAX = {CALL_USER_ID_BYTES_MAX};\n"
+    ));
+    output.push_str(&format!(
+        "\n/** Longest device ID in a call, in UTF-8 bytes. */\nexport const CALL_DEVICE_ID_BYTES_MAX = {CALL_DEVICE_ID_BYTES_MAX};\n"
     ));
     output
 }

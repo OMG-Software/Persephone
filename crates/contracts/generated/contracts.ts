@@ -937,3 +937,9 @@ export const timelinePageFixture = {
 
 /** Most other devices a call shows. */
 export const CALL_PARTICIPANTS_MAX = 32;
+
+/** Longest user ID in a call, in UTF-8 bytes. */
+export const CALL_USER_ID_BYTES_MAX = 255;
+
+/** Longest device ID in a call, in UTF-8 bytes. */
+export const CALL_DEVICE_ID_BYTES_MAX = 255;

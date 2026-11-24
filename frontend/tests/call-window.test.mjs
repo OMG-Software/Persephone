@@ -92,6 +92,11 @@ test('GIVEN each device test state THEN only the newest test has a text, and eve
   assert.match(deviceTestText({ test: 'microphone', state: 'running', stream: 0 }, 'microphone'), /meter/);
   assert.match(deviceTestText({ test: 'speaker', state: 'running', stream: 0 }, 'speaker'), /tone/);
   assert.match(deviceTestText({ test: 'camera', state: 'denied', stream: 0 }, 'camera'), /privacy/);
+  // The camera reports a privacy block as unavailable, so its text names both.
+  const camera = deviceTestText({ test: 'camera', state: 'unavailable', stream: 0 }, 'camera');
+  assert.match(camera, /another app/i);
+  assert.match(camera, /privacy/);
+  assert.doesNotMatch(deviceTestText({ test: 'microphone', state: 'unavailable', stream: 0 }, 'microphone'), /privacy/);
   assert.deepEqual(Object.keys(DEVICE_TEST_LABEL), ['microphone', 'speaker', 'camera']);
   assert.deepEqual(Object.keys(DEVICE_CHANGE_TEXT).sort(), ['failed', 'not_found', 'unsupported']);
 });

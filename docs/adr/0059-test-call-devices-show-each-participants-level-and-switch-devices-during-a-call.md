@@ -130,7 +130,12 @@ no media permissions, and a browser test would prove nothing about the worker.
   `call_device_test_changed` event tells the page to ask
   `call_device_test_status`.
 * `FailureCode::DeviceDenied` (wire value 11) is an operating system refusal,
-  shown as `denied` with a pointer to the privacy settings.
+  shown as `denied` with a pointer to the privacy settings. The microphone
+  and speaker tests report it. The camera path reports one `unavailable`
+  for a camera another app holds and for one the privacy settings block,
+  so the camera's `unavailable` text names both causes.
+* A camera that ran but was not released in time still ran: the test ends
+  as `done`.
   `FailureCode::Unsupported` (10) is a test this platform does not have.
 * The call protocol is version 10.
 

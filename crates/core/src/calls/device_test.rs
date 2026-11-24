@@ -73,6 +73,11 @@ pub fn next_state(
         | FromWorker::Camera {
             state: CameraState::On,
         } => CallDeviceTestState::Running,
+        // A camera that ran but was not released in time still ran: the
+        // `Left` that follows ends the test as done.
+        FromWorker::Camera {
+            state: CameraState::Unavailable,
+        } if current == CallDeviceTestState::Running => return None,
         FromWorker::Camera {
             state: CameraState::NotFound,
         } => CallDeviceTestState::NotFound,
@@ -150,6 +155,26 @@ mod tests {
         );
         assert_eq!(camera(CameraState::On), Some(CallDeviceTestState::Running));
         assert_eq!(camera(CameraState::Off), None);
+    }
+
+    /// GIVEN a camera test that ran WHEN the camera is not released in time
+    /// THEN the test still ends as done; before it ran, `Unavailable` is
+    /// the result.
+    #[test]
+    fn given_a_camera_held_after_it_ran_then_the_test_is_done() {
+        let held = FromWorker::Camera {
+            state: CameraState::Unavailable,
+        };
+        let running = CallDeviceTestState::Running;
+        assert_eq!(next_state(running, &held, false), None);
+        assert_eq!(
+            next_state(running, &FromWorker::Left, false),
+            Some(CallDeviceTestState::Done)
+        );
+        assert_eq!(
+            next_state(CallDeviceTestState::Starting, &held, false),
+            Some(CallDeviceTestState::Unavailable)
+        );
     }
 
     /// GIVEN a test that ends before its device ran WHEN the user stopped it
