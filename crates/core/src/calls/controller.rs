@@ -2835,6 +2835,9 @@ fn run_device_test(
         end(CallDeviceTestState::Idle);
         return;
     }
+    // The limit counts from here, so it covers the worker start and the
+    // Linux portal wait too.
+    let limit = std::time::Instant::now() + limit;
     // A `pulse:` choice goes to the launch as for a call (Linux, ADR-0049).
     let audio = device_test::worker_audio(test, device.as_deref());
     let Ok(mut link) = inner.host.start(&audio) else {
@@ -2890,7 +2893,6 @@ fn run_device_test(
     } else {
         CallDeviceTestState::Starting
     };
-    let limit = std::time::Instant::now() + limit;
     let mut leave_by: Option<std::time::Instant> = None;
     // Whether the `Leave` was the user's stop, not the limit.
     let mut user_stopped = false;

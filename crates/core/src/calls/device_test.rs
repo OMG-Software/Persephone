@@ -14,8 +14,10 @@ use persephone_contracts::{CallDeviceTestKind, CallDeviceTestState};
 
 use super::worker::WorkerAudio;
 
-/// The longest a test may run before the core ends it: the camera test's 30
-/// seconds and its open (with a permission dialog on macOS).
+/// The longest a test may run before the core ends it, counted from before
+/// the worker starts: the worker start, the Linux camera portal wait (at most
+/// 60 seconds), and the camera test's 30 seconds and its open (with a
+/// permission dialog on macOS).
 pub const TEST_LIMIT: Duration = Duration::from_secs(100);
 /// How long the worker has to end after `Leave`.
 pub const LEAVE_WAIT: Duration = Duration::from_secs(5);

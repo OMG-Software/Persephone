@@ -472,6 +472,11 @@ mod platform {
     /// The most bytes read from one fragment: a second of samples.
     const MAX_FRAGMENT_BYTES: usize = RATE as usize * BYTES_PER_FRAME;
 
+    // The values and struct sizes below are from the PulseAudio 16.1
+    // headers. A C file of static asserts checked each one against
+    // `libpulse-dev` 1:16.1+dfsg1-2ubuntu10.1
+    // (docs/evidence/device-tests-linux-macos.md). Check them again when
+    // a value is added.
     // pa_context_flags_t: never start a server (the worker cannot execute).
     const PA_CONTEXT_NOAUTOSPAWN: c_int = 1;
     // pa_context_state_t.
@@ -1601,13 +1606,16 @@ mod tests {
         assert_eq!(result, Err(FailureCode::DeviceNotFound));
     }
 
-    /// GIVEN the C headers WHEN the PulseAudio structs are laid out THEN
-    /// they have the sizes of `pa_sample_spec` and `pa_buffer_attr`; and
-    /// GIVEN the sound server's errors THEN a refusal is `DeviceDenied`, a
-    /// missing device `DeviceNotFound`, and the rest a device failure.
+    /// GIVEN the PulseAudio structs WHEN they are laid out THEN they have
+    /// the header sizes of `pa_sample_spec` and `pa_buffer_attr`; and GIVEN
+    /// the sound server's error numbers THEN `PA_ERR_ACCESS` (1) is
+    /// `DeviceDenied`, `PA_ERR_NOENTITY` (5) `DeviceNotFound`, and the rest
+    /// a device failure. The numbers are written out, not taken from the
+    /// constants, so a changed constant fails here; the header values were
+    /// checked in C (see the constants).
     #[cfg(target_os = "linux")]
     #[test]
-    fn given_pulse_audio_types_and_errors_then_they_match_the_headers() {
+    fn given_pulse_audio_struct_sizes_and_error_numbers_then_they_map_as_the_headers_say() {
         use super::platform::{BufferAttr, SampleSpec, failure};
         assert_eq!(std::mem::size_of::<SampleSpec>(), 12);
         assert_eq!(std::mem::size_of::<BufferAttr>(), 20);
