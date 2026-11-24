@@ -33,6 +33,8 @@
   import { CALL_WINDOW_UNAVAILABLE_TEXT } from './callWindow';
   import RoomTools from './RoomTools.svelte';
   import ConnectionHealth from './ConnectionHealth.svelte';
+  import HealthDetails from './HealthDetails.svelte';
+  import DiagnosticsSettings from './DiagnosticsSettings.svelte';
   import { callCamera, callDeafen, callDeclineRing, callDevices, callScreen, openCallWindow, callJoin, callLeave, callMute, callReadiness, callRings, callStatus, callVolume, changeRoom, roomMembers, jumpToDate, eventContext, setPinned, setRoomPreference, startConversation } from './bridge';
   import { LEAVE_NOT_DONE, LEAVE_QUESTION, LEAVING_TEXT, leaveAfterDraftFlush } from './roomLeave';
   import type { FocusedTimeline, ImagePick } from '../../crates/contracts/generated/contracts';
@@ -2938,6 +2940,26 @@
             <p class="lede">Synthetic data has no accounts. Start Persephone without --demo to add one.</p>
           </section>
         {/if}
+      {:else if settingsTab === 'diagnostics'}
+        <section class="settings-page" aria-labelledby="diagnostics-heading">
+          <h2 id="diagnostics-heading">Diagnostics</h2>
+          <p class="lede">
+            For finding faults: the state of the connection to your homeserver, and a log you can turn on
+            while you repeat a problem. Call devices have their own tests under Calls.
+          </p>
+          <div class="panel">
+            <h3>Connection health</h3>
+            {#if signedIn}
+              {#key sessionGeneration}<HealthDetails />{/key}
+            {:else}
+              <p class="note">No account is signed in, so there is no connection to show.</p>
+            {/if}
+          </div>
+          <div class="panel">
+            <h3>Diagnostic log</h3>
+            <DiagnosticsSettings />
+          </div>
+        </section>
       {:else if settingsTab === 'security'}
         <!-- One column for the whole tab, so every card has the page's spacing. -->
         <div class="settings-page">
