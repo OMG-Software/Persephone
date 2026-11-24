@@ -655,8 +655,8 @@ jobs:
       # check.yml's WebKitGTK headers, plus what the AppImage bundler needs:
       # `file` for linuxdeploy and librsvg2 for the GTK image loaders it copies.
       # With Tauri's `tray-icon` feature, the bundler finds the tray library with
-      # pkg-config: it copies it into the AppImage and adds it to the .deb's
-      # dependencies, and it panics if the library is missing. The build itself
+      # pkg-config: it copies it into the AppImage and adds it to the .deb and
+      # .rpm dependencies, and it panics if the library is missing. The build itself
       # loads the library only at run time, so check.yml does not need it.
       # Tauri's .deb and .rpm writers are part of the CLI.
       - name: Install Tauri prerequisites

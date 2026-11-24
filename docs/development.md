@@ -188,12 +188,14 @@ both architectures, because headers do not depend on it. The call worker still
 links the system's `libpipewire-0.3.so` 0.3.48, so the link fails if the
 worker calls a function that the older library lacks, and the `.deb` and
 `.rpm` packages still depend on the system's `libpipewire-0.3-0`. The
-"Minimise to tray" item (ADR-0060) needs Tauri's `tray-icon` feature, which
-loads `libayatana-appindicator3.so.1` at run time and panics if it cannot. The
-release jobs install `libayatana-appindicator3-dev`, because the Tauri bundler
-finds the library with pkg-config, copies it into the AppImage, and adds
-`libayatana-appindicator3-1` to the `.deb` dependencies. It does not add it to
-the `.rpm`, so `tauri.conf.json` names it there. Each
+"Minimise to tray" item (ADR-0060) needs Tauri's `tray-icon` feature. At run
+time, `libappindicator-sys` loads `libayatana-appindicator3.so.1`, or else
+`libappindicator3.so.1`, or else either name without the `.1`; it panics only
+if all four fail. The release jobs install `libayatana-appindicator3-dev`,
+because the Tauri bundler finds the tray library with pkg-config and panics
+if it is missing. The bundler then copies the library into the AppImage and
+adds it to the package dependencies: `libayatana-appindicator3-1` in the
+`.deb` and `libayatana-appindicator3.so.1()(64bit)` in the `.rpm`. Each
 package's SHA-256 in the script is the one in noble's `main/binary-amd64`
 `Packages.xz`, which noble's `InRelease` lists and the Ubuntu Archive
 Automatic Signing Key (2018), fingerprint
