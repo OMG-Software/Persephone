@@ -455,8 +455,6 @@ should report a notarized Developer ID source.
   dependencies are not listed yet.
 - **SBOM** is made from the repository lockfiles. It also lists development
   and test dependencies that do not ship.
-- **Icons**: `icon.icns` was generated from the 256 px `icon.png`; its larger
-  sizes are upscaled.
 - Workflow behaviour is verified only by a run on GitHub. Local checks cover
   YAML parsing, the `tools/release.py` logic, and the refusal paths of
   `tools/sign_windows.ps1` (`tests/tools/test_sign_windows.py`, Windows
@@ -464,17 +462,21 @@ should report a notarized Developer ID source.
 
 ## Icons
 
-`src-tauri/icons/32x32.png`, `128x128.png`, `128x128@2x.png` (256 px) and
-`icon.icns` were generated from `src-tauri/icons/icon.png` with Pillow 12.2.0:
+The files in `src-tauri/icons/` are copied unchanged from the OMG Software
+project icon set for Persephone (a toggle whose knob is a chat bubble). Nothing
+in this repository generates or resizes them.
 
-```python
-from PIL import Image
-src = Image.open("src-tauri/icons/icon.png").convert("RGBA")
-for name, size in (("32x32.png", 32), ("128x128.png", 128), ("128x128@2x.png", 256)):
-    (src if src.size == (size, size) else src.resize((size, size), Image.LANCZOS)).save(
-        f"src-tauri/icons/{name}", optimize=True)
-src.save("src-tauri/icons/icon.icns")
-```
+| File | Source in the icon set |
+| --- | --- |
+| `icon.png`, `128x128@2x.png` | `png/icon-256.png` |
+| `128x128.png` | `png/icon-128.png` |
+| `32x32.png` | `png/icon-32.png` |
+| `icon.ico` | `icon.ico` (PNG entries, 16 to 256 px) |
+| `icon.icns` | `icon.icns` (128 to 1024 px, with the Retina variants) |
 
-`icon.ico` is unchanged. `icon.png` stays first in `bundle.icon`, so the Linux
-and macOS window icon is the same as before.
+`icon.png` stays first in `bundle.icon`, so it is the Linux and macOS window
+icon. At 32 px and smaller the set uses its compact mark, the knob alone.
+The UI's header mark (`frontend/src/BrandMark.svelte`) and the site's
+`site/mark.svg` draw that compact mark; `site/toggle-mark.svg` is the full
+toggle on a transparent background. `site/omg-software.svg` is the OMG
+Software horizontal lockup in switch orange.

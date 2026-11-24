@@ -1,6 +1,6 @@
 [package]
 name = "persephone-media-sandbox"
-version = "0.2.0"
+version = "0.3.0"
 description = "Host that runs the media decoder guest in wasmi with an exact import allowlist and resource limits"
 edition.workspace = true
 license.workspace = true

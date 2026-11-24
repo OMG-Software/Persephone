@@ -1757,12 +1757,10 @@ kbd {
   font-weight: 600;
 }
 
-/* Each path sets its own stroke width. */
+/* The mark is one filled path (BrandMark.svelte); its fill follows the
+   theme's accent. */
 .brand-mark path {
-  fill: none;
-  stroke: var(--accent);
-  stroke-linecap: butt;
-  stroke-linejoin: miter;
+  fill: var(--accent);
 }
 
 .auth-card h1,
@@ -2943,8 +2941,10 @@ mark {
 
 .feature-dialog fieldset { margin: 1rem 0; border: 1px solid var(--line); border-radius: .4rem; padding: .75rem; }
 .feature-dialog fieldset label { display: grid; gap: .3rem; margin: .6rem 0; }
-.feature-dialog dl { display: grid; grid-template-columns: minmax(7rem, 1fr) minmax(0, 2fr); gap: .6rem; }
-.feature-dialog dd { margin: 0; overflow-wrap: anywhere; }
+.feature-dialog dl,
+.health-list { display: grid; grid-template-columns: minmax(7rem, 1fr) minmax(0, 2fr); gap: .6rem; }
+.feature-dialog dd,
+.health-list dd { margin: 0; overflow-wrap: anywhere; }
 .feature-dialog .local-results > li { margin: .75rem 0; overflow-wrap: anywhere; }
 
 /* Icon buttons with a tooltip label (IconAction, Menu). The tooltip shows

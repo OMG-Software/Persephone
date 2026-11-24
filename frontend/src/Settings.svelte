@@ -7,6 +7,7 @@
     | 'preferences'
     | 'calls'
     | 'accounts'
+    | 'diagnostics'
     | 'session';
 </script>
 
@@ -41,6 +42,7 @@
     { id: 'preferences', label: 'Preferences' },
     { id: 'calls', label: 'Calls' },
     { id: 'accounts', label: 'Accounts' },
+    { id: 'diagnostics', label: 'Diagnostics' },
     { id: 'session', label: 'This session' }
   ];
 </script>

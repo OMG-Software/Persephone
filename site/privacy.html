@@ -8,7 +8,7 @@
   <!-- No external requests: no web fonts, scripts, analytics or embeds. -->
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'">
   <meta name="referrer" content="no-referrer">
-  <meta name="theme-color" content="#151616">
+  <meta name="theme-color" content="#151515">
   <link rel="icon" href="mark.svg" type="image/svg+xml">
   <link rel="stylesheet" href="style.css">
 </head>
@@ -17,7 +17,7 @@
   <header class="site-header">
     <div class="wrap header-row">
       <a class="brand" href="./" aria-label="Persephone home">
-        <img src="mark.svg" alt="" width="28" height="28">
+        <img src="mark.svg" alt="" width="32" height="32">
         <span>Persephone</span>
       </a>
       <nav aria-label="Sections">
@@ -33,7 +33,7 @@
   <main id="main">
     <section class="hero">
       <div class="wrap">
-        <p class="eyebrow">Last updated 26 October 2026</p>
+        <p class="eyebrow">Last updated 23 November 2026</p>
         <h1>Privacy policy</h1>
         <p class="lede">
           This policy tells you what data the Persephone project collects, what the Persephone app
@@ -88,11 +88,17 @@
     <section id="sending">
       <div class="wrap prose">
         <h2>What the app sends, and to whom</h2>
-        <p>The app connects only to the homeserver that you enter at sign-in. The sign-in screen
+        <p>The app connects to the homeserver that you choose at sign-in. The sign-in screen
         suggests <code>https://matrix.org</code>; you can enter a different server. The app accepts
         only <code>https://</code> addresses. Every connection uses TLS 1.3 or later, with
         certificate checks. The app does not follow redirects and does not use a proxy that is set
         in the system.</p>
+        <p>Homeserver discovery contacts the server name you enter and checks the discovered
+        homeserver. The sign-in page shows the discovered address before sign-in. Browser sign-in
+        opens the homeserver's authentication provider in your browser and uses a loopback callback
+        to complete authentication. That provider and browser have their own privacy policies. A
+        configured profile SOCKS5 proxy applies to connections the core makes; it does not configure
+        your external browser.</p>
         <p>The homeserver receives what the Matrix protocol needs. This includes:</p>
         <ul>
           <li>your user ID, your password at sign-in and the session's access token;</li>
@@ -105,27 +111,36 @@
           <li>requests for each image that you choose to load.</li>
         </ul>
         <p>If you set up a key backup or a recovery key, the homeserver also stores your encrypted
-        room-key backup. Persephone does not do this automatically; you start it. Persephone shows
-        a new recovery key once and does not store it.</p>
+        room-key backup. Persephone does not do this automatically; you start it. The core can show
+        a new recovery key and save it to a file you choose. Such an exported file remains outside
+        the encrypted profile and needs your protection; it is not an automatic browser-storage
+        copy.</p>
         <p>The homeserver shares room data with the other servers whose users are in the room. The
-        other people in a room receive your messages and can see your membership. This is how
-        Matrix works, and the app cannot change it.</p>
+        other people in a room receive your messages and can see your membership. This is how Matrix
+        works, and the app cannot change it.</p>
 
         <h3>Starting a conversation</h3>
         <p>When you start a conversation, the app first looks for an encrypted room that you have
-        joined, that is marked as a direct conversation with that person, and whose only members
-        are the two of you (the person joined or invited). If it finds one, it opens it and sends
-        no request to start a new one. Otherwise, the app needs the person's cross-signing
-        identity. If the app does not have it yet, it sends the
-        Matrix ID that you enter to your homeserver to ask for it. Only if the person has a
-        cross-signing identity does the app ask the homeserver to create an encrypted room and to
-        invite them. Having encryption keys without a cross-signing identity is not enough. The invitation
-        also reaches the person's homeserver, as any Matrix invitation does.</p>
+        joined, that is marked as a direct conversation with that person, and whose only members are
+        the two of you (the person joined or invited). If it finds one, it opens it and sends no
+        request to start a new one. Otherwise, the app needs the person's cross-signing identity. If
+        the app does not have it yet, it sends the Matrix ID that you enter to your homeserver to
+        ask for it. Only if the person has a cross-signing identity does the app ask the homeserver
+        to create an encrypted room and to invite them. Having encryption keys without a
+        cross-signing identity is not enough. The invitation also reaches the person's homeserver,
+        as any Matrix invitation does.</p>
         <p>Search for people is off each time you open the dialog. If you turn it on, the app sends
         what you type, without leading or trailing spaces, to your homeserver's user directory. It
         sends it 0.4 seconds after you stop typing, once it is at least two characters long. Your
         homeserver can keep a record of these searches. Results show names and Matrix IDs as text.
         The app fetches no avatars.</p>
+        <p>The public room browser sends nothing until you press Browse. Then the app asks your
+        homeserver for one page of a public room directory, with the search text if you entered one.
+        If you enter another server, your homeserver asks that server for its directory on your
+        behalf; the app does not connect to it. Both servers can keep a record of these requests.
+        Results show names, room addresses and topics as text. The app fetches no avatars. When you
+        join a listed room, the room's members and servers see your Matrix ID. Public rooms are
+        usually not encrypted.</p>
         <p>When you accept a direct-message invitation, the app joins the room. When you decline it,
         the app leaves the room. Your homeserver and the person who invited you can see either
         answer.</p>
@@ -133,13 +148,56 @@
         <h3>What encryption protects</h3>
         <p>In an encrypted room, the app encrypts message content and images before it sends them.
         The homeserver cannot read that content.</p>
-        <p>Encryption does not hide all metadata. The homeserver, and other servers in the room,
-        can still see who is in a room, who sends messages, when, and how large the messages and
-        files are. Persephone does not make you anonymous and does not hide your traffic
-        patterns.</p>
+        <p>Encryption does not hide all metadata. The homeserver, and other servers in the room, can
+        still see who is in a room, who sends messages, when, and how large the messages and files
+        are. Persephone does not make you anonymous and does not hide your traffic patterns.</p>
         <p>In a room that is not encrypted, the homeserver can read your messages. The app labels
         such a room and asks you to confirm before you send the first message there. An encrypted
         send never falls back to plain text.</p>
+
+        <h3>Ignoring users and reporting messages</h3>
+        <p>The ignore list is Matrix account data stored on your homeserver. Its operator can read
+        the user IDs on that list. Other clients for the same account can use it. Ignoring hides
+        message content from those users in Persephone's timeline and local search. Room state
+        events can still appear. Ignoring does not remove a user from a room, revoke their access,
+        or withdraw keys already shared.</p>
+        <p>Reporting requires an explicit confirmation. The app sends the room ID, event ID and your
+        required reason to your own homeserver. It does not attach the message body. The homeserver
+        operator can read the reason even when the room is encrypted. Do not put message text or
+        other private data in the reason unless you intend to disclose it. A report is not a promise
+        of moderation.</p>
+
+        <h3>Local message search</h3>
+        <p>Message search reads only the SDK's existing encrypted local event cache. The query
+        causes no HTTP request, history download, or room-key request. The app creates no separate
+        search index. It searches only text already decrypted in that cache. Missing history,
+        undecrypted events and resource limits mean the results do not cover all messages.
+        User-directory search described above is a different operation and does send its query to
+        your homeserver.</p>
+        <p>Search can also filter by exact sender and an inclusive start and exclusive end time.
+        Dates use the original event timestamp, including when edits or redactions change the
+        displayed text. Unknown dates do not match a date filter. The cache does not grow because of
+        search, and the app creates no search index.</p>
+
+        <h3>Room navigation and inspection</h3>
+        <p>Jump to date sends the room ID and requested time to the homeserver. It does not send a
+        search term. The core asks for the first event at or after that time, and tries the last
+        event before that time only if the server returns 404. It then requests bounded event
+        context. Attachment browsing requests room history in chunks of at most 50 raw events.
+        Filters apply locally. The panel shows metadata; it does not load media automatically. You
+        must choose an existing media action to fetch or open an attachment.</p>
+        <p>Pinned messages use standard <code>m.room.pinned_events</code> room state. This state is
+        unencrypted room metadata, including in encrypted rooms. It contains event IDs, not message
+        snippets. Room participants and the homeserver can see these IDs. A pin change requires the
+        user's current room-state power level and reads fresh state first, but concurrent state
+        writes have no compare-and-swap protection. The panel shows at most 100 IDs and refuses new
+        pins at that limit. Removing a pin from a larger list preserves the other references within
+        the core's separate state and request-size limits. See <a
+        href="https://github.com/OMG-Software/Persephone/blob/main/docs/room-tools.md">Room
+        tools</a>.</p>
+        <p>Connection health is a manual view of existing sync observations. It starts no probes or
+        background tasks. Displayed timestamps use the computer clock and do not prove that the
+        client is currently connected. Locking resets the health snapshot.</p>
 
         <h3>Images</h3>
         <ul>
@@ -151,10 +209,29 @@
           location data and other metadata, for example EXIF, XMP, comments and colour profiles. Of
           the metadata, the copy keeps only the orientation tag, so that the photo does not appear
           rotated. The pixels do not change. The app sends the copy with a generic file name,
-          <code>image.png</code> or <code>image.jpg</code>, so the original file name does not
-          leave your device. The app never changes your original file.</li>
+          <code>image.png</code> or <code>image.jpg</code>, so the original file name does not leave
+          your device. The app never changes your original file.</li>
         </ul>
         <p>The app does not show link previews and does not load content from the web.</p>
+
+        <h3>Calls</h3>
+        <ul>
+          <li><strong>Who sees a call.</strong> A call uses your homeserver's call service (a
+          LiveKit media server) and its relay (TURN) servers. They see who is in the call, when,
+          your IP address, and the size and timing of the audio and video packets. They do not see
+          the audio or the video: each sender encrypts its media with keys that only the call
+          members get.</li>
+          <li><strong>Proxy.</strong> Calls cannot use the profile's SOCKS5 proxy. When a proxy is
+          set, the app asks before each call whether to connect directly.</li>
+          <li><strong>Microphone.</strong> The app records from the microphone only during a call.
+          Mute stops sending audio.</li>
+          <li><strong>Camera.</strong> The app uses the camera only after you choose "Video call" or
+          turn the camera on during a call. Turning the camera off stops it, and the camera light
+          goes out. The app uses only the camera that you chose in Settings, or the first camera
+          when you chose none. It never changes to another camera.</li>
+          <li><strong>Devices.</strong> The app saves your choice of microphone, speaker and camera
+          in the encrypted profile. Listing devices does not record, play or open a camera.</li>
+        </ul>
       </div>
     </section>
 
@@ -163,26 +240,58 @@
         <h2>What the app stores on your device</h2>
         <p>The app keeps your account in a local profile. The profile holds the Matrix SDK's
         databases: account state, the message cache, the media cache and the encryption keys.</p>
+        <p>The profile also keeps per-room text drafts and their reply event references, favourites
+        and named room sections. They use bounded encrypted records in the SDK crypto store. The app
+        does not upload them as Matrix room tags or keep them in browser storage. Each profile has
+        its own records. Draft text and search results are visible to the UI while it shows them;
+        keeping keys in the core does not hide displayed content from a compromised UI.</p>
+        <p>Search itself sends no query or history request. Selecting a search result can request
+        normal room history to locate that message. Saved drafts can remain after leaving a room.
+        Use Saved drafts to view or discard those local records.</p>
         <ul>
           <li>A random 32-byte key encrypts the values in these databases.</li>
-          <li>Your profile passphrase protects that key. You choose the passphrase when you create
-          the profile. The app has no way to recover a forgotten passphrase.</li>
-          <li>The operating system's keystore adds a second layer. On Windows this is DPAPI. The
-          design uses Secret Service on Linux and the Keychain on macOS; these two are not complete
-          yet. If no keystore is available, the profile stays locked. The app never writes an
-          unprotected key instead.</li>
+          <li>By default, the operating system's keystore alone protects that key. The profile then
+          opens with no prompt. Anyone, and any program, that can use your computer account can open
+          it.</li>
+          <li>You can turn on a profile passphrase in Settings, Security. It protects the key with a
+          second layer, and the app asks for it each time it starts. You can turn it off again. The
+          app has no way to recover a forgotten passphrase. Lock and the idle lock exist only while
+          the passphrase is on.</li>
+          <li>The operating system's keystore protects the key in both cases. On Windows this is
+          DPAPI. The Linux Secret Service adapter is not implemented. The macOS Keychain adapter is
+          implemented but has no recorded native app run. If no keystore is available, the profile
+          stays locked. The app never writes an unprotected key instead.</li>
         </ul>
         <p>The app keeps images that you load in memory only. It drops them when you lock the
         profile or sign out.</p>
-        <p>The app does not write log files. It does not keep your login password.</p>
+        <p>The app does not keep your login password.</p>
+
+        <h3>Diagnostic log</h3>
+        <p>The app writes no log file unless you turn on the diagnostic log in Settings,
+        Diagnostics. It is off each time the app starts. Before it starts, the app asks you in its
+        own window. While it is on, the app writes one file,
+        <code>diagnostics/persephone.jsonl</code>, in the profile's folder. Settings shows the full
+        path.</p>
+        <p>The log holds what the app and its libraries report: your user ID, other users' IDs, room
+        IDs, server names, device IDs, network addresses, and the type, sender, time and size of
+        each Matrix event. The app's own records of events never hold message text, media or other
+        event content. The libraries the app uses can put other text in their own records, and the
+        app does not remove message text from that text. The app never writes passwords, access
+        tokens, call tokens or keys to the log on purpose, and it filters such values out of library
+        text. A filter cannot be complete, so read the file before you send it to anyone.</p>
+        <p>When you turn the log off, the file stays, so you can send it. Each profile has its own
+        file. The next time the app starts with that profile, it writes random bytes over the file
+        and then deletes it. The file of a profile that you do not start again stays on the disk
+        until you do. On an SSD, and on some file systems, old copies of the data can stay on the
+        disk where no application can reach them. The app cannot remove those copies.</p>
 
         <h3>Signing out and resetting</h3>
         <p>When you sign out, the app asks the homeserver to end the session. It then deletes the
         profile's key, so the remaining files cannot be read. The next time the app starts, it
         deletes the profile's files.</p>
         <p>If you forget your passphrase, "Reset profile" deletes the profile without the
-        passphrase. The app cannot end the old session on the homeserver in this case. Remove the
-        old device from another Matrix client.</p>
+        passphrase. The new profile has no passphrase. The app cannot end the old session on the
+        homeserver in this case. Remove the old device from another Matrix client.</p>
 
         <h3>Limits</h3>
         <ul>
@@ -264,8 +373,9 @@
   </main>
 
   <footer class="site-footer">
-    <div class="wrap">
+    <div class="wrap footer-row">
       <p>Persephone · GPL-3.0 · This page loads nothing from third parties. · <a href="privacy.html">Privacy</a></p>
+      <a class="vendor" href="https://github.com/OMG-Software"><img src="omg-software.svg" alt="OMG Software" width="1305" height="420"></a>
     </div>
   </footer>
 </body>
