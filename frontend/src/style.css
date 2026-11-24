@@ -1759,10 +1759,7 @@ kbd {
 
 /* Each path sets its own stroke width. */
 .brand-mark path {
-  fill: none;
-  stroke: var(--accent);
-  stroke-linecap: butt;
-  stroke-linejoin: miter;
+  fill: var(--accent);
 }
 
 .auth-card h1,
