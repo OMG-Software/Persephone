@@ -164,37 +164,4 @@ impl Launcher for LinuxLauncher {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// GIVEN a start through `spawn_kept` WHEN its handle is kept THEN the
-    /// starting thread stays alive; WHEN the handle is dropped THEN the
-    /// thread ends.
-    #[test]
-    fn given_a_kept_start_then_its_thread_lives_until_the_handle_drops() {
-        let (name, parent, thread) =
-            spawn_kept(|| Ok(thread::current().name().map(str::to_owned))).expect("started");
-        assert_eq!(name.as_deref(), Some("call-worker-parent"));
-        thread::sleep(Duration::from_millis(50));
-        assert!(!thread.is_finished(), "kept while the handle lives");
-        drop(parent);
-        thread.join().expect("the thread ends");
-    }
-
-    /// GIVEN a start that fails WHEN started through `spawn_kept` THEN the
-    /// error comes back.
-    #[test]
-    fn given_a_failed_start_then_the_error_comes_back() {
-        let started = spawn_kept(|| Err::<(), _>(StartError::Launch));
-        assert!(matches!(started, Err(StartError::Launch)));
-    }
-
-    /// GIVEN each camera path WHEN mapped for the broker THEN the worker
-    /// gets the matching argument.
-    #[test]
-    fn given_camera_paths_then_each_maps_to_its_broker_mode() {
-        assert_eq!(camera_argument(CameraPath::Portal), CallCamera::Portal);
-        assert_eq!(camera_argument(CameraPath::V4l2), CallCamera::V4l2);
-        assert_eq!(camera_argument(CameraPath::None), CallCamera::None);
-    }
-}
+mod tests;
