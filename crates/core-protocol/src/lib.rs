@@ -1054,8 +1054,9 @@ pub const MAX_HOMESERVER_URL_BYTES: usize = 2048;
 pub const MAX_SUBSCRIPTIONS: usize = 16;
 
 /// The top of the call's sound level meter (ADR-0055): 0 dBFS. 0 is
-/// -60 dBFS or quieter.
-pub const MAX_CALL_SOUND_LEVEL: u8 = 100;
+/// -60 dBFS or quieter. The contract's ceiling, so the core, the host and
+/// the page check one number.
+pub const MAX_CALL_SOUND_LEVEL: u8 = persephone_contracts::CALL_SOUND_LEVEL_MAX;
 
 /// A notification from the core. Events carry no message content: the UI
 /// fetches content through bounded calls. A burst of changes to one room

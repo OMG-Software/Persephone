@@ -2808,7 +2808,9 @@ fn offer_devices(
 /// Runs device test `generation` on its own thread (ADR-0059): starts a
 /// worker, sends `TestDevice` and follows the answers until the worker ends,
 /// `stop` is set or [`device_test::TEST_LIMIT`] passes. A camera test's store
-/// is the controller's picture store while no call runs.
+/// is the controller's picture store while no call runs. The worker gets the
+/// diagnostic log's switch before the test and on each change, and its
+/// records go to the log (ADR-0058), so a failing test leaves a record.
 fn run_device_test(
     inner: &Arc<Inner>,
     generation: u64,
@@ -2844,9 +2846,13 @@ fn run_device_test(
         let stream = store.stream(0);
         inner.set_test(generation, |status| status.stream = stream);
     }
-    let sent = link.send(ToWorker::TestDevice {
-        test: device_test::worker_test(test),
-        device,
+    let mut diagnostics = crate::diagnostics::global().watch();
+    let on = *diagnostics.borrow_and_update();
+    let sent = link.send(ToWorker::SetDiagnostics { on }).and_then(|()| {
+        link.send(ToWorker::TestDevice {
+            test: device_test::worker_test(test),
+            device,
+        })
     });
     let mut state = CallDeviceTestState::Starting;
     let limit = std::time::Instant::now() + device_test::TEST_LIMIT;
@@ -2864,8 +2870,17 @@ fn run_device_test(
             state = CallDeviceTestState::Failed;
             break;
         }
+        if diagnostics.has_changed().unwrap_or(false) {
+            let on = *diagnostics.borrow_and_update();
+            let _ = link.send(ToWorker::SetDiagnostics { on });
+        }
         match link.events.try_recv() {
             Ok(FromWorker::SoundLevel { level }) => inner.own_level(level),
+            Ok(FromWorker::Diagnostic {
+                level,
+                target,
+                message,
+            }) => worker_record(level, &target, &message),
             Ok(message) => {
                 let stopped = leave_by.is_some();
                 if let Some(next) = device_test::next_state(state, &message, stopped) {
@@ -5112,6 +5127,77 @@ mod tests {
         assert_eq!(slot.status.id, slot.generation, "the status names its test");
         assert_eq!(job.test, CallDeviceTestKind::Speaker);
         assert_eq!(job.device.as_deref(), Some("spk"));
+    }
+
+    /// A host whose worker answers with `events`, in order, and keeps what
+    /// it is sent.
+    struct ScriptHost {
+        events: Mutex<Vec<FromWorker>>,
+        sent: Mutex<Option<mpsc::Receiver<ToWorker>>>,
+    }
+
+    impl CallHost for ScriptHost {
+        fn start(&self, _: &WorkerAudio) -> Result<CallWorkerLink, StartError> {
+            let (commands, received) = mpsc::channel(8);
+            let (answers, events) = mpsc::channel(8);
+            for event in self.events.lock().unwrap().drain(..) {
+                answers.try_send(event).unwrap();
+            }
+            *self.sent.lock().unwrap() = Some(received);
+            Ok(CallWorkerLink::from_parts(
+                commands,
+                events,
+                Box::new(FakeProcess(Arc::new(AtomicBool::new(false)))),
+            ))
+        }
+
+        fn confirm_direct_connection(&self) -> bool {
+            true
+        }
+    }
+
+    /// GIVEN a microphone test WHEN its worker starts THEN it gets the
+    /// diagnostic log's switch before `TestDevice` (ADR-0058); WHEN the
+    /// worker sends a diagnostic record during the test THEN the record
+    /// goes to the log and the test still ends as done.
+    #[test]
+    fn given_a_device_test_then_its_worker_gets_the_diagnostic_switch_first() {
+        let record = FromWorker::Diagnostic {
+            level: 2,
+            target: "call_worker".into(),
+            message: "no device".into(),
+        };
+        let host = Arc::new(ScriptHost {
+            events: Mutex::new(vec![FromWorker::Connected, record, FromWorker::Left]),
+            sent: Mutex::new(None),
+        });
+        let calls = controller(host.clone());
+        plain(&calls.inner.device_test).generation = 1;
+        let mic = Some("mic".to_owned());
+        run_device_test(
+            &calls.inner,
+            1,
+            CallDeviceTestKind::Microphone,
+            mic,
+            &AtomicBool::new(false),
+        );
+        assert_eq!(calls.device_test_status().state, CallDeviceTestState::Done);
+        let mut sent = host
+            .sent
+            .lock()
+            .unwrap()
+            .take()
+            .expect("the worker started");
+        // Other tests turn the global log on and off, so only the order is
+        // checked here.
+        assert!(matches!(
+            sent.try_recv(),
+            Ok(ToWorker::SetDiagnostics { .. })
+        ));
+        assert!(matches!(
+            sent.try_recv(),
+            Ok(ToWorker::TestDevice { device: Some(id), .. }) if id == "mic"
+        ));
     }
 
     /// GIVEN test 2 is the newest WHEN a stop names test 1 THEN test 2 runs
