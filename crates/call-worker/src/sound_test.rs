@@ -472,11 +472,11 @@ mod platform {
     /// The most bytes read from one fragment: a second of samples.
     const MAX_FRAGMENT_BYTES: usize = RATE as usize * BYTES_PER_FRAME;
 
-    // The values and struct sizes below are from the PulseAudio 16.1
-    // headers. A C file of static asserts checked each one against
-    // `libpulse-dev` 1:16.1+dfsg1-2ubuntu10.1
-    // (docs/evidence/device-tests-linux-macos.md). Check them again when
-    // a value is added.
+    // The values and struct sizes below are copied from the PulseAudio 16.1
+    // headers. The C static-assert file in the "PulseAudio header values"
+    // section of docs/evidence/device-tests-linux-macos.md checked each one
+    // against `libpulse-dev` 1:16.1+dfsg1-2ubuntu10.1; it is not part of the
+    // build. Add each new value to that file and compile it again.
     // pa_context_flags_t: never start a server (the worker cannot execute).
     const PA_CONTEXT_NOAUTOSPAWN: c_int = 1;
     // pa_context_state_t.
@@ -1611,8 +1611,9 @@ mod tests {
     /// the sound server's error numbers THEN `PA_ERR_ACCESS` (1) is
     /// `DeviceDenied`, `PA_ERR_NOENTITY` (5) `DeviceNotFound`, and the rest
     /// a device failure. The numbers are written out, not taken from the
-    /// constants, so a changed constant fails here; the header values were
-    /// checked in C (see the constants).
+    /// constants, so a changed constant fails here. This test cannot read
+    /// the headers; the header values were checked once with the C file
+    /// named above the constants.
     #[cfg(target_os = "linux")]
     #[test]
     fn given_pulse_audio_struct_sizes_and_error_numbers_then_they_map_as_the_headers_say() {
