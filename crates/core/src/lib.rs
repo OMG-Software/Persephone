@@ -1550,8 +1550,8 @@ impl Core {
                     Err(code) => Outcome::Error(code),
                 }
             }
-            Call::CallDeviceTestStop {} => {
-                self.calls.stop_device_test();
+            Call::CallDeviceTestStop { id } => {
+                self.calls.stop_device_test_if(*id);
                 Outcome::Ok(serde_json::Value::Null)
             }
             Call::CallDeviceTestStatus {} => ok(&self.calls.device_test_status()),

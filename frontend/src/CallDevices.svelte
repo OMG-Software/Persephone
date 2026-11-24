@@ -85,8 +85,9 @@
         const menu = kind === 'microphone' ? recording : kind === 'speaker' ? playout : camera;
         const next = await callDeviceTest(kind, deviceChoice(menu));
         if (destroyed) {
+          // Only this test: a newer one from a reopened page keeps running.
           if (next.state === 'starting' || next.state === 'running') {
-            void callDeviceTestStop().catch(() => {});
+            void callDeviceTestStop(next.id).catch(() => {});
           }
           return;
         }
@@ -102,7 +103,7 @@
   // Leaving the settings ends a test that runs.
   onDestroy(() => {
     destroyed = true;
-    if (test.state === 'starting' || test.state === 'running') void callDeviceTestStop().catch(() => {});
+    if (test.state === 'starting' || test.state === 'running') void callDeviceTestStop(test.id).catch(() => {});
   });
 
   const testing = $derived(test.state === 'starting' || test.state === 'running');

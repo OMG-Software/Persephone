@@ -76,8 +76,12 @@ commands.
   item "Show Persephone" brings the windows back and removes the icon. On
   Windows and macOS a left click does the same. Linux sends no icon clicks
   (Tauri 2.12.4), so there the menu is the way back. A call keeps running.
-* Where the system has no tray, the command fails with `unavailable` and the
-  windows stay shown, so the app is never left with no window and no icon.
+* Where no tray icon can be made, the command fails with `unavailable` and
+  the windows stay shown. On Linux a built icon does not prove that a tray
+  host shows it, so there the windows minimise instead of hiding and keep
+  their taskbar entry. The app is never left with no window and no way back.
+* The host registers the tray menu handler once, when the app starts, so a
+  minimise and restore cycle does not add handlers.
 * This needs Tauri's `tray-icon` feature. Its crate was already in the
   lockfile at the same version.
 

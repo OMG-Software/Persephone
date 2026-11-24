@@ -412,6 +412,12 @@ async fn sound_paths(
 struct SoundDevices {
     recording: Option<String>,
     playout: Option<String>,
+    /// After a failed change the call may not use `recording`, or capture
+    /// may have stopped, so the next change switches even to the same
+    /// choice.
+    recording_lost: bool,
+    /// The same for the speaker: going back to the old one failed.
+    playout_lost: bool,
 }
 
 /// The system's default speaker and microphone for media, as
@@ -455,7 +461,11 @@ fn resolve_devices(
         Some(_) => choose_device(playout, ids())?,
         None => system_default(default_playout.as_deref(), ids()),
     };
-    Ok(SoundDevices { recording, playout })
+    Ok(SoundDevices {
+        recording,
+        playout,
+        ..SoundDevices::default()
+    })
 }
 
 /// The listed microphone with this platform ID, as libwebrtc names it.
@@ -543,56 +553,112 @@ fn switch_devices(
     if let Some(id) = &next.playout {
         playout_id(audio, id)?;
     }
-    apply_switch(
-        current,
-        next,
-        |id| recording_id(audio, id).is_ok_and(|id| audio.switch_recording_device(&id).is_ok()),
-        |id| playout_id(audio, id).is_ok_and(|id| audio.switch_playout_device(&id).is_ok()),
-    )
+    apply_switch(current, next, &mut LiveAudio(audio))
+}
+
+/// The sound device calls a change during a call makes.
+trait SwitchAudio {
+    /// Switches the microphone; `false` when it failed.
+    fn switch_recording(&mut self, id: &str) -> bool;
+    /// Switches the speaker; `false` when it failed.
+    fn switch_playout(&mut self, id: &str) -> bool;
+    /// Starts the microphone again where a failed switch stopped it; `true`
+    /// when capture is set up after it.
+    fn restart_recording(&mut self) -> bool;
+}
+
+/// `SwitchAudio` on LiveKit's platform audio. LiveKit 0.11 stops a device
+/// before it opens the new one, and a failed open leaves it stopped. A
+/// stopped microphone starts again with `start_recording`. Playout has no
+/// public start, so a speaker switch back only selects the old speaker;
+/// the worker cannot confirm that it plays again (ADR-0059).
+struct LiveAudio<'a>(&'a PlatformAudio);
+
+impl SwitchAudio for LiveAudio<'_> {
+    fn switch_recording(&mut self, id: &str) -> bool {
+        recording_id(self.0, id).is_ok_and(|id| self.0.switch_recording_device(&id).is_ok())
+    }
+
+    fn switch_playout(&mut self, id: &str) -> bool {
+        playout_id(self.0, id).is_ok_and(|id| self.0.switch_playout_device(&id).is_ok())
+    }
+
+    fn restart_recording(&mut self) -> bool {
+        (self.0.is_recording_initialized() || self.0.start_recording().is_ok())
+            && self.0.is_recording_initialized()
+    }
 }
 
 /// Switches the microphone, then the speaker, to `next`, and keeps
-/// `current` as the devices the call uses. A failed microphone changes
-/// nothing. When the speaker fails after the microphone moved, the
-/// microphone goes back to the device it had. Where it cannot go back (it
-/// was libwebrtc's own default, which has no ID, or the switch back
-/// fails), `current` names the new microphone, so it never names a device
-/// that the call no longer uses. Each failure is `AudioDevice`.
+/// `current` as the devices the call uses. Each failure is `AudioDevice`.
+///
+/// * A failed microphone may have stopped capture: the old microphone is
+///   switched back and started again. Where that fails, or where there is
+///   no old ID (libwebrtc's own default), capture starts on what is
+///   selected, and `recording_lost` is set.
+/// * A failed speaker goes back to the old speaker; when it cannot,
+///   `playout_lost` is set. The microphone, if it moved, goes back too.
+///   Where it cannot, `current` names the new microphone and
+///   `recording_lost` is set; with no old ID the new microphone stays.
+///
+/// A lost device is switched again by the next change, even to the same
+/// choice.
 fn apply_switch(
     current: &mut SoundDevices,
     next: SoundDevices,
-    mut switch_recording: impl FnMut(&str) -> bool,
-    mut switch_playout: impl FnMut(&str) -> bool,
+    audio: &mut impl SwitchAudio,
 ) -> Result<(), FailureCode> {
     let recording = next
         .recording
-        .as_deref()
-        .filter(|_| next.recording != current.recording);
-    if let Some(id) = recording
-        && !switch_recording(id)
-    {
-        return Err(FailureCode::AudioDevice);
-    }
+        .clone()
+        .filter(|_| next.recording != current.recording || current.recording_lost);
     let playout = next
         .playout
-        .as_deref()
-        .filter(|_| next.playout != current.playout);
-    if let Some(id) = playout
-        && !switch_playout(id)
+        .clone()
+        .filter(|_| next.playout != current.playout || current.playout_lost);
+    if let Some(id) = &recording
+        && !audio.switch_recording(id)
     {
+        current.recording_lost = !restore_recording(audio, current.recording.as_deref());
+        return Err(FailureCode::AudioDevice);
+    }
+    if let Some(id) = &playout
+        && !audio.switch_playout(id)
+    {
+        let back = current
+            .playout
+            .as_deref()
+            .is_some_and(|old| audio.switch_playout(old));
+        current.playout_lost = !back;
         if recording.is_some() {
-            let back = current
-                .recording
-                .as_deref()
-                .is_some_and(&mut switch_recording);
-            if !back {
-                current.recording = next.recording;
+            match current.recording.as_deref() {
+                // libwebrtc's own default has no ID to go back to; the new
+                // microphone runs.
+                None => current.recording.clone_from(&next.recording),
+                Some(old) => {
+                    let back = restore_recording(audio, Some(old));
+                    if !back {
+                        current.recording.clone_from(&next.recording);
+                    }
+                    current.recording_lost = !back;
+                }
             }
         }
         return Err(FailureCode::AudioDevice);
     }
     *current = next;
     Ok(())
+}
+
+/// Puts the microphone back on `old` and starts capture: `true` when the
+/// old microphone runs again. Otherwise capture is started on what is
+/// selected, so the call keeps a microphone where one opens.
+fn restore_recording(audio: &mut impl SwitchAudio, old: Option<&str>) -> bool {
+    let back = old.is_some_and(|old| audio.switch_recording(old)) && audio.restart_recording();
+    if !back {
+        audio.restart_recording();
+    }
+    back
 }
 
 /// What a device test's thread reports.
@@ -3226,6 +3292,7 @@ mod tests {
         let devices = |recording: Option<&str>, playout: Option<&str>| SoundDevices {
             recording: recording.map(str::to_owned),
             playout: playout.map(str::to_owned),
+            ..SoundDevices::default()
         };
         let current = devices(Some("mic-1"), Some("spk-1"));
         assert_eq!(device_switch(&current, &current), Ok(None));
@@ -3248,81 +3315,123 @@ mod tests {
         );
     }
 
+    /// A sound device fake: the IDs that switch, whether a restart starts
+    /// capture, and every call in order.
+    #[derive(Default)]
+    struct FakeAudio {
+        mics: Vec<&'static str>,
+        speakers: Vec<&'static str>,
+        restarts: bool,
+        calls: Vec<String>,
+    }
+
+    impl SwitchAudio for FakeAudio {
+        fn switch_recording(&mut self, id: &str) -> bool {
+            self.calls.push(format!("mic {id}"));
+            self.mics.contains(&id)
+        }
+
+        fn switch_playout(&mut self, id: &str) -> bool {
+            self.calls.push(format!("speaker {id}"));
+            self.speakers.contains(&id)
+        }
+
+        fn restart_recording(&mut self) -> bool {
+            self.calls.push("restart".to_owned());
+            self.restarts
+        }
+    }
+
     /// GIVEN a change of both devices WHEN each switch succeeds or fails
-    /// THEN `current` always names the devices the call uses: success moves
-    /// both; a failed microphone changes nothing; a failed speaker puts the
-    /// microphone back; and where the microphone cannot go back (no ID, or
-    /// the switch back fails) `current` names the new microphone.
+    /// THEN `current` names the devices the call uses, a failed switch
+    /// starts the old device again, and a device that cannot be started
+    /// again is marked lost, so the next change switches it even to the
+    /// same choice.
     #[test]
     fn given_a_device_switch_then_current_names_the_devices_in_use() {
         let devices = |recording: Option<&str>, playout: Option<&str>| SoundDevices {
             recording: recording.map(str::to_owned),
             playout: playout.map(str::to_owned),
+            ..SoundDevices::default()
         };
         let next = devices(Some("mic-2"), Some("spk-2"));
-        let run = |start: SoundDevices, mic_ok: &[&str], spk_ok: bool| {
-            let mut current = start;
-            let mut mics = Vec::new();
-            let result = apply_switch(
-                &mut current,
-                next.clone(),
-                |id| {
-                    mics.push(id.to_owned());
-                    mic_ok.contains(&id)
-                },
-                |_| spk_ok,
-            );
-            (result, current, mics)
-        };
         let from = devices(Some("mic-1"), Some("spk-1"));
+        let run = |start: &SoundDevices, audio: &mut FakeAudio| {
+            let mut current = start.clone();
+            let result = apply_switch(&mut current, next.clone(), audio);
+            (result, current)
+        };
+        let fake = |mics: &[&'static str], speakers: &[&'static str], restarts| FakeAudio {
+            mics: mics.to_vec(),
+            speakers: speakers.to_vec(),
+            restarts,
+            calls: Vec::new(),
+        };
+        let failed = Err(FailureCode::AudioDevice);
 
-        let (result, current, mics) = run(from.clone(), &["mic-1", "mic-2"], true);
-        assert_eq!((result, current), (Ok(()), next.clone()));
-        assert_eq!(mics, ["mic-2"]);
+        // Both switch.
+        let mut audio = fake(&["mic-2"], &["spk-2"], true);
+        assert_eq!(run(&from, &mut audio), (Ok(()), next.clone()));
+        assert_eq!(audio.calls, ["mic mic-2", "speaker spk-2"]);
 
-        let (result, current, _) = run(from.clone(), &[], true);
+        // The new microphone fails: the old one is switched back and started.
+        let mut audio = fake(&["mic-1"], &["spk-2"], true);
+        assert_eq!(run(&from, &mut audio), (failed, from.clone()));
+        assert_eq!(audio.calls, ["mic mic-2", "mic mic-1", "restart"]);
+
+        // ... and when nothing starts again, the microphone is lost.
+        let mut audio = fake(&[], &["spk-2"], false);
+        let (result, current) = run(&from, &mut audio);
+        assert_eq!(result, failed);
+        assert!(current.recording_lost && !current.playout_lost);
+
+        // The speaker fails: both go back to the old devices.
+        let mut audio = fake(&["mic-1", "mic-2"], &["spk-1"], true);
+        assert_eq!(run(&from, &mut audio), (failed, from.clone()));
         assert_eq!(
-            (result, current),
-            (Err(FailureCode::AudioDevice), from.clone())
+            audio.calls,
+            [
+                "mic mic-2",
+                "speaker spk-2",
+                "speaker spk-1",
+                "mic mic-1",
+                "restart"
+            ]
         );
 
-        let (result, current, mics) = run(from.clone(), &["mic-1", "mic-2"], false);
-        assert_eq!(
-            (result, current),
-            (Err(FailureCode::AudioDevice), from.clone())
-        );
-        assert_eq!(mics, ["mic-2", "mic-1"], "the microphone goes back");
+        // The speaker cannot go back: it is lost; the microphone went back.
+        let mut audio = fake(&["mic-1", "mic-2"], &[], true);
+        let (result, current) = run(&from, &mut audio);
+        assert_eq!(result, failed);
+        assert!(current.playout_lost && !current.recording_lost);
+        assert_eq!(current.recording.as_deref(), Some("mic-1"));
 
-        let (result, current, mics) = run(from.clone(), &["mic-2"], false);
-        assert_eq!(
-            (result, current),
-            (
-                Err(FailureCode::AudioDevice),
-                devices(Some("mic-2"), Some("spk-1"))
-            )
-        );
-        assert_eq!(mics, ["mic-2", "mic-1"], "the switch back was tried");
+        // The microphone cannot go back: `current` names the new one, and
+        // capture is started on what is selected.
+        let mut audio = fake(&["mic-2"], &["spk-1"], true);
+        let (result, current) = run(&from, &mut audio);
+        assert_eq!(result, failed);
+        assert_eq!(current.recording.as_deref(), Some("mic-2"));
+        assert!(current.recording_lost);
+        assert_eq!(audio.calls.last().map(String::as_str), Some("restart"));
 
-        let (result, current, mics) = run(devices(None, Some("spk-1")), &["mic-2"], false);
-        assert_eq!(
-            (result, current),
-            (
-                Err(FailureCode::AudioDevice),
-                devices(Some("mic-2"), Some("spk-1"))
-            )
-        );
-        assert_eq!(mics, ["mic-2"], "no ID to go back to");
+        // No old microphone ID: the new microphone stays.
+        let mut audio = fake(&["mic-2"], &["spk-1"], true);
+        let (result, current) = run(&devices(None, Some("spk-1")), &mut audio);
+        assert_eq!(result, failed);
+        assert_eq!(current.recording.as_deref(), Some("mic-2"));
 
-        // Only the speaker changes: a failure leaves the microphone alone.
-        let (result, current, mics) = run(devices(Some("mic-2"), Some("spk-1")), &[], false);
+        // A lost microphone is switched again, even to the same choice.
+        let mut lost = next.clone();
+        lost.recording_lost = true;
+        let mut audio = fake(&["mic-2"], &["spk-2"], true);
+        assert_eq!(run(&lost, &mut audio), (Ok(()), next.clone()));
+        assert_eq!(audio.calls, ["mic mic-2"]);
         assert_eq!(
-            (result, current),
-            (
-                Err(FailureCode::AudioDevice),
-                devices(Some("mic-2"), Some("spk-1"))
-            )
+            device_switch(&lost, &next),
+            Ok(Some(next.clone())),
+            "a lost device is not the same as the choice"
         );
-        assert!(mics.is_empty());
     }
 
     /// GIVEN a Windows machine with speakers or microphones WHEN the worker

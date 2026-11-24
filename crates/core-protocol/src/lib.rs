@@ -340,8 +340,11 @@ pub enum Call {
         #[serde(deserialize_with = "Option::deserialize")]
         device: Option<String>,
     },
-    /// Stop the device test that runs, if any. Replies null.
-    CallDeviceTestStop {},
+    /// Stop the device test that runs, if any: with `id`, only when that
+    /// test is still the newest (ADR-0059). Replies null.
+    CallDeviceTestStop {
+        id: Option<u64>,
+    },
     /// The newest device test's status.
     CallDeviceTestStatus {},
     /// Sign in to this homeserver through its OAuth 2.0 provider (OIDC,
@@ -1188,13 +1191,57 @@ fn bounded_levels<'de, D: serde::Deserializer<'de>>(
     deserializer.deserialize_seq(Levels)
 }
 
-/// One entry of a level list as it crosses, with its IDs bounded.
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+/// One entry of a level list as it crosses, with its IDs bounded. Only a
+/// JSON object is read: a derived visitor would also take a positional
+/// array, which is not the contract.
 struct WireLevel {
     user_id: BoundedText<MAX_USER_ID_BYTES>,
     device_id: BoundedText<MAX_DEVICE_ID_BYTES>,
     level: u8,
+}
+
+impl<'de> Deserialize<'de> for WireLevel {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        enum Field {
+            UserId,
+            DeviceId,
+            Level,
+        }
+        struct Entry;
+        impl<'de> serde::de::Visitor<'de> for Entry {
+            type Value = WireLevel;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a call level object")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
+                use serde::de::Error;
+                let (mut user_id, mut device_id, mut level) = (None, None, None);
+                while let Some(field) = map.next_key::<Field>()? {
+                    let fresh = match field {
+                        Field::UserId => user_id.replace(map.next_value()?).is_none(),
+                        Field::DeviceId => device_id.replace(map.next_value()?).is_none(),
+                        Field::Level => level.replace(map.next_value()?).is_none(),
+                    };
+                    if !fresh {
+                        return Err(A::Error::custom("duplicate call level field"));
+                    }
+                }
+                Ok(WireLevel {
+                    user_id: user_id.ok_or_else(|| A::Error::missing_field("userId"))?,
+                    device_id: device_id.ok_or_else(|| A::Error::missing_field("deviceId"))?,
+                    level: level.ok_or_else(|| A::Error::missing_field("level"))?,
+                })
+            }
+        }
+        deserializer.deserialize_map(Entry)
+    }
 }
 
 /// A string of at most `N` bytes, refused before it is copied.
@@ -4091,6 +4138,17 @@ mod timeline_events_wire_tests {
             .collect();
         over.push(serde_json::json!({"anything": [1, 2, 3]}));
         let error = event(serde_json::Value::Array(over)).unwrap_err();
+        // An entry is an object, never a positional array (byte path).
+        let positional = br#"{"event":{"call_levels":{"levels":[["@a:example.org","D",42]]}}}"#;
+        assert!(serde_json::from_slice::<CoreMessage>(positional).is_err());
+        let object =
+            br#"{"event":{"call_levels":{"levels":[{"userId":"@a:example.org","deviceId":"D","level":42}]}}}"#;
+        assert!(serde_json::from_slice::<CoreMessage>(object).is_ok());
+        let twice = br#"{"event":{"call_levels":{"levels":[{"userId":"@a:example.org","userId":"@b:example.org","deviceId":"D","level":42}]}}}"#;
+        assert!(serde_json::from_slice::<CoreMessage>(twice).is_err());
+        let missing =
+            br#"{"event":{"call_levels":{"levels":[{"userId":"@a:example.org","deviceId":"D"}]}}}"#;
+        assert!(serde_json::from_slice::<CoreMessage>(missing).is_err());
         assert!(
             error.to_string().contains("call levels out of bounds"),
             "{error}"
@@ -4134,7 +4192,19 @@ mod timeline_events_wire_tests {
             read(r#"{"id":1,"call":{"command":"call_device_test","test":"x","device":null}}"#)
                 .is_err()
         );
-        assert!(read(r#"{"id":1,"call":{"command":"call_device_test_stop"}}"#).is_ok());
+        assert_eq!(
+            read(r#"{"id":1,"call":{"command":"call_device_test_stop"}}"#)
+                .unwrap()
+                .call,
+            Call::CallDeviceTestStop { id: None }
+        );
+        assert_eq!(
+            read(r#"{"id":1,"call":{"command":"call_device_test_stop","id":7}}"#)
+                .unwrap()
+                .call,
+            Call::CallDeviceTestStop { id: Some(7) }
+        );
+        assert!(read(r#"{"id":1,"call":{"command":"call_device_test_stop","id":-1}}"#).is_err());
         assert!(read(r#"{"id":1,"call":{"command":"call_device_test_status"}}"#).is_ok());
         let with = |device: &str| Call::CallDeviceTest {
             test: persephone_contracts::CallDeviceTestKind::Microphone,

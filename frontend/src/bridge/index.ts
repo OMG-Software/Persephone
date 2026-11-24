@@ -651,9 +651,9 @@ export function callDeviceTest(test: CallDeviceTestKind, device: string | null):
   return invoke<CallDeviceTestStatus>('call_device_test', { test, device });
 }
 
-/** Stops the device test that runs, if any. */
-export function callDeviceTestStop(): Promise<void> {
-  return invoke<void>('call_device_test_stop');
+/** Stops the device test that runs, if any; with `id`, only that test. */
+export function callDeviceTestStop(id: number | null = null): Promise<void> {
+  return invoke<void>('call_device_test_stop', { id });
 }
 
 /** The newest device test. */

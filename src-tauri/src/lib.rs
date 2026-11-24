@@ -1723,10 +1723,10 @@ async fn call_device_test(
     relay(core.inner(), call).await
 }
 
-/// Stops the device test that runs (ADR-0059).
+/// Stops the device test that runs (ADR-0059): with `id`, only that test.
 #[tauri::command]
-async fn call_device_test_stop(core: State<'_, CoreLink>) -> Result<(), String> {
-    relay(core.inner(), Call::CallDeviceTestStop {}).await
+async fn call_device_test_stop(core: State<'_, CoreLink>, id: Option<u64>) -> Result<(), String> {
+    relay(core.inner(), Call::CallDeviceTestStop { id }).await
 }
 
 /// The newest device test (ADR-0059).
@@ -2015,10 +2015,12 @@ const TRAY_ID: &str = "persephone";
 /// The tray menu item that shows the windows again.
 const TRAY_SHOW: &str = "show";
 
-/// Hides the app's windows and shows a tray icon; a click on the icon
-/// brings them back. If the platform has no tray (some Linux desktops), the
-/// windows stay shown and the command fails, so the app is never left with
-/// no way back. The icon shows only the app's own icon and name.
+/// Hides the app's windows and shows a tray icon; a click on the icon or
+/// its "Show Persephone" item brings them back. Where no icon can be made,
+/// the windows stay shown and the command fails. On Linux the windows
+/// minimise instead of hiding, because a built icon does not prove that a
+/// tray host shows it. So the app is never left with no way back. The icon
+/// shows only the app's own icon and name.
 #[tauri::command]
 async fn minimise_to_tray<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
     if app.tray_by_id(TRAY_ID).is_none() {
@@ -2038,11 +2040,6 @@ async fn minimise_to_tray<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
             .tooltip("Persephone")
             .menu(&menu)
             .show_menu_on_left_click(false)
-            .on_menu_event(|app, event| {
-                if event.id().as_ref() == TRAY_SHOW {
-                    restore_from_tray(app);
-                }
-            })
             .on_tray_icon_event(|tray, event| {
                 if let tauri::tray::TrayIconEvent::Click {
                     button: tauri::tray::MouseButton::Left,
@@ -2056,9 +2053,15 @@ async fn minimise_to_tray<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
             .build(&app)
             .map_err(|_| UNAVAILABLE.to_string())?;
     }
+    // On Linux a built icon does not prove that a tray host shows it, so
+    // the windows minimise and keep their taskbar entry as a way back.
     for label in [CALL_WINDOW, MAIN_WINDOW] {
         if let Some(window) = app.get_webview_window(label) {
-            let _ = window.hide();
+            let _ = if cfg!(target_os = "linux") {
+                window.minimize()
+            } else {
+                window.hide()
+            };
         }
     }
     Ok(())
@@ -2118,6 +2121,13 @@ pub fn configure<R: Runtime>(
         .manage(BandsInFlight::default())
         .manage(VideoInFlight::default())
         .manage(PasteInFlight::default())
+        // One handler for the tray menu, for the life of the app: a handler
+        // given to each new tray icon would stay after the icon goes.
+        .on_menu_event(|app, event| {
+            if event.id().as_ref() == TRAY_SHOW {
+                restore_from_tray(app);
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             app_status,
             room_list,

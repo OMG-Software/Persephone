@@ -1181,6 +1181,15 @@ struct Inner {
     test_listener: Mutex<Option<Listener>>,
 }
 
+/// One member's sound level and the worker participant that sent it, so a
+/// change of membership can check that the source still stands for it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LevelSample {
+    level: u8,
+    connection: u8,
+    identity: String,
+}
+
 /// The newest device test and what ends it.
 struct DeviceTestSlot {
     status: CallDeviceTestStatus,
@@ -1214,6 +1223,7 @@ impl Default for DeviceTestSlot {
     fn default() -> Self {
         Self {
             status: CallDeviceTestStatus {
+                id: 0,
                 test: None,
                 state: CallDeviceTestState::Idle,
                 stream: 0,
@@ -1411,9 +1421,17 @@ impl CallController {
     /// Ends the device test that runs, if any. Its status follows when the
     /// worker has ended.
     pub fn stop_device_test(&self) {
-        plain(&self.inner.device_test)
-            .stop
-            .store(true, Ordering::SeqCst);
+        self.stop_device_test_if(None);
+    }
+
+    /// Ends the device test `id` if it is still the newest; `None` ends any.
+    /// The check and the stop happen under the test lock, so a late stop
+    /// from a closed page never ends a newer test (ADR-0059).
+    pub fn stop_device_test_if(&self, id: Option<u64>) {
+        let slot = plain(&self.inner.device_test);
+        if id.is_none_or(|id| id == slot.generation) {
+            slot.stop.store(true, Ordering::SeqCst);
+        }
     }
 
     /// Starts a device test (ADR-0059) and returns its first status. A test
@@ -1441,6 +1459,7 @@ impl CallController {
         // does not stay after the call ends, and nothing that runs stops.
         if let Some(state) = refused {
             return CallDeviceTestStatus {
+                id: 0,
                 test: Some(test),
                 state,
                 stream: 0,
@@ -1449,6 +1468,7 @@ impl CallController {
         slot.stop.store(true, Ordering::SeqCst);
         slot.generation += 1;
         slot.status = CallDeviceTestStatus {
+            id: slot.generation,
             test: Some(test),
             state: CallDeviceTestState::Starting,
             stream: 0,
@@ -2434,8 +2454,8 @@ struct Call {
     /// the task subscribes.
     devices: watch::Sender<Option<SoundDevices>>,
     /// The level of each other member that is not silent (ADR-0059), at
-    /// most [`MAX_CALL_MEMBERS`].
-    levels: BTreeMap<CallParticipantLevelKey, u8>,
+    /// most [`MAX_CALL_MEMBERS`], with the worker participant it came from.
+    levels: BTreeMap<CallParticipantLevelKey, LevelSample>,
     /// The camera portal access request in flight (Linux portal path).
     /// Dropping it (the call ends) cancels the request.
     portal: Option<PortalTask>,
@@ -2733,6 +2753,19 @@ fn spawn_device_test(inner: Arc<Inner>) -> std::io::Result<std::thread::JoinHand
                 run_device_test(&inner, job.generation, job.test, job.device, &job.stop);
             }
         })
+}
+
+/// Replaces a kept device choice with a newer one that waits unread in
+/// `devices`, so a retry sends the newest choice only.
+fn take_newer_choice(
+    devices: &mut watch::Receiver<Option<SoundDevices>>,
+    pending: &mut Option<(Instant, SoundDevices)>,
+) {
+    if devices.has_changed().unwrap_or(false)
+        && let Some(choice) = devices.borrow_and_update().clone()
+    {
+        *pending = Some((Instant::now(), choice));
+    }
 }
 
 /// Gives the call a microphone and speaker choice. The same choice as the
@@ -3384,7 +3417,12 @@ impl Call {
         let changed = if level == 0 {
             self.levels.remove(&key).is_some()
         } else if self.levels.len() < MAX_CALL_MEMBERS || self.levels.contains_key(&key) {
-            self.levels.insert(key, level) != Some(level)
+            let sample = LevelSample {
+                level,
+                connection,
+                identity: identity.to_owned(),
+            };
+            self.levels.insert(key, sample).map(|old| old.level) != Some(level)
         } else {
             false
         };
@@ -3393,16 +3431,17 @@ impl Call {
         }
     }
 
-    /// Forgets the level of each device that is no longer a member, and
-    /// gives the meters the rest. A departed member's silence is not taken
-    /// (`level_member`), so without this its last level would stay.
+    /// Forgets each level whose source no longer stands for its device: the
+    /// member left, or moved to an SFU that the sample's connection does not
+    /// speak for. It gives the meters the rest. Such a source's silence is
+    /// not taken (`level_member`), so without this its last level would stay.
     fn prune_levels(&mut self, inner: &Inner) {
         let before = self.levels.len();
         let view = &self.view;
-        self.levels.retain(|(user_id, device_id), _| {
-            view.members
-                .iter()
-                .any(|m| m.user_id.as_str() == user_id && m.device_id.as_str() == device_id)
+        self.levels.retain(|key, sample| {
+            view.level_member(sample.connection, &sample.identity)
+                .as_ref()
+                == Some(key)
         });
         if self.levels.len() != before {
             self.send_levels(inner);
@@ -3415,10 +3454,10 @@ impl Call {
             listener(SoundUpdate::Participants(
                 self.levels
                     .iter()
-                    .map(|((user_id, device_id), level)| CallParticipantLevel {
+                    .map(|((user_id, device_id), sample)| CallParticipantLevel {
                         user_id: user_id.clone(),
                         device_id: device_id.clone(),
-                        level: *level,
+                        level: sample.level,
                     })
                     .collect(),
             ));
@@ -3861,7 +3900,13 @@ impl Call {
                         Some(at) => time::sleep_until(at.into()).await,
                         None => std::future::pending().await,
                     }
-                } => self.apply_devices(&mut pending_devices)?,
+                } => {
+                    // `select!` picks a ready arm at random: a newer choice
+                    // that waits unread replaces the kept one first, so the
+                    // worker never switches to an older choice.
+                    take_newer_choice(&mut devices, &mut pending_devices);
+                    self.apply_devices(&mut pending_devices)?;
+                }
                 Ok(()) = diagnostics.changed() => {
                     let on = *diagnostics.borrow_and_update();
                     pending_diagnostics = Some((Instant::now(), on));
@@ -5006,8 +5051,32 @@ mod tests {
         let job = slot.job.as_ref().expect("the newest job waits");
         assert_eq!(job.generation, 4);
         assert_eq!(job.generation, slot.generation);
+        assert_eq!(slot.status.id, slot.generation, "the status names its test");
         assert_eq!(job.test, CallDeviceTestKind::Speaker);
         assert_eq!(job.device.as_deref(), Some("spk"));
+    }
+
+    /// GIVEN test 2 is the newest WHEN a stop names test 1 THEN test 2 runs
+    /// on; WHEN a stop names test 2, or no test, THEN it stops.
+    #[test]
+    fn given_a_stop_for_an_older_test_then_the_newest_runs_on() {
+        let calls = controller(FakeHost::new(true, None));
+        let stop = Arc::new(AtomicBool::new(false));
+        {
+            let mut slot = plain(&calls.inner.device_test);
+            slot.generation = 2;
+            slot.stop = stop.clone();
+        }
+        calls.stop_device_test_if(Some(1));
+        assert!(
+            !stop.load(Ordering::SeqCst),
+            "an older test's stop is ignored"
+        );
+        calls.stop_device_test_if(Some(2));
+        assert!(stop.load(Ordering::SeqCst));
+        stop.store(false, Ordering::SeqCst);
+        calls.stop_device_test();
+        assert!(stop.load(Ordering::SeqCst), "no ID stops any test");
     }
 
     /// GIVEN a test thread that still runs WHEN the next test thread cannot
@@ -5567,6 +5636,32 @@ mod tests {
         ));
     }
 
+    /// GIVEN a device choice kept for a retry and a newer choice not read
+    /// yet WHEN the retry is due THEN the newer choice replaces the kept one
+    /// before anything is sent; with no newer choice the kept one stays.
+    #[test]
+    fn given_a_newer_choice_when_a_retry_is_due_then_only_the_newer_is_sent() {
+        let sender = watch::channel(None::<SoundDevices>).0;
+        let mut devices = sender.subscribe();
+        let choice = |id: &str| SoundDevices {
+            recording: Some(id.to_owned()),
+            playout: None,
+        };
+        let mut pending = Some((Instant::now(), choice("mic-1")));
+        take_newer_choice(&mut devices, &mut pending);
+        assert_eq!(
+            pending.as_ref().map(|(_, c)| c.clone()),
+            Some(choice("mic-1"))
+        );
+        sender.send_replace(Some(choice("mic-2")));
+        take_newer_choice(&mut devices, &mut pending);
+        assert_eq!(
+            pending.as_ref().map(|(_, c)| c.clone()),
+            Some(choice("mic-2"))
+        );
+        assert!(!devices.has_changed().unwrap(), "the newer choice is read");
+    }
+
     /// GIVEN two members with a sound level WHEN one leaves the call THEN
     /// its level goes from the meters at once, and the member that stays
     /// keeps its level; a prune with no change sends nothing.
@@ -5607,6 +5702,18 @@ mod tests {
         let sent = plain(&updates).len();
         call.prune_levels(&inner);
         assert_eq!(plain(&updates).len(), sent, "no change sends nothing");
+        // The member that stays moves to another SFU: connection 0 no longer
+        // speaks for it, so its level goes too.
+        call.view.set_members(vec![member(
+            b.user_id.as_str(),
+            b.device_id.as_str(),
+            "https://other.example.org",
+        )]);
+        call.prune_levels(&inner);
+        assert_eq!(
+            plain(&updates).last().cloned(),
+            Some(SoundUpdate::Participants(Vec::new()))
+        );
     }
 
     /// Ends a portal request that produced no remote.

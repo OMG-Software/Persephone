@@ -299,7 +299,9 @@ const unknownDeviceChange: CallStatus = { ...idleCall, deviceChange: "unplugged"
 const levelList: CallParticipantLevel[] = [{ userId: "@a:s", deviceId: "D", level: 40 }];
 // @ts-expect-error a level carries the device and a number, nothing else
 const levelWithName: CallParticipantLevel = { ...levelList[0], name: "x" };
-const testStatus: CallDeviceTestStatus = { test: "camera", state: "running", stream: 2 };
+const testStatus: CallDeviceTestStatus = { id: 4, test: "camera", state: "running", stream: 2 };
+// @ts-expect-error the test ID is required
+const noTestId: CallDeviceTestStatus = { test: "camera", state: "running", stream: 2 };
 // @ts-expect-error only the defined device tests are accepted
 const unknownTest: CallDeviceTestKind = "kettle";
 // @ts-expect-error only the defined test states are accepted
@@ -358,5 +360,6 @@ void logWithText;
 void unknownDeviceChange;
 void levelWithName;
 void testStatus;
+void noTestId;
 void unknownTest;
 void unknownTestState;

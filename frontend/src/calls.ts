@@ -681,7 +681,7 @@ export const PARTICIPANT_MUTED_LABEL = 'Microphone off';
 export const DEVICE_CHANGE_TEXT: Record<CallDeviceChange, string> = {
   not_found: 'The chosen microphone or speaker is not connected. The call keeps the one it had.',
   unsupported: 'This change cannot be made during a call on this system. It applies to the next call.',
-  failed: 'The microphone or speaker could not be changed. The call keeps the one it had.'
+  failed: 'The microphone or speaker could not be changed, and the sound may have stopped. Choose a device again, or leave and rejoin the call.'
 };
 
 /** The buttons that start each device test. */
@@ -735,4 +735,4 @@ export function deviceTestActive(status: CallDeviceTestStatus, kind: CallDeviceT
 }
 
 /** No device test yet. */
-export const IDLE_DEVICE_TEST: CallDeviceTestStatus = { test: null, state: 'idle', stream: 0 };
+export const IDLE_DEVICE_TEST: CallDeviceTestStatus = { id: 0, test: null, state: 'idle', stream: 0 };

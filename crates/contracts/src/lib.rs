@@ -2453,6 +2453,11 @@ pub enum CallDeviceTestState {
 #[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct CallDeviceTestStatus {
+    /// Numbers the tests, so the page can stop the one it started
+    /// (`call_device_test_stop`). 0 for no test and for a refusal.
+    #[serde(deserialize_with = "safe_u64")]
+    #[ts(type = "number")]
+    pub id: u64,
     pub test: Option<CallDeviceTestKind>,
     pub state: CallDeviceTestState,
     #[serde(deserialize_with = "safe_u64")]

@@ -532,12 +532,13 @@ impl CoreTransport for FakeCore {
                 _ => Err(CoreError::Core(ErrorCode::InvalidArgument)),
             },
             Call::CallDeviceTest { test, .. } => Ok(serde_json::json!({
-                "test": test, "state": "starting", "stream": 0
+                "id": 3, "test": test, "state": "starting", "stream": 0
             })),
-            Call::CallDeviceTestStop {} => Ok(serde_json::Value::Null),
+            Call::CallDeviceTestStop { id: None | Some(3) } => Ok(serde_json::Value::Null),
+            Call::CallDeviceTestStop { .. } => Err(CoreError::Core(ErrorCode::InvalidArgument)),
             // A state outside the contract must not reach the page.
             Call::CallDeviceTestStatus {} => Ok(serde_json::json!({
-                "test": "camera", "state": "exploded", "stream": 0
+                "id": 0, "test": "camera", "state": "exploded", "stream": 0
             })),
             Call::NewSessions {} => Ok(serde_json::json!({
                 "sessions": [{"deviceId": "NEWDEV", "displayName": null}], "truncated": false
@@ -1176,12 +1177,19 @@ fn given_device_test_commands_then_bounded_arguments_cross() {
             "call_device_test",
             serde_json::json!({"test": "speaker", "device": "{0.0.0.00000000}.{a}"})
         ),
-        Ok(serde_json::json!({"test": "speaker", "state": "starting", "stream": 0}))
+        Ok(serde_json::json!({"id": 3, "test": "speaker", "state": "starting", "stream": 0}))
     );
     assert_eq!(
         invoke("call_device_test_stop", serde_json::json!({})),
         Ok(serde_json::Value::Null)
     );
+    // The test ID crosses to the core.
+    assert_eq!(
+        invoke("call_device_test_stop", serde_json::json!({"id": 3})),
+        Ok(serde_json::Value::Null)
+    );
+    assert!(invoke("call_device_test_stop", serde_json::json!({"id": 4})).is_err());
+    assert!(invoke("call_device_test_stop", serde_json::json!({"id": -1})).is_err());
     assert!(invoke("call_device_test_status", serde_json::json!({})).is_err());
     let before = core.calls.load(Ordering::SeqCst);
     for args in [

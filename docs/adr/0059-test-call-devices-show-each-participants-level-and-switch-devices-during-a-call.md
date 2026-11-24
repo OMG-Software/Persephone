@@ -88,6 +88,13 @@ no media permissions, and a browser test would prove nothing about the worker.
 * The worker checks both devices before it changes either. A selected device
   that is not connected is `DeviceNotFound`, and the call keeps the devices it
   has. It never falls back to the default device for a selected one.
+* LiveKit 0.11 stops a device before it opens the new one, and a failed
+  open leaves it stopped. After such a failure the worker switches back to
+  the old devices and starts the microphone again. Playout has no public
+  start, so the worker cannot confirm that the old speaker plays again. A
+  device it could not restore is switched again by the next change, even to
+  the same choice. The answer is then `failed`, and the page says that the
+  sound may have stopped.
 * The worker answers `DevicesSet { failure }`. The core shows a failure as the
   call status's `deviceChange` (`not_found`, `unsupported` or `failed`) until
   the next change. Linux reports `unsupported`: the PulseAudio path has no
@@ -108,6 +115,10 @@ no media permissions, and a browser test would prove nothing about the worker.
   old one and waits for its worker to end. A test is refused with `in_call`
   while a call runs or joins, and a join stops a running test. The core ends
   any test after 100 seconds.
+* Each status has an `id`, the number of its test (0 for none and for a
+  refusal). `call_device_test_stop { id }` stops only that test while it is
+  the newest, checked under the test lock, so a late stop from a closed page
+  never ends a newer test. Without `id` it stops any test.
 * The states are `idle`, `starting`, `running`, `done`, `not_found`,
   `denied`, `unsupported`, `unavailable`, `in_call` and `failed`. The
   `call_device_test_changed` event tells the page to ask
