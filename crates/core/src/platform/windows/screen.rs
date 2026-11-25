@@ -3,10 +3,14 @@
 //!
 //! The core names the monitor to the worker by its GDI device name
 //! (`MONITORINFOEXW::szDevice`, such as `\\.\DISPLAY1`) and its size in
-//! pixels when the user saw it. The worker takes only the monitor with that
-//! name and size, and checks its place again before and after each copy, so
-//! monitors that change while the question is open give "not found", never
-//! another screen. This module lists monitors with the same rules as
+//! pixels when the user saw it. A device name names a display output, and
+//! Windows can give it to another output when the monitors change, so the
+//! core reads every monitor's name, rectangle and mode before the first
+//! question and again after a Share: any change voids the answer, and the
+//! share stays off. The worker takes only the monitor with that name and
+//! size, and checks its place again before and after each copy, so a change
+//! after the answer gives "not found" or ends the share, never another
+//! screen. This module lists monitors with the same rules as
 //! `crates/call-worker/src/screen/wgc.rs` (the call protocol's
 //! `MAX_SCREEN_MONITORS` and `MAX_MONITOR_SIDE`, the size of the current
 //! display mode, in display order). A monitor whose name is not printable
@@ -76,8 +80,13 @@ impl ScreenSource for MonitorScreen {
         if cancel.load(Ordering::SeqCst) {
             return Err(ScreenRefusal::Cancelled);
         }
-        let screens = monitors();
-        let target = pick(&screens, cancel, |text, several| ask(text, several, cancel))?;
+        let before = monitors();
+        let target = pick_unchanged(
+            &before.screens,
+            cancel,
+            |text, several| ask(text, several, cancel),
+            || monitors().layout == before.layout,
+        )?;
         Ok(ScreenGrant {
             target,
             remote: None,
@@ -87,12 +96,9 @@ impl ScreenSource for MonitorScreen {
     }
 }
 
-/// The text of the window for the screen at `index` of the `count` that are
-/// offered. `left_out` screens are listed but have a size that cannot be
-/// shared.
 /// The question for the monitor at `place` (from 0) among the `count`
-/// offered ones. The number the user reads counts the offered monitors; the
-/// share's target keeps the monitor's index in the worker's list.
+/// offered ones. The number the user reads counts the offered monitors.
+/// `left_out` monitors are listed but have a size that cannot be shared.
 pub fn prompt_text(place: usize, count: usize, screen: Screen, left_out: usize) -> String {
     let name = place + 1;
     let (what, buttons) = if count > 1 {
@@ -162,6 +168,26 @@ pub fn pick(
             Answer::Next => at = (at + 1) % offered.len(),
             Answer::Cancel => return Err(ScreenRefusal::Cancelled),
         }
+    }
+}
+
+/// [`pick`], then the check that the monitors are as they were before the
+/// first question (`unchanged`, read after a Share only). A device name names
+/// a display output, and Windows can give a name to another output when the
+/// monitors change, so a Share given while they changed is void: the share
+/// stays off ([`ScreenRefusal::Cancelled`]). The worker reads the monitor
+/// again when it opens it and before and after each copy.
+pub fn pick_unchanged(
+    screens: &[Screen],
+    cancel: &AtomicBool,
+    ask: impl FnMut(&str, bool) -> Answer,
+    unchanged: impl FnOnce() -> bool,
+) -> Result<ScreenTarget, ScreenRefusal> {
+    let target = pick(screens, cancel, ask)?;
+    if unchanged() {
+        Ok(target)
+    } else {
+        Err(ScreenRefusal::Cancelled)
     }
 }
 
@@ -264,8 +290,32 @@ fn ask_with_timer(
     }
 }
 
-struct Collector {
-    found: Vec<Screen>,
+/// The most monitors a [`Layout`] keeps; it counts every one.
+const MAX_SEEN: usize = 64;
+
+/// One monitor as Windows reports it: its device name (zeros after the
+/// name), its rectangle on the virtual screen, and its current display mode
+/// (0x0 when it has none).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Seen {
+    device: [u16; 32],
+    rect: (i32, i32, i32, i32),
+    mode: (u32, u32),
+}
+
+/// Every monitor as Windows reports it, also those that are not offered,
+/// for the check that nothing changed while the question was open.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct Layout {
+    count: usize,
+    seen: Vec<Seen>,
+}
+
+/// The offered list and the layout from one enumeration.
+#[derive(Default)]
+struct Monitors {
+    screens: Vec<Screen>,
+    layout: Layout,
 }
 
 unsafe extern "system" fn collect(
@@ -274,21 +324,26 @@ unsafe extern "system" fn collect(
     _rect: *mut RECT,
     data: LPARAM,
 ) -> i32 {
-    // SAFETY: `data` is the `&mut Collector` that `monitors` passed and keeps
+    // SAFETY: `data` is the `&mut Monitors` that `monitors` passed and keeps
     // alive for the whole enumeration.
-    let collector = unsafe { &mut *(data as *mut Collector) };
-    if let Some(screen) = monitor_screen(monitor)
-        && collector.found.len() < MAX_MONITORS
-        && listed(screen.width, screen.height)
-    {
-        collector.found.push(screen);
+    let found = unsafe { &mut *(data as *mut Monitors) };
+    found.layout.count += 1;
+    if let Some(seen) = read_monitor(monitor) {
+        if found.layout.seen.len() < MAX_SEEN {
+            found.layout.seen.push(seen);
+        }
+        if let Some(screen) = screen_of(&seen)
+            && found.screens.len() < MAX_MONITORS
+            && listed(screen.width, screen.height)
+        {
+            found.screens.push(screen);
+        }
     }
     1
 }
 
-/// A monitor's device name and its size in pixels: its current display
-/// mode, else its rectangle. A name that is not printable ASCII is `None`.
-fn monitor_screen(monitor: HMONITOR) -> Option<Screen> {
+/// What Windows reports for one monitor now.
+fn read_monitor(monitor: HMONITOR) -> Option<Seen> {
     // SAFETY: both structures are plain data and are zeroed before use.
     unsafe {
         let mut info: MONITORINFOEXW = std::mem::zeroed();
@@ -296,43 +351,66 @@ fn monitor_screen(monitor: HMONITOR) -> Option<Screen> {
         if GetMonitorInfoW(monitor, (&raw mut info).cast::<MONITORINFO>()) == 0 {
             return None;
         }
-        let name = MonitorName::from_wide(&info.szDevice)?;
         let mut mode: DEVMODEW = std::mem::zeroed();
         mode.dmSize = size_of::<DEVMODEW>() as u16;
-        if EnumDisplaySettingsW(info.szDevice.as_ptr(), ENUM_CURRENT_SETTINGS, &mut mode) != 0
-            && mode.dmPelsWidth > 0
-            && mode.dmPelsHeight > 0
+        let mode = if EnumDisplaySettingsW(info.szDevice.as_ptr(), ENUM_CURRENT_SETTINGS, &mut mode)
+            != 0
         {
-            return Some(Screen {
-                name,
-                width: mode.dmPelsWidth,
-                height: mode.dmPelsHeight,
-            });
-        }
+            (mode.dmPelsWidth, mode.dmPelsHeight)
+        } else {
+            (0, 0)
+        };
+        // Windows does not promise what the buffer holds after the NUL.
+        let mut device = [0; 32];
+        let end = info
+            .szDevice
+            .iter()
+            .position(|&unit| unit == 0)
+            .unwrap_or(info.szDevice.len());
+        device[..end].copy_from_slice(&info.szDevice[..end]);
         let rect = info.monitorInfo.rcMonitor;
-        let width = u32::try_from(rect.right.checked_sub(rect.left)?).ok()?;
-        let height = u32::try_from(rect.bottom.checked_sub(rect.top)?).ok()?;
-        Some(Screen {
-            name,
-            width,
-            height,
+        Some(Seen {
+            device,
+            rect: (rect.left, rect.top, rect.right, rect.bottom),
+            mode,
         })
     }
 }
 
-/// The monitors in display order.
-fn monitors() -> Vec<Screen> {
-    let mut collector = Collector { found: Vec::new() };
-    // SAFETY: the callback only uses the collector during the call.
+/// A monitor's device name and its size in pixels: its current display
+/// mode, else its rectangle. A name that is not printable ASCII is `None`.
+fn screen_of(seen: &Seen) -> Option<Screen> {
+    let name = MonitorName::from_wide(&seen.device)?;
+    let (width, height) = match seen.mode {
+        (width, height) if width > 0 && height > 0 => (width, height),
+        _ => {
+            let (left, top, right, bottom) = seen.rect;
+            (
+                u32::try_from(right.checked_sub(left)?).ok()?,
+                u32::try_from(bottom.checked_sub(top)?).ok()?,
+            )
+        }
+    };
+    Some(Screen {
+        name,
+        width,
+        height,
+    })
+}
+
+/// The monitors in display order, with the layout they were read from.
+fn monitors() -> Monitors {
+    let mut found = Monitors::default();
+    // SAFETY: the callback only uses `found` during the call.
     unsafe {
         EnumDisplayMonitors(
             null_mut(),
             std::ptr::null(),
             Some(collect),
-            (&raw mut collector) as LPARAM,
+            (&raw mut found) as LPARAM,
         );
     }
-    collector.found
+    found
 }
 
 #[cfg(test)]
@@ -487,6 +565,83 @@ mod tests {
         assert!(!listed(0, 1080));
         assert!(!listed(1920, 0));
         assert!(!listed(16_385, 1080));
+    }
+
+    /// GIVEN two screens WHEN the user shares one THEN the target is kept
+    /// only if the monitors did not change while the question was open; a
+    /// change voids the Share, and a Cancel never reads the monitors again.
+    #[test]
+    fn given_monitors_that_changed_while_asked_when_shared_then_nothing_is_shared() {
+        let cancel = AtomicBool::new(false);
+        let kept = pick_unchanged(
+            &[hd(), qhd()],
+            &cancel,
+            scripted(vec![Answer::Share]),
+            || true,
+        );
+        assert_eq!(kept, Ok(target(hd())));
+        let changed = pick_unchanged(
+            &[hd(), qhd()],
+            &cancel,
+            scripted(vec![Answer::Next, Answer::Share]),
+            || false,
+        );
+        assert_eq!(changed, Err(ScreenRefusal::Cancelled));
+        let cancelled = pick_unchanged(&[hd()], &cancel, scripted(vec![Answer::Cancel]), || {
+            panic!("the monitors were read after a cancel")
+        });
+        assert_eq!(cancelled, Err(ScreenRefusal::Cancelled));
+    }
+
+    /// GIVEN this machine's monitors, unchanged WHEN they are read twice THEN
+    /// the layouts are equal, so an unchanged desktop never voids a Share,
+    /// and each offered screen comes from a monitor in the layout.
+    #[test]
+    fn given_unchanged_monitors_when_read_twice_then_the_layouts_are_equal() {
+        let first = monitors();
+        let second = monitors();
+        assert_eq!(first.layout, second.layout);
+        assert_eq!(first.screens, second.screens);
+        assert!(first.layout.seen.len() <= first.layout.count);
+        for screen in &first.screens {
+            assert!(
+                first
+                    .layout
+                    .seen
+                    .iter()
+                    .any(|seen| screen_of(seen) == Some(*screen))
+            );
+        }
+    }
+
+    fn seen(device: &str, rect: (i32, i32, i32, i32), mode: (u32, u32)) -> Seen {
+        let mut name = [0; 32];
+        for (to, from) in name.iter_mut().zip(device.encode_utf16()) {
+            *to = from;
+        }
+        Seen {
+            device: name,
+            rect,
+            mode,
+        }
+    }
+
+    /// GIVEN what Windows reports for a monitor WHEN it becomes a screen THEN
+    /// its size is the display mode, else its rectangle; a name that is not
+    /// printable ASCII, or a reversed rectangle with no mode, is not a screen.
+    #[test]
+    fn given_a_reported_monitor_when_read_then_its_size_is_the_mode_else_the_rectangle() {
+        let first = screen(1, 2560, 1440);
+        let scaled = seen(r"\\.\DISPLAY1", (0, 0, 1280, 720), (2560, 1440));
+        assert_eq!(screen_of(&scaled), Some(first));
+        let no_mode = seen(r"\\.\DISPLAY1", (-2560, 0, 0, 1440), (0, 0));
+        assert_eq!(screen_of(&no_mode), Some(first));
+        let one_side = seen(r"\\.\DISPLAY1", (-2560, 0, 0, 1440), (2560, 0));
+        assert_eq!(screen_of(&one_side), Some(first));
+        assert_eq!(screen_of(&seen("DISPLAY 1", (0, 0, 10, 10), (0, 0))), None);
+        assert_eq!(screen_of(&seen("", (0, 0, 10, 10), (0, 0))), None);
+        let reversed = seen(r"\\.\DISPLAY1", (10, 0, 0, 10), (0, 0));
+        assert_eq!(screen_of(&reversed), None);
     }
 
     /// GIVEN a cancel timer that cannot start WHEN a question would be asked

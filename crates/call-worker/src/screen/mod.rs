@@ -64,8 +64,8 @@ pub use persephone_call_protocol::screen_capture_size_ok as capture_size_ok;
 // The Windows monitor list and the GDI capture keep their own numbers,
 // because the containment gate compiles those files without this crate.
 // They must equal the protocol's, which the core uses to name and offer a
-// monitor: a different list rule moves the indexes, a different capture
-// rule offers a monitor that the worker then refuses.
+// monitor: a different list rule or capture rule offers a monitor that
+// the worker then refuses.
 #[cfg(windows)]
 const _: () = assert!(
     wgc::MAX_MONITORS == persephone_call_protocol::MAX_SCREEN_MONITORS as usize

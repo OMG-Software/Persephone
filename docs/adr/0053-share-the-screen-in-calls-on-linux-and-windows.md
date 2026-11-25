@@ -245,6 +245,13 @@ Decision:
   name and size; none, or another size, is "not found". An index could name
   another monitor of the same size after a monitor was removed or the order
   changed while the question was open.
+* Windows documents `szDevice` only as the monitor's device name, not as
+  stable across display changes; after a change it can give a name to
+  another output. So the core reads every monitor's device name, rectangle
+  and display mode before the first question and again after a Yes. Any
+  change voids the Yes, and the share stays off (cancelled). A name can then
+  only move in the moment between that second read and the worker's open,
+  and the worker's own checks below still apply.
 * The GDI copy reads a rectangle of the whole desktop. Before and after each
   copy the worker reads the monitor's name and rectangle again
   (`GetMonitorInfoW`); a monitor that moved, changed or went away ends the
