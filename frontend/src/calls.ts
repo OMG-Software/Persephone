@@ -749,6 +749,41 @@ export const DEVICE_CHANGE_TEXT: Record<CallDeviceChange, string> = {
   failed: 'The microphone or speaker could not be changed, and the sound may have stopped. Choose a device again, or leave and rejoin the call.'
 };
 
+/** What the core's device commands answer, as text for the device menus. */
+export const DEVICE_FAILURE_TEXT: Record<string, string> = {
+  locked: 'The profile is locked.',
+  limit_exceeded: 'Persephone is busy. Try again in a moment.',
+  core_unavailable: 'The call devices could not be listed.',
+  invalid_argument: 'That device cannot be saved.'
+};
+
+/**
+ * What the device panel of the call window says about a change during a
+ * call (ADR-0065). A failure is the call status's `deviceChange` (ADR-0059).
+ * The status has no mark for a change that worked, so `null` after a save
+ * reads as switched. A speaker that is lost needs a rejoin (`failed`).
+ */
+export const DEVICE_SWITCH_TEXT: Record<CallDeviceChange, string> = {
+  not_found: 'The chosen microphone or speaker is not connected. The call keeps the one it had.',
+  unsupported: 'This system cannot switch the microphone or speaker during a call (Linux today). Your choice applies from the next call.',
+  kept: 'The chosen microphone could not be opened. The call keeps the one it had.',
+  failed: 'The microphone or speaker could not be changed, and the sound may have stopped. A lost speaker needs a rejoin: leave the call and join it again.'
+};
+export const DEVICE_SWITCHED_TEXT = 'Switched. A camera change applies the next time you turn the camera on.';
+export const DEVICE_SWITCHING_TEXT = 'Switching…';
+export const DEVICES_BUTTON_LABEL = 'Device settings';
+export const DEVICES_PANEL_LABEL = 'Call devices';
+
+/**
+ * The line under the device menus after a save: nothing before a save,
+ * "switching" while it runs, the failure the status shows, or "switched".
+ */
+export function deviceSwitchText(saved: boolean, saving: boolean, change: CallDeviceChange | null): string {
+  if (saving) return DEVICE_SWITCHING_TEXT;
+  if (!saved) return '';
+  return change === null ? DEVICE_SWITCHED_TEXT : DEVICE_SWITCH_TEXT[change];
+}
+
 /** The buttons that start each device test. */
 export const DEVICE_TEST_LABEL: Record<CallDeviceTestKind, string> = {
   microphone: 'Test microphone',

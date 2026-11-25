@@ -7,7 +7,7 @@
 </script>
 
 <script lang="ts">
-  import { onDestroy, onMount, untrack } from 'svelte';
+  import { onDestroy, onMount, tick, untrack } from 'svelte';
   import type { CallParticipantLevel, CallStatus } from '../../crates/contracts/generated/contracts';
   import {
     callCamera,
@@ -25,6 +25,7 @@
     cameraButton,
     DEAFEN_LABEL,
     DEVICE_CHANGE_TEXT,
+    DEVICES_BUTTON_LABEL,
     END_TEXT,
     IDLE_CALL,
     inCall,
@@ -49,7 +50,9 @@
     volumeText,
     volumeValue
   } from './calls';
-  import { callGrid, ROSTER_LABEL, SelfClose } from './callWindow';
+  import { callGrid, ROSTER_LABEL, SelfClose, type CallCell } from './callWindow';
+  import { AUTO_PICK, keepPick, largeKey, selectFeed, showAll, splitFeeds, type ViewPick } from './callView';
+  import CallWindowDevices from './CallWindowDevices.svelte';
   import Icon from './Icon.svelte';
   import PersonName from './PersonName.svelte';
   import { tileCanvas, tileLayout, type TileRef, type VideoPicture } from './video';
@@ -71,6 +74,10 @@
   let busy = $state(false);
   let failure = $state<string | null>(null);
   let volumeDraft = $state<number | null>(null);
+  // The viewer's pick of a large feed (ADR-0065) and the device panel.
+  let pick = $state.raw<ViewPick>(AUTO_PICK);
+  let devicesOpen = $state(false);
+  let devicesButton = $state<HTMLButtonElement | undefined>();
   // Numbers the status reads, so an older answer never replaces a newer one.
   let request = 0;
   // The window closes itself after a call it saw ends, unless it is
@@ -83,6 +90,10 @@
     if (next.phase !== 'active') {
       ownLevel = 0;
       levels = new Map();
+    }
+    if (!inCall(next)) {
+      pick = AUTO_PICK;
+      devicesOpen = false;
     }
   }
 
@@ -152,7 +163,12 @@
   const canvases: Record<number, HTMLCanvasElement | undefined> = {};
   let shapes = $state<Record<number, Shape | undefined>>({});
 
+  // The newest picture of each tile. A feed that moves between the large
+  // view, the row and the grid gets a new canvas; it shows this at once.
+  const latest: Record<number, VideoPicture | undefined> = {};
+
   function show(tile: number, picture: VideoPicture) {
+    latest[tile] = picture;
     const canvas = canvases[tile];
     const context = canvas?.getContext('2d');
     if (!canvas || !context) return;
@@ -166,6 +182,7 @@
   }
 
   function clear(tile: number) {
+    latest[tile] = undefined;
     const canvas = canvases[tile];
     canvas?.getContext('2d')?.clearRect(0, 0, canvas.width, canvas.height);
     shapes[tile] = undefined;
@@ -178,6 +195,42 @@
   });
 
   const grid = $derived(callGrid(status));
+  const keys = $derived(grid.map((cell) => cell.key));
+  const large = $derived(largeKey(pick, keys));
+  const view = $derived(splitFeeds(grid, large));
+
+  // A feed that went away drops its pick.
+  $effect(() => {
+    const kept = keepPick(pick, keys);
+    if (kept !== pick) pick = kept;
+  });
+
+  // The tile that moves loses its button, so the focus follows the feed.
+  async function choose(next: ViewPick, focusKey: string | null) {
+    pick = next;
+    await tick();
+    if (focusKey === null) return;
+    for (const node of document.querySelectorAll<HTMLButtonElement>('[data-feed]')) {
+      if (node.dataset.feed === focusKey) {
+        node.focus();
+        return;
+      }
+    }
+  }
+
+  const feedLabel = (cell: CallCell, isLarge: boolean) => (isLarge ? 'Show all' : 'Show large');
+
+  function closeDevices() {
+    devicesOpen = false;
+    void tick().then(() => devicesButton?.focus());
+  }
+
+  function onKeydown(event: KeyboardEvent) {
+    if (event.key === 'Escape' && devicesOpen) {
+      event.preventDefault();
+      closeDevices();
+    }
+  }
 
   $effect(() => {
     const next: TileRef[] = status.video.map((tile) => ({
@@ -194,7 +247,21 @@
   });
 
   // A kept cell can move to another tile, so the canvas follows its tile.
-  const canvasRef = (node: HTMLCanvasElement, tile: number) => tileCanvas(canvases, node, tile);
+  const canvasRef = (node: HTMLCanvasElement, tile: number) => {
+    const registration = tileCanvas(canvases, node, tile);
+    const repaint = (at: number) => {
+      const picture = latest[at];
+      if (picture) show(at, picture);
+    };
+    repaint(tile);
+    return {
+      update(next: number) {
+        registration.update(next);
+        repaint(next);
+      },
+      destroy: registration.destroy
+    };
+  };
 
   const joined = $derived(inCall(status));
   const camera = $derived(cameraButton(status.camera));
@@ -202,7 +269,40 @@
   const volume = $derived(volumeDraft ?? status.volume);
 </script>
 
-<svelte:window onfocus={() => selfClose.shown()} />
+{#snippet feed(cell: CallCell, isLarge: boolean)}
+  {@const shape = cell.tile === null ? undefined : shapes[cell.tile]}
+  {@const layout = shape && cell.tile !== null ? tileLayout(shape.width, shape.height, shape.rotation, cell.own) : null}
+  <div class="video-tile call-cell" class:screen={cell.screen} class:speaking={cell.speaking} class:large={isLarge} style:--ratio={layout ? String(layout.ratio) : '1.7778'}>
+    <button type="button" class="call-feed" data-feed={cell.key} aria-pressed={isLarge} title={feedLabel(cell, isLarge)} onclick={() => void choose(selectFeed(pick, cell.key, keys), cell.key)}>
+      <span class="video-frame" style:aspect-ratio={layout ? String(layout.ratio) : '16 / 9'}>
+        {#if cell.tile !== null}
+          <canvas
+            use:canvasRef={cell.tile}
+            class="video-canvas"
+            hidden={layout === null}
+            aria-hidden="true"
+            style:width={layout ? `${layout.canvasPercent}%` : undefined}
+            style:transform={layout?.transform}
+          ></canvas>
+        {/if}
+        {#if layout === null}
+          <span class="call-placeholder" aria-hidden="true"><Icon name="video-off" /></span>
+        {/if}
+      </span>
+      <span class="video-name">
+        {#if cell.own}
+          {OWN_TILE_LABEL}
+        {:else if cell.userId !== null}
+          <PersonName userId={cell.userId} />
+        {/if}
+        {#if cell.screen}<span class="note">{SCREEN_TILE_LABEL}</span>{/if}
+        {#if cell.muted}<span class="call-muted" role="img" aria-label={PARTICIPANT_MUTED_LABEL}><Icon name="mic-off" /></span>{/if}
+      </span>
+    </button>
+  </div>
+{/snippet}
+
+<svelte:window onfocus={() => selfClose.shown()} onkeydown={onKeydown} />
 
 <main class="call-window">
   <header class="call-window-head">
@@ -218,41 +318,30 @@
       <Icon name={rosterOpen ? 'chevron-right' : 'chevron-left'} />
       {rosterOpen ? `Hide ${ROSTER_LABEL.toLowerCase()}` : `Show ${ROSTER_LABEL.toLowerCase()}`}
     </button>
+    {#if joined && view.large}
+      <button type="button" class="secondary call-show-all" onclick={() => void choose(showAll(), view.large?.key ?? null)}>
+        Show all
+      </button>
+    {/if}
   </header>
 
   <div class="call-window-body">
     {#if joined}
-      <section class="call-grid" aria-label="Call video">
-        {#each grid as cell (cell.key)}
-          {@const shape = cell.tile === null ? undefined : shapes[cell.tile]}
-          {@const layout = shape && cell.tile !== null ? tileLayout(shape.width, shape.height, shape.rotation, cell.own) : null}
-          <figure class="video-tile call-cell" class:screen={cell.screen} class:speaking={cell.speaking}>
-            <div class="video-frame" style:aspect-ratio={layout ? String(layout.ratio) : '16 / 9'}>
-              {#if cell.tile !== null}
-                <canvas
-                  use:canvasRef={cell.tile}
-                  class="video-canvas"
-                  hidden={layout === null}
-                  aria-hidden="true"
-                  style:width={layout ? `${layout.canvasPercent}%` : undefined}
-                  style:transform={layout?.transform}
-                ></canvas>
-              {/if}
-              {#if layout === null}
-                <span class="call-placeholder" aria-hidden="true"><Icon name="video-off" /></span>
-              {/if}
-            </div>
-            <figcaption class="video-name">
-              {#if cell.own}
-                {OWN_TILE_LABEL}
-              {:else if cell.userId !== null}
-                <PersonName userId={cell.userId} />
-              {/if}
-              {#if cell.screen}<span class="note">{SCREEN_TILE_LABEL}</span>{/if}
-              {#if cell.muted}<span class="call-muted" role="img" aria-label={PARTICIPANT_MUTED_LABEL}><Icon name="mic-off" /></span>{/if}
-            </figcaption>
-          </figure>
-        {/each}
+      <section class="call-stage" aria-label="Call video">
+        {#if view.large}
+          <div class="call-large">{@render feed(view.large, true)}</div>
+          <div class="call-strip">
+            {#each view.rest as cell (cell.key)}
+              {@render feed(cell, false)}
+            {/each}
+          </div>
+        {:else}
+          <div class="call-grid">
+            {#each view.rest as cell (cell.key)}
+              {@render feed(cell, false)}
+            {/each}
+          </div>
+        {/if}
       </section>
     {:else}
       <section class="call-grid-empty">
@@ -310,6 +399,9 @@
   </div>
 
   {#if joined}
+    {#if devicesOpen}
+      <CallWindowDevices change={status.deviceChange} />
+    {/if}
     <footer class="call-window-controls">
       <button type="button" class="secondary" aria-pressed={status.muted} disabled={busy} onclick={() => command(() => callMute(!status.muted), 'The microphone did not change. Try again.')}>
         <Icon name={status.muted ? 'mic-off' : 'mic'} />
@@ -341,6 +433,18 @@
         />
         <output class="note">{volumeText(volume)}</output>
       </label>
+      <button
+        type="button"
+        class="secondary call-devices-button"
+        bind:this={devicesButton}
+        aria-expanded={devicesOpen}
+        aria-controls="call-window-devices"
+        aria-label={DEVICES_BUTTON_LABEL}
+        title={DEVICES_BUTTON_LABEL}
+        onclick={() => (devicesOpen ? closeDevices() : (devicesOpen = true))}
+      >
+        <Icon name="settings" />
+      </button>
       <button type="button" class="call-leave danger" disabled={busy} onclick={() => command(callLeave, 'The call could not be left. Try again.')}>Leave</button>
     </footer>
     {#if CAMERA_TEXT[status.camera] !== ''}
@@ -349,7 +453,7 @@
     {#if SCREEN_TEXT[status.screen] !== ''}
       <p class="note call-window-note" role="status">{SCREEN_TEXT[status.screen]}</p>
     {/if}
-    {#if status.deviceChange}
+    {#if status.deviceChange && !devicesOpen}
       <p class="note call-window-note" role="status">{DEVICE_CHANGE_TEXT[status.deviceChange]}</p>
     {/if}
   {/if}
