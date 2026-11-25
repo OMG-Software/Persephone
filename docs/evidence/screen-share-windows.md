@@ -263,3 +263,55 @@ Limits: one machine and one DPI scale. The timer looks every 100 ms, so a
 close can take up to about 100 ms plus the time the box needs to end; these
 runs did not show the upper end. The case where `SetTimer` fails is a unit
 test (no box opens), not a measurement.
+
+## Rerun of the capture measurement, 25 November 2026
+
+Question: does the result of the DXGI and GDI measurement above hold at the
+current branch head, on two monitors, with the desktop unlocked?
+
+A run at commit 5e98e72 on a locked desktop (`LogonUI.exe` running) was
+inconclusive: the uncontained GDI control also copied an all-black screen,
+so the container's copy could not be judged. It was not recorded here. This
+rerun replaces it.
+
+* Date and machine: 25 November 2026, 20:46 UTC. Windows 11 Pro x64, version
+  10.0.26300.9974, two 2560x1440 monitors, one interactive session. The
+  desktop was unlocked (`LogonUI.exe` not running) and in use.
+* Source: commit `605676488bd3d60a64e2144c640569c21af0893b` on branch
+  `claude/call-screen-share-all`, with no local changes before the run
+  (`git status --porcelain` empty).
+* `Cargo.lock` SHA-256:
+  `f90e3714eb4bc6476f8bbebfb7d59c8e60d4979b870ccd73dcc2b6e260346832`.
+* Tools and build: rustc 1.99.1 (58cf8f9c3 2026-10-13), cargo 1.99.1
+  (5f94df478 2026-08-27); the release build that the wrapper makes.
+* Command: `python tools/dev.py sandbox --offline`. Raw output (not
+  committed): `.local/sandbox-run-2026-11-25-6056764.txt` in that worktree.
+  Wrapper exit status: **1**, from the same existing gate failure as before
+  (`probe error: one or more sandbox assertions failed`;
+  `network_denial` is `NOT_ESTABLISHED` for `appcontainer`, `lpac` and
+  `restricted_token`, and the restricted-token worker failed to start with
+  `0xc0000142`). That failure is not part of this measurement and is not a
+  pass. `--screen-probe` printed all results below and deleted its
+  AppContainer profile.
+
+| Method | Control (no container) | AppContainer, worker's three capabilities |
+| --- | --- | --- |
+| WGC `CreateForMonitor` | captured a frame | fails, `0x80070005` (`E_ACCESSDENIED`); same with `graphicsCaptureProgrammatic`, `graphicsCapture` and both |
+| DXGI `DuplicateOutput` then `AcquireNextFrame` and CPU copy | captured a frame; mean colour `0x1b1f25` | `DuplicateOutput` fails, `0x80070005` (`E_ACCESSDENIED`) |
+| GDI `GetDC(NULL)` and `BitBlt` into a 32-bit DIB section (`CAPTUREBLT`) | captured a frame; not black, not uniform; mean colour `0x232222` | **captured a frame; not black, not uniform; mean colour `0x232222`** |
+
+Notes:
+
+* The result matches the first measurement: only GDI copies a picture in
+  the container, with no new capability and no relaxed mitigation.
+* This time the DXGI control captured a frame, because the screen changed
+  during the run. So the container's DXGI refusal at `DuplicateOutput` now
+  stands next to a control that works.
+* The probe listed both monitors but copies monitor 0 only
+  (`Choice::First`). The second monitor was not copied in the container.
+* As before, equal mean colours are consistent with a copy of the desktop,
+  but they do not prove the same picture. The pictures were not compared or
+  looked at.
+* Not measured: a copy of the second monitor in the container, other DPI
+  scales, protected content, a locked or secure desktop, and whether the
+  Persephone main window is hidden from a GDI copy (ADR-0045).
