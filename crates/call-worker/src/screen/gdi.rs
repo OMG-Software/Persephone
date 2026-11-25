@@ -279,10 +279,21 @@ impl Capture {
         admit: &mut dyn FnMut() -> bool,
         deliver: &mut wgc::Deliver<'_>,
     ) -> Result<bool, Stage> {
+        self.poll_checked(admit, deliver, &mut |capture| !capture.source_closed())
+    }
+
+    /// [`Capture::poll`] with the place check `in_place`, which runs before
+    /// and after the copy. A test can then change the place during a copy.
+    fn poll_checked(
+        &mut self,
+        admit: &mut dyn FnMut() -> bool,
+        deliver: &mut wgc::Deliver<'_>,
+        in_place: &mut dyn FnMut(&Capture) -> bool,
+    ) -> Result<bool, Stage> {
         if !admit() {
             return Ok(false);
         }
-        if self.source_closed() {
+        if !in_place(self) {
             return Err(Stage::NoMonitor);
         }
         // SAFETY: both DCs are live; the memory DC holds the DIB section.
@@ -305,7 +316,7 @@ impl Capture {
         let _ = unsafe { GdiFlush() };
         // The monitors can change while the copy runs. A copy that ends with
         // the monitor in another place may hold another screen: drop it.
-        if self.source_closed() {
+        if !in_place(self) {
             return Err(Stage::NoMonitor);
         }
         let stride = self.width as usize * 4;
@@ -420,5 +431,93 @@ mod tests {
         // Under the pixel limit, but wider than any frame the worker sends.
         assert!(!size_ok(8000, 1000));
         assert!(!size_ok(MAX_SIDE + 1, 2));
+    }
+
+    /// A device name as the place records it: the name, then zeros.
+    fn recorded_name(raw: &[u16]) -> [u16; wgc::DEVICE_NAME_UNITS] {
+        let mut name = [0; wgc::DEVICE_NAME_UNITS];
+        let units = device_name(raw);
+        name[..units.len()].copy_from_slice(units);
+        name
+    }
+
+    /// GIVEN a capture of a real monitor, opened by its device name WHEN it is
+    /// polled while the monitor stays in its place THEN each poll delivers
+    /// one frame of the monitor's size. WHEN the monitor is not where the
+    /// capture recorded it (moved, or another monitor's name) THEN the poll
+    /// ends with `NoMonitor` before the copy; WHEN it changes during the copy
+    /// THEN the copy is dropped. Neither delivers a frame, and a monitor back
+    /// in its place delivers again.
+    ///
+    /// The changes are made to the recorded place, not to the real display
+    /// layout. Ignored: it copies the real screen (into memory only). Run it
+    /// on Windows after a change to `poll` or the place checks:
+    /// `cargo test -p persephone-call-worker -- --ignored real_monitor`.
+    #[test]
+    #[ignore = "copies the real screen"]
+    fn given_a_real_monitor_when_its_place_changes_then_no_frame_is_delivered() {
+        let list = wgc::monitors();
+        let monitor = list
+            .iter()
+            .find(|monitor| size_ok(monitor.width, monitor.height))
+            .expect("a monitor the capture takes");
+        let device = device_name(&monitor.device).to_vec();
+        let mut capture = open(Choice::Named {
+            device: &device,
+            width: monitor.width,
+            height: monitor.height,
+        })
+        .expect("the named monitor opens");
+        let frames = std::cell::RefCell::new(Vec::new());
+        let mut deliver = |width: u32, height: u32, stride: u32, bytes: &[u8]| {
+            frames
+                .borrow_mut()
+                .push((width, height, stride, bytes.len()));
+        };
+        let mut admit = || true;
+        for _ in 0..3 {
+            assert_eq!(capture.poll(&mut admit, &mut deliver), Ok(true));
+        }
+        let (width, height) = (monitor.width, monitor.height);
+        let frame = (width, height, width * 4, (width * 4 * height) as usize);
+        assert_eq!(*frames.borrow(), vec![frame; 3]);
+
+        let recorded = capture.place;
+        // The monitor moved: its rectangle is not the recorded one.
+        capture.place.rect.0 += 1;
+        assert_eq!(
+            capture.poll(&mut admit, &mut deliver),
+            Err(Stage::NoMonitor)
+        );
+        // Another monitor's name at this handle (or, with one monitor, a
+        // name that no monitor has).
+        capture.place = recorded;
+        capture.place.device = match list
+            .iter()
+            .find(|other| device_name(&other.device) != device.as_slice())
+        {
+            Some(other) => recorded_name(&other.device),
+            None => recorded_name(&wide(r"\\.\PERSEPHONE-NO-SUCH-DISPLAY")),
+        };
+        assert_eq!(
+            capture.poll(&mut admit, &mut deliver),
+            Err(Stage::NoMonitor)
+        );
+        // In place before the copy, moved after it: the copy is dropped.
+        capture.place = recorded;
+        let mut checks = 0;
+        let mut moved_during_copy = |capture: &Capture| {
+            checks += 1;
+            checks == 1 && !capture.source_closed()
+        };
+        assert_eq!(
+            capture.poll_checked(&mut admit, &mut deliver, &mut moved_during_copy),
+            Err(Stage::NoMonitor)
+        );
+        assert_eq!(checks, 2, "both checks ran, so the copy ran between them");
+        assert_eq!(frames.borrow().len(), 3, "no frame from a changed place");
+        // Back in its place: frames come again.
+        assert_eq!(capture.poll(&mut admit, &mut deliver), Ok(true));
+        assert_eq!(frames.borrow().len(), 4);
     }
 }

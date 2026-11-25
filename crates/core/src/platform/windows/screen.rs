@@ -36,7 +36,8 @@ use windows_sys::Win32::Graphics::Gdi::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     IDNO, IDYES, KillTimer, MB_DEFBUTTON2, MB_ICONWARNING, MB_SETFOREGROUND, MB_TOPMOST, MB_YESNO,
-    MB_YESNOCANCEL, MSG, MessageBoxW, PM_REMOVE, PeekMessageW, PostQuitMessage, SetTimer, WM_QUIT,
+    MB_YESNOCANCEL, MESSAGEBOX_RESULT, MSG, MessageBoxW, PM_REMOVE, PeekMessageW, PostQuitMessage,
+    SetTimer, WM_QUIT,
 };
 
 use crate::calls::screen::{ScreenGrant, ScreenRefusal, ScreenSource};
@@ -205,26 +206,46 @@ fn ask(text: &str, several: bool, cancel: &Arc<AtomicBool>) -> Answer {
     let text = wide(text);
     let caption = wide("Persephone: share your screen");
     let kind = if several { MB_YESNOCANCEL } else { MB_YESNO };
+    ask_with_timer(
+        cancel,
+        several,
+        // SAFETY: a thread timer with no window; `watch_cancel` matches the
+        // TIMERPROC signature.
+        || unsafe { SetTimer(null_mut(), 0, CANCEL_CHECK_MS, Some(watch_cancel)) },
+        // SAFETY: both strings are NUL-terminated and live for the call; the
+        // box has no owner window.
+        || unsafe {
+            MessageBoxW(
+                null_mut(),
+                text.as_ptr(),
+                caption.as_ptr(),
+                kind | MB_DEFBUTTON2 | MB_ICONWARNING | MB_SETFOREGROUND | MB_TOPMOST,
+            )
+        },
+    )
+}
+
+/// Shows one question only while its cancel timer runs. `start_timer` makes
+/// the thread timer and returns its ID (0 when it failed); `show` opens the
+/// box and returns the button. Without a timer, the end of the call could
+/// not close the box, so no box opens and the answer is [`Answer::Cancel`]:
+/// the share stays off.
+fn ask_with_timer(
+    cancel: &Arc<AtomicBool>,
+    several: bool,
+    start_timer: impl FnOnce() -> usize,
+    show: impl FnOnce() -> MESSAGEBOX_RESULT,
+) -> Answer {
     OPEN_QUESTION.with(|open| *open.borrow_mut() = Some(cancel.clone()));
     QUIT_POSTED.set(false);
-    // SAFETY: a thread timer with no window; `watch_cancel` matches the
-    // TIMERPROC signature. A failed timer (0) leaves the box open until the
-    // user answers, and the answer is then dropped by the caller.
-    let timer = unsafe { SetTimer(null_mut(), 0, CANCEL_CHECK_MS, Some(watch_cancel)) };
-    // SAFETY: both strings are NUL-terminated and live for the call; the box
-    // has no owner window.
-    let answer = unsafe {
-        MessageBoxW(
-            null_mut(),
-            text.as_ptr(),
-            caption.as_ptr(),
-            kind | MB_DEFBUTTON2 | MB_ICONWARNING | MB_SETFOREGROUND | MB_TOPMOST,
-        )
-    };
-    if timer != 0 {
-        // SAFETY: the thread timer made above, on this thread.
-        unsafe { KillTimer(null_mut(), timer) };
+    let timer = start_timer();
+    if timer == 0 {
+        OPEN_QUESTION.with(|open| open.borrow_mut().take());
+        return Answer::Cancel;
     }
+    let answer = show();
+    // SAFETY: the thread timer made above, on this thread.
+    unsafe { KillTimer(null_mut(), timer) };
     OPEN_QUESTION.with(|open| open.borrow_mut().take());
     if QUIT_POSTED.replace(false) {
         // The box's loop posts the quit message again when it ends; take it
@@ -466,6 +487,23 @@ mod tests {
         assert!(!listed(0, 1080));
         assert!(!listed(1920, 0));
         assert!(!listed(16_385, 1080));
+    }
+
+    /// GIVEN a cancel timer that cannot start WHEN a question would be asked
+    /// THEN no box opens and the answer is a cancel, so the share stays off,
+    /// and no open question is left recorded on the thread.
+    #[test]
+    fn given_no_cancel_timer_when_asked_then_no_box_opens_and_it_cancels() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let answer = ask_with_timer(
+            &cancel,
+            true,
+            || 0,
+            || panic!("a box opened without a cancel timer"),
+        );
+        assert_eq!(answer, Answer::Cancel);
+        assert!(OPEN_QUESTION.with(|open| open.borrow().is_none()));
+        assert!(!QUIT_POSTED.get());
     }
 
     /// GIVEN an open question WHEN the call ends THEN the box closes within

@@ -234,7 +234,9 @@ Decision:
   "Starting and stopping" section says. When the call ends while a box is
   open, a thread timer on the asking thread ends the box's loop within about
   100 ms (a quit message, the way Windows documents to time out a message
-  box), and the pick is cancelled.
+  box), and the pick is cancelled. When that timer cannot start, no box
+  opens and the pick is cancelled: a box that the end of the call cannot
+  close is never shown.
 * The target is no longer the index in display order. It is
   `ScreenTarget::Monitor { name, width, height }`: the monitor's GDI device
   name (`MONITORINFOEXW::szDevice`, such as `\\.\DISPLAY1`, printable ASCII,
