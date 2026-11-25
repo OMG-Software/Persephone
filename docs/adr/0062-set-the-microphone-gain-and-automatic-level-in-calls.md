@@ -131,8 +131,8 @@ control and the gain follow the requests while the track is sent.
 ### Order
 
 * At the join, the worker sets the gain before the first sound is captured,
-  and turns the automatic level off after the publish when the user chose
-  off (a new track starts with it on).
+  and sets the automatic level on the track right after the publish (a new
+  track starts with it on, so this changes only a choice of off).
 * The worker sets both again after each device change (`SetDevices`), because
   a change may reconfigure the capture path.
 * A gain that is set later changes the APM configuration only. A later
@@ -158,6 +158,22 @@ control and the gain follow the requests while the track is sent.
   them. The core sends the saved values in `Join`, and sends each change to a
   running call through a watch channel that keeps only the newest value, so
   a slider never fills the command queue.
+
+### Verification on 25 November 2026
+
+Windows 11, debug build, run from the worktree of this change:
+
+* `cargo test -p persephone-call-worker` passed, with the lifecycle workload
+  for the gain and automatic gain control.
+* The ignored loopback test passed with a real microphone track: with the
+  track sent, echo cancellation, noise suppression and automatic gain
+  control were reported running; `set_auto_gain_control(false)` and `(true)`
+  turned automatic gain control off and on, and the report followed each
+  call; a gain of 250 percent was reported by the module and stayed after a
+  later automatic level change; capture ran with no playout (3.84 seconds of
+  samples and 192 packets in 3.84 seconds).
+* Not run: a call with another client, listening by ear, the own level meter
+  with a changed gain, and any run on Linux or macOS.
 
 ### Diagnostic notes
 
