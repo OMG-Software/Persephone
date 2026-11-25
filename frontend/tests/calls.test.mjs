@@ -21,6 +21,7 @@ import {
   callReasonNote,
   keptReasonRoom,
   STARTING_TEXT,
+  NOT_PERMITTED_TEXT,
   cameraButton,
   screenButton,
   SCREEN_TEXT,
@@ -65,8 +66,8 @@ const ready = (over) => ({ available: true, reason: null, activeMembers: 0, ...o
 test('GIVEN every call code in the contract WHEN its text is read THEN each is plain, non-empty text, except a normal leave', () => {
   const codes = {
     unavailable: ['unsupported_platform', 'not_joined', 'not_encrypted', 'not_permitted', 'no_call_server', 'call_server_unsupported', 'server_unreachable'],
-    join: ['already_in_call', 'not_joined', 'not_encrypted', 'no_call_server', 'call_server_unsupported', 'declined', 'unsupported_platform', 'containment', 'no_worker', 'no_delayed_events', 'membership', 'call_server', 'keys', 'proxy_unreadable', 'device_setting_unreadable'],
-    end: ['connection_failed', 'audio_device', 'device_not_found', 'containment', 'worker_stopped', 'worker_crashed', 'membership_lost', 'keys_unavailable', 'session_ended', 'internal']
+    join: ['already_in_call', 'not_joined', 'not_encrypted', 'no_call_server', 'call_server_unsupported', 'declined', 'unsupported_platform', 'containment', 'no_worker', 'no_delayed_events', 'membership', 'not_permitted', 'call_server', 'keys', 'proxy_unreadable', 'device_setting_unreadable'],
+    end: ['connection_failed', 'audio_device', 'device_not_found', 'containment', 'worker_stopped', 'worker_crashed', 'membership_lost', 'keys_unavailable', 'alone', 'session_ended', 'internal']
   };
   for (const [table, list] of [[UNAVAILABLE_TEXT, codes.unavailable], [JOIN_ERROR_TEXT, codes.join], [END_TEXT, codes.end]]) {
     assert.deepEqual(Object.keys(table).filter((key) => key !== 'left').sort(), [...list].sort());
@@ -87,6 +88,31 @@ test('GIVEN an unavailable room WHEN the button is built THEN it is disabled wit
   assert.equal(view.disabled, true);
   assert.equal(view.reason, 'Calls need an encrypted room.');
   assert.equal(view.label, 'Join call (2)');
+});
+
+test('GIVEN a member who may not join calls WHEN the join buttons are built THEN both look disabled and give the same permission text', () => {
+  const blocked = ready({ available: false, reason: 'not_permitted', activeMembers: 2 });
+  for (const view of [callButton('!r:s', blocked, IDLE_CALL, false), videoCallButton('!r:s', blocked, IDLE_CALL, false)]) {
+    assert.deepEqual([view.hidden, view.disabled, view.reason], [false, true, NOT_PERMITTED_TEXT]);
+  }
+  assert.equal(callButton('!r:s', blocked, IDLE_CALL, false).label, 'Join call (2)');
+  assert.equal(
+    NOT_PERMITTED_TEXT,
+    'You do not have permission to join calls in this room. A room moderator can allow it in Room settings, Permissions, Join calls.'
+  );
+  // The same text for a refused join, so a ring's Join says the same.
+  assert.equal(JOIN_ERROR_TEXT.not_permitted, NOT_PERMITTED_TEXT);
+  assert.equal(UNAVAILABLE_TEXT.not_permitted, NOT_PERMITTED_TEXT);
+});
+
+test('GIVEN a click on a join button of a room that does not allow it WHEN the note is built THEN it shows the permission text, and goes when the room allows it', () => {
+  const blocked = callButton('!r:s', ready({ available: false, reason: 'not_permitted' }), IDLE_CALL, false);
+  assert.equal(callReasonNote('!r:s', '!r:s', blocked), NOT_PERMITTED_TEXT);
+  assert.equal(callReasonNote('!r:s', '!r:s', callButton('!r:s', ready(), IDLE_CALL, false)), null);
+});
+
+test('GIVEN a call that ended for being alone WHEN its text is read THEN it names the 30 seconds', () => {
+  assert.equal(END_TEXT.alone, 'You were the only person in the call for 30 seconds, so the call ended.');
 });
 
 test('GIVEN readiness not yet known WHEN the button is built THEN it is disabled without a reason', () => {

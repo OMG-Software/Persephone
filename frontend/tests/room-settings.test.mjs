@@ -74,7 +74,9 @@ test('GIVEN every level key WHEN shown THEN each has a label and appears in exac
   const grouped = levelGroups.flatMap((group) => group.keys);
   assert.equal(new Set(grouped).size, grouped.length);
   assert.deepEqual([...grouped].sort(), Object.keys(levelLabels).sort());
-  assert.equal(grouped.length, 20);
+  assert.equal(grouped.length, 21);
+  assert.ok(levelGroups.find((group) => group.title === 'Calls')?.keys.includes('join_calls'));
+  assert.equal(levelLabels.join_calls, 'Join calls');
 });
 
 test('GIVEN the settings WHEN addresses are listed THEN each appears once, the main one first', () => {
