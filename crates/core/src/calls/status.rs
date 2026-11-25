@@ -40,6 +40,7 @@ pub fn end_code(reason: EndReason) -> CallEnd {
         EndReason::WorkerCrashed => CallEnd::WorkerCrashed,
         EndReason::MembershipLost => CallEnd::MembershipLost,
         EndReason::KeysUnavailable => CallEnd::KeysUnavailable,
+        EndReason::Alone => CallEnd::Alone,
         EndReason::SessionEnded => CallEnd::SessionEnded,
         EndReason::Internal => CallEnd::Internal,
     }
@@ -64,6 +65,7 @@ pub fn join_error(error: CallError) -> Option<CallJoinError> {
         CallError::Worker(StartError::NoExe | StartError::Launch) => CallJoinError::NoWorker,
         CallError::NoDelayedEvents => CallJoinError::NoDelayedEvents,
         CallError::Membership => CallJoinError::Membership,
+        CallError::NotPermitted => CallJoinError::NotPermitted,
         CallError::OpenId | CallError::Sfu(_) => CallJoinError::CallServer,
         CallError::Keys => CallJoinError::Keys,
         CallError::NotInCall
@@ -398,6 +400,7 @@ mod tests {
             (EndReason::WorkerStopped, CallEnd::WorkerStopped),
             (EndReason::MembershipLost, CallEnd::MembershipLost),
             (EndReason::KeysUnavailable, CallEnd::KeysUnavailable),
+            (EndReason::Alone, CallEnd::Alone),
             (EndReason::SessionEnded, CallEnd::SessionEnded),
             (EndReason::Internal, CallEnd::Internal),
         ] {
@@ -448,6 +451,7 @@ mod tests {
             ),
             (CallError::NoDelayedEvents, CallJoinError::NoDelayedEvents),
             (CallError::Membership, CallJoinError::Membership),
+            (CallError::NotPermitted, CallJoinError::NotPermitted),
             (CallError::OpenId, CallJoinError::CallServer),
             (sfu, CallJoinError::CallServer),
             (CallError::Keys, CallJoinError::Keys),

@@ -35,6 +35,7 @@
 //! * A refusal from the homeserver is `rejected`; no answer is `unavailable`.
 //!   Nothing is retried.
 
+use crate::calls::membership::EVENT_TYPE;
 use crate::views::{MAX_PAGE_BYTES, project_body, project_name};
 use matrix_sdk::{
     Client, EncryptionState, Room, RoomMemberships, RoomState,
@@ -335,6 +336,7 @@ fn state_type(key: LevelKey) -> Option<StateEventType> {
         LevelKey::ServerAcl => StateEventType::RoomServerAcl,
         LevelKey::Tombstone => StateEventType::RoomTombstone,
         LevelKey::PinnedEvents => StateEventType::RoomPinnedEvents,
+        LevelKey::JoinCalls => StateEventType::from(EVENT_TYPE),
         LevelKey::UsersDefault
         | LevelKey::EventsDefault
         | LevelKey::StateDefault
@@ -1336,6 +1338,31 @@ mod tests {
             set_level(&mut levels, key, Int::new(33).unwrap());
             assert_eq!(level_of(&levels, key), Int::new(33).unwrap(), "{key:?}");
         }
+    }
+
+    /// GIVEN default power levels WHEN the level for joining calls is read
+    /// and set THEN it is the call membership's own entry, which the call
+    /// check uses: a member can join at 0 and not at the state default.
+    #[test]
+    fn given_the_join_calls_level_then_it_is_the_call_membership_entry() {
+        use crate::calls::status::can_send_member_state;
+        let alice = UserId::parse("@alice:s").unwrap();
+        let mut levels = defaults();
+        // No entry of its own: the state default, as for the other keys.
+        assert_eq!(level_of(&levels, LevelKey::JoinCalls), levels.state_default);
+        assert!(!can_send_member_state(&levels, &alice));
+        assert_eq!(
+            state_type(LevelKey::JoinCalls),
+            Some(StateEventType::from("org.matrix.msc3401.call.member"))
+        );
+        set_level(&mut levels, LevelKey::JoinCalls, Int::new(0).unwrap());
+        assert_eq!(level_of(&levels, LevelKey::JoinCalls), Int::new(0).unwrap());
+        assert!(can_send_member_state(&levels, &alice));
+        // Other keys keep their levels.
+        assert_eq!(level_of(&levels, LevelKey::Topic), defaults().state_default);
+        // A level above a member's own shuts that member out again.
+        set_level(&mut levels, LevelKey::JoinCalls, Int::new(51).unwrap());
+        assert!(!can_send_member_state(&levels, &alice));
     }
 
     fn member(user_id: &str, membership: Membership, level: Option<i64>, own: bool) -> RoomMember {

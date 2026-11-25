@@ -128,9 +128,9 @@ export type CallDeviceTestStatus = {
  */
 id: number, test: CallDeviceTestKind | null, state: CallDeviceTestState, stream: number, };
 
-export type CallEnd = "left" | "connection_failed" | "audio_device" | "containment" | "worker_stopped" | "worker_crashed" | "membership_lost" | "keys_unavailable" | "session_ended" | "internal" | "device_not_found";
+export type CallEnd = "left" | "connection_failed" | "audio_device" | "containment" | "worker_stopped" | "worker_crashed" | "membership_lost" | "keys_unavailable" | "session_ended" | "internal" | "device_not_found" | "alone";
 
-export type CallJoinError = "already_in_call" | "not_joined" | "not_encrypted" | "no_call_server" | "call_server_unsupported" | "declined" | "unsupported_platform" | "containment" | "no_worker" | "no_delayed_events" | "membership" | "call_server" | "keys" | "proxy_unreadable" | "device_setting_unreadable";
+export type CallJoinError = "already_in_call" | "not_joined" | "not_encrypted" | "no_call_server" | "call_server_unsupported" | "declined" | "unsupported_platform" | "containment" | "no_worker" | "no_delayed_events" | "membership" | "not_permitted" | "call_server" | "keys" | "proxy_unreadable" | "device_setting_unreadable";
 
 export type CallCamera = "off" | "starting" | "on" | "not_found" | "unavailable";
 
@@ -342,7 +342,7 @@ export type HistoryVisibility = "invited" | "joined" | "shared" | "world_readabl
 
 export type RoomNotifications = "default" | "all" | "mentions" | "mute";
 
-export type LevelKey = "users_default" | "events_default" | "state_default" | "invite" | "kick" | "ban" | "redact" | "notify_room" | "name" | "topic" | "avatar" | "canonical_alias" | "join_rules" | "history_visibility" | "guest_access" | "encryption" | "power_levels" | "server_acl" | "tombstone" | "pinned_events";
+export type LevelKey = "users_default" | "events_default" | "state_default" | "invite" | "kick" | "ban" | "redact" | "notify_room" | "name" | "topic" | "avatar" | "canonical_alias" | "join_rules" | "history_visibility" | "guest_access" | "encryption" | "power_levels" | "server_acl" | "tombstone" | "pinned_events" | "join_calls";
 
 export type RoomLevel = { key: LevelKey, level: number, };
 
