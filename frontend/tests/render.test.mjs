@@ -277,6 +277,13 @@ test('GIVEN a call window that opens WHEN the call bar renders THEN it shows the
   const { body: opening } = render(CallBar, { props: { ...props, status, opening: true } });
   assert.match(opening, /class="secondary call-window-open"[^>]*disabled[^>]*>[\s\S]*?Opening the call window…/);
   assert.match(opening, /class="secondary call-leave"/);
+  // The full bar, from which a failed open is retried, does the same.
+  const { body: retrying } = render(CallBar, { props: { ...props, status, full: true, opening: true } });
+  assert.match(retrying, /class="secondary call-mute"/);
+  assert.match(retrying, /class="secondary call-window-open"[^>]*disabled[^>]*>[\s\S]*?Opening the call window…/);
+  const { body: retry } = render(CallBar, { props: { ...props, status, full: true } });
+  assert.match(retry, /class="secondary call-mute"/);
+  assert.doesNotMatch(retry, /call-window-open"[^>]*disabled|Opening the call window/);
   // An ended call still says why, and can be dismissed.
   const { body: ended } = render(CallBar, { props: { ...props, status: { ...status, phase: 'ended', ended: 'internal' } } });
   assert.match(ended, /call-dismiss/);
