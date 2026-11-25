@@ -36,10 +36,11 @@
   // announced: each participant's mark is read in place only.
   //
   // The call window holds the call's controls (ADR-0060). While it can open,
-  // the bar shows only the room, the phase, a "Call window" button and the
-  // "Declined" note, which the call window does not show. When it could not
-  // open (`full`), the bar shows every control, so the call can still be
-  // muted or left here.
+  // the bar shows only the room, the phase, a "Call window" button, the
+  // "Declined" note, which the call window does not show, and the device
+  // change note, which must be seen while the call window is closed. When it
+  // could not open (`full`), the bar shows every control, so the call can
+  // still be muted or left here.
   let {
     status,
     dismissed,
@@ -98,6 +99,13 @@
   const screenText = $derived(SCREEN_TEXT[status.screen]);
 </script>
 
+{#snippet callWindowButton()}
+  <button type="button" class="secondary call-window-open" onclick={onwindow}>
+    <Icon name="video" />
+    Call window
+  </button>
+{/snippet}
+
 <div class="visually-hidden" aria-live="polite" aria-atomic="true">
   {callAnnouncement(status, dismissed)}
 </div>
@@ -111,10 +119,7 @@
         {#if ended}
           <button type="button" class="secondary call-dismiss" onclick={ondismiss}>Dismiss</button>
         {:else if !full}
-          <button type="button" class="secondary call-window-open" onclick={onwindow}>
-            <Icon name="video" />
-            Call window
-          </button>
+          {@render callWindowButton()}
         {:else}
           <button
             type="button"
@@ -157,10 +162,7 @@
             <Icon name="screen" />
             {screen.label}
           </button>
-          <button type="button" class="secondary call-window-open" onclick={onwindow}>
-            <Icon name="video" />
-            Call window
-          </button>
+          {@render callWindowButton()}
           <button type="button" class="secondary call-leave" onclick={onleave}>Leave</button>
         {/if}
       </span>
@@ -205,7 +207,7 @@
     {#if !ended && full && screenText !== ''}
       <p class="call-screen-note note" role="status">{screenText}</p>
     {/if}
-    {#if !ended && full && status.deviceChange}
+    {#if !ended && status.deviceChange}
       <p class="call-device-note note" role="status">{DEVICE_CHANGE_TEXT[status.deviceChange]}</p>
     {/if}
     {#if ended}

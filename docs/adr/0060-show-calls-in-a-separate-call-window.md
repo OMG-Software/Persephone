@@ -24,9 +24,8 @@ than a call needs?
 * Keep the web view keyless (ADR-0004), with explicit commands per window.
 * Keep the main window's navigation, new-window and capture rules for the
   new window.
-* Keep a call bar in the main window, so the call window can be opened again
-  when it is closed, and the call can be controlled when the call window
-  cannot open.
+* Keep the call bar in the main window, so the call can be controlled when
+  the call window is closed.
 
 ## Considered Options
 
@@ -57,12 +56,15 @@ commands.
   volume, level meter and participants in the call window only. While the
   call window opens, the main window's call bar shows only the phone icon,
   the room, the phase, the "Call window" button and, after a declined ring
-  (ADR-0052), the "Declined" note, which the call window does not show.
-  When the call window cannot open for the call, the call bar shows all of
-  its controls and the main window shows the video tiles under it, so the
-  call can still be muted or left. A later open that
-  works makes the bar short again. An ended call still shows its reason and
-  "Dismiss".
+  (ADR-0052), the "Declined" note, which the call window does not show. It
+  also shows the device change note, so a failed microphone or speaker is
+  seen while the call window is closed. When the call window cannot open for
+  the call, the call bar shows all of its controls and the main window shows
+  the video tiles under it, so the call can still be muted or left. A later
+  open that works makes the bar short again. An ended call still shows its
+  reason and "Dismiss". This replaces the driver above for an open call
+  window: the bar keeps the controls only when the call window cannot open,
+  and its "Call window" button reopens a closed call window.
 * The host keeps each window's session, sound level and level channels under
   the window's label. Room subscriptions belong to the main window only. A
   call window that closes or reloads drops only its own channels.

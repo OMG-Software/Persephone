@@ -260,7 +260,12 @@ test('GIVEN a call window that opens WHEN the call bar renders THEN it shows the
   assert.match(short, /class="secondary call-window-open"/);
   assert.match(short, />Declined</);
   assert.doesNotMatch(short, /call-mute|call-deafen|call-camera|call-screen|call-leave|type="range"|role="meter"|call-people|@a:s/);
-  assert.doesNotMatch(short, /not connected|You are sharing/);
+  assert.doesNotMatch(short, /not connected|You are sharing|call-device-note/);
+  // A device change still shows: the call window may be closed.
+  const { body: changed } = render(CallBar, { props: { ...props, status: { ...status, deviceChange: 'failed' } } });
+  assert.match(changed, /class="call-device-note note"/);
+  assert.match(changed, /rejoin/);
+  assert.doesNotMatch(changed, /call-leave/);
   // An ended call still says why, and can be dismissed.
   const { body: ended } = render(CallBar, { props: { ...props, status: { ...status, phase: 'ended', ended: 'internal' } } });
   assert.match(ended, /call-dismiss/);

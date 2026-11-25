@@ -1762,7 +1762,10 @@ async fn call_device_test_status(
 async fn open_call_window<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
     if let Some(window) = app.get_webview_window(CALL_WINDOW) {
         let _ = window.unminimize();
-        window.show().map_err(|_| UNAVAILABLE.to_string())?;
+        window.show().map_err(|error| {
+            eprintln!("persephone-ui: cannot show the call window: {error}");
+            UNAVAILABLE.to_string()
+        })?;
         let _ = window.set_focus();
         return Ok(());
     }
