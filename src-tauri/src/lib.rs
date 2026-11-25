@@ -464,9 +464,11 @@ impl Subscriptions {
         self.stats().remove(label).is_some()
     }
 
-    /// The count of the page that the window `label` shows now.
-    fn page(&self, label: &str) -> u64 {
-        self.pages().get(label).copied().unwrap_or(0)
+    /// The count of the page that the window `label` shows now. `None` when
+    /// no page of the window was counted: counts start at 1, so no request
+    /// can match it.
+    fn page(&self, label: &str) -> Option<u64> {
+        self.pages().get(label).copied()
     }
 
     /// Counts a new page for the window `label` and drops its statistics
@@ -484,7 +486,7 @@ impl Subscriptions {
     /// cannot come between them.
     fn keep_stats(&self, label: String, page: u64, channel: Channel<CallStats>) -> bool {
         let pages = self.pages();
-        if pages.get(&label).copied().unwrap_or(0) != page {
+        if pages.get(&label).copied() != Some(page) {
             return false;
         }
         self.stats().insert(
@@ -505,7 +507,7 @@ impl Subscriptions {
     /// come between them and give the new page's channel the old page's read.
     fn stats_read(&self, label: &str, page: u64) -> bool {
         let pages = self.pages();
-        if pages.get(label).copied().unwrap_or(0) != page {
+        if pages.get(label).copied() != Some(page) {
             return false;
         }
         if let Some(entry) = self.stats().get_mut(label) {
@@ -740,7 +742,7 @@ async fn call_stats<R: Runtime>(
 ) -> Result<(), String> {
     let label = webview.label().to_owned();
     let _order = subscriptions.stats_order.lock().await;
-    if subscriptions.page(&label) != page {
+    if subscriptions.page(&label) != Some(page) {
         return Err(INVALID_ARGUMENT.to_owned());
     }
     if !on {

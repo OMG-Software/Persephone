@@ -351,3 +351,22 @@ test('GIVEN the technical details panel WHEN it renders before a reading THEN it
   assert.match(body, /Waiting for the first reading\./);
   assert.doesNotMatch(body, /<table/);
 });
+
+test('GIVEN statistics tables WHEN their captions render THEN a device shows its user ID and its own isolated device ID, a hostile device ID stays inert, and a part of the call shows its title', async () => {
+  const { default: CallStatsCaption } = await vite.ssrLoadModule('/src/CallStatsCaption.svelte');
+  const section = (more) => ({ key: 'k', title: '', userId: null, deviceId: null, rows: [], ...more });
+  const caption = (more) => render(CallStatsCaption, { props: { section: section(more) } }).body;
+
+  const device = caption({ userId: '@bob:s', deviceId: 'PHONE' });
+  assert.match(device, /<bdi>@bob:s<\/bdi>/);
+  assert.match(device, /class="call-stats-device">\(<span class="visually-hidden">device <\/span><bdi>PHONE<\/bdi>\)<\/span>/);
+
+  // A right-to-left override in a device ID stays inside its own isolate.
+  const hostile = caption({ userId: '@eve:s', deviceId: '‮<img src=x onerror=alert(1)>' });
+  assert.match(hostile, /<bdi>‮&lt;img src=x onerror=alert\(1\)>?(&gt;)?<\/bdi>\)<\/span>/);
+  assert.doesNotMatch(hostile, /<img/);
+
+  const own = caption({ title: 'Your microphone' });
+  assert.match(own, /Your microphone/);
+  assert.doesNotMatch(own, /<bdi>|call-stats-device/);
+});

@@ -1393,6 +1393,14 @@ fn given_call_statistics_then_only_the_call_window_may_open_them_and_only_while_
     }
     assert!(switches().is_empty());
 
+    // Before its page is counted, the window has no count: page 0, which
+    // the map's default would give, is not one, so a start, a stop and a
+    // read are all refused and nothing reaches the core.
+    assert!(invoke_on(&call, "call_stats", app_origin(), stats_on(true, 0)).is_err());
+    assert!(invoke_on(&call, "call_stats", app_origin(), stats_on(false, 0)).is_err());
+    assert!(read(0).is_err());
+    assert!(switches().is_empty());
+
     let page = new_page();
 
     // A start that the core refuses keeps no channel.

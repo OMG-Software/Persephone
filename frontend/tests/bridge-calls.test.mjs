@@ -566,7 +566,7 @@ test('GIVEN a stale page count WHEN the host refuses the read of a reading THEN 
 });
 
 test('GIVEN no usable page count from the host WHEN the technical details are turned on THEN the start fails and asks nothing, and a stop asks nothing', async () => {
-  for (const reply of [null, -1, 1.5, '3', Number.MAX_SAFE_INTEGER + 2]) {
+  for (const reply of [null, 0, -1, 1.5, '3', Number.MAX_SAFE_INTEGER + 2]) {
     await watchAs(reply);
     const asked = [];
     mockIPC((command) => {

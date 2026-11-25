@@ -4579,12 +4579,28 @@ mod timeline_events_wire_tests {
                 reading(microphone, participants, connections)
             ))
         };
-        assert!(read(&with("[1,null,null,null]", "[]", "[]")).is_err());
-        assert!(read(&with("null", "[]", "[[0,null,null,null,null]]")).is_err());
+        // Each array is a complete record that the derived reader of the
+        // contract type takes, so only the map-only reader refuses it here.
+        let microphone = "[1,null,0,null,null,null]";
+        let heard = "[1,null,0,0,0,null]";
+        let connection = "[0,null,null,null,null]";
+        assert!(
+            serde_json::from_str::<persephone_contracts::CallStatsAudioSent>(microphone).is_ok()
+        );
+        assert!(
+            serde_json::from_str::<persephone_contracts::CallStatsAudioReceived>(heard).is_ok()
+        );
+        assert!(
+            serde_json::from_str::<persephone_contracts::CallStatsConnection>(connection).is_ok()
+        );
+        assert!(read(&with(microphone, "[]", "[]")).is_err());
+        assert!(read(&with("null", "[]", &format!("[{connection}]"))).is_err());
         assert!(
             read(&with(
                 "null",
-                r#"[{"userId":"@a:example.org","deviceId":"D","audio":[1,null,null,null,null],"video":null}]"#,
+                &format!(
+                    r#"[{{"userId":"@a:example.org","deviceId":"D","audio":{heard},"video":null}}]"#
+                ),
                 "[]"
             ))
             .is_err()

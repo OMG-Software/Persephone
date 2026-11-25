@@ -394,7 +394,8 @@ export async function watchSession(
     if (parsed !== null) onLevels(parsed);
   });
   const page = await invoke<unknown>('watch_session', { onChange: channel, onSoundLevel: soundLevel, onLevels: levels });
-  statsPage = typeof page === 'number' && Number.isSafeInteger(page) && page >= 0 ? page : null;
+  // The host counts pages from 1, so 0 is no count.
+  statsPage = typeof page === 'number' && Number.isSafeInteger(page) && page >= 1 ? page : null;
   // The log may already be on (a reloaded page): follow it from now.
   await followDiagnostics();
 }

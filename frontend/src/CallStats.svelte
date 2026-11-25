@@ -3,8 +3,8 @@
   import type { CallStats } from '../../crates/contracts/generated/contracts';
   import { startCallStats, stopCallStats } from './bridge';
   import { STATS_FAILED_TEXT, STATS_LABEL, statsNote, statsSections } from './callStats';
+  import CallStatsCaption from './CallStatsCaption.svelte';
   import Icon from './Icon.svelte';
-  import PersonName from './PersonName.svelte';
 
   // The call's technical details (ADR-0066), shown while this panel exists:
   // mounting it turns the readings on, and destroying it turns them off, so a
@@ -53,10 +53,7 @@
   {:else}
     {#each sections as section (section.key)}
       <table class="call-stats-table">
-        <caption>
-          {#if section.userId !== null}<PersonName userId={section.userId} />{#if section.deviceId !== null}
-              <span class="call-stats-device">({section.deviceId})</span>{/if}{:else}{section.title}{/if}
-        </caption>
+        <caption><CallStatsCaption {section} /></caption>
         <tbody>
           {#each section.rows as row (row.label)}
             <tr><th scope="row">{row.label}</th><td>{row.value}</td></tr>

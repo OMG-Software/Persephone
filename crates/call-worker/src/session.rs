@@ -3276,7 +3276,9 @@ async fn event_loop(
                 }
                 Some(Input::Message(message)) => {
                     // The off also drops a reading that waits in the output
-                    // slot, so none is written after the off (ADR-0066).
+                    // slot. A reading that the writer took already can still
+                    // be written after the off; the core drops it, because
+                    // its switch is off then (ADR-0066).
                     let stats_off = matches!(message, ToWorker::SetStats { on: false });
                     match call.handle_command(message).await {
                         Ok(reply) => outgoing.extend(reply),
