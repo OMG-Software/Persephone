@@ -1,8 +1,8 @@
 //! Screen capture (ADR-0053). The platform-neutral API: no platform and no
 //! LiveKit types.
 //!
-//! One backend per OS: `windows.rs` (Windows.Graphics.Capture, through
-//! `wgc.rs`), `linux.rs` (PipeWire over the ScreenCast portal remote) and
+//! One backend per OS: `windows.rs` (GDI `BitBlt`, through `gdi.rs`;
+//! `wgc.rs` is kept for the gate's measurement), `linux.rs` (PipeWire over the ScreenCast portal remote) and
 //! `unsupported.rs` for the rest (macOS reports screen sharing as
 //! unavailable until its own decision). A backend offers `capture()`; this
 //! module wraps it in [`open`]. The core names the screen: the worker never
@@ -33,7 +33,13 @@ mod backend;
 #[path = "unsupported.rs"]
 mod backend;
 
+// The call backend reads the monitor list of `wgc.rs`; the rest of it is the
+// Windows.Graphics.Capture code that the containment gate measures (it is
+// denied in the AppContainer, so the worker does not use it).
 #[cfg(windows)]
+mod gdi;
+#[cfg(windows)]
+#[allow(dead_code)]
 mod wgc;
 
 /// The longest wait for the screen to open: the Windows capture setup, or

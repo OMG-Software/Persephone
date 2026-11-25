@@ -10,6 +10,7 @@ pub mod modules;
 pub mod pick;
 pub mod profile;
 pub mod save;
+pub mod screen;
 pub mod ui;
 pub mod vault;
 

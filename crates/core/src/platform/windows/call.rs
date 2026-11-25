@@ -131,6 +131,11 @@ impl Launcher for WindowsLauncher {
         ask_yes_no(DIRECT_CONNECTION_TEXT)
     }
 
+    /// The core's own window that names each monitor (ADR-0053).
+    fn screen_source(&self) -> Arc<dyn crate::calls::screen::ScreenSource> {
+        Arc::new(super::screen::MonitorScreen)
+    }
+
     /// The same box with Yes and No: a message box has no custom button
     /// names, so the text says Yes means connect. "No" is the default.
     fn confirm_other_sfu(&self, host: &str, proxy_configured: bool) -> bool {

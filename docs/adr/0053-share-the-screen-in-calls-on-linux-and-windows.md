@@ -207,3 +207,47 @@ keeps the choice in the process that owns authority.
 * [ADR-0045](0045-exclude-the-main-window-from-screen-capture-by-default.md)
 * [ADR-0048](0048-add-camera-video-to-calls-in-the-call-worker.md)
 * [ADR-0049](0049-contain-the-call-worker-on-linux-and-macos.md)
+
+## Amendment of 2026-11-25: Windows captures with GDI
+
+Status of this amendment: proposed, needs owner approval.
+
+The measurement of 19 November tried only Windows.Graphics.Capture. On
+25 November the gate also measured DXGI Desktop Duplication and GDI `BitBlt`
+inside the call AppContainer, with the call launcher's own capabilities
+(`internetClient`, `microphone`, `webcam`) and mitigations
+([evidence](../evidence/screen-share-windows.md#measurement-of-25-november-2026-dxgi-and-gdi)):
+
+* WGC `CreateForMonitor` and DXGI `DuplicateOutput` fail with
+  `E_ACCESSDENIED`.
+* GDI `GetDC(NULL)` and `BitBlt` copy a real picture (its mean colour equals
+  the control's, so it is not a blank copy).
+
+Decision:
+
+* The worker captures a monitor with GDI (`screen/gdi.rs`). It adds no
+  capability and relaxes no mitigation. The "Windows capture" rules above
+  that say Windows reports screen sharing as unavailable no longer apply.
+  The WGC code stays, because the gate measures it.
+* The core shows its own window for each monitor (a message box per monitor:
+  Yes shares, No shows the next one, Cancel stops), as the "Starting and
+  stopping" section says. The target is the index in display order and the
+  size in pixels, as before.
+* Limits of GDI: Windows draws no capture border and no cursor into the
+  picture, the copy is the whole monitor (no window share), and the buffer is
+  at most 3840x2160 pixels. A larger monitor reports "unavailable". The capture
+  thread sets per-monitor DPI awareness so that the monitor list and the copy
+  use physical pixels; this needs the `Win32_UI_HiDpi` feature of the locked
+  `windows 0.62.2` (no new crate, no `Cargo.lock` change).
+* Why this is not a containment loosening: a process in this AppContainer
+  could already copy the screen with GDI before this change. The worker does
+  not use Win32k lockdown (ADR-0049, audio needs it). Screen sharing only
+  uses an existing ability, and the core still grants one monitor for each
+  share. Turning on the Win32k lockdown for the call worker would stop this
+  capture and also close that ability; it needs its own decision.
+* The call bar shows that the screen is shared, because Windows shows no
+  border for a GDI copy. ADR-0045 hides the Persephone main window from
+  capture; whether that hides it from a GDI copy was not measured.
+* Not verified live: a share seen by another call member, a multi-monitor
+  setup (the machine had one monitor), a monitor of another DPI scale, a
+  protected (DRM) window, and a locked or secure desktop.

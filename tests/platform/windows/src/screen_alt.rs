@@ -4,10 +4,9 @@
 //! silent failure. The numbers are the exit codes of the child process.
 
 use std::cell::Cell;
-use std::ffi::c_void;
 use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::{HMODULE, HWND};
+use windows::Win32::Foundation::HMODULE;
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAP_READ,
@@ -17,11 +16,6 @@ use windows::Win32::Graphics::Direct3D11::{
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, DXGI_OUTDUPL_FRAME_INFO, IDXGIAdapter, IDXGIFactory1, IDXGIOutput1,
     IDXGIOutputDuplication, IDXGIResource,
-};
-use windows::Win32::Graphics::Gdi::{
-    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CAPTUREBLT, CreateCompatibleDC, CreateDIBSection,
-    DESKTOPHORZRES, DESKTOPVERTRES, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetDeviceCaps,
-    ReleaseDC, SRCCOPY, SelectObject,
 };
 use windows::core::Interface;
 
@@ -331,81 +325,27 @@ fn copy_and_check(
     stage
 }
 
+/// The call worker's own GDI capture (`screen/gdi.rs`): one frame of
+/// monitor 0, checked for black or uniform pixels.
 fn gdi() -> u32 {
-    // SAFETY: GDI calls on handles made and released in this function.
-    unsafe {
-        let screen = GetDC(None);
-        if screen.is_invalid() {
-            return GDI_DC;
-        }
-        let release = |screen| {
-            ReleaseDC(Some(HWND::default()), screen);
-        };
-        let width = GetDeviceCaps(Some(screen), DESKTOPHORZRES).max(0);
-        let height = GetDeviceCaps(Some(screen), DESKTOPVERTRES).max(0);
-        if !(2..=16_384).contains(&width) || !(2..=16_384).contains(&height) {
-            release(screen);
-            return GDI_DC;
-        }
-        let memory = CreateCompatibleDC(Some(screen));
-        if memory.is_invalid() {
-            release(screen);
-            return GDI_DC;
-        }
-        let info = BITMAPINFO {
-            bmiHeader: BITMAPINFOHEADER {
-                biSize: size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: width,
-                biHeight: -height,
-                biPlanes: 1,
-                biBitCount: 32,
-                biCompression: BI_RGB.0,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let mut bits: *mut c_void = std::ptr::null_mut();
-        let bitmap = match CreateDIBSection(Some(memory), &info, DIB_RGB_COLORS, &mut bits, None, 0)
-        {
-            Ok(bitmap) if !bits.is_null() => bitmap,
-            Ok(bitmap) => {
-                let _ = DeleteObject(bitmap.into());
-                let _ = DeleteDC(memory);
-                release(screen);
-                return GDI_BITMAP;
-            }
-            Err(error) => {
-                let _ = DeleteDC(memory);
-                release(screen);
-                return note(GDI_BITMAP, error);
-            }
-        };
-        let old = SelectObject(memory, bitmap.into());
-        let blt = BitBlt(
-            memory,
-            0,
-            0,
-            width,
-            height,
-            Some(screen),
-            0,
-            0,
-            SRCCOPY | CAPTUREBLT,
-        );
-        let stage = match blt {
-            Ok(()) => {
-                let (w, h) = (width as usize, height as usize);
-                // SAFETY: the DIB section holds `w * h * 4` bytes.
-                let bytes = std::slice::from_raw_parts(bits.cast::<u8>(), w * h * 4);
-                verdict(inspect(bytes, w, h, w * 4))
-            }
-            Err(error) => note(GDI_BLT, error),
-        };
-        SelectObject(memory, old);
-        let _ = DeleteObject(bitmap.into());
-        let _ = DeleteDC(memory);
-        release(screen);
-        stage
+    let mut capture = match super::gdi::open(0, None) {
+        Ok(capture) => capture,
+        Err(stage) => return stage as u32,
+    };
+    let mut stage = BLACK;
+    let mut admit = || true;
+    let mut deliver = |width: u32, height: u32, stride: u32, bytes: &[u8]| {
+        stage = verdict(inspect(
+            bytes,
+            width as usize,
+            height as usize,
+            stride as usize,
+        ));
+    };
+    match capture.poll(&mut admit, &mut deliver) {
+        Ok(true) => stage,
+        Ok(false) => GDI_BLT,
+        Err(error) => error as u32,
     }
 }
 

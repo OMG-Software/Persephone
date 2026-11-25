@@ -20,9 +20,10 @@ tokio-stream = { version = "=0.1.19", default-features = false }
 zeroize = "=1.9.1"
 
 [target.'cfg(windows)'.dependencies]
-# Camera capture through Media Foundation (ADR-0048) and screen capture
-# through Windows.Graphics.Capture (ADR-0053), the default speaker and
-# microphone for media (`sound_defaults.rs`), and the WASAPI device tests
+# Camera capture through Media Foundation (ADR-0048), screen capture through
+# GDI (ADR-0053; `Win32_UI_HiDpi` puts the capture thread in physical pixels)
+# and its Windows.Graphics.Capture code that the gate measures, the default
+# speaker and microphone for media (`sound_defaults.rs`), and the WASAPI device tests
 # (`sound_test.rs`, ADR-0059; `IMMDevice::Activate` needs the two
 # `PROPVARIANT` features): only these features.
 windows = { version = "=0.62.2", default-features = false, features = [
@@ -42,6 +43,7 @@ windows = { version = "=0.62.2", default-features = false, features = [
   "Win32_System_Variant",
   "Win32_System_WinRT_Direct3D11",
   "Win32_System_WinRT_Graphics_Capture",
+  "Win32_UI_HiDpi",
 ] }
 windows-sys = { version = "=0.61.2", features = [
   "Win32_Foundation",

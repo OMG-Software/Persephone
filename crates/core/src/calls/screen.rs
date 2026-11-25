@@ -3,9 +3,10 @@
 //!
 //! The page never names a source. A share starts when the page asks, and
 //! the core asks a [`ScreenSource`] to pick one: on Linux the core shows its
-//! own warning window and then runs the ScreenCast portal; Windows and macOS
-//! report screen sharing as unavailable (the Windows capture does not run in
-//! the worker's AppContainer, `docs/evidence/screen-share-windows.md`). A
+//! own warning window and then runs the ScreenCast portal; on Windows the
+//! core's own window names each monitor (`platform/windows/screen.rs`; the
+//! worker captures it with GDI, `docs/evidence/screen-share-windows.md`);
+//! macOS reports screen sharing as unavailable. A
 //! cancelled or refused pick leaves the share off. It never falls back to
 //! another source.
 //!
@@ -124,8 +125,7 @@ pub trait ScreenSource: Send + Sync {
     fn choose(&self, cancel: &Arc<AtomicBool>) -> Result<ScreenGrant, ScreenRefusal>;
 }
 
-/// A platform without screen sharing: Windows until a capability makes the
-/// capture run in the worker's container, macOS until its own decision.
+/// A platform without screen sharing: macOS until its own decision.
 pub struct Unavailable;
 
 impl ScreenSource for Unavailable {

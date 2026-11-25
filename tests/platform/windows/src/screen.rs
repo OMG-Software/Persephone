@@ -53,6 +53,9 @@ use windows_sys::Win32::System::Threading::{
 #[path = "screen_alt.rs"]
 mod alt;
 #[allow(dead_code)] // the worker uses the parts the probe does not
+#[path = "../../../../crates/call-worker/src/screen/gdi.rs"]
+mod gdi;
+#[allow(dead_code)] // the worker uses the parts the probe does not
 #[path = "../../../../crates/call-worker/src/screen/wgc.rs"]
 mod wgc;
 

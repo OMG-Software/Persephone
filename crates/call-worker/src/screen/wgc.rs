@@ -87,6 +87,13 @@ pub enum Stage {
 #[derive(Clone, Copy, Debug)]
 pub struct Monitor {
     pub handle: HMONITOR,
+    /// The top-left corner on the virtual screen, in the pixels of the
+    /// calling thread's DPI awareness (physical pixels for a per-monitor
+    /// aware thread). Only the GDI capture (`gdi.rs`) reads it.
+    #[allow(dead_code)]
+    pub left: i32,
+    #[allow(dead_code)]
+    pub top: i32,
     pub width: u32,
     pub height: u32,
 }
@@ -104,7 +111,7 @@ unsafe extern "system" fn collect(
     // SAFETY: `data` is the `&mut Collector` that `monitors` passed and keeps
     // alive for the whole enumeration.
     let collector = unsafe { &mut *(data.0 as *mut Collector) };
-    if let Some((width, height)) = monitor_size(monitor) {
+    if let Some((width, height, left, top)) = monitor_size(monitor) {
         // A list over the limit stops growing; later monitors are not shown.
         if collector.found.len() < MAX_MONITORS
             && (1..=MAX_MONITOR_SIDE).contains(&width)
@@ -112,6 +119,8 @@ unsafe extern "system" fn collect(
         {
             collector.found.push(Monitor {
                 handle: monitor,
+                left,
+                top,
                 width,
                 height,
             });
@@ -120,9 +129,9 @@ unsafe extern "system" fn collect(
     BOOL(1)
 }
 
-/// The size of a monitor in pixels: its current display mode, else the
-/// monitor rectangle.
-fn monitor_size(monitor: HMONITOR) -> Option<(u32, u32)> {
+/// The size of a monitor in pixels (its current display mode, else the
+/// monitor rectangle) and the corner of its rectangle.
+fn monitor_size(monitor: HMONITOR) -> Option<(u32, u32, i32, i32)> {
     let mut info = MONITORINFOEXW::default();
     info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
     // SAFETY: `info` is a valid MONITORINFOEXW with its size set; the
@@ -131,6 +140,10 @@ fn monitor_size(monitor: HMONITOR) -> Option<(u32, u32)> {
     if !known.as_bool() {
         return None;
     }
+    let (left, top) = (
+        info.monitorInfo.rcMonitor.left,
+        info.monitorInfo.rcMonitor.top,
+    );
     let mut mode = DEVMODEW {
         dmSize: std::mem::size_of::<DEVMODEW>() as u16,
         ..Default::default()
@@ -145,12 +158,12 @@ fn monitor_size(monitor: HMONITOR) -> Option<(u32, u32)> {
         )
     };
     if read.as_bool() && mode.dmPelsWidth > 0 && mode.dmPelsHeight > 0 {
-        return Some((mode.dmPelsWidth, mode.dmPelsHeight));
+        return Some((mode.dmPelsWidth, mode.dmPelsHeight, left, top));
     }
     let rect = info.monitorInfo.rcMonitor;
     let width = u32::try_from(rect.right.checked_sub(rect.left)?).ok()?;
     let height = u32::try_from(rect.bottom.checked_sub(rect.top)?).ok()?;
-    Some((width, height))
+    Some((width, height, left, top))
 }
 
 /// The monitors in display order, at most [`MAX_MONITORS`].
