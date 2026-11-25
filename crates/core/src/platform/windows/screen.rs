@@ -139,11 +139,10 @@ pub fn pick(
     cancel: &AtomicBool,
     mut ask: impl FnMut(&str, bool) -> Answer,
 ) -> Result<ScreenTarget, ScreenRefusal> {
-    let offered: Vec<(usize, Screen)> = screens
+    let offered: Vec<Screen> = screens
         .iter()
         .copied()
-        .enumerate()
-        .filter(|(_, screen)| screen_capture_size_ok(screen.width, screen.height))
+        .filter(|screen| screen_capture_size_ok(screen.width, screen.height))
         .collect();
     if offered.is_empty() {
         return Err(ScreenRefusal::Unavailable);
@@ -151,7 +150,7 @@ pub fn pick(
     let left_out = screens.len() - offered.len();
     let mut at = 0;
     loop {
-        let (_, screen) = offered[at];
+        let screen = offered[at];
         let text = prompt_text(at, offered.len(), screen, left_out);
         let answer = ask(&text, offered.len() > 1);
         if cancel.load(Ordering::SeqCst) {
@@ -351,15 +350,6 @@ fn read_monitor(monitor: HMONITOR) -> Option<Seen> {
         if GetMonitorInfoW(monitor, (&raw mut info).cast::<MONITORINFO>()) == 0 {
             return None;
         }
-        let mut mode: DEVMODEW = std::mem::zeroed();
-        mode.dmSize = size_of::<DEVMODEW>() as u16;
-        let mode = if EnumDisplaySettingsW(info.szDevice.as_ptr(), ENUM_CURRENT_SETTINGS, &mut mode)
-            != 0
-        {
-            (mode.dmPelsWidth, mode.dmPelsHeight)
-        } else {
-            (0, 0)
-        };
         // Windows does not promise what the buffer holds after the NUL.
         let mut device = [0; 32];
         let end = info
@@ -368,6 +358,17 @@ fn read_monitor(monitor: HMONITOR) -> Option<Seen> {
             .position(|&unit| unit == 0)
             .unwrap_or(info.szDevice.len());
         device[..end].copy_from_slice(&info.szDevice[..end]);
+        let mut mode: DEVMODEW = std::mem::zeroed();
+        mode.dmSize = size_of::<DEVMODEW>() as u16;
+        // A name that fills the buffer has no NUL, and the mode read needs
+        // one; the worker's list then uses the rectangle too.
+        let mode = if device[31] == 0
+            && EnumDisplaySettingsW(device.as_ptr(), ENUM_CURRENT_SETTINGS, &mut mode) != 0
+        {
+            (mode.dmPelsWidth, mode.dmPelsHeight)
+        } else {
+            (0, 0)
+        };
         let rect = info.monitorInfo.rcMonitor;
         Some(Seen {
             device,
@@ -661,32 +662,34 @@ mod tests {
         assert!(!QUIT_POSTED.get());
     }
 
-    /// GIVEN an open question WHEN the call ends THEN the box closes within
-    /// a moment and the answer is a cancel; the next question on the same
-    /// thread is not ended by a left-over quit message.
+    /// GIVEN an open question WHEN the call ends THEN the box closes less
+    /// than 500 ms later and the answer is a cancel; the next question on
+    /// the same thread is not ended by a left-over quit message.
     ///
-    /// Ignored: it shows a real message box on the desktop for about 300 ms.
-    /// Run it on Windows after a change to `ask`:
-    /// `cargo test -p persephone-core --lib -- --ignored open_question`.
+    /// Ignored: it shows a real message box on the desktop for about 400 ms.
+    /// Run it on Windows after a change to `ask`, and record the result in
+    /// `docs/evidence/screen-share-windows.md`:
+    /// `cargo test -p persephone-core --lib -- --ignored open_question --nocapture`.
     #[test]
     #[ignore = "shows a real message box on the desktop"]
     fn given_an_open_question_when_the_call_ends_then_it_closes() {
         use std::time::{Duration, Instant};
         let cancel = Arc::new(AtomicBool::new(false));
         let setter = cancel.clone();
-        let started = Instant::now();
         let timer = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(300));
             setter.store(true, Ordering::SeqCst);
+            Instant::now()
         });
         let answer = ask("Persephone test: this closes by itself.", true, &cancel);
-        timer.join().expect("the timer thread");
+        let closed = Instant::now();
+        let ended = timer.join().expect("the timer thread");
         assert_eq!(answer, Answer::Cancel);
-        assert!(
-            started.elapsed() < Duration::from_secs(3),
-            "{:?}",
-            started.elapsed()
-        );
+        // The timer looks every CANCEL_CHECK_MS (100 ms); allow for a slow
+        // desktop, but not for a box that waits for the user.
+        let after = closed.saturating_duration_since(ended);
+        eprintln!("the box closed {after:?} after the call ended");
+        assert!(after < Duration::from_millis(500), "{after:?}");
         // A second question on this thread with the flag already set closes
         // at the first timer tick too, which shows that the quit message of
         // the first one was taken off the queue (it would end this one at

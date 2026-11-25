@@ -14,9 +14,11 @@
 //!
 //! The share names its monitor by the GDI device name (`\\.\DISPLAY1`)
 //! and size the user saw. `open` takes only the listed monitor with that
-//! name and size. The copy reads a rectangle of the whole desktop, so before
-//! and after each copy the capture reads that monitor's name and rectangle
-//! again: a monitor that moved, changed its size or went away ends the
+//! name and size, and copies exactly its rectangle (`copy_area`), which can
+//! differ from the size of its display mode. The copy reads a rectangle of
+//! the whole desktop, so before and after each copy the capture reads that
+//! monitor's name and rectangle again (`wgc::monitor_place`, the list's own
+//! reading): a monitor that moved, changed its size or went away ends the
 //! share, and the copy made while it changed is dropped. Another monitor is
 //! never sent as the chosen one.
 
@@ -25,14 +27,14 @@ use std::ffi::c_void;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CAPTUREBLT, CreateCompatibleDC, CreateDIBSection,
-    DIB_RGB_COLORS, DeleteDC, DeleteObject, GdiFlush, GetDC, GetMonitorInfoW, HBITMAP, HDC,
-    HGDIOBJ, HMONITOR, MONITORINFO, MONITORINFOEXW, ReleaseDC, SRCCOPY, SelectObject,
+    DIB_RGB_COLORS, DeleteDC, DeleteObject, GdiFlush, GetDC, HBITMAP, HDC, HGDIOBJ, HMONITOR,
+    ReleaseDC, SRCCOPY, SelectObject,
 };
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetThreadDpiAwarenessContext,
 };
 
-use super::wgc;
+use super::wgc::{self, Place};
 
 /// The most pixels one capture copies (a 4K screen), as in the call
 /// protocol's `MAX_CAPTURE_PIXELS`.
@@ -121,36 +123,30 @@ pub fn choose(list: &[wgc::Monitor], choice: Choice<'_>) -> Result<wgc::Monitor,
     }
 }
 
-/// Where a monitor is: its device name and its rectangle on the virtual
-/// screen, in the pixels of the calling thread's DPI awareness.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct Place {
-    device: [u16; wgc::DEVICE_NAME_UNITS],
-    rect: (i32, i32, i32, i32),
+/// The monitor's place now, or `None` when Windows no longer knows the
+/// handle (the monitors changed). The same reading as the list's.
+fn place_of(monitor: HMONITOR) -> Option<Place> {
+    wgc::monitor_place(monitor)
 }
 
-/// The monitor's place now, or `None` when Windows no longer knows the
-/// handle (the monitors changed).
-fn place_of(monitor: HMONITOR) -> Option<Place> {
-    let mut info = MONITORINFOEXW::default();
-    info.monitorInfo.cbSize = size_of::<MONITORINFOEXW>() as u32;
-    // SAFETY: `info` is a valid MONITORINFOEXW with its size set; the
-    // pointer cast is the documented way to pass the extended structure.
-    // A handle that is no longer valid makes the call fail, nothing else.
-    let known = unsafe { GetMonitorInfoW(monitor, (&raw mut info).cast::<MONITORINFO>()) };
-    if !known.as_bool() {
-        return None;
+/// The part of the desktop that a capture of `listed` copies, as `(left,
+/// top, width, height)`: its rectangle now, when the handle still has the
+/// listed name and rectangle. The copy is the rectangle, not the display
+/// mode's size: a mode can differ from the rectangle, and a copy of the
+/// rectangle never reaches past the monitor.
+fn copy_area(listed: &wgc::Monitor, place: &Place) -> Result<(i32, i32, u32, u32), Stage> {
+    if device_name(&place.device) != device_name(&listed.device) || place.rect != listed.rect {
+        return Err(Stage::NoMonitor);
     }
-    // Compare names up to the NUL only: Windows does not promise what the
-    // rest of the buffer holds.
-    let mut device = [0; wgc::DEVICE_NAME_UNITS];
-    let name = device_name(&info.szDevice);
-    device[..name.len()].copy_from_slice(name);
-    let rect = info.monitorInfo.rcMonitor;
-    Some(Place {
-        device,
-        rect: (rect.left, rect.top, rect.right, rect.bottom),
-    })
+    let (left, top, right, bottom) = place.rect;
+    let side = |from: i32, to: i32| u32::try_from(i64::from(to) - i64::from(from)).ok();
+    let (Some(width), Some(height)) = (side(left, right), side(top, bottom)) else {
+        return Err(Stage::NoMonitor);
+    };
+    if !size_ok(width, height) {
+        return Err(Stage::BadSize);
+    }
+    Ok((left, top, width, height))
 }
 
 /// One running capture of a monitor. Use it on the thread that made it.
@@ -180,19 +176,9 @@ pub fn open(choice: Choice<'_>) -> Result<Capture, Stage> {
         return Err(Stage::BadSize);
     }
     // The place every copy is checked against. A monitor that changed since
-    // the list was read is not taken. The copy is the mode's size from the
-    // rectangle's corner, so the rectangle must have that size too: then the
-    // copy never reaches past the chosen monitor.
-    let place = place_of(monitor.handle)
-        .filter(|place| {
-            let (left, top, right, bottom) = place.rect;
-            device_name(&place.device) == device_name(&monitor.device)
-                && (left, top) == (monitor.left, monitor.top)
-                && i64::from(right) - i64::from(left) == i64::from(monitor.width)
-                && i64::from(bottom) - i64::from(top) == i64::from(monitor.height)
-        })
-        .ok_or(Stage::NoMonitor)?;
-    let (width, height) = (monitor.width, monitor.height);
+    // the list was read is not taken.
+    let place = place_of(monitor.handle).ok_or(Stage::NoMonitor)?;
+    let (left, top, width, height) = copy_area(&monitor, &place)?;
     // SAFETY: each handle made below is owned by `Capture`, or released
     // here on a failure.
     unsafe {
@@ -251,8 +237,8 @@ pub fn open(choice: Choice<'_>) -> Result<Capture, Stage> {
             bits: bits.cast_const().cast(),
             monitor: monitor.handle,
             place,
-            left: monitor.left,
-            top: monitor.top,
+            left,
+            top,
             width,
             height,
         })
@@ -356,11 +342,47 @@ mod tests {
         wgc::Monitor {
             handle: HMONITOR::default(),
             device: name,
-            left,
-            top: 0,
+            rect: (left, 0, left + width as i32, height as i32),
             width,
             height,
         }
+    }
+
+    fn place(monitor: &wgc::Monitor) -> Place {
+        Place {
+            device: monitor.device,
+            rect: monitor.rect,
+        }
+    }
+
+    /// GIVEN a listed monitor and its place now WHEN the copy area is taken
+    /// THEN it is the rectangle, also when the display mode is larger (a
+    /// scaled mode); another name or a moved rectangle is not found, a
+    /// reversed rectangle too, and a rectangle the buffer cannot hold is a
+    /// bad size.
+    #[test]
+    fn given_a_monitor_place_when_the_copy_area_is_taken_then_it_is_the_rectangle() {
+        let plain = listed(r"\\.\DISPLAY1", 1920, 1920, 1080);
+        assert_eq!(copy_area(&plain, &place(&plain)), Ok((1920, 0, 1920, 1080)));
+        // The mode says 1920x1080; the desktop rectangle is 1280x720.
+        let mut scaled = listed(r"\\.\DISPLAY1", 0, 1920, 1080);
+        scaled.rect = (0, 0, 1280, 720);
+        assert_eq!(copy_area(&scaled, &place(&scaled)), Ok((0, 0, 1280, 720)));
+        let mut renamed = place(&plain);
+        renamed.device = listed(r"\\.\DISPLAY2", 1920, 1920, 1080).device;
+        assert_eq!(copy_area(&plain, &renamed), Err(Stage::NoMonitor));
+        let mut moved = place(&plain);
+        moved.rect = (0, 0, 1920, 1080);
+        assert_eq!(copy_area(&plain, &moved), Err(Stage::NoMonitor));
+        let mut reversed = plain;
+        reversed.rect = (1920, 0, 0, 1080);
+        assert_eq!(
+            copy_area(&reversed, &place(&reversed)),
+            Err(Stage::NoMonitor)
+        );
+        let mut huge = plain;
+        huge.rect = (0, 0, 7680, 4320);
+        assert_eq!(copy_area(&huge, &place(&huge)), Err(Stage::BadSize));
     }
 
     /// GIVEN two monitors of the same size that changed places WHEN the
@@ -380,7 +402,7 @@ mod tests {
             height,
         };
         let taken = choose(&list, named(1920, 1080)).expect("the named monitor");
-        assert_eq!(taken.left, 1920);
+        assert_eq!(taken.rect.0, 1920);
         assert_eq!(device_name(&taken.device), device.as_slice());
         assert_eq!(
             choose(&list, named(2560, 1440)).err(),
@@ -402,7 +424,7 @@ mod tests {
         };
         assert_eq!(choose(&list, short).err(), Some(Stage::NoMonitor));
         assert_eq!(choose(&[], Choice::First).err(), Some(Stage::NoMonitor));
-        assert_eq!(choose(&list, Choice::First).expect("first").left, 0);
+        assert_eq!(choose(&list, Choice::First).expect("first").rect.0, 0);
     }
 
     /// GIVEN a device name buffer WHEN read THEN it ends at the first NUL, or
@@ -478,7 +500,9 @@ mod tests {
         for _ in 0..3 {
             assert_eq!(capture.poll(&mut admit, &mut deliver), Ok(true));
         }
-        let (width, height) = (monitor.width, monitor.height);
+        // The copy is the monitor's rectangle.
+        let (left, top, right, bottom) = monitor.rect;
+        let (width, height) = ((right - left) as u32, (bottom - top) as u32);
         let frame = (width, height, width * 4, (width * 4 * height) as usize);
         assert_eq!(*frames.borrow(), vec![frame; 3]);
 

@@ -207,3 +207,31 @@ Notes:
 * Not verified: a live call in which another member sees the share, and
   that ADR-0045's display affinity (main window excluded from capture) also
   hides the main window from a GDI copy.
+
+## Message box cancel, 25 November 2026
+
+ADR-0053 says that when the call ends while the core's screen question is
+open, a thread timer closes the message box within about 100 ms. This
+measures that path on a real desktop.
+
+* Host: Windows 11 Pro, version 10.0.26300, two 2560x1440 monitors. The
+  workstation was locked (`LogonUI.exe` running); the box still opened and
+  closed.
+* Code: commit 0eff4e2 with the uncommitted edits of the next commit on
+  `claude/call-screen-share-all` (the test's bound, not `ask`, changed).
+* Command, run three times:
+  `cargo test --locked --offline -p persephone-core --lib -- --ignored open_question --nocapture`
+* The test (`given_an_open_question_when_the_call_ends_then_it_closes` in
+  `crates/core/src/platform/windows/screen.rs`) opens a real box, sets the
+  cancel flag after 300 ms, and measures from the flag to the box's return.
+  It requires a cancel within 500 ms. It then opens a second box on the same
+  thread with the flag already set and requires that it stays open for at
+  least 50 ms, so a quit message left from the first box did not end it.
+
+Results: all three runs passed. The box closed 41.2 ms, 32.4 ms and 37.6 ms
+after the flag was set; each run took 0.44 to 0.46 s in all.
+
+Limits: one machine and one DPI scale. The timer looks every 100 ms, so a
+close can take up to about 100 ms plus the time the box needs to end; these
+runs did not show the upper end. The case where `SetTimer` fails is a unit
+test (no box opens), not a measurement.

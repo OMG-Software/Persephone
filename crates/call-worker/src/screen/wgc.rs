@@ -90,17 +90,18 @@ pub enum Stage {
 pub struct Monitor {
     pub handle: HMONITOR,
     /// The GDI device name (`MONITORINFOEXW::szDevice`, for example
-    /// `\\.\DISPLAY1`), NUL-terminated. Only the GDI capture (`gdi.rs`)
-    /// reads it: the share names its monitor by it.
+    /// `\\.\DISPLAY1`), with zeros after the name. Only the GDI capture
+    /// (`gdi.rs`) reads it: the share names its monitor by it.
     #[allow(dead_code)]
     pub device: [u16; DEVICE_NAME_UNITS],
-    /// The top-left corner on the virtual screen, in the pixels of the
-    /// calling thread's DPI awareness (physical pixels for a per-monitor
-    /// aware thread). Only the GDI capture (`gdi.rs`) reads it.
+    /// The rectangle on the virtual screen (left, top, right, bottom), in
+    /// the pixels of the calling thread's DPI awareness (physical pixels for
+    /// a per-monitor aware thread). Only the GDI capture (`gdi.rs`) reads it:
+    /// it copies this rectangle.
     #[allow(dead_code)]
-    pub left: i32,
-    #[allow(dead_code)]
-    pub top: i32,
+    pub rect: (i32, i32, i32, i32),
+    /// The size the user is shown: the current display mode, else the
+    /// rectangle's size.
     pub width: u32,
     pub height: u32,
 }
@@ -118,63 +119,89 @@ unsafe extern "system" fn collect(
     // SAFETY: `data` is the `&mut Collector` that `monitors` passed and keeps
     // alive for the whole enumeration.
     let collector = unsafe { &mut *(data.0 as *mut Collector) };
-    if let Some((width, height, left, top, device)) = monitor_size(monitor) {
+    if let Some(listed) = monitor_size(monitor) {
         // A list over the limit stops growing; later monitors are not shown.
         if collector.found.len() < MAX_MONITORS
-            && (1..=MAX_MONITOR_SIDE).contains(&width)
-            && (1..=MAX_MONITOR_SIDE).contains(&height)
+            && (1..=MAX_MONITOR_SIDE).contains(&listed.width)
+            && (1..=MAX_MONITOR_SIDE).contains(&listed.height)
         {
-            collector.found.push(Monitor {
-                handle: monitor,
-                device,
-                left,
-                top,
-                width,
-                height,
-            });
+            collector.found.push(listed);
         }
     }
     BOOL(1)
 }
 
-/// The size of a monitor in pixels (its current display mode, else the
-/// monitor rectangle), the corner of its rectangle and its device name.
-type Listed = (u32, u32, i32, i32, [u16; DEVICE_NAME_UNITS]);
+/// Where a monitor is: its device name (zeros after the name) and its
+/// rectangle on the virtual screen (left, top, right, bottom), in the pixels
+/// of the calling thread's DPI awareness.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Place {
+    pub device: [u16; DEVICE_NAME_UNITS],
+    pub rect: (i32, i32, i32, i32),
+}
 
-fn monitor_size(monitor: HMONITOR) -> Option<Listed> {
+/// A monitor's place from one `GetMonitorInfoW` call, or `None` when Windows
+/// no longer knows the handle. The list and the GDI capture's place checks
+/// both read a monitor through this, so their readings compare equal while
+/// it does not change.
+pub fn monitor_place(monitor: HMONITOR) -> Option<Place> {
     let mut info = MONITORINFOEXW::default();
     info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
     // SAFETY: `info` is a valid MONITORINFOEXW with its size set; the
     // pointer cast is the documented way to pass the extended structure.
+    // A handle that is no longer valid makes the call fail, nothing else.
     let known = unsafe { GetMonitorInfoW(monitor, (&raw mut info).cast::<MONITORINFO>()) };
     if !known.as_bool() {
         return None;
     }
-    let (left, top) = (
-        info.monitorInfo.rcMonitor.left,
-        info.monitorInfo.rcMonitor.top,
-    );
-    let device = info.szDevice;
+    // Keep the name up to its NUL only: Windows does not promise what the
+    // rest of the buffer holds.
+    let mut device = [0; DEVICE_NAME_UNITS];
+    let end = info
+        .szDevice
+        .iter()
+        .position(|&unit| unit == 0)
+        .unwrap_or(info.szDevice.len());
+    device[..end].copy_from_slice(&info.szDevice[..end]);
+    let rect = info.monitorInfo.rcMonitor;
+    Some(Place {
+        device,
+        rect: (rect.left, rect.top, rect.right, rect.bottom),
+    })
+}
+
+/// A monitor as listed: its place, and its size in pixels (its current
+/// display mode, else its rectangle's size).
+fn monitor_size(monitor: HMONITOR) -> Option<Monitor> {
+    let Place { device, rect } = monitor_place(monitor)?;
     let mut mode = DEVMODEW {
         dmSize: std::mem::size_of::<DEVMODEW>() as u16,
         ..Default::default()
     };
-    // SAFETY: `szDevice` is a NUL-terminated device name and `mode` is a
-    // valid DEVMODEW with its size set.
-    let read = unsafe {
-        EnumDisplaySettingsW(
-            PCWSTR(info.szDevice.as_ptr()),
-            ENUM_CURRENT_SETTINGS,
-            &mut mode,
+    // A name that fills the buffer has no NUL, and the mode read needs one.
+    let read = device[DEVICE_NAME_UNITS - 1] == 0
+        // SAFETY: `device` is NUL-terminated (checked above) and `mode` is
+        // a valid DEVMODEW with its size set.
+        && unsafe {
+            EnumDisplaySettingsW(PCWSTR(device.as_ptr()), ENUM_CURRENT_SETTINGS, &mut mode)
+        }
+        .as_bool();
+    let (width, height) = if read && mode.dmPelsWidth > 0 && mode.dmPelsHeight > 0 {
+        (mode.dmPelsWidth, mode.dmPelsHeight)
+    } else {
+        let (left, top, right, bottom) = rect;
+        (
+            u32::try_from(right.checked_sub(left)?).ok()?,
+            u32::try_from(bottom.checked_sub(top)?).ok()?,
         )
     };
-    if read.as_bool() && mode.dmPelsWidth > 0 && mode.dmPelsHeight > 0 {
-        return Some((mode.dmPelsWidth, mode.dmPelsHeight, left, top, device));
-    }
-    let rect = info.monitorInfo.rcMonitor;
-    let width = u32::try_from(rect.right.checked_sub(rect.left)?).ok()?;
-    let height = u32::try_from(rect.bottom.checked_sub(rect.top)?).ok()?;
-    Some((width, height, left, top, device))
+    Some(Monitor {
+        handle: monitor,
+        device,
+        rect,
+        width,
+        height,
+    })
 }
 
 /// The monitors in display order, at most [`MAX_MONITORS`].

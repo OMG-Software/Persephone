@@ -234,7 +234,9 @@ Decision:
   "Starting and stopping" section says. When the call ends while a box is
   open, a thread timer on the asking thread ends the box's loop within about
   100 ms (a quit message, the way Windows documents to time out a message
-  box), and the pick is cancelled. When that timer cannot start, no box
+  box), and the pick is cancelled
+  ([measured](../evidence/screen-share-windows.md#message-box-cancel-25-november-2026)).
+  When that timer cannot start, no box
   opens and the pick is cancelled: a box that the end of the call cannot
   close is never shown.
 * The target is no longer the index in display order. It is
@@ -254,9 +256,13 @@ Decision:
   and the worker's own checks below still apply.
 * The GDI copy reads a rectangle of the whole desktop. Before and after each
   copy the worker reads the monitor's name and rectangle again
-  (`GetMonitorInfoW`); a monitor that moved, changed or went away ends the
+  (`GetMonitorInfoW`, the same reading as the list's); a monitor that
+  moved, changed or went away ends the
   share as "off" (the source ended), and the copy made while it changed is
-  dropped. The device name names the display output: a different monitor
+  dropped. The copy is that rectangle, not the display mode's size (the two
+  can differ), so it never reaches past the monitor and a monitor whose
+  mode is larger than its rectangle can still be shared. The device name
+  names the display output: a different monitor
   plugged into the same output, at the same size and place, counts as the
   same screen.
 * The core lists monitors with the worker's list rule, but it asks only about
