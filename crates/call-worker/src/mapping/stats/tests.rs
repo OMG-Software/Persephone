@@ -3,6 +3,8 @@ use persephone_call_protocol::MAX_IDENTITY_BYTES;
 
 fn audio_in(bytes: u64) -> RawRemoteAudio {
     RawRemoteAudio {
+        track: "TR_audio".to_owned(),
+        at_ms: 0,
         level: 0.5,
         bytes_received: bytes,
         packets_received: 100,
@@ -24,6 +26,8 @@ fn remote(identity: &str, audio: Option<RawRemoteAudio>) -> RawRemote {
 
 fn mic(bytes: u64) -> RawOwnAudio {
     RawOwnAudio {
+        track: "TR_mic".to_owned(),
+        at_ms: 0,
         level: 1.0,
         bytes_sent: bytes,
         packets_sent: 5,
@@ -35,8 +39,10 @@ fn mic(bytes: u64) -> RawOwnAudio {
 
 fn reading(at_ms: u64, bytes: u64) -> RawStats {
     RawStats {
-        at_ms,
-        microphone: Some(mic(bytes)),
+        microphone: Some(RawOwnAudio {
+            at_ms,
+            ..mic(bytes)
+        }),
         ..RawStats::default()
     }
 }
@@ -189,10 +195,7 @@ fn given_a_reset_book_when_read_then_the_first_reading_has_no_rate() {
 fn given_a_track_that_goes_and_returns_when_read_then_its_rate_starts_again() {
     let mut book = StatsBook::default();
     book.next(&reading(1000, 0));
-    book.next(&RawStats {
-        at_ms: 2000,
-        ..RawStats::default()
-    });
+    book.next(&RawStats::default());
     assert_eq!(bitrate(&book.next(&reading(3000, 99_000))), None);
     assert_eq!(
         bitrate(&book.next(&reading(4000, 99_000 + 125_000))),
@@ -206,10 +209,10 @@ fn given_a_track_that_goes_and_returns_when_read_then_its_rate_starts_again() {
 fn given_concealed_samples_when_read_then_the_share_is_of_the_last_interval() {
     let mut book = StatsBook::default();
     let with = |at_ms, total, concealed| RawStats {
-        at_ms,
         remotes: vec![remote(
             "@a:example.org:D",
             Some(RawRemoteAudio {
+                at_ms,
                 total_samples: total,
                 concealed_samples: concealed,
                 ..audio_in(0)
@@ -233,9 +236,9 @@ fn given_concealed_samples_when_read_then_the_share_is_of_the_last_interval() {
 fn given_dropped_frames_when_read_then_the_rate_is_per_second() {
     let mut book = StatsBook::default();
     let with = |at_ms, dropped| RawStats {
-        at_ms,
         remotes: vec![RawRemote {
             video: Some(RawRemoteVideo {
+                at_ms,
                 fps: 29.97,
                 width: 1280,
                 height: 720,
@@ -258,10 +261,7 @@ fn given_dropped_frames_when_read_then_the_rate_is_per_second() {
 /// message holds only valid ones, each once, and at most the limit.
 #[test]
 fn given_bad_participants_when_read_then_only_valid_distinct_ones_stay() {
-    let mut raw = RawStats {
-        at_ms: 1000,
-        ..RawStats::default()
-    };
+    let mut raw = RawStats::default();
     raw.remotes.push(remote("", None));
     raw.remotes.push(remote("bad\nname", None));
     raw.remotes
@@ -292,24 +292,42 @@ fn given_bad_participants_when_read_then_only_valid_distinct_ones_stay() {
     );
 }
 
+fn link(role: LinkRole, at_ms: u64, sent: u64, received: u64) -> RawLink {
+    RawLink {
+        role,
+        at_ms,
+        bytes_sent: sent,
+        bytes_received: received,
+    }
+}
+
+fn connection(number: u8, links: Vec<RawLink>, complete: bool) -> RawConnection {
+    RawConnection {
+        connection: number,
+        outgoing_bits_per_second: Some(3_000_000.0),
+        rtt_seconds: Some(0.02),
+        links,
+        complete,
+    }
+}
+
 /// GIVEN connections that repeat or do not exist WHEN read THEN each real
 /// one is there once and the rates follow the transport bytes.
 #[test]
 fn given_connections_when_read_then_rates_follow_the_transport_bytes() {
-    let link = |connection, sent, received| RawConnection {
-        connection,
-        outgoing_bits_per_second: Some(3_000_000.0),
-        bytes_sent: Some(sent),
-        bytes_received: Some(received),
-        rtt_seconds: Some(0.02),
+    let one = |number, at_ms, sent, received| {
+        connection(
+            number,
+            vec![link(LinkRole::Single, at_ms, sent, received)],
+            true,
+        )
     };
     let raw = |at_ms, sent, received| RawStats {
-        at_ms,
         connections: vec![
-            link(0, sent, received),
-            link(0, 0, 0),
-            link(1, sent, received),
-            link(MAX_OTHER_CONNECTIONS + 1, 0, 0),
+            one(0, at_ms, sent, received),
+            one(0, at_ms, 0, 0),
+            one(1, at_ms, sent, received),
+            one(MAX_OTHER_CONNECTIONS + 1, at_ms, 0, 0),
         ],
         ..RawStats::default()
     };
@@ -331,7 +349,6 @@ fn given_connections_when_read_then_rates_follow_the_transport_bytes() {
 fn given_a_participant_that_left_when_read_then_its_counters_are_forgotten() {
     let mut book = StatsBook::default();
     let both = RawStats {
-        at_ms: 1000,
         remotes: vec![
             remote("@a:example.org:D", Some(audio_in(1))),
             remote("@b:example.org:D", Some(audio_in(1))),
@@ -341,13 +358,124 @@ fn given_a_participant_that_left_when_read_then_its_counters_are_forgotten() {
     book.next(&both);
     let held = book.counters.len();
     book.next(&RawStats {
-        at_ms: 2000,
-        remotes: vec![remote("@a:example.org:D", Some(audio_in(1)))],
+        remotes: vec![remote(
+            "@a:example.org:D",
+            Some(RawRemoteAudio {
+                at_ms: 1000,
+                ..audio_in(1)
+            }),
+        )],
         ..RawStats::default()
     });
     assert!(book.counters.len() < held);
     assert!(book.counters.keys().all(|(source, _)| matches!(
         source,
-        Source::Remote(0, identity) if identity == "@a:example.org:D"
+        Source::Remote(0, identity, _) if identity == "@a:example.org:D"
     )));
+}
+
+/// GIVEN a participant whose video moves from one track to another (the
+/// camera after a screen share) WHEN read THEN the new track has no rate
+/// until its second reading, however its counters compare with the old
+/// track's.
+#[test]
+fn given_a_new_track_for_a_participant_when_read_then_no_rate_crosses_tracks() {
+    let mut book = StatsBook::default();
+    let with = |track: &str, at_ms, bytes, dropped| RawStats {
+        remotes: vec![RawRemote {
+            video: Some(RawRemoteVideo {
+                track: track.to_owned(),
+                at_ms,
+                bytes_received: bytes,
+                frames_dropped: dropped,
+                ..RawRemoteVideo::default()
+            }),
+            ..remote("@a:example.org:D", None)
+        }],
+        ..RawStats::default()
+    };
+    let video = |stats: CallStats| stats.remotes[0].video.unwrap();
+    book.next(&with("TR_screen", 1000, 100_000, 3));
+    let switched = video(book.next(&with("TR_camera", 2000, 250_000, 9)));
+    assert_eq!(switched.bitrate_kbps, None, "never compared with the share");
+    assert_eq!(switched.dropped_fps, None);
+    let next = video(book.next(&with("TR_camera", 3000, 250_000 + 125_000, 10)));
+    assert_eq!(next.bitrate_kbps, Some(1000));
+    assert_eq!(next.dropped_fps, Some(1));
+    // The own microphone after a device change is a new track too.
+    book.next(&reading(4000, 10_000));
+    let new_mic = book.next(&RawStats {
+        microphone: Some(RawOwnAudio {
+            track: "TR_mic_2".to_owned(),
+            at_ms: 5000,
+            ..mic(500_000)
+        }),
+        ..RawStats::default()
+    });
+    assert_eq!(bitrate(&new_mic), None);
+}
+
+/// GIVEN two tracks read at different times in one reading WHEN the rates
+/// are made THEN each uses the time between its own two reads, so a slow
+/// read of another track never changes them.
+#[test]
+fn given_tracks_read_at_different_times_when_rated_then_each_uses_its_own_interval() {
+    let mut book = StatsBook::default();
+    let with = |mic_at, remote_at, bytes| RawStats {
+        microphone: Some(RawOwnAudio {
+            at_ms: mic_at,
+            ..mic(bytes)
+        }),
+        remotes: vec![remote(
+            "@a:example.org:D",
+            Some(RawRemoteAudio {
+                at_ms: remote_at,
+                ..audio_in(bytes)
+            }),
+        )],
+        ..RawStats::default()
+    };
+    book.next(&with(1000, 1000, 0));
+    let stats = book.next(&with(2000, 2700, 125_000));
+    assert_eq!(bitrate(&stats), Some(1000), "one second for the microphone");
+    assert_eq!(
+        stats.remotes[0].audio.unwrap().bitrate_kbps,
+        Some(588),
+        "1.7 seconds for the remote track"
+    );
+}
+
+/// GIVEN a connection with a publisher and a subscriber transport WHEN one
+/// transport was not read THEN the totals are unknown in that reading and
+/// in the next one, and never jump; the reading after has the true rate.
+#[test]
+fn given_a_transport_that_was_not_read_when_rated_then_the_totals_are_unknown() {
+    let mut book = StatsBook::default();
+    let both = |at_ms, published, subscribed| RawStats {
+        connections: vec![connection(
+            0,
+            vec![
+                link(LinkRole::Publisher, at_ms, published, 0),
+                link(LinkRole::Subscriber, at_ms, subscribed, 0),
+            ],
+            true,
+        )],
+        ..RawStats::default()
+    };
+    let send = |stats: CallStats| stats.connections[0].send_kbps;
+    assert_eq!(send(book.next(&both(1000, 100_000, 50_000))), None);
+    assert_eq!(send(book.next(&both(2000, 200_000, 60_000))), Some(880));
+    // The publisher's read missed its deadline.
+    let short = RawStats {
+        connections: vec![connection(
+            0,
+            vec![link(LinkRole::Subscriber, 3000, 70_000, 0)],
+            false,
+        )],
+        ..RawStats::default()
+    };
+    assert_eq!(send(book.next(&short)), None, "a short total is unknown");
+    // The publisher has no sample before, so no jump on its return.
+    assert_eq!(send(book.next(&both(4000, 400_000, 80_000))), None);
+    assert_eq!(send(book.next(&both(5000, 420_000, 90_000))), Some(240));
 }

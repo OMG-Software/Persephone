@@ -19,6 +19,16 @@ export const AUTO_PICK: ViewPick = { kind: 'auto' };
 export const GRID_PICK: ViewPick = { kind: 'grid' };
 
 /**
+ * The keys of the feeds that can show large: the cells with a picture. A
+ * cell whose camera is off has no tile, so it is no feed: a pick of it
+ * drops, and selecting it changes nothing. The functions below take these
+ * keys.
+ */
+export function feedKeys(cells: readonly { key: string; tile: number | null }[]): string[] {
+  return cells.filter((cell) => cell.tile !== null).map((cell) => cell.key);
+}
+
+/**
  * The pick after the feeds changed. A feed that went away (the person left,
  * the camera went off, the share ended) drops its pick, so the window goes
  * back to the grid, or to the screen share by the automatic rule. A choice

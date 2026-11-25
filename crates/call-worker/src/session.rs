@@ -2638,8 +2638,10 @@ impl Call<'_> {
                     }
                     participants += 1;
                     // One microphone, and the camera before a screen share.
-                    // The smallest track id breaks a tie, so every read
-                    // follows the same track and its counters never jump.
+                    // The smallest track id breaks a tie, so the reads
+                    // follow one track while it stays. When the choice
+                    // moves to another track, the book keys counters by
+                    // track ID, so the new track starts without a rate.
                     let mut audio: Option<(TrackSid, RemoteAudioTrack)> = None;
                     let mut video: Option<(bool, TrackSid, RemoteVideoTrack)> = None;
                     for publication in participant.track_publications().values() {

@@ -33,6 +33,13 @@ struct FakeCore {
     capture_protection: AtomicBool,
     // The call statistics switches that reached the core, in order.
     stats_switches: Mutex<Vec<bool>>,
+    // Refuses a statistics start, as the core does without a call.
+    refuse_stats: AtomicBool,
+    // When set, the next statistics switch says that it arrived, then waits
+    // until the test lets it go.
+    stats_gate: Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
+    // The last device choice that reached the core.
+    call_devices: Mutex<Option<(Option<String>, Option<String>, Option<String>)>>,
 }
 
 impl FakeCore {
@@ -45,6 +52,9 @@ impl FakeCore {
             timeline_events: Mutex::new(None),
             capture_protection: AtomicBool::new(true),
             stats_switches: Mutex::new(Vec::new()),
+            refuse_stats: AtomicBool::new(false),
+            stats_gate: Mutex::new(None),
+            call_devices: Mutex::new(None),
         })
     }
 }
@@ -58,6 +68,23 @@ impl CoreTransport for FakeCore {
         }
         if let Call::CallStats { on } = &call {
             self.stats_switches.lock().unwrap().push(*on);
+            let gate = self.stats_gate.lock().unwrap().take();
+            if let Some((arrived, release)) = gate {
+                let _ = arrived.send(());
+                let _ = release.recv();
+            }
+            if *on && self.refuse_stats.load(Ordering::SeqCst) {
+                return Err(CoreError::Core(ErrorCode::Unavailable));
+            }
+        }
+        if let Call::SetCallDevices {
+            recording,
+            playout,
+            camera,
+        } = &call
+        {
+            *self.call_devices.lock().unwrap() =
+                Some((recording.clone(), playout.clone(), camera.clone()));
         }
         if let Call::TimelineEvents { room_id, event_ids } = &call {
             *self.timeline_events.lock().unwrap() = Some((room_id.clone(), event_ids.clone()));
@@ -1204,6 +1231,11 @@ fn given_the_call_window_then_it_lists_and_changes_call_devices() {
         ),
         Ok(serde_json::Value::Null)
     );
+    assert_eq!(
+        *core.call_devices.lock().unwrap(),
+        Some((Some("mic-1".to_owned()), None, Some("cam-1".to_owned()))),
+        "each choice crosses in its place, and null stays the system default"
+    );
     let relayed = core.calls.load(Ordering::SeqCst);
     for args in [
         serde_json::json!({"recording": "", "playout": null}),
@@ -1295,6 +1327,20 @@ fn given_call_statistics_then_only_the_call_window_may_open_them_and_only_while_
     );
     assert!(core.stats_switches.lock().unwrap().is_empty());
 
+    // A start that the core refuses keeps no channel.
+    core.refuse_stats.store(true, Ordering::SeqCst);
+    assert!(invoke_on(&call, "call_stats", app_origin(), stats_on(true)).is_err());
+    core.refuse_stats.store(false, Ordering::SeqCst);
+    assert_eq!(
+        *core.stats_switches.lock().unwrap(),
+        [true],
+        "the start was tried"
+    );
+    subscriptions.dispatch(Event::CallStats { stats: reading(1) });
+    assert_eq!(sent(1), 0);
+    assert!(!subscriptions.forget_stats(CALL_WINDOW), "no channel kept");
+    core.stats_switches.lock().unwrap().clear();
+
     // On: the core is told, and a reading in its limits is delivered.
     assert_eq!(
         invoke_on(&call, "call_stats", app_origin(), stats_on(true)),
@@ -1338,6 +1384,39 @@ fn given_call_statistics_then_only_the_call_window_may_open_them_and_only_while_
     assert!(!subscriptions.forget_stats(CALL_WINDOW), "once");
     subscriptions.dispatch(Event::CallStats { stats: reading(4) });
     assert_eq!(sent(4), 0);
+
+    // A reload while a start is on its way to the core: the start keeps no
+    // channel and turns the numbers off again, so nothing reads for a page
+    // that is gone.
+    let (arrived, at_core) = std::sync::mpsc::channel();
+    let (release, held) = std::sync::mpsc::channel();
+    *core.stats_gate.lock().unwrap() = Some((arrived, held));
+    let window = call.clone();
+    let start = std::thread::spawn(move || {
+        invoke_on(
+            &window,
+            "call_stats",
+            app_origin(),
+            serde_json::json!({"on": true, "onStats": "__CHANNEL__:9"}),
+        )
+    });
+    at_core
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("the start reached the core");
+    reset_subscriptions(&link, &subscriptions, CALL_WINDOW);
+    release.send(()).unwrap();
+    assert_eq!(start.join().unwrap(), Ok(serde_json::Value::Null));
+    assert_eq!(
+        *core.stats_switches.lock().unwrap(),
+        [true, false, true, false, true, false]
+    );
+    subscriptions.dispatch(Event::CallStats { stats: reading(5) });
+    assert_eq!(sent(5), 0);
+
+    // The new page starts them again, and that start stands.
+    invoke_on(&call, "call_stats", app_origin(), stats_on(true)).unwrap();
+    subscriptions.dispatch(Event::CallStats { stats: reading(6) });
+    assert_eq!(sent(6), 1);
 }
 
 /// GIVEN device test commands THEN bounded IDs cross, a bad one never

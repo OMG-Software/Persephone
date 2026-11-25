@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   AUTO_PICK,
+  feedKeys,
   GRID_PICK,
   keepPick,
   largeKey,
@@ -71,6 +72,33 @@ test('GIVEN a grid choice WHEN the screen share ends and another starts THEN the
 test('GIVEN a large feed WHEN it goes away THEN the grid shows', () => {
   assert.deepEqual(keepPick(feed('b'), ['own', 'a']), AUTO_PICK);
   assert.equal(largeKey(feed('b'), ['own', 'a']), null);
+});
+
+test('GIVEN a large camera WHEN that camera goes off THEN the pick drops and the grid shows', () => {
+  const on = feedKeys([
+    { key: 'own', tile: 0 },
+    { key: 'a', tile: 1 }
+  ]);
+  assert.equal(largeKey(feed('a'), on), 'a');
+  // The person stays in the call; only the picture is gone.
+  const off = feedKeys([
+    { key: 'own', tile: 0 },
+    { key: 'a', tile: null }
+  ]);
+  assert.deepEqual(off, ['own']);
+  assert.deepEqual(keepPick(feed('a'), off), AUTO_PICK);
+  assert.equal(largeKey(feed('a'), off), null);
+});
+
+test('GIVEN a camera that is off WHEN its cell is selected THEN nothing changes', () => {
+  const keys = feedKeys([
+    { key: 'own', tile: null },
+    { key: 'a', tile: 1 },
+    { key: 'screen', tile: 5 }
+  ]);
+  assert.deepEqual(keys, ['a', 'screen']);
+  assert.deepEqual(selectFeed(AUTO_PICK, 'own', keys), AUTO_PICK);
+  assert.equal(largeKey(selectFeed(feed('a'), 'own', keys), keys), 'a');
 });
 
 test('GIVEN a large camera that went away WHEN a screen share runs THEN the screen is large', () => {

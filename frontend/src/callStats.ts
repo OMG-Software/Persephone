@@ -3,6 +3,15 @@
 // Node tests load it directly.
 
 import type {
+  CALL_DEVICE_ID_BYTES_MAX,
+  CALL_PARTICIPANTS_MAX,
+  CALL_SOUND_LEVEL_MAX,
+  CALL_STATS_CONNECTIONS_MAX,
+  CALL_STATS_FPS_MAX,
+  CALL_STATS_KBPS_MAX,
+  CALL_STATS_MS_MAX,
+  CALL_STATS_SIDE_MAX,
+  CALL_USER_ID_BYTES_MAX,
   CallStats,
   CallStatsAudioReceived,
   CallStatsAudioSent,
@@ -15,15 +24,17 @@ import type {
 
 // The bounds of the Rust contract (`crates/contracts`). The host drops a
 // reading outside them; this page checks again before it shows anything.
-const KBPS_MAX = 1_000_000;
-const MS_MAX = 60_000;
-const FPS_MAX = 120;
-const SIDE_MAX = 16_384;
-const LEVEL_MAX = 100;
-const PARTICIPANTS_MAX = 32;
-const CONNECTIONS_MAX = 4;
-const USER_ID_BYTES_MAX = 255;
-const DEVICE_ID_BYTES_MAX = 255;
+// Each copy has the type of the generated constant's literal, so a change of
+// the contract fails the type check here instead of dropping every reading.
+const KBPS_MAX: typeof CALL_STATS_KBPS_MAX = 1_000_000;
+const MS_MAX: typeof CALL_STATS_MS_MAX = 60_000;
+const FPS_MAX: typeof CALL_STATS_FPS_MAX = 120;
+const SIDE_MAX: typeof CALL_STATS_SIDE_MAX = 16_384;
+const LEVEL_MAX: typeof CALL_SOUND_LEVEL_MAX = 100;
+const PARTICIPANTS_MAX: typeof CALL_PARTICIPANTS_MAX = 32;
+const CONNECTIONS_MAX: typeof CALL_STATS_CONNECTIONS_MAX = 4;
+const USER_ID_BYTES_MAX: typeof CALL_USER_ID_BYTES_MAX = 255;
+const DEVICE_ID_BYTES_MAX: typeof CALL_DEVICE_ID_BYTES_MAX = 255;
 const U32_MAX = 4_294_967_295;
 
 type Fields = Record<string, unknown>;

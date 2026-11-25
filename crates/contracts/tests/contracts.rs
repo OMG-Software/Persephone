@@ -1089,6 +1089,51 @@ fn call_stats_cross_with_camel_case_names_and_refuse_unknown_fields() {
     }
 }
 
+/// GIVEN a statistics reading WHEN a value that may be null is null THEN it
+/// reads as unknown, and WHEN its key is left out THEN the reading is
+/// refused: the key is required, as the TypeScript contract declares.
+#[test]
+fn call_stats_need_each_nullable_key() {
+    let json = serde_json::to_value(sample_call_stats()).unwrap();
+    for (path, keys) in [
+        ("", &["microphone", "camera", "screen"][..]),
+        (
+            "/microphone",
+            &["bitrateKbps", "packetsLost", "jitterMs", "rttMs"],
+        ),
+        ("/camera", &["bitrateKbps", "packetsLost"]),
+        ("/participants/0", &["audio", "video"]),
+        (
+            "/participants/0/audio",
+            &["bitrateKbps", "concealedPercent"],
+        ),
+        ("/participants/0/video", &["bitrateKbps", "droppedFps"]),
+        (
+            "/connections/0",
+            &["outgoingKbps", "sendKbps", "receiveKbps", "rttMs"],
+        ),
+    ] {
+        for key in keys {
+            let mut null = json.clone();
+            null.pointer_mut(path).unwrap()[*key] = serde_json::Value::Null;
+            assert!(
+                serde_json::from_value::<persephone_contracts::CallStats>(null).is_ok(),
+                "{path}/{key} may be null"
+            );
+            let mut missing = json.clone();
+            let object = missing.pointer_mut(path).unwrap().as_object_mut().unwrap();
+            assert!(
+                object.remove(*key).is_some(),
+                "{path}/{key} is in the sample"
+            );
+            assert!(
+                serde_json::from_value::<persephone_contracts::CallStats>(missing).is_err(),
+                "{path}/{key} may not be left out"
+            );
+        }
+    }
+}
+
 /// GIVEN a statistics reading with one value over its bound, too many or
 /// repeated entries, or an overlong ID WHEN it is checked THEN it is
 /// refused whole.

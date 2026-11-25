@@ -53,7 +53,7 @@
     volumeValue
   } from './calls';
   import { callGrid, ROSTER_LABEL, SelfClose, type CallCell } from './callWindow';
-  import { AUTO_PICK, keepPick, largeKey, selectFeed, showAll, splitFeeds, type ViewPick } from './callView';
+  import { AUTO_PICK, feedKeys, keepPick, largeKey, selectFeed, showAll, splitFeeds, type ViewPick } from './callView';
   import CallWindowDevices from './CallWindowDevices.svelte';
   import CallStatsPanel from './CallStats.svelte';
   import { STATS_LABEL } from './callStats';
@@ -215,7 +215,8 @@
   });
 
   const grid = $derived(callGrid(status));
-  const keys = $derived(grid.map((cell) => cell.key));
+  // Only a cell with a picture is a feed: a camera that goes off drops its pick.
+  const keys = $derived(feedKeys(grid));
   const large = $derived(largeKey(pick, keys));
   const view = $derived(splitFeeds(grid, large));
 
@@ -305,7 +306,17 @@
   {@const shape = cell.tile === null ? undefined : shapes[cell.tile]}
   {@const layout = shape && cell.tile !== null ? tileLayout(shape.width, shape.height, shape.rotation, cell.own) : null}
   <div class="video-tile call-cell" class:screen={cell.screen} class:speaking={cell.speaking} class:large={isLarge} style:--ratio={layout ? String(layout.ratio) : '1.7778'}>
-    <button type="button" class="call-feed" data-feed={cell.key} aria-pressed={isLarge} title={feedLabel(isLarge)} onclick={() => void choose(selectFeed(pick, cell.key, keys), cell.key)}>
+    <button
+      type="button"
+      class="call-feed"
+      data-feed={cell.key}
+      aria-pressed={isLarge}
+      disabled={cell.tile === null}
+      title={cell.tile === null ? undefined : feedLabel(isLarge)}
+      onclick={() => void choose(selectFeed(pick, cell.key, keys), cell.key)}
+    >
+      <!-- The action leads the button's name; the person's name follows. -->
+      {#if cell.tile !== null}<span class="visually-hidden">{feedLabel(isLarge)}: </span>{/if}
       <span class="video-frame" style:aspect-ratio={layout ? String(layout.ratio) : '16 / 9'}>
         {#if cell.tile !== null}
           <canvas

@@ -82,17 +82,24 @@ for the answer, and a reading is old when the page asks for it.
   tracks, and of one audio and one video track of each remote participant
   (at most 32 participants, so at most 64 remote reads): the microphone, and
   the camera before a screen share, with the smallest track ID when there
-  are more, so each read follows the same track and its counters never jump.
+  are more, so the reads follow one track while it stays. Each read keeps
+  its track ID and the time it finished.
   libwebrtc gives each track only its own streams and the transport they
   use. The own room uses LiveKit's single peer connection when the server
   offers it; its own and remote tracks then read one transport, which counts
-  once. With a publisher and a subscriber connection, both add. The connection
-  numbers come from the transport and the selected candidate pair that those
-  reports already include. A connection with no track has no entry.
-* `mapping/stats.rs` is pure. `StatsBook` keeps the last counters and makes
-  each rate from the change since the reading before. A counter that fell, a
-  counter with no earlier value, and a zero or negative interval give no rate
-  (`null`), never a wrong one. A 32-bit counter that wrapped counts across
+  once. With a publisher and a subscriber connection, both add, each from its
+  own counters. The connection numbers come from the transport and the
+  selected candidate pair that those reports already include. A connection
+  with no track has no entry. When a transport that a connection uses was
+  not read (its read missed the deadline), the connection's send and
+  receive rates are unknown for that reading, never short.
+* `mapping/stats.rs` is pure. `StatsBook` keeps the last sample of each
+  counter, with the time of the read that gave it, under the track's ID (or
+  the connection's transport). Each rate is the change since that sample,
+  over the time between the two reads, so a slow read of another track
+  never changes it, and a new track never compares with an old one. A
+  counter that fell, a counter with no earlier value, and a zero or
+  negative interval give no rate (`null`), never a wrong one. A 32-bit counter that wrapped counts across
   the wrap. Every number is clamped to its bound, and an entry whose identity
   or connection the protocol would refuse is left out.
 * The reading goes to `Output::offer_stats`. It never waits, it replaces a
@@ -128,6 +135,12 @@ candidate type, SSRC, codec or other text.
 * The core keeps only the newest reading and sends it as `Event::CallStats`.
   The UI host reads the event with the same limits and sends it only to the
   channel of a window that turned the details on.
+* The UI host keeps a window's channel only after the core accepted the
+  start. Its own stop on a reload or close is a request too, so the host
+  lets one change of the core's switch run at a time, and each ends with the
+  switch as the kept channels want. A start that a reload or close overtook
+  keeps no channel and turns the switch off again; a late stop does not
+  undo the start of the page that came next.
 * The capability `call` gains `allow-call-stats`, and nothing else. The
   main window does not have it.
 

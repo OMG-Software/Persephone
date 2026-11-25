@@ -394,6 +394,14 @@ pub struct Subscriptions {
     /// one only while its page has the technical details open, so a reading
     /// goes only to a page that asked for it.
     stats: Mutex<HashMap<String, Channel<CallStats>>>,
+    /// How many pages each window has loaded, so a statistics start that a
+    /// reload or close overtook keeps no channel.
+    pages: Mutex<HashMap<String, u64>>,
+    /// Lets one change of the core's statistics switch run at a time. Each
+    /// change ends with the switch as the kept channels want it, so a late
+    /// stop never undoes a later start and a closed page never leaves the
+    /// numbers on.
+    stats_order: tauri::async_runtime::Mutex<()>,
     toasts: Mutex<Toasts>,
     capture: Arc<capture::CaptureState>,
 }
@@ -429,10 +437,46 @@ impl Subscriptions {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    fn pages(&self) -> MutexGuard<'_, HashMap<String, u64>> {
+        self.pages
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// Drops the statistics channel of the window `label`. True when it had
     /// one, so the core is told to stop reading.
     pub fn forget_stats(&self, label: &str) -> bool {
         self.stats().remove(label).is_some()
+    }
+
+    /// The count of the page that the window `label` shows now.
+    fn page(&self, label: &str) -> u64 {
+        self.pages().get(label).copied().unwrap_or(0)
+    }
+
+    /// Counts a new page for the window `label` and drops its statistics
+    /// channel. True when it had one.
+    fn new_page(&self, label: &str) -> bool {
+        let mut pages = self.pages();
+        *pages.entry(label.to_owned()).or_default() += 1;
+        self.stats().remove(label).is_some()
+    }
+
+    /// Keeps `channel` for the window `label` only while it still shows the
+    /// page `page`. The check and the insert hold the page count, so a reset
+    /// cannot come between them.
+    fn keep_stats(&self, label: String, page: u64, channel: Channel<CallStats>) -> bool {
+        let pages = self.pages();
+        if pages.get(&label).copied().unwrap_or(0) != page {
+            return false;
+        }
+        self.stats().insert(label, channel);
+        true
+    }
+
+    /// Whether any page wants the statistics now.
+    fn wants_stats(&self) -> bool {
+        !self.stats().is_empty()
     }
 
     /// Tells every page's session channel about `what`.
@@ -615,8 +659,15 @@ fn watch_session<R: Runtime>(
 
 /// Turns the call's technical details on or off for the calling window
 /// (ADR-0066). Only the call window may call it. The channel is kept only
-/// while they are on, after the core accepted. The core reads the numbers
-/// only while they are on, and the host drops a reading outside its limits.
+/// after the core accepted the start, and only while the window shows the
+/// page that asked. The core reads the numbers only while they are on, and
+/// the host drops a reading outside its limits.
+///
+/// Each change of the core's switch takes `stats_order`, and so does the
+/// stop of `reset_subscriptions`. A start that a reload or close overtook
+/// keeps no channel and turns the switch off again. A request that the host
+/// starts only after the reset counts as the new page's; it still stops when
+/// the window reloads or closes next, or when the call ends.
 #[tauri::command]
 async fn call_stats<R: Runtime>(
     webview: Webview<R>,
@@ -626,17 +677,25 @@ async fn call_stats<R: Runtime>(
     on_stats: Channel<CallStats>,
 ) -> Result<(), String> {
     let label = webview.label().to_owned();
-    if on {
-        // Before the core starts, so the first reading is not lost.
-        subscriptions.stats().insert(label.clone(), on_stats);
-    } else {
+    let page = subscriptions.page(&label);
+    let _order = subscriptions.stats_order.lock().await;
+    if !on {
         subscriptions.forget_stats(&label);
+        return relay(
+            core.inner(),
+            Call::CallStats {
+                on: subscriptions.wants_stats(),
+            },
+        )
+        .await;
     }
-    let result = relay::<()>(core.inner(), Call::CallStats { on }).await;
-    if on && result.is_err() {
-        subscriptions.forget_stats(&label);
+    relay::<()>(core.inner(), Call::CallStats { on: true }).await?;
+    // A reading that comes before the insert is lost; the next comes in a
+    // second.
+    if !subscriptions.keep_stats(label, page, on_stats) && !subscriptions.wants_stats() {
+        let _ = relay::<()>(core.inner(), Call::CallStats { on: false }).await;
     }
-    result
+    Ok(())
 }
 
 /// Locks the core's session. Replies with the resulting state; `locking`
@@ -2157,23 +2216,32 @@ fn restore_from_tray<R: Runtime>(app: &AppHandle<R>) {
 /// would otherwise stay taken. Rooms belong to the main window only. The
 /// page-load and window-destroyed handlers call it; it is public for the
 /// IPC tests, because the mock runtime sends neither event.
-pub fn reset_subscriptions(core: &CoreLink, subscriptions: &Subscriptions, label: &str) {
+pub fn reset_subscriptions(core: &CoreLink, subscriptions: &Arc<Subscriptions>, label: &str) {
     let rooms = subscriptions.forget_window(label);
     // A window that goes or reloads stops the call statistics it asked for
-    // (ADR-0066).
-    let stats = subscriptions.forget_stats(label);
-    if rooms.is_empty() && !stats {
-        return;
+    // (ADR-0066). A start of the old page still on its way sees the new
+    // page and undoes itself.
+    let stats = subscriptions.new_page(label);
+    if !rooms.is_empty() {
+        let core = core.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            for room_id in rooms {
+                let _ = core.call(Call::Unsubscribe { room_id });
+            }
+        });
     }
-    let core = core.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        for room_id in rooms {
-            let _ = core.call(Call::Unsubscribe { room_id });
-        }
-        if stats {
-            let _ = core.call(Call::CallStats { on: false });
-        }
-    });
+    if stats {
+        let core = core.clone();
+        let subscriptions = subscriptions.clone();
+        tauri::async_runtime::spawn(async move {
+            // In turn with the starts: when a later page has started them
+            // again first, the switch is already as it should be.
+            let _order = subscriptions.stats_order.lock().await;
+            if !subscriptions.wants_stats() {
+                let _ = relay::<()>(&core, Call::CallStats { on: false }).await;
+            }
+        });
+    }
 }
 
 /// True only for the bundled app's own origin. Tauri serves embedded assets

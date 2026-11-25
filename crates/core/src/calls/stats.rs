@@ -11,6 +11,18 @@ use persephone_contracts::{
     CallStatsParticipant, CallStatsVideoReceived, CallStatsVideoSent,
 };
 
+// The page's bounds repeat the worker protocol's. The worker clamps each
+// number to its protocol bound, and `CallStats::within_limits` drops a
+// reading whole on a number over the page's bound, so the two must match.
+const _: () = {
+    assert!(persephone_contracts::CALL_STATS_KBPS_MAX == worker::MAX_STATS_KBPS);
+    assert!(persephone_contracts::CALL_STATS_MS_MAX == worker::MAX_STATS_MS);
+    assert!(persephone_contracts::CALL_STATS_FPS_MAX == worker::MAX_STATS_FPS);
+    assert!(persephone_contracts::CALL_STATS_SIDE_MAX == worker::MAX_STATS_SIDE);
+    assert!(persephone_contracts::CALL_STATS_CONNECTIONS_MAX == worker::MAX_STATS_CONNECTIONS);
+    assert!(persephone_contracts::CALL_PARTICIPANTS_MAX == worker::MAX_PARTICIPANTS);
+};
+
 fn limit(limit: worker::QualityLimit) -> CallStatsLimit {
     match limit {
         worker::QualityLimit::None => CallStatsLimit::None,

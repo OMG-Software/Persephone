@@ -1176,13 +1176,14 @@ pub fn levels_within_limits(levels: &[persephone_contracts::CallParticipantLevel
         })
 }
 
-/// Reads a statistics reading and refuses one with a number over its bound,
-/// too many or repeated entries or an overlong ID. The frame that carries it
-/// is already bounded by the transport.
+/// Reads a statistics reading. Only a JSON object is read, each list stops
+/// at its limit before it builds one more entry, and each ID is bounded
+/// before it is copied. `CallStats::within_limits` then checks the numbers
+/// and repeats: a reading that fails is refused whole.
 fn bounded_stats<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<persephone_contracts::CallStats, D::Error> {
-    let stats = persephone_contracts::CallStats::deserialize(deserializer)?;
+    let stats = deserializer.deserialize_map(WireStats)?;
     if stats.within_limits() {
         Ok(stats)
     } else {
@@ -1190,48 +1191,187 @@ fn bounded_stats<'de, D: serde::Deserializer<'de>>(
     }
 }
 
-/// Reads a level list and refuses an entry past [`MAX_CALL_LEVELS`], an
-/// overlong ID or a level out of range before it keeps it, so a hostile list
-/// allocates at most the limits.
+/// The map-only reader of a statistics reading. Every key is required, and
+/// the keys of the parts that may be null take `null`.
+struct WireStats;
+
+impl<'de> serde::de::Visitor<'de> for WireStats {
+    type Value = persephone_contracts::CallStats;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a call statistics object")
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        use serde::de::Error;
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        enum Field {
+            Microphone,
+            Camera,
+            Screen,
+            Participants,
+            Connections,
+        }
+        let (mut microphone, mut camera, mut screen) = (None, None, None);
+        let (mut participants, mut connections) = (None, None);
+        while let Some(field) = map.next_key::<Field>()? {
+            let fresh = match field {
+                Field::Microphone => microphone.replace(map.next_value()?).is_none(),
+                Field::Camera => camera.replace(map.next_value()?).is_none(),
+                Field::Screen => screen.replace(map.next_value()?).is_none(),
+                Field::Participants => participants
+                    .replace(map.next_value::<BoundedList<WireParticipant, MAX_CALL_LEVELS>>()?)
+                    .is_none(),
+                Field::Connections => connections
+                    .replace(map.next_value::<BoundedList<
+                        persephone_contracts::CallStatsConnection,
+                        { persephone_contracts::CALL_STATS_CONNECTIONS_MAX },
+                    >>()?)
+                    .is_none(),
+            };
+            if !fresh {
+                return Err(A::Error::custom("duplicate call statistics field"));
+            }
+        }
+        let participants = participants.ok_or_else(|| A::Error::missing_field("participants"))?;
+        Ok(persephone_contracts::CallStats {
+            microphone: microphone.ok_or_else(|| A::Error::missing_field("microphone"))?,
+            camera: camera.ok_or_else(|| A::Error::missing_field("camera"))?,
+            screen: screen.ok_or_else(|| A::Error::missing_field("screen"))?,
+            participants: participants
+                .0
+                .into_iter()
+                .map(|participant| persephone_contracts::CallStatsParticipant {
+                    user_id: participant.user_id.0,
+                    device_id: participant.device_id.0,
+                    audio: participant.audio,
+                    video: participant.video,
+                })
+                .collect(),
+            connections: connections
+                .ok_or_else(|| A::Error::missing_field("connections"))?
+                .0,
+        })
+    }
+}
+
+/// One device of a statistics reading as it crosses, with its IDs bounded.
+/// Only a JSON object is read, and every key is required.
+struct WireParticipant {
+    user_id: BoundedText<MAX_USER_ID_BYTES>,
+    device_id: BoundedText<MAX_DEVICE_ID_BYTES>,
+    audio: Option<persephone_contracts::CallStatsAudioReceived>,
+    video: Option<persephone_contracts::CallStatsVideoReceived>,
+}
+
+impl<'de> Deserialize<'de> for WireParticipant {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        enum Field {
+            UserId,
+            DeviceId,
+            Audio,
+            Video,
+        }
+        struct Entry;
+        impl<'de> serde::de::Visitor<'de> for Entry {
+            type Value = WireParticipant;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a call statistics participant object")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
+                use serde::de::Error;
+                let (mut user_id, mut device_id, mut audio, mut video) = (None, None, None, None);
+                while let Some(field) = map.next_key::<Field>()? {
+                    let fresh = match field {
+                        Field::UserId => user_id.replace(map.next_value()?).is_none(),
+                        Field::DeviceId => device_id.replace(map.next_value()?).is_none(),
+                        Field::Audio => audio.replace(map.next_value()?).is_none(),
+                        Field::Video => video.replace(map.next_value()?).is_none(),
+                    };
+                    if !fresh {
+                        return Err(A::Error::custom("duplicate call statistics field"));
+                    }
+                }
+                Ok(WireParticipant {
+                    user_id: user_id.ok_or_else(|| A::Error::missing_field("userId"))?,
+                    device_id: device_id.ok_or_else(|| A::Error::missing_field("deviceId"))?,
+                    audio: audio.ok_or_else(|| A::Error::missing_field("audio"))?,
+                    video: video.ok_or_else(|| A::Error::missing_field("video"))?,
+                })
+            }
+        }
+        deserializer.deserialize_map(Entry)
+    }
+}
+
+/// Reads a level list and refuses an entry past [`MAX_CALL_LEVELS`] or an
+/// overlong ID before it keeps it, so a hostile list allocates at most the
+/// limits, and then a level out of range.
 fn bounded_levels<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Vec<persephone_contracts::CallParticipantLevel>, D::Error> {
-    struct Levels;
-    impl<'de> serde::de::Visitor<'de> for Levels {
-        type Value = Vec<persephone_contracts::CallParticipantLevel>;
+    let BoundedList(levels) = BoundedList::<WireLevel, MAX_CALL_LEVELS>::deserialize(deserializer)?;
+    if levels
+        .iter()
+        .any(|level| level.level > MAX_CALL_SOUND_LEVEL)
+    {
+        return Err(serde::de::Error::custom("call levels out of bounds"));
+    }
+    Ok(levels
+        .into_iter()
+        .map(|level| persephone_contracts::CallParticipantLevel {
+            user_id: level.user_id.0,
+            device_id: level.device_id.0,
+            level: level.level,
+        })
+        .collect())
+}
 
-        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "at most {MAX_CALL_LEVELS} call levels")
-        }
+/// A list of at most `N` entries. The entry past the limit is refused
+/// before it is built: a full list only checks for one more, unbuilt.
+struct BoundedList<T, const N: usize>(Vec<T>);
 
-        fn visit_seq<A: serde::de::SeqAccess<'de>>(
-            self,
-            mut seq: A,
-        ) -> Result<Self::Value, A::Error> {
-            let mut levels = Vec::new();
-            loop {
-                // A full list only checks for one more entry, unbuilt.
-                if levels.len() == MAX_CALL_LEVELS {
-                    if seq.next_element::<serde::de::IgnoredAny>()?.is_some() {
-                        return Err(serde::de::Error::custom("call levels out of bounds"));
+impl<'de, T: Deserialize<'de>, const N: usize> Deserialize<'de> for BoundedList<T, N> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct List<T, const N: usize>(std::marker::PhantomData<T>);
+        impl<'de, T: Deserialize<'de>, const N: usize> serde::de::Visitor<'de> for List<T, N> {
+            type Value = BoundedList<T, N>;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "a list of at most {N} entries")
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut entries = Vec::new();
+                loop {
+                    if entries.len() == N {
+                        if seq.next_element::<serde::de::IgnoredAny>()?.is_some() {
+                            return Err(serde::de::Error::custom(format_args!(
+                                "list over its limit of {N} entries"
+                            )));
+                        }
+                        return Ok(BoundedList(entries));
                     }
-                    return Ok(levels);
+                    let Some(entry) = seq.next_element()? else {
+                        return Ok(BoundedList(entries));
+                    };
+                    entries.push(entry);
                 }
-                let Some(level) = seq.next_element::<WireLevel>()? else {
-                    return Ok(levels);
-                };
-                if level.level > MAX_CALL_SOUND_LEVEL {
-                    return Err(serde::de::Error::custom("call levels out of bounds"));
-                }
-                levels.push(persephone_contracts::CallParticipantLevel {
-                    user_id: level.user_id.0,
-                    device_id: level.device_id.0,
-                    level: level.level,
-                });
             }
         }
+        deserializer.deserialize_seq(List(std::marker::PhantomData))
     }
-    deserializer.deserialize_seq(Levels)
 }
 
 /// One entry of a level list as it crosses, with its IDs bounded. Only a
@@ -4230,12 +4370,77 @@ mod timeline_events_wire_tests {
         let mut extra = reading(1, "@a:example.org");
         extra["address"] = "10.0.0.1".into();
         assert!(event(extra).is_err());
+        for key in ["microphone", "screen", "participants", "connections"] {
+            let mut missing = reading(1, "@a:example.org");
+            missing.as_object_mut().unwrap().remove(key);
+            assert!(event(missing).is_err(), "{key}");
+        }
+        for key in ["audio", "deviceId"] {
+            let mut missing = reading(1, "@a:example.org");
+            missing["participants"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove(key);
+            assert!(event(missing).is_err(), "{key}");
+        }
+        let mut no_rate = reading(1, "@a:example.org");
+        no_rate["camera"]
+            .as_object_mut()
+            .unwrap()
+            .remove("bitrateKbps");
+        assert!(event(no_rate).is_err());
         let wire = serde_json::to_string(&CoreMessage::Event(Event::CallStats {
             stats: persephone_contracts::CallStats::default(),
         }))
         .unwrap();
         assert!(wire.starts_with(r#"{"event":{"call_stats":{"stats":{"microphone":null"#));
         assert!(serde_json::from_str::<CoreMessage>(&wire).is_ok());
+    }
+
+    /// GIVEN statistics events with a list past its limit, a positional
+    /// array or a repeated key WHEN read THEN each is refused: the reader
+    /// takes objects only and stops a list at its limit as it reads.
+    #[test]
+    fn given_call_stats_past_their_limits_or_in_arrays_then_they_are_refused() {
+        let event = |stats: serde_json::Value| {
+            serde_json::from_value::<CoreMessage>(
+                serde_json::json!({"event": {"call_stats": {"stats": stats}}}),
+            )
+        };
+        let participant = |index: usize| {
+            serde_json::json!({"userId": format!("@u{index}:example.org"), "deviceId": "D",
+                               "audio": null, "video": null})
+        };
+        let connection = |index: usize| {
+            serde_json::json!({"connection": index, "outgoingKbps": null, "sendKbps": null,
+                               "receiveKbps": null, "rttMs": null})
+        };
+        let reading = |participants: usize, connections: usize| {
+            serde_json::json!({
+                "microphone": null, "camera": null, "screen": null,
+                "participants": (0..participants).map(participant).collect::<Vec<_>>(),
+                "connections": (0..connections).map(connection).collect::<Vec<_>>(),
+            })
+        };
+        let full = persephone_contracts::CALL_STATS_CONNECTIONS_MAX;
+        assert!(event(reading(MAX_CALL_LEVELS, full)).is_ok());
+        assert!(event(reading(MAX_CALL_LEVELS + 1, 0)).is_err());
+        // An entry past the limit is refused unbuilt, whatever it holds.
+        let mut over = reading(MAX_CALL_LEVELS, 0);
+        over["participants"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"anything": [1, 2, 3]}));
+        let error = event(over).unwrap_err();
+        assert!(error.to_string().contains("over its limit"), "{error}");
+        assert!(event(reading(0, full + 1)).is_err());
+        assert!(event(serde_json::json!([null, null, null, [], []])).is_err());
+        let mut positional = reading(0, 0);
+        positional["participants"] = serde_json::json!([["@a:example.org", "D", null, null]]);
+        assert!(event(positional).is_err());
+        let twice = r#"{"event":{"call_stats":{"stats":{"microphone":null,"microphone":null,
+            "camera":null,"screen":null,"participants":[],"connections":[]}}}}"#;
+        assert!(serde_json::from_str::<CoreMessage>(twice).is_err());
     }
 
     /// GIVEN call level events WHEN read THEN bounded ones are kept, and a
@@ -4282,10 +4487,7 @@ mod timeline_events_wire_tests {
         let missing =
             br#"{"event":{"call_levels":{"levels":[{"userId":"@a:example.org","deviceId":"D"}]}}}"#;
         assert!(serde_json::from_slice::<CoreMessage>(missing).is_err());
-        assert!(
-            error.to_string().contains("call levels out of bounds"),
-            "{error}"
-        );
+        assert!(error.to_string().contains("over its limit"), "{error}");
         let longest = "a".repeat(MAX_USER_ID_BYTES);
         assert!(event(serde_json::json!([one(1, &longest)])).is_ok());
         let device = "D".repeat(MAX_DEVICE_ID_BYTES + 1);

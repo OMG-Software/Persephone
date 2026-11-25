@@ -1,8 +1,11 @@
 //! Turns raw WebRTC counters into the call statistics message (ADR-0066).
 //!
 //! Pure: no LiveKit types, no I/O and no clock. The caller gives each
-//! reading a time in milliseconds, and the book makes rates from the change
-//! of a counter since the reading before.
+//! track's and each transport's numbers the time they were read, in
+//! milliseconds, and the book makes each rate from the change of a counter
+//! since its sample before, over the time between the two samples. A
+//! track's counters are kept under its track ID, so a new track never
+//! compares with an older one.
 
 use std::collections::HashMap;
 
@@ -111,6 +114,9 @@ fn kbps_from_bits(bits_per_second: f64) -> Option<u32> {
 /// The own microphone track.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RawOwnAudio {
+    /// The track ID, which keys its counters, and the time of its read.
+    pub track: String,
+    pub at_ms: u64,
     /// Linear, 0.0 to 1.0.
     pub level: f64,
     pub bytes_sent: u64,
@@ -125,6 +131,8 @@ pub struct RawOwnAudio {
 /// the sum of their bytes and the largest layer's size and frame rate.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RawOwnVideo {
+    pub track: String,
+    pub at_ms: u64,
     pub fps: f64,
     pub width: u32,
     pub height: u32,
@@ -137,6 +145,8 @@ pub struct RawOwnVideo {
 /// participant; the smallest track id when it has more).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RawRemoteAudio {
+    pub track: String,
+    pub at_ms: u64,
     /// Linear, 0.0 to 1.0.
     pub level: f64,
     pub bytes_received: u64,
@@ -150,6 +160,8 @@ pub struct RawRemoteAudio {
 /// The video of one remote participant.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RawRemoteVideo {
+    pub track: String,
+    pub at_ms: u64,
     pub fps: f64,
     pub width: u32,
     pub height: u32,
@@ -166,23 +178,43 @@ pub struct RawRemote {
     pub video: Option<RawRemoteVideo>,
 }
 
+/// Which transport of a connection a link is.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum LinkRole {
+    /// The own room's single peer connection, which sends and receives.
+    Single,
+    Publisher,
+    Subscriber,
+}
+
+/// The byte counters of one transport, read at `at_ms`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RawLink {
+    pub role: LinkRole,
+    pub at_ms: u64,
+    pub bytes_sent: u64,
+    pub bytes_received: u64,
+}
+
 /// One connection to an SFU.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RawConnection {
     pub connection: u8,
     /// WebRTC's estimate of the bandwidth for sending, in bit/s.
     pub outgoing_bits_per_second: Option<f64>,
-    /// The bytes sent and received on the connection's transports.
-    pub bytes_sent: Option<u64>,
-    pub bytes_received: Option<u64>,
     pub rtt_seconds: Option<f64>,
+    /// The transports whose bytes add up to the connection's totals, each
+    /// role once.
+    pub links: Vec<RawLink>,
+    /// Whether every transport that the connection uses was read. When one
+    /// was not, the totals would be short, so the byte rates are unknown.
+    pub complete: bool,
 }
 
-/// One reading of everything.
+/// One reading of everything. Each part carries the time it was read, on a
+/// clock that only goes forward.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RawStats {
-    /// Milliseconds on a clock that only goes forward.
-    pub at_ms: u64,
     pub microphone: Option<RawOwnAudio>,
     pub camera: Option<RawOwnVideo>,
     pub screen: Option<RawOwnVideo>,
@@ -190,14 +222,17 @@ pub struct RawStats {
     pub connections: Vec<RawConnection>,
 }
 
-/// What a counter belongs to.
+/// What a counter belongs to: an own track by its track ID, a remote track
+/// by connection, identity and track ID, or one transport of a connection.
+/// A new track starts with no earlier value, so a switch (a camera after a
+/// screen share, a new microphone) never gives a wrong rate.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 enum Source {
-    Microphone,
-    Camera,
-    Screen,
-    Remote(u8, String),
-    Connection(u8),
+    Microphone(String),
+    Camera(String),
+    Screen(String),
+    Remote(u8, String, String),
+    Link(u8, LinkRole),
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -213,43 +248,65 @@ enum Counter {
 
 type Key = (Source, Counter);
 
-/// Remembers the last counters, so a reading gives rates.
+/// A counter's value and the time it was read.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Sample {
+    value: u64,
+    at_ms: u64,
+}
+
+/// Remembers the last sample of each counter, so a reading gives rates.
 #[derive(Debug, Default)]
 pub struct StatsBook {
-    at_ms: Option<u64>,
-    counters: HashMap<Key, u64>,
+    counters: HashMap<Key, Sample>,
 }
 
 /// The counters of one reading while it is made.
 struct Reading<'a> {
-    /// The time since the reading before, or `None` for the first reading
-    /// and for one at the same time or earlier.
-    interval_ms: Option<u64>,
-    before: &'a HashMap<Key, u64>,
-    now: HashMap<Key, u64>,
+    before: &'a HashMap<Key, Sample>,
+    now: HashMap<Key, Sample>,
 }
 
 impl Reading<'_> {
-    /// The change of a counter since the reading before. The counter is kept
-    /// for the next reading in any case.
+    /// The change of a counter since its sample before, and the time
+    /// between the two. `None` for a counter with no sample before, one that
+    /// was reset, and a sample at the time of the one before or earlier. A
+    /// sample at the same time keeps the one before, so the next sample
+    /// still has a rate; any other sample is kept for the next reading.
     fn delta(
         &mut self,
         source: &Source,
         counter: Counter,
-        value: u64,
+        sample: Sample,
         width: Width,
-    ) -> Option<u64> {
+    ) -> Option<(u64, u64)> {
         let key = (source.clone(), counter);
-        let delta = self
-            .interval_ms
-            .and_then(|_| counter_delta(self.before.get(&key).copied(), value, width));
-        self.now.insert(key, value);
-        delta
+        let before = self.before.get(&key).copied();
+        if let Some(before) = before
+            && before.at_ms == sample.at_ms
+        {
+            self.now.insert(key, before);
+            return None;
+        }
+        self.now.insert(key, sample);
+        let before = before?;
+        let interval = sample
+            .at_ms
+            .checked_sub(before.at_ms)
+            .filter(|interval| *interval > 0)?;
+        Some((
+            counter_delta(Some(before.value), sample.value, width)?,
+            interval,
+        ))
     }
 
-    fn kbps(&mut self, source: &Source, counter: Counter, bytes: u64) -> Option<u32> {
-        let delta = self.delta(source, counter, bytes, Width::Bits64);
-        kbps(delta?, self.interval_ms?)
+    fn kbps(&mut self, source: &Source, counter: Counter, bytes: u64, at_ms: u64) -> Option<u32> {
+        let sample = Sample {
+            value: bytes,
+            at_ms,
+        };
+        let (delta, interval) = self.delta(source, counter, sample, Width::Bits64)?;
+        kbps(delta, interval)
     }
 }
 
@@ -257,56 +314,36 @@ impl StatsBook {
     /// Forgets every counter, so the next reading has no rates. Call it when
     /// the statistics are turned on, so a pause is not a long interval.
     pub fn reset(&mut self) {
-        self.at_ms = None;
         self.counters.clear();
     }
 
-    /// The statistics message for `raw`. Rates are `None` for the first
-    /// reading, for a reading at the time of the one before, and for a
-    /// counter that was not there before or was reset. A reading at the
-    /// time of the one before changes nothing, so the next reading still
-    /// has a rate. Entries past the limits and entries the protocol would
-    /// refuse are left out.
+    /// The statistics message for `raw`. A rate is `None` for a counter with
+    /// no sample before (the first reading, a new track), one that was
+    /// reset, and one read at the time of its sample before or earlier.
+    /// Entries past the limits and entries the protocol would refuse are
+    /// left out. Counters that the reading does not show are forgotten.
     pub fn next(&mut self, raw: &RawStats) -> CallStats {
-        // The same time twice is a zero interval: no rates, and no change
-        // of what the next reading compares with.
-        let same_time = self.at_ms == Some(raw.at_ms);
-        let interval_ms = if same_time {
-            None
-        } else {
-            self.at_ms
-                .and_then(|before| raw.at_ms.checked_sub(before))
-                .filter(|interval| *interval > 0)
-        };
         let before = std::mem::take(&mut self.counters);
         let mut reading = Reading {
-            interval_ms,
             before: &before,
             now: HashMap::new(),
         };
-        let stats = CallStats {
-            microphone: raw
-                .microphone
-                .as_ref()
-                .map(|audio| own_audio(&mut reading, audio)),
-            camera: raw
-                .camera
-                .as_ref()
-                .map(|video| own_video(&mut reading, &Source::Camera, video)),
-            screen: raw
-                .screen
-                .as_ref()
-                .map(|video| own_video(&mut reading, &Source::Screen, video)),
-            remotes: remotes(&mut reading, &raw.remotes),
-            connections: connections(&mut reading, &raw.connections),
-        };
-        let now = reading.now;
-        if same_time {
-            self.counters = before;
-        } else {
-            self.counters = now;
-            self.at_ms = Some(raw.at_ms);
-        }
+        let stats =
+            CallStats {
+                microphone: raw
+                    .microphone
+                    .as_ref()
+                    .map(|audio| own_audio(&mut reading, audio)),
+                camera: raw.camera.as_ref().map(|video| {
+                    own_video(&mut reading, &Source::Camera(video.track.clone()), video)
+                }),
+                screen: raw.screen.as_ref().map(|video| {
+                    own_video(&mut reading, &Source::Screen(video.track.clone()), video)
+                }),
+                remotes: remotes(&mut reading, &raw.remotes),
+                connections: connections(&mut reading, &raw.connections),
+            };
+        self.counters = reading.now;
         stats
     }
 }
@@ -314,7 +351,12 @@ impl StatsBook {
 fn own_audio(reading: &mut Reading<'_>, audio: &RawOwnAudio) -> AudioSendStats {
     AudioSendStats {
         level: sound_level(audio.level),
-        bitrate_kbps: reading.kbps(&Source::Microphone, Counter::BytesSent, audio.bytes_sent),
+        bitrate_kbps: reading.kbps(
+            &Source::Microphone(audio.track.clone()),
+            Counter::BytesSent,
+            audio.bytes_sent,
+            audio.at_ms,
+        ),
         packets_sent: unsigned(audio.packets_sent),
         packets_lost: audio.packets_lost.map(count),
         jitter_ms: audio.jitter_seconds.and_then(millis),
@@ -327,7 +369,7 @@ fn own_video(reading: &mut Reading<'_>, source: &Source, video: &RawOwnVideo) ->
         fps: frames_per_second(video.fps),
         width: side(video.width),
         height: side(video.height),
-        bitrate_kbps: reading.kbps(source, Counter::BytesSent, video.bytes_sent),
+        bitrate_kbps: reading.kbps(source, Counter::BytesSent, video.bytes_sent, video.at_ms),
         limit: video.limit,
         packets_lost: video.packets_lost.map(count),
     }
@@ -347,23 +389,39 @@ fn remotes(reading: &mut Reading<'_>, raw: &[RawRemote]) -> Vec<RemoteStats> {
         {
             continue;
         }
-        let source = Source::Remote(remote.connection, remote.identity.clone());
+        let track = |track: &str| {
+            Source::Remote(remote.connection, remote.identity.clone(), track.to_owned())
+        };
         let audio = remote.audio.as_ref().map(|audio| {
-            let total = reading.delta(
-                &source,
-                Counter::TotalSamples,
-                audio.total_samples,
-                Width::Bits64,
-            );
-            let concealed = reading.delta(
-                &source,
-                Counter::ConcealedSamples,
-                audio.concealed_samples,
-                Width::Bits64,
-            );
+            let source = track(&audio.track);
+            let sample = |value| Sample {
+                value,
+                at_ms: audio.at_ms,
+            };
+            let total = reading
+                .delta(
+                    &source,
+                    Counter::TotalSamples,
+                    sample(audio.total_samples),
+                    Width::Bits64,
+                )
+                .map(|(delta, _)| delta);
+            let concealed = reading
+                .delta(
+                    &source,
+                    Counter::ConcealedSamples,
+                    sample(audio.concealed_samples),
+                    Width::Bits64,
+                )
+                .map(|(delta, _)| delta);
             AudioReceiveStats {
                 level: sound_level(audio.level),
-                bitrate_kbps: reading.kbps(&source, Counter::AudioBytes, audio.bytes_received),
+                bitrate_kbps: reading.kbps(
+                    &source,
+                    Counter::AudioBytes,
+                    audio.bytes_received,
+                    audio.at_ms,
+                ),
                 packets_received: unsigned(audio.packets_received),
                 packets_lost: count(audio.packets_lost),
                 jitter_ms: millis(audio.jitter_seconds).unwrap_or(0),
@@ -371,19 +429,27 @@ fn remotes(reading: &mut Reading<'_>, raw: &[RawRemote]) -> Vec<RemoteStats> {
             }
         });
         let video = remote.video.as_ref().map(|video| {
+            let source = track(&video.track);
             let dropped = reading.delta(
                 &source,
                 Counter::FramesDropped,
-                video.frames_dropped,
+                Sample {
+                    value: video.frames_dropped,
+                    at_ms: video.at_ms,
+                },
                 Width::Bits32,
             );
             VideoReceiveStats {
                 fps: frames_per_second(video.fps),
                 width: side(video.width),
                 height: side(video.height),
-                bitrate_kbps: reading.kbps(&source, Counter::VideoBytes, video.bytes_received),
+                bitrate_kbps: reading.kbps(
+                    &source,
+                    Counter::VideoBytes,
+                    video.bytes_received,
+                    video.at_ms,
+                ),
                 dropped_fps: dropped
-                    .zip(reading.interval_ms)
                     .and_then(|(delta, interval)| per_second(delta, interval))
                     .map(|rate| u8::try_from(rate.min(u64::from(MAX_STATS_FPS))).unwrap_or(0)),
                 packets_lost: count(video.packets_lost),
@@ -421,20 +487,46 @@ fn connections(reading: &mut Reading<'_>, raw: &[RawConnection]) -> Vec<Connecti
         {
             continue;
         }
-        let source = Source::Connection(connection.connection);
         out.push(ConnectionStats {
             connection: connection.connection,
             outgoing_kbps: connection.outgoing_bits_per_second.and_then(kbps_from_bits),
-            send_kbps: connection
-                .bytes_sent
-                .and_then(|bytes| reading.kbps(&source, Counter::BytesSent, bytes)),
-            receive_kbps: connection
-                .bytes_received
-                .and_then(|bytes| reading.kbps(&source, Counter::BytesReceived, bytes)),
+            send_kbps: link_kbps(reading, connection, Counter::BytesSent, |link| {
+                link.bytes_sent
+            }),
+            receive_kbps: link_kbps(reading, connection, Counter::BytesReceived, |link| {
+                link.bytes_received
+            }),
             rtt_ms: connection.rtt_seconds.and_then(millis),
         });
     }
     out
+}
+
+/// A connection's rate of one counter: the sum of its transports' rates,
+/// each from that transport's own samples. Unknown when a transport that
+/// the connection uses was not read, or when one has no rate yet, so a
+/// missing transport never makes a total that is short or one that jumps.
+/// Each transport's sample is kept for the next reading either way.
+fn link_kbps(
+    reading: &mut Reading<'_>,
+    connection: &RawConnection,
+    counter: Counter,
+    bytes: fn(&RawLink) -> u64,
+) -> Option<u32> {
+    let mut total = Some(0_u32);
+    let mut roles: Vec<LinkRole> = Vec::new();
+    for link in &connection.links {
+        if roles.contains(&link.role) {
+            continue;
+        }
+        roles.push(link.role);
+        let source = Source::Link(connection.connection, link.role);
+        let rate = reading.kbps(&source, counter, bytes(link), link.at_ms);
+        total = total
+            .zip(rate)
+            .map(|(sum, rate)| sum.saturating_add(rate).min(MAX_STATS_KBPS));
+    }
+    total.filter(|_| connection.complete && !roles.is_empty())
 }
 
 #[cfg(test)]

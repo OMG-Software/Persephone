@@ -4,6 +4,10 @@
 //! checks. There is no text except the participants' identities, which the
 //! worker has already validated for other messages. There is no address,
 //! port, candidate type, SSRC or codec name.
+//!
+//! The page's contract repeats the `MAX_STATS_*` bounds as `CALL_STATS_*`
+//! in `persephone-contracts`. The core checks at compile time that they
+//! match. Change them together.
 
 use super::{DecodeError, MAX_OTHER_CONNECTIONS, MAX_PARTICIPANTS, Reader, put_str};
 

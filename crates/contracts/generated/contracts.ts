@@ -1014,3 +1014,18 @@ export const CALL_DEVICE_ID_BYTES_MAX = 255;
 
 /** The top of a call sound level meter. */
 export const CALL_SOUND_LEVEL_MAX = 100;
+
+/** The highest call statistic bitrate, in kbit/s. */
+export const CALL_STATS_KBPS_MAX = 1000000;
+
+/** The longest call statistic time, in milliseconds. */
+export const CALL_STATS_MS_MAX = 60000;
+
+/** The highest call statistic frame rate. */
+export const CALL_STATS_FPS_MAX = 120;
+
+/** The longest call statistic picture side, in pixels. */
+export const CALL_STATS_SIDE_MAX = 16384;
+
+/** The most connections in one call statistics reading. */
+export const CALL_STATS_CONNECTIONS_MAX = 4;

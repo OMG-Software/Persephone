@@ -5,10 +5,12 @@
 //! under a deadline, so the event loop never waits for it. It reads only
 //! while the core has turned the statistics on, and at most once a second.
 //! The task gives back plain numbers (`RawStats`); `mapping::stats` makes
-//! the message from them. Nothing here keeps a track, an address or a name:
-//! only the numbers that the message carries leave the parse functions.
+//! the message from them. Nothing here keeps a track handle, an address or a
+//! name: only the numbers that the message carries, and each track's ID with
+//! the time of its read, leave the parse functions. The ID keys the track's
+//! counters in the worker and never leaves it.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
@@ -24,8 +26,8 @@ use tokio::time::Instant;
 
 use super::read_all;
 use crate::mapping::stats::{
-    RawConnection, RawOwnAudio, RawOwnVideo, RawRemote, RawRemoteAudio, RawRemoteVideo, RawStats,
-    StatsBook,
+    LinkRole, RawConnection, RawLink, RawOwnAudio, RawOwnVideo, RawRemote, RawRemoteAudio,
+    RawRemoteVideo, RawStats, StatsBook,
 };
 
 /// The shortest time between two reads.
@@ -54,14 +56,49 @@ pub struct Sources {
     pub remote_video: Vec<(u8, String, RemoteVideoTrack)>,
 }
 
-/// The reading of one track: its statistics, or none when they could not be
-/// read.
-enum Read {
-    Microphone(Vec<RtcStats>),
-    Camera(Vec<RtcStats>),
-    Screen(Vec<RtcStats>),
-    RemoteAudio(u8, String, Vec<RtcStats>),
-    RemoteVideo(u8, String, Vec<RtcStats>),
+/// Which track a read is of.
+enum ReadKind {
+    Microphone,
+    Camera,
+    Screen,
+    RemoteAudio(u8, String),
+    RemoteVideo(u8, String),
+}
+
+/// The reading of one track: its statistics (none when they could not be
+/// read), its track ID, and the time the read finished on the probe's
+/// clock. libwebrtc gathers a track's statistics just before its read
+/// finishes, so that time is the time of its counters.
+struct Read {
+    kind: ReadKind,
+    track: String,
+    at_ms: u64,
+    stats: Vec<RtcStats>,
+}
+
+impl Read {
+    fn new(kind: ReadKind, track: String, base: std::time::Instant, stats: Vec<RtcStats>) -> Self {
+        Self {
+            kind,
+            track,
+            at_ms: since(base),
+            stats,
+        }
+    }
+}
+
+/// Milliseconds since `base`.
+fn since(base: std::time::Instant) -> u64 {
+    u64::try_from(base.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+/// The transports a read needs: the own room's publisher when an own track
+/// is read, and each connection's subscriber when one of its remote tracks
+/// is read.
+#[derive(Default)]
+struct Asked {
+    own: bool,
+    remote: BTreeSet<u8>,
 }
 
 type Job = Pin<Box<dyn Future<Output = Read> + Send>>;
@@ -109,14 +146,14 @@ impl StatsProbe {
     }
 
     /// Turns the reads on or off (`SetStats`). Turning them on starts a new
-    /// series: the first reading has no rates.
+    /// series: the first reading has no rates. The time of the last start is
+    /// kept, so turning them off and on never reads more than once a second.
     pub fn set(&mut self, on: bool) {
         if on == self.on {
             return;
         }
         self.on = on;
         self.generation += 1;
-        self.started = None;
         self.book.reset();
         // A read that runs ends by its deadline and reports; its report is
         // dropped by its number. The slot is freed only by that report.
@@ -175,53 +212,66 @@ impl StatsProbe {
 async fn read(sources: Sources, base: std::time::Instant) -> RawStats {
     let deadline = Instant::now() + STATS_READ_BUDGET;
     let one_connection = sources.one_connection;
+    let mut asked = Asked::default();
     let mut jobs: Vec<Job> = Vec::new();
     if let Some(track) = sources.microphone {
+        asked.own = true;
+        let sid = track.sid().to_string();
         jobs.push(Box::pin(async move {
-            Read::Microphone(track.get_stats().await.unwrap_or_default())
+            let stats = track.get_stats().await.unwrap_or_default();
+            Read::new(ReadKind::Microphone, sid, base, stats)
         }));
     }
-    if let Some(track) = sources.camera {
+    for (kind, track) in [
+        (ReadKind::Camera, sources.camera),
+        (ReadKind::Screen, sources.screen),
+    ] {
+        let Some(track) = track else {
+            continue;
+        };
+        asked.own = true;
+        let sid = track.sid().to_string();
         jobs.push(Box::pin(async move {
-            Read::Camera(track.get_stats().await.unwrap_or_default())
-        }));
-    }
-    if let Some(track) = sources.screen {
-        jobs.push(Box::pin(async move {
-            Read::Screen(track.get_stats().await.unwrap_or_default())
+            let stats = track.get_stats().await.unwrap_or_default();
+            Read::new(kind, sid, base, stats)
         }));
     }
     for (connection, identity, track) in sources.remote_audio {
+        asked.remote.insert(connection);
+        let sid = track.sid().to_string();
         jobs.push(Box::pin(async move {
-            Read::RemoteAudio(
-                connection,
-                identity,
-                track.get_stats().await.unwrap_or_default(),
+            let stats = track.get_stats().await.unwrap_or_default();
+            Read::new(
+                ReadKind::RemoteAudio(connection, identity),
+                sid,
+                base,
+                stats,
             )
         }));
     }
     for (connection, identity, track) in sources.remote_video {
+        asked.remote.insert(connection);
+        let sid = track.sid().to_string();
         jobs.push(Box::pin(async move {
-            Read::RemoteVideo(
-                connection,
-                identity,
-                track.get_stats().await.unwrap_or_default(),
+            let stats = track.get_stats().await.unwrap_or_default();
+            Read::new(
+                ReadKind::RemoteVideo(connection, identity),
+                sid,
+                base,
+                stats,
             )
         }));
     }
     let reads = read_all(deadline, jobs).await.into_iter().flatten();
-    let at_ms = u64::try_from(base.elapsed().as_millis()).unwrap_or(u64::MAX);
-    assemble(at_ms, one_connection, reads)
+    assemble(&asked, one_connection, reads)
 }
 
 /// Makes the raw reading from what the reads gave. A track whose read did
 /// not finish is left out. `one_connection` says that the own room's tracks
-/// all use one transport (see [`Sources::one_connection`]).
-fn assemble(at_ms: u64, one_connection: bool, reads: impl Iterator<Item = Read>) -> RawStats {
-    let mut raw = RawStats {
-        at_ms,
-        ..RawStats::default()
-    };
+/// all use one transport (see [`Sources::one_connection`]). A connection
+/// whose needed transport (see [`Asked`]) no read gave is not complete.
+fn assemble(asked: &Asked, one_connection: bool, reads: impl Iterator<Item = Read>) -> RawStats {
+    let mut raw = RawStats::default();
     // The first transport of the own tracks (the publisher) and of the
     // remote tracks of each connection (the subscriber). Each track's
     // statistics hold only its own streams and the transport they use.
@@ -229,30 +279,31 @@ fn assemble(at_ms: u64, one_connection: bool, reads: impl Iterator<Item = Read>)
     let mut subscribers: HashMap<u8, Link> = HashMap::new();
     let mut remotes: HashMap<(u8, String), RawRemote> = HashMap::new();
     for read in reads {
-        match read {
-            Read::Microphone(stats) => {
-                raw.microphone = own_audio(&stats);
-                publisher = publisher.or_else(|| link(&stats));
+        let found = link(&read);
+        match &read.kind {
+            ReadKind::Microphone => {
+                raw.microphone = own_audio(&read);
+                publisher = publisher.or(found);
             }
-            Read::Camera(stats) => {
-                raw.camera = own_video(&stats);
-                publisher = publisher.or_else(|| link(&stats));
+            ReadKind::Camera => {
+                raw.camera = own_video(&read);
+                publisher = publisher.or(found);
             }
-            Read::Screen(stats) => {
-                raw.screen = own_video(&stats);
-                publisher = publisher.or_else(|| link(&stats));
+            ReadKind::Screen => {
+                raw.screen = own_video(&read);
+                publisher = publisher.or(found);
             }
-            Read::RemoteAudio(connection, identity, stats) => {
-                if let Some(link) = link(&stats) {
-                    subscribers.entry(connection).or_insert(link);
+            ReadKind::RemoteAudio(connection, identity) => {
+                if let Some(found) = found {
+                    subscribers.entry(*connection).or_insert(found);
                 }
-                remote(&mut remotes, connection, identity).audio = remote_audio(&stats);
+                remote(&mut remotes, *connection, identity).audio = remote_audio(&read);
             }
-            Read::RemoteVideo(connection, identity, stats) => {
-                if let Some(link) = link(&stats) {
-                    subscribers.entry(connection).or_insert(link);
+            ReadKind::RemoteVideo(connection, identity) => {
+                if let Some(found) = found {
+                    subscribers.entry(*connection).or_insert(found);
                 }
-                remote(&mut remotes, connection, identity).video = remote_video(&stats);
+                remote(&mut remotes, *connection, identity).video = remote_video(&read);
             }
         }
     }
@@ -262,44 +313,56 @@ fn assemble(at_ms: u64, one_connection: bool, reads: impl Iterator<Item = Read>)
     raw.connections = (0..=MAX_OTHER_CONNECTIONS)
         .filter_map(|connection| {
             let subscriber = subscribers.get(&connection);
-            let (own, subscriber) = match connection {
-                // One peer connection: both reads saw the same transport.
-                0 if one_connection => (publisher.as_ref().or(subscriber), None),
-                0 => (publisher.as_ref(), subscriber),
-                _ => (None, subscriber),
+            let remote_asked = asked.remote.contains(&connection);
+            let links: Vec<(LinkRole, Option<&Link>, bool)> = match connection {
+                // One peer connection: every read of the room saw the same
+                // transport, so any one of them gives it.
+                0 if one_connection => vec![(
+                    LinkRole::Single,
+                    publisher.as_ref().or(subscriber),
+                    asked.own || remote_asked,
+                )],
+                0 => vec![
+                    (LinkRole::Publisher, publisher.as_ref(), asked.own),
+                    (LinkRole::Subscriber, subscriber, remote_asked),
+                ],
+                _ => vec![(LinkRole::Subscriber, subscriber, remote_asked)],
             };
-            connection_stats(connection, own, subscriber)
+            connection_stats(connection, &links)
         })
         .collect();
     raw
 }
 
-fn remote(
-    remotes: &mut HashMap<(u8, String), RawRemote>,
+fn remote<'a>(
+    remotes: &'a mut HashMap<(u8, String), RawRemote>,
     connection: u8,
-    identity: String,
-) -> &mut RawRemote {
+    identity: &str,
+) -> &'a mut RawRemote {
     remotes
-        .entry((connection, identity.clone()))
+        .entry((connection, identity.to_owned()))
         .or_insert_with(|| RawRemote {
             connection,
-            identity,
+            identity: identity.to_owned(),
             audio: None,
             video: None,
         })
 }
 
 /// The numbers of one peer connection's transport and its selected pair of
-/// addresses. The addresses themselves are never read.
+/// addresses, and the time of the read that gave them. The addresses
+/// themselves are never read.
 #[derive(Clone, Debug, Default, PartialEq)]
 struct Link {
+    at_ms: u64,
     bytes_sent: u64,
     bytes_received: u64,
     outgoing_bits_per_second: Option<f64>,
     rtt_seconds: Option<f64>,
 }
 
-fn link(stats: &[RtcStats]) -> Option<Link> {
+fn link(read: &Read) -> Option<Link> {
+    let stats = &read.stats;
     let mut transports = stats.iter().filter_map(|stat| match stat {
         RtcStats::Transport(transport) => Some(transport),
         _ => None,
@@ -314,6 +377,7 @@ fn link(stats: &[RtcStats]) -> Option<Link> {
         _ => None,
     });
     Some(Link {
+        at_ms: read.at_ms,
         bytes_sent: transport.transport.bytes_sent,
         bytes_received: transport.transport.bytes_received,
         outgoing_bits_per_second: selected
@@ -325,34 +389,54 @@ fn link(stats: &[RtcStats]) -> Option<Link> {
     })
 }
 
-/// The connection's numbers: what is sent and received in total on its
-/// transports, the estimate of the outgoing bandwidth, and the round-trip
-/// time. `None` when no transport was read.
+/// The connection's numbers from its transports (`role`, the link a read
+/// gave, whether a read needed it): each transport's bytes, the estimate of
+/// the outgoing bandwidth, and the round-trip time. `None` when no
+/// transport was read. Not complete when a needed transport is missing.
 fn connection_stats(
     connection: u8,
-    publisher: Option<&Link>,
-    subscriber: Option<&Link>,
+    transports: &[(LinkRole, Option<&Link>, bool)],
 ) -> Option<RawConnection> {
-    let links: Vec<&Link> = publisher.into_iter().chain(subscriber).collect();
-    if links.is_empty() {
+    let read: Vec<(LinkRole, &Link)> = transports
+        .iter()
+        .filter_map(|(role, link, _)| link.map(|link| (*role, link)))
+        .collect();
+    if read.is_empty() {
         return None;
     }
     Some(RawConnection {
         connection,
-        outgoing_bits_per_second: links.iter().find_map(|link| link.outgoing_bits_per_second),
-        bytes_sent: Some(links.iter().map(|link| link.bytes_sent).sum()),
-        bytes_received: Some(links.iter().map(|link| link.bytes_received).sum()),
-        rtt_seconds: links.iter().find_map(|link| link.rtt_seconds),
+        outgoing_bits_per_second: read
+            .iter()
+            .find_map(|(_, link)| link.outgoing_bits_per_second),
+        rtt_seconds: read.iter().find_map(|(_, link)| link.rtt_seconds),
+        links: read
+            .iter()
+            .map(|(role, link)| RawLink {
+                role: *role,
+                at_ms: link.at_ms,
+                bytes_sent: link.bytes_sent,
+                bytes_received: link.bytes_received,
+            })
+            .collect(),
+        complete: transports
+            .iter()
+            .all(|(_, link, needed)| link.is_some() || !needed),
     })
 }
 
-fn own_audio(stats: &[RtcStats]) -> Option<RawOwnAudio> {
+fn own_audio(read: &Read) -> Option<RawOwnAudio> {
+    let stats = &read.stats;
     let mut audio: Option<RawOwnAudio> = None;
     for stat in stats {
         if let RtcStats::OutboundRtp(outbound) = stat
             && outbound.stream.kind == "audio"
         {
-            let audio = audio.get_or_insert_with(RawOwnAudio::default);
+            let audio = audio.get_or_insert_with(|| RawOwnAudio {
+                track: read.track.clone(),
+                at_ms: read.at_ms,
+                ..RawOwnAudio::default()
+            });
             audio.bytes_sent = audio.bytes_sent.saturating_add(outbound.sent.bytes_sent);
             audio.packets_sent = audio
                 .packets_sent
@@ -388,7 +472,8 @@ fn limit(reason: QualityLimitationReason) -> QualityLimit {
 
 /// The own video track: the bytes of every layer, and the size, frame rate
 /// and limit of the largest one.
-fn own_video(stats: &[RtcStats]) -> Option<RawOwnVideo> {
+fn own_video(read: &Read) -> Option<RawOwnVideo> {
+    let stats = &read.stats;
     let mut video: Option<RawOwnVideo> = None;
     let mut largest = 0_u64;
     for stat in stats {
@@ -404,6 +489,8 @@ fn own_video(stats: &[RtcStats]) -> Option<RawOwnVideo> {
             None => {
                 largest = size;
                 video = Some(RawOwnVideo {
+                    track: read.track.clone(),
+                    at_ms: read.at_ms,
                     fps: outbound.outbound.frames_per_second,
                     width: outbound.outbound.frame_width,
                     height: outbound.outbound.frame_height,
@@ -440,16 +527,20 @@ fn own_video(stats: &[RtcStats]) -> Option<RawOwnVideo> {
     Some(video.clone())
 }
 
-fn remote_audio(stats: &[RtcStats]) -> Option<RawRemoteAudio> {
+fn remote_audio(read: &Read) -> Option<RawRemoteAudio> {
     let mut audio: Option<RawRemoteAudio> = None;
-    for stat in stats {
+    for stat in &read.stats {
         let RtcStats::InboundRtp(inbound) = stat else {
             continue;
         };
         if inbound.stream.kind != "audio" {
             continue;
         }
-        let audio = audio.get_or_insert_with(RawRemoteAudio::default);
+        let audio = audio.get_or_insert_with(|| RawRemoteAudio {
+            track: read.track.clone(),
+            at_ms: read.at_ms,
+            ..RawRemoteAudio::default()
+        });
         audio.level = audio.level.max(inbound.inbound.audio_level);
         audio.bytes_received = audio
             .bytes_received
@@ -471,16 +562,20 @@ fn remote_audio(stats: &[RtcStats]) -> Option<RawRemoteAudio> {
     audio
 }
 
-fn remote_video(stats: &[RtcStats]) -> Option<RawRemoteVideo> {
+fn remote_video(read: &Read) -> Option<RawRemoteVideo> {
     let mut video: Option<RawRemoteVideo> = None;
-    for stat in stats {
+    for stat in &read.stats {
         let RtcStats::InboundRtp(inbound) = stat else {
             continue;
         };
         if inbound.stream.kind != "video" {
             continue;
         }
-        let video = video.get_or_insert_with(RawRemoteVideo::default);
+        let video = video.get_or_insert_with(|| RawRemoteVideo {
+            track: read.track.clone(),
+            at_ms: read.at_ms,
+            ..RawRemoteVideo::default()
+        });
         video.fps = video.fps.max(inbound.inbound.frames_per_second);
         video.width = video.width.max(inbound.inbound.frame_width);
         video.height = video.height.max(inbound.inbound.frame_height);
@@ -547,6 +642,28 @@ mod tests {
         probe.shutdown();
     }
 
+    /// GIVEN a read that finished WHEN the statistics go off and on again
+    /// within a second THEN no read starts before a second since the last
+    /// start, and the next one has no rates.
+    #[tokio::test]
+    async fn given_a_quick_off_and_on_when_ticked_then_reads_stay_a_second_apart() {
+        let (mut probe, mut reports) = probe();
+        probe.set(true);
+        let start = Instant::now();
+        assert_eq!(tick(&mut probe, start), 1);
+        let (generation, raw) = reports.recv().await.unwrap();
+        assert!(probe.end(generation, raw).is_some());
+        probe.set(false);
+        probe.set(true);
+        assert_eq!(
+            tick(&mut probe, start + Duration::from_millis(100)),
+            0,
+            "the toggle keeps the time of the last start"
+        );
+        assert_eq!(tick(&mut probe, start + STATS_INTERVAL), 1);
+        probe.shutdown();
+    }
+
     /// GIVEN a read that runs WHEN the statistics go off and on again THEN
     /// the old read's report gives no message and the slot stays taken until
     /// it reports, so two reads never run together.
@@ -597,15 +714,14 @@ mod tests {
     /// up.
     #[test]
     fn given_a_connection_without_transports_when_assembled_then_it_has_no_entry() {
-        let raw = assemble(5, false, std::iter::empty());
-        assert_eq!(raw.at_ms, 5);
+        let raw = assemble(&Asked::default(), false, std::iter::empty());
         assert!(raw.connections.is_empty() && raw.remotes.is_empty());
         let raw = assemble(
-            6,
+            &asked(true, &[1]),
             false,
             [
-                Read::Microphone(Vec::new()),
-                Read::RemoteAudio(1, "x".into(), Vec::new()),
+                read(ReadKind::Microphone, 6, Vec::new()),
+                read(ReadKind::RemoteAudio(1, "x".into()), 6, Vec::new()),
             ]
             .into_iter(),
         );
@@ -624,13 +740,49 @@ mod tests {
         vec![RtcStats::Transport(transport)]
     }
 
+    fn read(kind: ReadKind, at_ms: u64, stats: Vec<RtcStats>) -> Read {
+        Read {
+            kind,
+            track: "TR".to_owned(),
+            at_ms,
+            stats,
+        }
+    }
+
+    fn asked(own: bool, remote: &[u8]) -> Asked {
+        Asked {
+            own,
+            remote: remote.iter().copied().collect(),
+        }
+    }
+
     fn reads() -> impl Iterator<Item = Read> {
         [
-            Read::Microphone(on_transport(100, 40)),
-            Read::RemoteAudio(0, "a".into(), on_transport(101, 41)),
-            Read::RemoteVideo(1, "b".into(), on_transport(7, 9)),
+            read(ReadKind::Microphone, 10, on_transport(100, 40)),
+            read(
+                ReadKind::RemoteAudio(0, "a".into()),
+                11,
+                on_transport(101, 41),
+            ),
+            read(ReadKind::RemoteVideo(1, "b".into()), 12, on_transport(7, 9)),
         ]
         .into_iter()
+    }
+
+    /// Each connection's (number, links as role, time, sent, received, and
+    /// whether it is complete).
+    fn links(raw: &RawStats) -> Vec<(u8, Vec<(LinkRole, u64, u64, u64)>, bool)> {
+        raw.connections
+            .iter()
+            .map(|c| {
+                let links = c
+                    .links
+                    .iter()
+                    .map(|l| (l.role, l.at_ms, l.bytes_sent, l.bytes_received))
+                    .collect();
+                (c.connection, links, c.complete)
+            })
+            .collect()
     }
 
     /// GIVEN the own room uses one peer connection WHEN the reading is
@@ -638,22 +790,33 @@ mod tests {
     /// and another connection keeps its own numbers.
     #[test]
     fn given_one_peer_connection_when_assembled_then_its_transport_counts_once() {
-        let raw = assemble(1, true, reads());
-        let bytes: Vec<_> = raw
-            .connections
-            .iter()
-            .map(|c| (c.connection, c.bytes_sent, c.bytes_received))
-            .collect();
-        assert_eq!(bytes, [(0, Some(100), Some(40)), (1, Some(7), Some(9))]);
+        let raw = assemble(&asked(true, &[0, 1]), true, reads());
+        assert_eq!(
+            links(&raw),
+            [
+                (0, vec![(LinkRole::Single, 10, 100, 40)], true),
+                (1, vec![(LinkRole::Subscriber, 12, 7, 9)], true),
+            ]
+        );
     }
 
     /// GIVEN the own room uses a publisher and a subscriber connection WHEN
-    /// the reading is assembled THEN both transports are added.
+    /// the reading is assembled THEN both transports are there, each with
+    /// the time of its own read.
     #[test]
-    fn given_two_peer_connections_when_assembled_then_both_transports_add() {
-        let raw = assemble(1, false, reads());
-        assert_eq!(raw.connections[0].bytes_sent, Some(201));
-        assert_eq!(raw.connections[0].bytes_received, Some(81));
+    fn given_two_peer_connections_when_assembled_then_both_transports_are_there() {
+        let raw = assemble(&asked(true, &[0, 1]), false, reads());
+        assert_eq!(
+            links(&raw)[0],
+            (
+                0,
+                vec![
+                    (LinkRole::Publisher, 10, 100, 40),
+                    (LinkRole::Subscriber, 11, 101, 41)
+                ],
+                true
+            )
+        );
     }
 
     /// GIVEN one peer connection and no own track WHEN the reading is
@@ -661,11 +824,72 @@ mod tests {
     #[test]
     fn given_one_peer_connection_without_own_tracks_then_the_remote_transport_counts() {
         let raw = assemble(
-            1,
+            &asked(false, &[0]),
             true,
-            [Read::RemoteAudio(0, "a".into(), on_transport(3, 5))].into_iter(),
+            [read(
+                ReadKind::RemoteAudio(0, "a".into()),
+                3,
+                on_transport(3, 5),
+            )]
+            .into_iter(),
         );
-        assert_eq!(raw.connections[0].bytes_sent, Some(3));
-        assert_eq!(raw.connections[0].bytes_received, Some(5));
+        assert_eq!(links(&raw), [(0, vec![(LinkRole::Single, 3, 3, 5)], true)]);
+    }
+
+    /// GIVEN two peer connections and an own track whose read did not finish
+    /// WHEN the reading is assembled THEN the connection has the subscriber
+    /// only and is not complete, so its totals are unknown, never short.
+    #[test]
+    fn given_a_missing_publisher_read_when_assembled_then_the_connection_is_not_complete() {
+        let raw = assemble(
+            &asked(true, &[0]),
+            false,
+            [read(
+                ReadKind::RemoteAudio(0, "a".into()),
+                3,
+                on_transport(3, 5),
+            )]
+            .into_iter(),
+        );
+        assert_eq!(
+            links(&raw),
+            [(0, vec![(LinkRole::Subscriber, 3, 3, 5)], false)]
+        );
+    }
+
+    /// GIVEN reads of tracks WHEN the reading is assembled THEN each track's
+    /// numbers carry its track ID and the time of its own read.
+    #[test]
+    fn given_reads_when_assembled_then_each_track_has_its_id_and_time() {
+        let mut outbound = livekit::webrtc::stats::OutboundRtpStats::default();
+        outbound.stream.kind = "audio".to_owned();
+        let mut inbound = livekit::webrtc::stats::InboundRtpStats::default();
+        inbound.stream.kind = "video".to_owned();
+        let raw = assemble(
+            &asked(true, &[0]),
+            true,
+            [
+                Read {
+                    kind: ReadKind::Microphone,
+                    track: "TR_mic".to_owned(),
+                    at_ms: 20,
+                    stats: vec![RtcStats::OutboundRtp(outbound)],
+                },
+                Read {
+                    kind: ReadKind::RemoteVideo(0, "a".into()),
+                    track: "TR_cam".to_owned(),
+                    at_ms: 27,
+                    stats: vec![RtcStats::InboundRtp(inbound)],
+                },
+            ]
+            .into_iter(),
+        );
+        let microphone = raw.microphone.unwrap();
+        assert_eq!(
+            (microphone.track.as_str(), microphone.at_ms),
+            ("TR_mic", 20)
+        );
+        let video = raw.remotes[0].video.as_ref().unwrap();
+        assert_eq!((video.track.as_str(), video.at_ms), ("TR_cam", 27));
     }
 }
