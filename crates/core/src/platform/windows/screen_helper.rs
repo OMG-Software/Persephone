@@ -46,23 +46,27 @@ pub trait HelperLaunch: Send + Sync {
 
 /// Starts the helper executable through the media broker.
 pub struct BrokerHelper {
-    exe: PathBuf,
+    /// `None` when the core's own path is not known: no helper starts then.
+    exe: Option<PathBuf>,
 }
 
 impl BrokerHelper {
-    /// The helper executable next to the running core.
+    /// The helper executable next to the running core. A core that does not
+    /// know its own path starts no helper: a bare file name would be found
+    /// in the current directory, and the helper runs with the user's full
+    /// token, outside any container.
     pub fn next_to_core() -> Self {
         let exe = std::env::current_exe()
             .ok()
             .and_then(|core| core.parent().map(|dir| dir.join(SCREEN_HELPER_EXE)))
-            .unwrap_or_else(|| PathBuf::from(SCREEN_HELPER_EXE));
+            .filter(|exe| exe.is_absolute());
         Self { exe }
     }
 
     /// The helper executable at `exe`.
     #[cfg(test)]
     pub fn at(exe: PathBuf) -> Self {
-        Self { exe }
+        Self { exe: Some(exe) }
     }
 }
 
@@ -103,13 +107,14 @@ impl HelperProcess for BrokerProcess {
 
 impl HelperLaunch for BrokerHelper {
     fn launch(&self, share: u32, target: &ScreenTarget) -> Result<LaunchedHelper, ScreenRefusal> {
+        let exe = self.exe.as_deref().ok_or(ScreenRefusal::Unavailable)?;
         let pipes = ScreenHelperPipes::new().map_err(|_| ScreenRefusal::Unavailable)?;
         // The command line is built from the target the user approved, with
         // the two handle values the helper inherits. A target that is not a
         // monitor the capture takes makes no start.
         let start = HelperStart::new(share, pipes.control_value(), pipes.frames_value(), target)
             .ok_or(ScreenRefusal::Unavailable)?;
-        let started = start_screen_helper(&self.exe, &start.to_args(), pipes)
+        let started = start_screen_helper(exe, &start.to_args(), pipes)
             .map_err(|_| ScreenRefusal::Unavailable)?;
         Ok(LaunchedHelper {
             process: Arc::new(BrokerProcess {
@@ -158,6 +163,12 @@ mod tests {
         };
         assert!(matches!(
             launcher.launch(1, &monitor),
+            Err(ScreenRefusal::Unavailable)
+        ));
+        // A core that does not know its own path tries no file name.
+        let unknown = BrokerHelper { exe: None };
+        assert!(matches!(
+            unknown.launch(1, &monitor),
             Err(ScreenRefusal::Unavailable)
         ));
         let portal = ScreenTarget::Portal { node: 1 };

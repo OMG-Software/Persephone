@@ -46,7 +46,8 @@ pub use unix::{LongLivedWorker, StartedCallWorker};
 #[cfg(windows)]
 pub use windows::{
     AppContainerProfile, LongLivedWorker, ScreenHelperPipes, ScreenHelperProcess,
-    StartedCallWorker, StartedScreenHelper, start_call_worker, start_screen_helper,
+    StartedCallWorker, StartedScreenHelper, process_start_lock, start_call_worker,
+    start_screen_helper,
 };
 
 /// How a call worker ended, as the OS reports it. The core maps it to a

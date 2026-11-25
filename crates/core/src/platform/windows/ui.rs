@@ -45,9 +45,12 @@ pub struct JobHost;
 impl UiHost for JobHost {
     fn start(&self) -> Result<StartedUi, StartError> {
         let ui = ui_exe().map_err(|_| StartError::NoExe)?;
-        let mut child = ui_command(&ui)
-            .spawn()
-            .map_err(|error| StartError::Spawn { ui, error })?;
+        // The media broker's process-start lock: the UI cannot inherit a
+        // call worker's or screen helper's pipe end while one launches.
+        let start = persephone_media_broker::process_start_lock();
+        let spawned = ui_command(&ui).spawn();
+        drop(start);
+        let mut child = spawned.map_err(|error| StartError::Spawn { ui, error })?;
         // Contain the UI before it creates its web view. The Job holds the UI
         // and its web view processes; closing it on exit ends anything left.
         match contain(&child) {

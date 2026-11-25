@@ -87,6 +87,8 @@ pub enum Answer {
 /// How long a new share waits for the helper of the last share to be
 /// stopped and joined. Two helpers never run at once.
 const HELPER_IDLE_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+/// How often that wait looks at the cancel flag.
+const IDLE_CHECK: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// The Windows monitor source. After the user's Yes it starts the capture
 /// helper for the share (ADR-0067).
@@ -143,11 +145,24 @@ impl ScreenSource for MonitorScreen {
         share: u32,
         cancel: &Arc<AtomicBool>,
     ) -> Result<ScreenGrant, ScreenRefusal> {
+        // The wait for the last helper can take seconds; a call that ends
+        // meanwhile starts no helper. The call's end also waits for this
+        // pick, so a cancel that comes after the last check still stops and
+        // joins the helper.
+        let waited = std::time::Instant::now();
+        loop {
+            if cancel.load(Ordering::SeqCst) {
+                return Err(ScreenRefusal::Cancelled);
+            }
+            if wait_until_idle(IDLE_CHECK) {
+                break;
+            }
+            if waited.elapsed() >= HELPER_IDLE_WAIT {
+                return Err(ScreenRefusal::Unavailable);
+            }
+        }
         if cancel.load(Ordering::SeqCst) {
             return Err(ScreenRefusal::Cancelled);
-        }
-        if !wait_until_idle(HELPER_IDLE_WAIT) {
-            return Err(ScreenRefusal::Unavailable);
         }
         let launched = self.launcher.launch(share, &grant.target)?;
         let helper =

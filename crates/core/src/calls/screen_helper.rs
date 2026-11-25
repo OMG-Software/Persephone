@@ -118,13 +118,13 @@ impl Running {
             self.process.terminate();
             code = self.exit.wait(TERMINATE_WAIT);
         }
-        // The waiter ends once it saw the exit. A fault that left no exit
-        // after the terminate leaves the thread to end with the process
-        // object; the join would wait for it.
+        // The waiter ends once it saw the exit, and it ends the helper's
+        // count in `ACTIVE`. A fault that left no exit after the terminate
+        // leaves the thread to end with the process, and the helper counts
+        // as active until then: no other helper starts beside it.
         if code.is_some() {
             let _ = self.waiter.join();
         }
-        ACTIVE.fetch_sub(1, Ordering::AcqRel);
         code
     }
 }
@@ -153,16 +153,31 @@ impl HelperShare {
         let waiter = std::thread::Builder::new()
             .name("screen-helper-waiter".to_owned())
             .spawn(move || {
-                while !watched.wait_exit(WATCH_INTERVAL) {}
+                loop {
+                    let looked = Instant::now();
+                    if watched.wait_exit(WATCH_INTERVAL) {
+                        break;
+                    }
+                    // A wait that failed returns at once: wait out the rest
+                    // of the interval, so a fault does not spin this thread.
+                    std::thread::sleep(WATCH_INTERVAL.saturating_sub(looked.elapsed()));
+                }
                 // An exit the OS cannot name fails the share closed.
                 let code = watched.exit_code().unwrap_or(u32::MAX);
                 seen.set(code);
                 let _ = sender.send(code);
+                // The process has ended: only now may another helper start.
+                ACTIVE.fetch_sub(1, Ordering::AcqRel);
             });
         let Ok(waiter) = waiter else {
             process.close_control();
             process.terminate();
-            ACTIVE.fetch_sub(1, Ordering::AcqRel);
+            // No waiter will see the exit: count the helper as ended only
+            // when this wait sees it. Otherwise it stays active, and no
+            // other helper starts.
+            if process.wait_exit(TERMINATE_WAIT) {
+                ACTIVE.fetch_sub(1, Ordering::AcqRel);
+            }
             return None;
         };
         Some(Self {
@@ -231,9 +246,9 @@ impl Drop for HelperShare {
                 running.stop_and_join();
             });
         if reaper.is_err() {
-            // No thread: the Job ends the process at once.
+            // No thread: the Job ends the process at once. The waiter still
+            // runs, and it ends the helper's count when it sees the exit.
             process.terminate();
-            ACTIVE.fetch_sub(1, Ordering::AcqRel);
         }
     }
 }
@@ -250,6 +265,10 @@ pub(crate) mod fake {
         /// Whether closing the control pipe makes the process exit.
         pub exits_on_close: bool,
         pub code: Mutex<Option<u32>>,
+        /// While set, a wait fails at once, as a wait on a bad handle does.
+        pub failing_waits: AtomicBool,
+        /// How many waits ran.
+        pub waits: AtomicUsize,
         exited: (Mutex<bool>, Condvar),
     }
 
@@ -260,6 +279,8 @@ pub(crate) mod fake {
                 terminated: AtomicBool::new(false),
                 exits_on_close,
                 code: Mutex::new(Some(code_on_exit)),
+                failing_waits: AtomicBool::new(false),
+                waits: AtomicUsize::new(0),
                 exited: (Mutex::new(false), Condvar::new()),
             })
         }
@@ -285,6 +306,10 @@ pub(crate) mod fake {
         }
 
         fn wait_exit(&self, timeout: Duration) -> bool {
+            self.waits.fetch_add(1, Ordering::SeqCst);
+            if self.failing_waits.load(Ordering::SeqCst) {
+                return false;
+            }
             let guard = self.exited.0.lock().unwrap();
             let (guard, _) = self
                 .exited
@@ -393,6 +418,36 @@ mod tests {
         let _ = tokio::task::spawn_blocking(move || share.stop_and_join())
             .await
             .unwrap();
+    }
+
+    /// GIVEN a helper whose waits fail at once WHEN the waiter watches it
+    /// THEN it waits out each interval instead of spinning, and it still
+    /// sees the exit once the waits work again.
+    #[test]
+    fn given_waits_that_fail_when_watched_then_the_waiter_does_not_spin() {
+        let helper = FakeHelper::new(true, EXIT_STOPPED);
+        helper.failing_waits.store(true, Ordering::SeqCst);
+        let share = start(&helper, 5);
+        std::thread::sleep(Duration::from_millis(300));
+        let waits = helper.waits.load(Ordering::SeqCst);
+        assert!(waits <= 10, "{waits} waits in 300 ms");
+        helper.failing_waits.store(false, Ordering::SeqCst);
+        assert_eq!(share.stop_and_join(), Some(EXIT_STOPPED));
+    }
+
+    /// GIVEN a helper that exits by itself WHEN its exit is seen THEN it no
+    /// longer counts as active, although its share is still held: a new
+    /// share does not wait for a process that has ended.
+    #[test]
+    fn given_a_helper_that_exits_when_its_exit_is_seen_then_it_is_not_active() {
+        let helper = FakeHelper::new(true, EXIT_NOT_FOUND);
+        let share = start(&helper, 6);
+        helper.exit();
+        assert!(
+            wait_until_idle(Duration::from_secs(10)),
+            "the share is held"
+        );
+        drop(share);
     }
 
     /// GIVEN a share that is dropped (a call that ends, a stop that races, a

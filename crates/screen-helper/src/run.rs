@@ -101,9 +101,11 @@ impl Outcome {
     /// What the end item tells the worker.
     fn end(self) -> ScreenEnd {
         match self {
-            Self::Stopped | Self::PipeClosed => ScreenEnd::Stopped,
+            Self::Stopped => ScreenEnd::Stopped,
             Self::NotFound => ScreenEnd::NotFound,
-            Self::Unavailable => ScreenEnd::Unavailable,
+            // A closed pipe has no reader for this item; it says what the
+            // exit code says.
+            Self::Unavailable | Self::PipeClosed => ScreenEnd::Unavailable,
         }
     }
 }
@@ -356,8 +358,8 @@ mod tests {
     }
 
     /// GIVEN each outcome WHEN mapped THEN the exit code and the end item
-    /// say the same thing: a stop and a closed frame pipe are normal, a
-    /// missing monitor is not found, and the rest is unavailable.
+    /// say the same thing: a stop is normal, a missing monitor is not
+    /// found, and the rest (also a closed frame pipe) is unavailable.
     #[test]
     fn given_outcomes_when_mapped_then_code_and_end_item_agree() {
         assert_eq!(Outcome::Stopped.exit_code(), EXIT_STOPPED);
@@ -365,7 +367,7 @@ mod tests {
         assert_eq!(Outcome::NotFound.exit_code(), EXIT_NOT_FOUND);
         assert_eq!(Outcome::Unavailable.exit_code(), EXIT_UNAVAILABLE);
         assert_eq!(Outcome::Stopped.end(), ScreenEnd::Stopped);
-        assert_eq!(Outcome::PipeClosed.end(), ScreenEnd::Stopped);
+        assert_eq!(Outcome::PipeClosed.end(), ScreenEnd::Unavailable);
         assert_eq!(Outcome::NotFound.end(), ScreenEnd::NotFound);
         assert_eq!(Outcome::Unavailable.end(), ScreenEnd::Unavailable);
         assert_eq!(outcome_for_stage(wgc::Stage::NoMonitor), Outcome::NotFound);

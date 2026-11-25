@@ -53,7 +53,7 @@ trust and in code?
   and the web view must never receive the screen.
 * A process with the authority to read the screen should be small, have no
   network code and take no untrusted input.
-* No new crate. Every crate must still build on Linux and macOS.
+* No new third-party crate. Every crate must still build on Linux and macOS.
 * A failure must end the share and keep the call.
 
 ## Considered Options
@@ -119,6 +119,14 @@ it as accepted.
   the write end of its frame pipe. Its standard handles are null and its
   environment holds only `LOCALAPPDATA`, `SystemDrive`, `SystemRoot` and
   `windir`.
+* No other process can inherit those pipe ends. They are not inheritable
+  when they are made. The launch makes the helper's two ends inheritable
+  only while it holds the core's process-start lock, and it closes them
+  before it lets the lock go. Every process start of the core takes the
+  same lock: the call and media workers, the UI host and a profile switch.
+  A start without a handle list (the standard library's) would otherwise
+  inherit every inheritable handle. The call worker's own pipes now follow
+  the same rule.
 * The target comes on the command line: the share number, the two handle
   values, the monitor's device name (as hexadecimal bytes), its size and its
   rectangle. It holds no secret. Both the core and the helper validate it
@@ -162,12 +170,25 @@ it as accepted.
   pipe, waits up to 2 seconds for the exit, terminates the Job if the
   helper is still running, and joins the thread that waits for the process.
   The end of the call and the end of the session do this before they go on.
+  They also cancel a share pick that still runs and wait for it (at most
+  2 seconds), so a helper that it started is stopped and joined too. Then
+  they wait until no helper that an earlier stop left to its reaper is
+  active (at most 5 seconds). A pick looks at the cancel again just before
+  it starts the helper.
   A stop from the page drops the share's helper: the control pipe closes at
   once, and a reaper thread does the wait, the terminate and the join. The
-  next share starts its helper only after no earlier helper is active.
+  next share starts its helper only after no earlier helper is active. A
+  helper counts as active until its exit is seen. One that the terminate
+  did not end keeps the next share from starting, and that share is
+  "unavailable".
+* The start takes the command queue slots of `ScreenFrames` and `SetScreen`
+  together. A full queue fails the share, not the call, before the pipe
+  goes into the worker.
 * A helper exit maps to the share state: a missing or changed monitor is
   "not found", a refused or failed capture is "unavailable", and a normal
-  stop is "off". The helper says the same in its last pipe item, so the
+  stop is "off". A frame pipe that the worker closed is "unavailable": the
+  core's own stop drops the helper first, and the exit of a dropped helper
+  is not reported, so a reported closed pipe is the worker's own end. The helper says the same in its last pipe item, so the
   worker's state and the core's agree. A crash, a kill or an unknown exit
   code is "unavailable".
 * Any failure ends the share and keeps the call. The core never falls back
@@ -203,8 +224,13 @@ it as accepted.
   but this is a real addition to the attack surface.
 * There is a new frame channel and a new core ability: duplicating a handle
   into the worker process. A bug in the handle check could let the core
-  give the worker a handle that is not a pipe. The worker checks the type
-  and does not close what it does not own.
+  give the worker a handle that is not a pipe. The worker takes a value
+  only when it is a pipe end (`GetFileType` and `GetNamedPipeInfo`, which
+  refuses a socket) and none of its standard handles, and it does not close
+  what it refuses. These checks cannot prove that a pipe end is the frame
+  pipe; the core names the handle that it duplicated just before. A value
+  that names no handle ends the worker (strict handle checks), and so the
+  call.
 * There is more Windows code to review: the helper, its launch in the
   broker, the helper's lifecycle in the core, the frame format and the
   worker's reader.

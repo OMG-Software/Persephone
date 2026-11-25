@@ -77,6 +77,20 @@ use zeroize::Zeroizing;
 
 /// How long the worker has to leave on its own before it is ended.
 const WORKER_EXIT: Duration = Duration::from_secs(5);
+/// The command slots a screen start takes at once: on Windows the frame
+/// pipe's `ScreenFrames` and the `SetScreen`, elsewhere the `SetScreen` (the
+/// Linux remote goes over the camera channel).
+#[cfg(windows)]
+const SCREEN_START_COMMANDS: usize = 2;
+#[cfg(not(windows))]
+const SCREEN_START_COMMANDS: usize = 1;
+/// How long the end of a call waits for a cancelled screen pick (ADR-0067).
+/// The question box closes within about 100 ms of the cancel and the idle
+/// wait looks at the cancel every 50 ms, so this only bounds a fault.
+const PICK_END_WAIT: Duration = Duration::from_secs(2);
+/// How long the end of a call waits for the helpers that earlier stops left
+/// to their reaper threads: a stop wait and some margin.
+const REAPED_HELPER_WAIT: Duration = Duration::from_secs(5);
 
 /// Longest wait for one delayed-event restart. It is shorter than the
 /// restart interval.
@@ -956,6 +970,37 @@ async fn start_worker(
 /// Ends the worker; blocks in a blocking task.
 async fn finish_worker(link: CallWorkerLink) {
     let _ = tokio::task::spawn_blocking(move || link.finish(WORKER_EXIT)).await;
+}
+
+/// Ends the screen pick and the capture helpers of a call (ADR-0067). A pick
+/// that still runs is cancelled. On Windows its task is waited for, at most
+/// [`PICK_END_WAIT`], because it may start a helper: that helper is stopped
+/// and joined with the running share's one. Then the wait goes on until no
+/// helper is active, at most [`REAPED_HELPER_WAIT`], so a helper that an
+/// earlier stop left to its reaper has ended too.
+async fn end_screen_helpers(pick: Option<ScreenPick>, helper: Option<HelperShare>) {
+    let mut helpers: Vec<HelperShare> = helper.into_iter().collect();
+    if let Some(mut pick) = pick {
+        pick.cancel.store(true, Ordering::SeqCst);
+        // Only the Windows pick starts a helper; elsewhere the cancel is
+        // enough. A grant that the pick made anyway drops here, except its
+        // helper.
+        if cfg!(windows)
+            && let Ok(Ok(Ok(grant))) = time::timeout(PICK_END_WAIT, &mut pick.task).await
+        {
+            helpers.extend(grant.helper);
+        }
+    }
+    if helpers.is_empty() && super::screen_helper::helpers_active() == 0 {
+        return;
+    }
+    let _ = tokio::task::spawn_blocking(move || {
+        for helper in helpers {
+            helper.stop_and_join();
+        }
+        super::screen_helper::wait_until_idle(REAPED_HELPER_WAIT);
+    })
+    .await;
 }
 
 /// Writes the leave now: through the delayed event, else directly.
@@ -3344,16 +3389,29 @@ impl Call {
                 return Ok(());
             }
         };
-        // A full command queue is a worker that has not read its commands
-        // yet, not one that stopped: the share alone fails, the call runs on.
         // A stop still waiting for room goes first, so no start overtakes
-        // it: the share fails too. The grant drops here, which closes its
+        // it: the share fails. The grant drops here, which closes its
         // session.
-        if self.screen_stop_pending.is_some() || self.link.queue_full() {
+        if self.screen_stop_pending.is_some() {
             drop(accepted);
             self.screen_failed(inner);
             return Ok(());
         }
+        // Every command of the start has its slot before any goes out
+        // (Windows: `ScreenFrames` and `SetScreen`). A full command queue is
+        // a worker that has not read its commands yet, not one that
+        // stopped: the share alone fails, the call runs on, and no pipe goes
+        // into the worker.
+        let commands = self.link.command_sender();
+        let mut slots = match commands.try_reserve_many(SCREEN_START_COMMANDS) {
+            Ok(slots) => slots,
+            Err(mpsc::error::TrySendError::Full(())) => {
+                drop(accepted);
+                self.screen_failed(inner);
+                return Ok(());
+            }
+            Err(mpsc::error::TrySendError::Closed(())) => return Err(EndReason::WorkerStopped),
+        };
         let ScreenGrant {
             target,
             remote,
@@ -3373,10 +3431,16 @@ impl Call {
             self.screen_failed(inner);
             return Ok(());
         }
+        let Some(start) = slots.next() else {
+            drop(accepted);
+            self.screen_failed(inner);
+            return Ok(());
+        };
         // The remote goes first and the command says so by its target: the
         // worker takes the oldest screen remote with it (Windows: the frame
-        // pipe goes into the worker process and `ScreenFrames` names it).
-        if !self.send_screen_remote(remote, &target, share) {
+        // pipe goes into the worker process and `ScreenFrames`, in its own
+        // slot, names it).
+        if !self.send_screen_remote(remote, &target, share, &mut slots) {
             drop(accepted);
             self.screen_failed(inner);
             return Ok(());
@@ -3385,16 +3449,16 @@ impl Call {
         self.screen_closed = closed;
         self.screen_helper = helper;
         self.screen_sent = true;
-        self.screen_share = self.screen_share.wrapping_add(1);
-        let sent = self.send_worker(ToWorker::SetScreen {
+        self.screen_share = share;
+        start.send(ToWorker::SetScreen {
             target: Some(target),
-            share: self.screen_share,
+            share,
         });
         // A share with no portal session (Windows, macOS) gets a
         // `WorkerStop` as its session, after its start is queued and under
         // the same lock: a stop that the handle accepts then queues the
         // worker's stop behind the start.
-        if sent.is_ok() && accepted.session.is_none() {
+        if accepted.session.is_none() {
             let settled = Arc::new(AtomicBool::new(false));
             accepted.session = Some(Box::new(WorkerStop {
                 commands: self.link.command_sender(),
@@ -3404,7 +3468,7 @@ impl Call {
             self.screen_stop_settled = Some(settled);
         }
         drop(accepted);
-        sent
+        Ok(())
     }
 
     /// Whether the running share's stop still has to go to the worker: not
@@ -3432,6 +3496,7 @@ impl Call {
         remote: Option<super::screen::Remote>,
         target: &persephone_call_protocol::ScreenTarget,
         _share: u32,
+        _slots: &mut mpsc::PermitIterator<'_, ToWorker>,
     ) -> bool {
         use persephone_call_protocol::ScreenTarget;
         use std::os::fd::AsFd;
@@ -3445,23 +3510,24 @@ impl Call {
     }
 
     /// Windows (ADR-0067): a monitor's frame pipe goes into the worker
-    /// process, and `ScreenFrames` names it for share `share`; the caller
-    /// sends the share's `SetScreen` next. The core's own copy of the pipe
-    /// closes when `remote` drops. A monitor without a pipe goes on: the
-    /// worker has none for it and answers `Unavailable`. A target of another
-    /// OS is refused.
+    /// process, and `ScreenFrames` names it for share `share` in one of
+    /// `slots`; the caller sends the share's `SetScreen` next, in a slot it
+    /// took before. The core's own copy of the pipe closes when `remote`
+    /// drops. A monitor without a pipe goes on: the worker has none for it
+    /// and answers `Unavailable`. A target of another OS is refused.
     #[cfg(windows)]
     fn send_screen_remote(
         &self,
         remote: Option<super::screen::Remote>,
         target: &persephone_call_protocol::ScreenTarget,
         share: u32,
+        slots: &mut mpsc::PermitIterator<'_, ToWorker>,
     ) -> bool {
         use persephone_call_protocol::ScreenTarget;
         match (target, remote) {
-            (ScreenTarget::Monitor { .. }, Some(frames)) => {
-                self.link.send_screen_frames(&frames, share).is_ok()
-            }
+            (ScreenTarget::Monitor { .. }, Some(frames)) => slots
+                .next()
+                .is_some_and(|slot| self.link.send_screen_frames(&frames, share, slot).is_ok()),
             (ScreenTarget::Monitor { .. }, None) => true,
             (ScreenTarget::Portal { .. } | ScreenTarget::Display { .. }, _) => false,
         }
@@ -3474,6 +3540,7 @@ impl Call {
         _remote: Option<super::screen::Remote>,
         target: &persephone_call_protocol::ScreenTarget,
         _share: u32,
+        _slots: &mut mpsc::PermitIterator<'_, ToWorker>,
     ) -> bool {
         matches!(
             target,
@@ -4531,15 +4598,12 @@ impl Call {
         // its dialog does not stay open while the call is torn down. The
         // screen pick and the share's portal session end with the call.
         drop(portal);
-        drop(screen_pick);
         drop(screen_closed);
         close_session(&mut plain(&screen_control));
-        // The capture helper ends with the call and with the session:
-        // stop it and wait for it before anything else goes on. It never
-        // outlives the call.
-        if let Some(helper) = screen_helper {
-            let _ = tokio::task::spawn_blocking(move || helper.stop_and_join()).await;
-        }
+        // The screen pick and the capture helpers end with the call and with
+        // the session, before anything else goes on. No helper outlives the
+        // call.
+        end_screen_helpers(screen_pick, screen_helper).await;
         // No more restarts, so the leave cannot be pushed back.
         tasks.abort_all();
         if session_ended {
@@ -9595,6 +9659,87 @@ mod tests {
         assert_eq!(fixture.call.view.screen, CallScreen::Unavailable);
         assert_eq!(closed(&helper), 1, "the helper stops");
         assert!(fixture.to_worker.try_recv().is_err());
+    }
+
+    /// A worker process that counts the handles it is given.
+    #[cfg(windows)]
+    struct CountingProcess(Arc<AtomicUsize>);
+
+    #[cfg(windows)]
+    impl WorkerProcess for CountingProcess {
+        fn kill(&self) {}
+        fn wait_exit(&self, _: Duration) -> bool {
+            true
+        }
+        fn give_handle(&self, _handle: &std::os::windows::io::OwnedHandle) -> Option<u32> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Some(78)
+        }
+    }
+
+    /// GIVEN a worker queue with one free slot WHEN a share with a frame
+    /// pipe starts THEN the share alone fails: no pipe goes into the worker,
+    /// nothing more is queued, the helper stops and the call runs on.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn given_one_free_slot_when_a_share_with_a_pipe_starts_then_only_the_share_fails() {
+        use std::os::windows::io::OwnedHandle;
+        let (mut fixture, inner, _) = call_with_source(true);
+        let (command_tx, mut commands) = mpsc::channel(2);
+        let given = Arc::new(AtomicUsize::new(0));
+        fixture.call.link = CallWorkerLink::from_parts(
+            command_tx,
+            mpsc::channel(1).1,
+            Box::new(CountingProcess(given.clone())),
+        );
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        fixture
+            .call
+            .link
+            .send(ToWorker::SetMuted { muted: true })
+            .expect("one of two slots");
+        let helper = FakeHelper::new(true, 0);
+        let (read, _write) = std::io::pipe().expect("a pipe");
+        let grant = ScreenGrant {
+            remote: Some(OwnedHandle::from(read)),
+            ..helper_grant(&helper, 1)
+        };
+        assert_eq!(fixture.call.screen_picked(&inner, Ok(grant)), Ok(()));
+        assert_eq!(fixture.call.view.screen, CallScreen::Unavailable);
+        assert_eq!(given.load(Ordering::SeqCst), 0, "no pipe went in");
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ToWorker::SetMuted { muted: true })
+        ));
+        assert!(commands.try_recv().is_err(), "nothing more is queued");
+        assert_eq!(closed(&helper), 1, "the helper stops");
+        assert!(fixture.call.screen_helper.is_none());
+    }
+
+    /// GIVEN a pick that starts its helper just as the call ends WHEN the
+    /// call finishes THEN the finish waits for the pick, and that helper is
+    /// stopped and has ended before the finish returns.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn given_a_pick_that_starts_a_helper_when_the_call_ends_then_the_helper_is_stopped() {
+        let (mut fixture, _inner, _) = call_with_source(true);
+        let helper = FakeHelper::new(true, 0);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let seen = cancel.clone();
+        let started = helper.clone();
+        fixture.call.screen_pick = Some(ScreenPick {
+            task: tokio::task::spawn_blocking(move || {
+                // A launch that the cancel came too late to stop.
+                while !seen.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Ok(helper_grant(&started, 1))
+            }),
+            cancel,
+        });
+        fixture.call.finish(true).await;
+        assert_eq!(closed(&helper), 1, "the helper was stopped");
+        assert!(helper.wait_exit_for_test(Duration::ZERO), "and it ended");
     }
 
     // ---- Other SFUs (ADR-0054) ----

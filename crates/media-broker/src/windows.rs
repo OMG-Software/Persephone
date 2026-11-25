@@ -21,6 +21,7 @@ use std::{
     },
     path::Path,
     ptr::{null, null_mut},
+    sync::{Mutex, MutexGuard, PoisonError},
     time::Duration,
 };
 use windows_sys::Win32::{
@@ -289,12 +290,42 @@ impl Drop for AttributeList {
     }
 }
 
-/// A pipe whose child end is inheritable and whose broker end is not.
+/// Every process start of this process holds this lock: the broker's
+/// launches and the core's own `std::process::Command` starts. A handle is
+/// inheritable only while a start holds the lock, and it is closed before
+/// the lock is released, so no other start can inherit it. Windows lets a
+/// start without a handle list inherit every inheritable handle, and the
+/// standard library starts with no handle list.
+static PROCESS_START: Mutex<()> = Mutex::new(());
+
+/// Takes the process-start lock. Hold it across a whole process start
+/// (`Command::spawn`, or a launch here) and take it before nothing else.
+pub fn process_start_lock() -> MutexGuard<'static, ()> {
+    PROCESS_START.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Makes `handles` inheritable for the process start that holds `_start`.
+/// The caller closes them before it releases the lock.
+fn inheritable_for(
+    _start: &MutexGuard<'static, ()>,
+    handles: &[HANDLE],
+) -> Result<(), LaunchError> {
+    for &handle in handles {
+        // SAFETY: each handle is a valid handle of this process.
+        if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) } == 0 {
+            return Err(api("SetHandleInformation"));
+        }
+    }
+    Ok(())
+}
+
+/// A pipe with no inheritable end. A launch makes the child's end
+/// inheritable with [`inheritable_for`] under the process-start lock.
 fn pipe(child_reads: bool) -> Result<(OwnedHandle, OwnedHandle), LaunchError> {
     let attributes = SECURITY_ATTRIBUTES {
         nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
         lpSecurityDescriptor: null_mut(),
-        bInheritHandle: 1,
+        bInheritHandle: 0,
     };
     let (mut read, mut write): (HANDLE, HANDLE) = (null_mut(), null_mut());
     // SAFETY: both out-pointers are valid; the handles are owned below.
@@ -307,10 +338,6 @@ fn pipe(child_reads: bool) -> Result<(OwnedHandle, OwnedHandle), LaunchError> {
     } else {
         (write, read)
     };
-    // SAFETY: clears inheritance on the broker's own end.
-    if unsafe { SetHandleInformation(raw(&broker), HANDLE_FLAG_INHERIT, 0) } == 0 {
-        return Err(api("SetHandleInformation"));
-    }
     Ok((child, broker))
 }
 
@@ -668,9 +695,13 @@ fn launch(
     worker: &Path,
     spec: &LaunchSpec,
 ) -> Result<Started, LaunchError> {
+    // Taken first, so it is released last: the child's pipe ends close
+    // before any other start can run (`PROCESS_START`).
+    let start = process_start_lock();
     let sid = profile.sid()?;
     let (child_stdin, broker_stdin) = pipe(true)?;
     let (child_stdout, broker_stdout) = pipe(false)?;
+    inheritable_for(&start, &[raw(&child_stdin), raw(&child_stdout)])?;
     let job = job(spec)?;
 
     let capability_sids = CapabilitySids::derive(spec.capabilities, spec.device_capabilities)?;
@@ -782,7 +813,7 @@ fn launch(
 
 /// Committed memory for the screen helper: two 3840x2160 BGRA pictures (the
 /// staging copy and the repacked copy, about 64 MiB) and the Direct3D and
-/// WinRT runtime. The peak measured on 25 November 2026 was 85 MiB for one
+/// WinRT runtime. The peak measured on 25 November 2026 was 87 MiB for one
 /// monitor on the development machine; the limit leaves room for a 4K
 /// monitor and for a graphics driver that commits more.
 const SCREEN_HELPER_MEMORY_LIMIT_BYTES: usize = 512 * 1024 * 1024;
@@ -801,12 +832,11 @@ const HELPER_UI_LIMITS: u32 = JOB_OBJECT_UILIMIT_HANDLES
 /// `PROCESS_CREATION_CHILD_PROCESS_RESTRICTED` from winnt.h.
 const CHILD_PROCESS_RESTRICTED: u32 = 0x1;
 
-/// The creation-time mitigations of the screen helper: those of the call
-/// worker, except what Windows.Graphics.Capture and Direct3D need. The
-/// helper keeps dynamic code allowed (the graphics driver generates code in
-/// the process) and Win32k system calls allowed (WinRT capture and Direct3D
-/// need them), so it has no Win32k lockdown. The call worker has none
-/// either; the audio stack needs it there.
+/// The creation-time mitigations of the screen helper: the same flags as the
+/// call worker's. Like the call worker, the helper has no dynamic-code
+/// prohibition (the graphics driver generates code in the process) and no
+/// Win32k lockdown (WinRT capture and Direct3D need Win32k system calls;
+/// the call worker's audio stack needs them too).
 fn helper_mitigation_flags() -> u64 {
     mitigation_flags(Mitigations {
         prohibit_dynamic_code: false,
@@ -816,7 +846,9 @@ fn helper_mitigation_flags() -> u64 {
 
 /// The two pipes of one screen share, made before the helper starts. The
 /// helper gets the control pipe's read end and the frame pipe's write end;
-/// the core keeps the other two. Neither core end is inheritable.
+/// the core keeps the other two. No end is inheritable: the launch makes the
+/// helper's two ends inheritable under the process-start lock and closes
+/// them before it releases the lock.
 pub struct ScreenHelperPipes {
     control_for_helper: OwnedHandle,
     control_for_core: OwnedHandle,
@@ -953,6 +985,9 @@ fn launch_helper(
     args: &[String],
     pipes: ScreenHelperPipes,
 ) -> Result<StartedScreenHelper, LaunchError> {
+    // Taken first, so it is released last: the helper's pipe ends close
+    // before any other start can run (`PROCESS_START`).
+    let start = process_start_lock();
     let inherited = helper_inherit_list(&pipes);
     let ScreenHelperPipes {
         control_for_helper,
@@ -960,6 +995,7 @@ fn launch_helper(
         frames_for_helper,
         frames_for_core,
     } = pipes;
+    inheritable_for(&start, &inherited)?;
     let job = job_with(SCREEN_HELPER_MEMORY_LIMIT_BYTES, None, true)?;
     let mitigations = helper_mitigation_flags();
     let child_policy = CHILD_PROCESS_RESTRICTED;
@@ -1343,8 +1379,9 @@ mod tests {
             assert_ne!(unsafe { GetHandleInformation(raw(handle), &mut flags) }, 0);
             flags
         };
-        assert_eq!(flags(&pipes.control_for_helper) & HANDLE_FLAG_INHERIT, 1);
-        assert_eq!(flags(&pipes.frames_for_helper) & HANDLE_FLAG_INHERIT, 1);
+        // No end is inheritable until a launch holds the process-start lock.
+        assert_eq!(flags(&pipes.control_for_helper) & HANDLE_FLAG_INHERIT, 0);
+        assert_eq!(flags(&pipes.frames_for_helper) & HANDLE_FLAG_INHERIT, 0);
         assert_eq!(flags(&pipes.control_for_core) & HANDLE_FLAG_INHERIT, 0);
         assert_eq!(flags(&pipes.frames_for_core) & HANDLE_FLAG_INHERIT, 0);
     }

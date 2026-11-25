@@ -17,8 +17,8 @@ use crate::{
     DesktopRect, MAX_MONITOR_NAME, MonitorName, ScreenState, ScreenTarget, screen_capture_size_ok,
 };
 
-/// The helper was asked to end (the control pipe closed), or the worker
-/// closed the frame pipe: a normal end. The share is off.
+/// The helper was asked to end (the control pipe closed): a normal end.
+/// The share is off.
 pub const EXIT_STOPPED: u32 = 0;
 /// The monitor is gone, moved, or has another name, size or rectangle than
 /// the one the user approved.
@@ -27,7 +27,11 @@ pub const EXIT_NOT_FOUND: u32 = 10;
 pub const EXIT_UNAVAILABLE: u32 = 11;
 /// The command line or an inherited handle was not valid.
 pub const EXIT_BAD_START: u32 = 12;
-/// The frame pipe closed while the helper wrote to it: the worker is gone.
+/// The frame pipe closed while the helper wrote to it. A stop of the core
+/// drops the helper first, and the exit of a dropped helper is not
+/// reported. So a reported closed pipe is the worker's own end: it refused
+/// an item, timed out or is gone. The share failed, and it is
+/// `Unavailable`.
 pub const EXIT_PIPE_CLOSED: u32 = 13;
 
 /// The share state that an exit code of the helper means. An exit that is
@@ -35,7 +39,7 @@ pub const EXIT_PIPE_CLOSED: u32 = 13;
 /// `Unavailable`: the share fails closed.
 pub fn state_for_exit(code: u32) -> ScreenState {
     match code {
-        EXIT_STOPPED | EXIT_PIPE_CLOSED => ScreenState::Off,
+        EXIT_STOPPED => ScreenState::Off,
         EXIT_NOT_FOUND => ScreenState::NotFound,
         _ => ScreenState::Unavailable,
     }
@@ -322,13 +326,13 @@ mod tests {
         }
     }
 
-    /// GIVEN each exit code WHEN mapped THEN a stop, or a worker that
-    /// closed the pipe, is off; a missing monitor is not found; and every
-    /// other code (a failure, a crash status, a kill) is unavailable.
+    /// GIVEN each exit code WHEN mapped THEN a stop is off; a missing
+    /// monitor is not found; and every other code (a worker that closed the
+    /// pipe, a failure, a crash status, a kill) is unavailable.
     #[test]
     fn given_exit_codes_when_mapped_then_the_share_state_follows() {
         assert_eq!(state_for_exit(EXIT_STOPPED), ScreenState::Off);
-        assert_eq!(state_for_exit(EXIT_PIPE_CLOSED), ScreenState::Off);
+        assert_eq!(state_for_exit(EXIT_PIPE_CLOSED), ScreenState::Unavailable);
         assert_eq!(state_for_exit(EXIT_NOT_FOUND), ScreenState::NotFound);
         for code in [
             EXIT_UNAVAILABLE,

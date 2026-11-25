@@ -2,9 +2,9 @@
 //!
 //! The core made the pipe, gave its write end to the helper and duplicated
 //! its read end into this process. The worker never trusts it: before it
-//! reads, it checks that the handle is a pipe (`GetFileType`), and every read
-//! is bounded, so a helper that stalls cannot block the capture thread past
-//! a stop. The format is `persephone_call_protocol::screen_frame`; this
+//! reads, it checks that the handle is a pipe end and not one of its own
+//! standard handles (`is_pipe`), and every read is bounded, so a helper that
+//! stalls cannot block the capture thread past a stop. The format is `persephone_call_protocol::screen_frame`; this
 //! module only moves bytes and keeps the waits short.
 
 use std::fs::File;
@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Storage::FileSystem::{FILE_TYPE_PIPE, GetFileType};
-use windows::Win32::System::Pipes::PeekNamedPipe;
+use windows::Win32::System::Pipes::{GetNamedPipeInfo, PeekNamedPipe};
 
 /// How long a read waits for the next bytes of an item that has begun. A
 /// helper that stops writing inside an item is a failed helper.
@@ -23,11 +23,30 @@ pub const STALL_TIMEOUT: Duration = Duration::from_secs(3);
 /// How often a wait looks at the pipe and at the stop flag.
 const POLL: Duration = Duration::from_millis(5);
 
-/// Whether `handle` is a pipe.
+/// Whether `handle` is the end of a pipe and none of this process's
+/// standard handles. `GetFileType` also calls a socket a pipe;
+/// `GetNamedPipeInfo` fails on a socket and works on both ends of an
+/// anonymous pipe. The worker's standard input and output are pipes too,
+/// and they carry the call protocol, so their values are refused.
+///
+/// The core gives a value that it duplicated into this process just
+/// before. A value that names no handle is a fault of the core: the
+/// worker's strict handle checks then end the worker, and the call ends.
 pub fn is_pipe(handle: HANDLE) -> bool {
-    // SAFETY: only asks the kernel about a handle value; an invalid value
-    // gives `FILE_TYPE_UNKNOWN`.
-    unsafe { GetFileType(handle) == FILE_TYPE_PIPE }
+    let standard = [
+        std::io::stdin().as_raw_handle(),
+        std::io::stdout().as_raw_handle(),
+        std::io::stderr().as_raw_handle(),
+    ];
+    if handle.0.is_null() || standard.contains(&handle.0) {
+        return false;
+    }
+    // SAFETY: only asks the kernel about a handle value; no out-pointer is
+    // passed to `GetNamedPipeInfo`.
+    unsafe {
+        GetFileType(handle) == FILE_TYPE_PIPE
+            && GetNamedPipeInfo(handle, None, None, None, None).is_ok()
+    }
 }
 
 /// The handle with value `value` in this process, owned, when it is a pipe.
@@ -195,6 +214,22 @@ mod tests {
         assert!(PipeReader::new(owned, Arc::new(AtomicBool::new(false))).is_err());
         assert!(!is_pipe(HANDLE(file.as_raw_handle())));
         assert!(!is_pipe(HANDLE(null.as_raw_handle())));
+    }
+
+    /// GIVEN the values of this process's standard handles (pipes in the
+    /// worker, and they carry the call protocol) WHEN checked THEN none is
+    /// taken as the frame pipe, while a pipe's read end is.
+    #[test]
+    fn given_the_standard_handles_when_checked_then_they_are_not_the_frame_pipe() {
+        for standard in [
+            std::io::stdin().as_raw_handle(),
+            std::io::stdout().as_raw_handle(),
+            std::io::stderr().as_raw_handle(),
+        ] {
+            assert!(!is_pipe(HANDLE(standard)));
+        }
+        let (read, _write) = pipe();
+        assert!(is_pipe(HANDLE(read.as_raw_handle())));
     }
 
     /// GIVEN a handle value that is not open, a file's value or a pipe's

@@ -116,10 +116,12 @@ pub(crate) fn ui_host() -> Box<dyn UiHost> {
 
 /// Starts a new core for a profile switch, detached from this one as the
 /// launcher starts it: no console and its own process group, so it outlives
-/// this process.
+/// this process. The start holds the media broker's process-start lock, so
+/// it cannot inherit a worker's or screen helper's pipe end.
 pub(crate) fn start_detached(command: &mut std::process::Command) -> std::io::Result<()> {
     use std::os::windows::process::CommandExt;
     use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS};
+    let _start = persephone_media_broker::process_start_lock();
     command
         .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
         .spawn()
