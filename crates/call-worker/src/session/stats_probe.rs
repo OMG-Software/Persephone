@@ -769,9 +769,11 @@ mod tests {
         .into_iter()
     }
 
-    /// Each connection's (number, links as role, time, sent, received, and
-    /// whether it is complete).
-    fn links(raw: &RawStats) -> Vec<(u8, Vec<(LinkRole, u64, u64, u64)>, bool)> {
+    /// A link as its role, time, bytes sent and bytes received.
+    type LinkRow = (LinkRole, u64, u64, u64);
+
+    /// Each connection's number, links, and whether it is complete.
+    fn links(raw: &RawStats) -> Vec<(u8, Vec<LinkRow>, bool)> {
         raw.connections
             .iter()
             .map(|c| {

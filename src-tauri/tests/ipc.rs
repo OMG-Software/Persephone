@@ -18,6 +18,12 @@ use tauri::{
     webview::InvokeRequest,
 };
 
+/// Where a held core call says that it arrived, and where it waits to go on.
+type Gate = (std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>);
+
+/// A device choice as recording, playout and camera; none is the default.
+type DeviceChoice = (Option<String>, Option<String>, Option<String>);
+
 /// Stands in for the core process. Counts calls so tests can show which
 /// requests never reached it.
 struct FakeCore {
@@ -37,9 +43,9 @@ struct FakeCore {
     refuse_stats: AtomicBool,
     // When set, the next statistics switch says that it arrived, then waits
     // until the test lets it go.
-    stats_gate: Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
+    stats_gate: Mutex<Option<Gate>>,
     // The last device choice that reached the core.
-    call_devices: Mutex<Option<(Option<String>, Option<String>, Option<String>)>>,
+    call_devices: Mutex<Option<DeviceChoice>>,
 }
 
 impl FakeCore {
