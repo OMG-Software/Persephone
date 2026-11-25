@@ -230,7 +230,8 @@ export const SCREEN_STARTING_TEXT = 'Starting the screen share…';
 export const SCREEN_SHARING_TEXT = 'You are sharing your screen';
 export const SCREEN_NOT_FOUND_TEXT = 'The chosen screen is not available any more';
 export const SCREEN_UNAVAILABLE_TEXT = 'Screen sharing is not available here';
-export const SCREEN_REFUSED_TEXT = 'Your system did not allow the screen share';
+export const SCREEN_REFUSED_TEXT =
+  'Your system did not allow the screen share. On macOS, allow Persephone in System Settings, Privacy & Security, Screen Recording.';
 
 /** The note beside the screen share button; empty when it needs none. */
 export const SCREEN_TEXT: Record<CallScreen, string> = {

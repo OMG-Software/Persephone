@@ -507,8 +507,10 @@ pub enum ScreenTarget {
     /// directly before this command. `node` is the PipeWire node ID.
     Portal { node: u32 },
     /// Windows: the monitor's index in display order and its size in pixels
-    /// when the user chose it. The worker reads its own list when the share
-    /// starts; another size at that index is "not found".
+    /// when the user chose it. macOS (ADR-0064): the display's index in
+    /// `CGGetActiveDisplayList` order and its size in points. The worker
+    /// reads its own list when the share starts; another size at that index
+    /// is "not found".
     Monitor { index: u8, width: u32, height: u32 },
 }
 

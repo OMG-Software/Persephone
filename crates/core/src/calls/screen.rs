@@ -5,17 +5,17 @@
 //! the core asks a [`ScreenSource`] to pick one: on Linux the core shows its
 //! own warning window and then runs the ScreenCast portal; on Windows the
 //! core's own window names each monitor (`platform/windows/screen.rs`; the
-//! worker captures it with GDI, `docs/evidence/screen-share-windows.md`);
-//! macOS reports screen sharing as unavailable. A
-//! cancelled or refused pick leaves the share off. It never falls back to
-//! another source.
+//! worker captures it with GDI, `docs/evidence/screen-share-windows.md`); on
+//! macOS it checks the Screen Recording permission and asks which display to
+//! share (ADR-0064). A cancelled or refused pick leaves the share off. It
+//! never falls back to another source.
 //!
 //! The source runs off the call loop, on a blocking thread, because the user
 //! answers in a window of the desktop. Setting the cancel flag ends the wait
 //! quickly.
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use persephone_call_protocol::ScreenTarget;
 use persephone_contracts::CallScreen;
@@ -30,6 +30,136 @@ pub const LINUX_SCREEN_WARNING_TEXT: &str = concat!(
     "in the call can see it.\n\n",
     "Share the screen?",
 );
+
+/// What the user reads before a macOS screen share starts, with the display
+/// named first. The shared screen can show Persephone's messages, because
+/// macOS does not hide this window from screen capture (ADR-0064).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn macos_screen_question(index: usize, width: u32, height: u32, main: bool) -> String {
+    format!(
+        concat!(
+            "Share Screen {number} ({width} x {height}{main})?\n\n",
+            "Everyone in the call can see it. It can show Persephone's ",
+            "messages, because macOS does not hide this window from screen ",
+            "capture.\n\n",
+            "Choose No to see the next screen, or to cancel.",
+        ),
+        number = index + 1,
+        width = width,
+        height = height,
+        main = if main { ", main screen" } else { "" },
+    )
+}
+
+/// One display as the core reads it from the system: its ID, and its size in
+/// points. The worker reads the same sizes (ADR-0064).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub struct Display {
+    pub id: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// The most displays the core and the worker read, in the same order.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub const MAX_DISPLAYS: usize = 16;
+
+/// A display size, in points, that the worker takes: at least 2x2, at most
+/// 7680 on a side and 3840x2160 pixels.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn display_size_ok(width: u32, height: u32) -> bool {
+    width >= 2
+        && height >= 2
+        && width <= 7680
+        && height <= 7680
+        && u64::from(width) * u64::from(height) <= 3840 * 2160
+}
+
+/// A display side in points, from CoreGraphics' `double`, as whole points.
+/// A value that is not finite, is under 1 or is over 7680 is `None`.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn points(value: f64) -> Option<u32> {
+    (value.is_finite() && (1.0..=7680.0).contains(&value)).then(|| value.round() as u32)
+}
+
+/// The target for the display at `index` of `displays`, or `None` when the
+/// index is past the limit or the list, or the size is not one the worker
+/// takes.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn display_target(displays: &[Display], index: usize) -> Option<ScreenTarget> {
+    let display = displays.get(index).filter(|_| index < MAX_DISPLAYS)?;
+    display_size_ok(display.width, display.height).then_some(ScreenTarget::Monitor {
+        index: u8::try_from(index).ok()?,
+        width: display.width,
+        height: display.height,
+    })
+}
+
+/// What the macOS source needs from the system. A test supplies its own.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub trait DisplayShare {
+    /// Whether this process may record the screen now. Never asks.
+    fn allowed(&self) -> bool;
+    /// Asks the system for the permission. The answer is `false` at the
+    /// first ask: the user answers in System Settings.
+    fn request(&self) -> bool;
+    /// The active displays in `CGGetActiveDisplayList` order, and the ID of
+    /// the main one.
+    fn displays(&self) -> (Vec<Display>, u32);
+    /// Shows a Yes or No question in the core's own window. `None`: no
+    /// window could run.
+    fn ask(&self, text: &str) -> Option<bool>;
+}
+
+/// The macOS pick (ADR-0064): the Screen Recording permission first, then
+/// one question for each display, the main one first. "Yes" is the pick; a
+/// "No" on every display, or a cancel, leaves the share off. A permission
+/// that is not given is `Refused`, and the page then tells the user to allow
+/// Persephone in System Settings.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn choose_display(
+    system: &dyn DisplayShare,
+    cancel: &AtomicBool,
+) -> Result<ScreenGrant, ScreenRefusal> {
+    if cancel.load(Ordering::SeqCst) {
+        return Err(ScreenRefusal::Cancelled);
+    }
+    if !system.allowed() && !system.request() {
+        return Err(ScreenRefusal::Refused);
+    }
+    let (displays, main) = system.displays();
+    if displays.is_empty() {
+        return Err(ScreenRefusal::Unavailable);
+    }
+    let mut order: Vec<usize> = (0..displays.len().min(MAX_DISPLAYS)).collect();
+    // The main display first; the others keep their order.
+    order.sort_by_key(|&index| displays[index].id != main);
+    for index in order {
+        let Some(target) = display_target(&displays, index) else {
+            continue;
+        };
+        let display = displays[index];
+        let text = macos_screen_question(index, display.width, display.height, display.id == main);
+        let answer = system.ask(&text);
+        if cancel.load(Ordering::SeqCst) {
+            return Err(ScreenRefusal::Cancelled);
+        }
+        match answer {
+            Some(true) => {
+                return Ok(ScreenGrant {
+                    target,
+                    remote: None,
+                    session: None,
+                    closed: None,
+                });
+            }
+            Some(false) => {}
+            None => return Err(ScreenRefusal::Unavailable),
+        }
+    }
+    Err(ScreenRefusal::Cancelled)
+}
 
 /// The PipeWire remote that goes to the worker over the camera channel
 /// (Linux). Other platforms never have one.
@@ -125,7 +255,8 @@ pub trait ScreenSource: Send + Sync {
     fn choose(&self, cancel: &Arc<AtomicBool>) -> Result<ScreenGrant, ScreenRefusal>;
 }
 
-/// A platform without screen sharing: macOS until its own decision.
+/// A platform without screen sharing: every OS without its own source (the
+/// default for a launcher that offers none).
 pub struct Unavailable;
 
 impl ScreenSource for Unavailable {
@@ -192,5 +323,183 @@ mod tests {
         assert!(LINUX_SCREEN_WARNING_TEXT.contains("Persephone's messages"));
         assert!(LINUX_SCREEN_WARNING_TEXT.contains("does not hide"));
         assert!(LINUX_SCREEN_WARNING_TEXT.contains("Everyone in the call"));
+    }
+
+    struct FakeSystem {
+        allowed: bool,
+        displays: Vec<Display>,
+        main: u32,
+        answers: std::sync::Mutex<Vec<Option<bool>>>,
+        asked: std::sync::Mutex<Vec<String>>,
+        requested: AtomicBool,
+    }
+
+    impl FakeSystem {
+        fn new(allowed: bool, answers: Vec<Option<bool>>) -> Self {
+            Self {
+                allowed,
+                displays: vec![
+                    Display {
+                        id: 7,
+                        width: 1440,
+                        height: 900,
+                    },
+                    Display {
+                        id: 9,
+                        width: 2560,
+                        height: 1440,
+                    },
+                ],
+                main: 9,
+                answers: std::sync::Mutex::new(answers),
+                asked: std::sync::Mutex::new(Vec::new()),
+                requested: AtomicBool::new(false),
+            }
+        }
+    }
+
+    impl DisplayShare for FakeSystem {
+        fn allowed(&self) -> bool {
+            self.allowed
+        }
+        fn request(&self) -> bool {
+            self.requested.store(true, Ordering::SeqCst);
+            false
+        }
+        fn displays(&self) -> (Vec<Display>, u32) {
+            (self.displays.clone(), self.main)
+        }
+        fn ask(&self, text: &str) -> Option<bool> {
+            self.asked.lock().expect("asked").push(text.to_owned());
+            self.answers.lock().expect("answers").remove(0)
+        }
+    }
+
+    /// GIVEN no Screen Recording permission that the system grants WHEN a
+    /// display is chosen THEN the share is refused, the system was asked
+    /// once and the user saw no display question.
+    #[test]
+    fn given_no_permission_when_a_display_is_chosen_then_it_is_refused() {
+        let system = FakeSystem::new(false, vec![]);
+        let cancel = AtomicBool::new(false);
+        assert_eq!(
+            choose_display(&system, &cancel).err(),
+            Some(ScreenRefusal::Refused)
+        );
+        assert!(system.requested.load(Ordering::SeqCst));
+        assert!(system.asked.lock().expect("asked").is_empty());
+    }
+
+    /// GIVEN a permission that is already given WHEN a display is chosen
+    /// THEN the system is not asked for it again.
+    #[test]
+    fn given_a_permission_when_a_display_is_chosen_then_it_is_not_asked_again() {
+        let system = FakeSystem::new(true, vec![Some(true)]);
+        let cancel = AtomicBool::new(false);
+        assert!(choose_display(&system, &cancel).is_ok());
+        assert!(!system.requested.load(Ordering::SeqCst));
+    }
+
+    /// GIVEN two displays WHEN the user says No to the main one and Yes to
+    /// the other THEN the main display is asked first, and the grant names
+    /// the other one by its index in list order and its size.
+    #[test]
+    fn given_two_displays_when_the_user_picks_the_second_then_the_target_names_it() {
+        let system = FakeSystem::new(true, vec![Some(false), Some(true)]);
+        let cancel = AtomicBool::new(false);
+        let grant = choose_display(&system, &cancel).expect("grant");
+        assert_eq!(
+            grant.target,
+            ScreenTarget::Monitor {
+                index: 0,
+                width: 1440,
+                height: 900
+            }
+        );
+        assert!(grant.remote.is_none() && grant.session.is_none() && grant.closed.is_none());
+        let asked = system.asked.lock().expect("asked");
+        assert!(asked[0].contains("Screen 2 (2560 x 1440, main screen)"));
+        assert!(asked[1].contains("Screen 1 (1440 x 900)"));
+        assert!(asked[0].contains("Persephone's messages"));
+    }
+
+    /// GIVEN a No on every display WHEN a display is chosen THEN the share
+    /// is cancelled, and a missing window is unavailable.
+    #[test]
+    fn given_no_on_every_display_then_it_is_cancelled() {
+        let cancel = AtomicBool::new(false);
+        let all_no = FakeSystem::new(true, vec![Some(false), Some(false)]);
+        assert_eq!(
+            choose_display(&all_no, &cancel).err(),
+            Some(ScreenRefusal::Cancelled)
+        );
+        let no_window = FakeSystem::new(true, vec![None]);
+        assert_eq!(
+            choose_display(&no_window, &cancel).err(),
+            Some(ScreenRefusal::Unavailable)
+        );
+    }
+
+    /// GIVEN a cancel flag WHEN a display is chosen THEN nothing is asked.
+    #[test]
+    fn given_a_cancel_then_no_display_is_asked() {
+        let cancel = AtomicBool::new(true);
+        let system = FakeSystem::new(true, vec![]);
+        assert_eq!(
+            choose_display(&system, &cancel).err(),
+            Some(ScreenRefusal::Cancelled)
+        );
+        assert!(system.asked.lock().expect("asked").is_empty());
+    }
+
+    /// GIVEN display sides from CoreGraphics WHEN read as points THEN only a
+    /// finite size in range is taken, rounded.
+    #[test]
+    fn given_display_sides_when_read_as_points_then_only_a_sane_size_is_taken() {
+        assert_eq!(points(1512.0), Some(1512));
+        assert_eq!(points(982.4), Some(982));
+        assert_eq!(points(0.0), None);
+        assert_eq!(points(-1.0), None);
+        assert_eq!(points(f64::NAN), None);
+        assert_eq!(points(f64::INFINITY), None);
+        assert_eq!(points(7681.0), None);
+    }
+
+    /// GIVEN display lists WHEN a target is made THEN only a listed index
+    /// within the limit and a size the worker takes gives one.
+    #[test]
+    fn given_display_lists_when_a_target_is_made_then_the_limits_hold() {
+        let list = [
+            Display {
+                id: 1,
+                width: 1512,
+                height: 982,
+            },
+            Display {
+                id: 2,
+                width: 1,
+                height: 1,
+            },
+        ];
+        assert_eq!(
+            display_target(&list, 0),
+            Some(ScreenTarget::Monitor {
+                index: 0,
+                width: 1512,
+                height: 982
+            })
+        );
+        assert_eq!(display_target(&list, 1), None);
+        assert_eq!(display_target(&list, 2), None);
+        let many: Vec<Display> = (0..40)
+            .map(|id| Display {
+                id,
+                width: 800,
+                height: 600,
+            })
+            .collect();
+        assert!(display_target(&many, MAX_DISPLAYS - 1).is_some());
+        assert_eq!(display_target(&many, MAX_DISPLAYS), None);
+        assert!(!display_size_ok(7681, 100) && !display_size_ok(5120, 2880));
     }
 }

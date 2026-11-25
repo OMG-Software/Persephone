@@ -60,7 +60,8 @@ seccompiler = "=0.5.0"
 pipewire = { version = "=0.10.1", default-features = false }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-# Camera capture through AVFoundation (ADR-0049): only these features.
+# Camera capture through AVFoundation (ADR-0049) and screen capture through
+# ScreenCaptureKit (ADR-0064): only these features.
 objc2 = "=0.6.5"
 objc2-foundation = { version = "=0.3.2", default-features = false, features = [
   "std",
@@ -87,6 +88,17 @@ objc2-av-foundation = { version = "=0.3.2", default-features = false, features =
   "AVCaptureSessionPreset",
   "AVCaptureVideoDataOutput",
   "AVMediaFormat",
+] }
+# ScreenCaptureKit (ADR-0064): the display list, one display filter and the
+# stream. `objc2-core-graphics` is only for the `CGDirectDisplayID` type.
+objc2-screen-capture-kit = { version = "=0.3.2", default-features = false, features = [
+  "std",
+  "block2",
+  "dispatch2",
+  "objc2-core-graphics",
+  "objc2-core-media",
+  "SCShareableContent",
+  "SCStream",
 ] }
 objc2-core-media = { version = "=0.3.2", default-features = false, features = [
   "std",

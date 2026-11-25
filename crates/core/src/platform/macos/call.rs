@@ -42,6 +42,12 @@ impl Launcher for MacLauncher {
             .map_err(|_| StartError::Launch)
     }
 
+    /// The Screen Recording permission, then a question for each display
+    /// (ADR-0064). Not compiled or run on the development machine.
+    fn screen_source(&self) -> std::sync::Arc<dyn crate::calls::screen::ScreenSource> {
+        std::sync::Arc::new(super::screen::MacScreen)
+    }
+
     /// The same question as on Windows, in the core's own alert, "No" by
     /// default. No main loop, or an aborted alert, is "no".
     fn confirm_direct_connection(&self) -> bool {

@@ -83,6 +83,19 @@ const PROFILE: &str = r#"(version 1)
   (iokit-user-client-class "IOAudioControlUserClient")
   (iokit-user-client-class "IOAudioEngineUserClient")
   (iokit-user-client-class "AppleCameraInterfaceUserClient"))
+
+; Screen sharing (ADR-0064). To be measured on a Mac: the Mach services that
+; ScreenCaptureKit and the display list use (the replay daemon that serves
+; the stream, the window server and Core Display), and the I/O Kit class of
+; the IOSurface buffers that carry its pictures. Screen Recording is still a
+; TCC permission that the core asks for, and there is no other capture
+; right: no window listing, no event tap.
+(allow mach-lookup
+  (global-name "com.apple.replayd")
+  (global-name "com.apple.windowserver.active")
+  (global-name "com.apple.CoreDisplay.master"))
+(allow iokit-open
+  (iokit-user-client-class "IOSurfaceRootUserClient"))
 "#;
 
 #[link(name = "sandbox", kind = "dylib")]
