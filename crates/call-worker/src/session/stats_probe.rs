@@ -67,8 +67,13 @@ enum ReadKind {
 
 /// The reading of one track: its statistics (none when they could not be
 /// read), its track ID, and the time the read finished on the probe's
-/// clock. libwebrtc gathers a track's statistics just before its read
-/// finishes, so that time is the time of its counters.
+/// monotonic clock, which is the time of its counters. libwebrtc may answer
+/// from a report it made up to 50 ms before, and its answer reaches the
+/// probe a little later, so a rate is off by those delays' change between
+/// two reads: a few percent of a one-second interval, which the next
+/// interval gives back. The records' own `timestamp` is not used: by default
+/// it comes from the system clock, which can step (`media_config.h`), and a
+/// step would give a wrong rate of any size.
 struct Read {
     kind: ReadKind,
     track: String,

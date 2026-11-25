@@ -140,7 +140,10 @@ candidate type, SSRC, codec or other text.
   lets one change of the core's switch run at a time, and each ends with the
   switch as the kept channels want. A start that a reload or close overtook
   keeps no channel and turns the switch off again; a late stop does not
-  undo the start of the page that came next.
+  undo the start of the page that came next. The host cannot tell which
+  page sent a start whose task begins after the reset, so the new page's
+  first request (`watch_session`) counts the page again before it can start
+  the details.
 * The capability `call` gains `allow-call-stats`, and nothing else. The
   main window does not have it.
 

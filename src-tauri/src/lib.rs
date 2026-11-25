@@ -640,16 +640,22 @@ async fn unsubscribe_room(
 
 /// Registers the page's session channel, its call sound level channel and
 /// its channel for the other devices' levels, replacing the earlier ones of
-/// the same window.
+/// the same window. A page calls it once, when it starts, before it can turn
+/// the call statistics on; so it also counts a new page for them, as
+/// `reset_subscriptions` does at the page load (ADR-0066). A start of the
+/// old page that the host began only after that reset sees the count change
+/// again and undoes itself, and a channel such a start kept is dropped.
 #[tauri::command]
 fn watch_session<R: Runtime>(
     webview: Webview<R>,
+    core: State<'_, CoreLink>,
     subscriptions: State<'_, Arc<Subscriptions>>,
     on_change: Channel<&'static str>,
     on_sound_level: Channel<u8>,
     on_levels: Channel<Vec<CallParticipantLevel>>,
 ) {
     let label = webview.label().to_owned();
+    new_stats_page(core.inner(), subscriptions.inner(), &label);
     subscriptions.session().insert(label.clone(), on_change);
     subscriptions
         .sound_level()
@@ -664,10 +670,12 @@ fn watch_session<R: Runtime>(
 /// the host drops a reading outside its limits.
 ///
 /// Each change of the core's switch takes `stats_order`, and so does the
-/// stop of `reset_subscriptions`. A start that a reload or close overtook
-/// keeps no channel and turns the switch off again. A request that the host
-/// starts only after the reset counts as the new page's; it still stops when
-/// the window reloads or closes next, or when the call ends.
+/// stop of `new_stats_page`. A start that a reload or close overtook keeps
+/// no channel and turns the switch off again. Tauri reads a command's
+/// arguments in its task, so the host cannot tell which page sent a start
+/// whose task begins after the reset; the new page's `watch_session` counts
+/// the page again before the new page can start them, so such a start is
+/// undone too.
 #[tauri::command]
 async fn call_stats<R: Runtime>(
     webview: Webview<R>,
@@ -2218,10 +2226,8 @@ fn restore_from_tray<R: Runtime>(app: &AppHandle<R>) {
 /// IPC tests, because the mock runtime sends neither event.
 pub fn reset_subscriptions(core: &CoreLink, subscriptions: &Arc<Subscriptions>, label: &str) {
     let rooms = subscriptions.forget_window(label);
-    // A window that goes or reloads stops the call statistics it asked for
-    // (ADR-0066). A start of the old page still on its way sees the new
-    // page and undoes itself.
-    let stats = subscriptions.new_page(label);
+    // A window that goes or reloads stops the call statistics it asked for.
+    new_stats_page(core, subscriptions, label);
     if !rooms.is_empty() {
         let core = core.clone();
         tauri::async_runtime::spawn_blocking(move || {
@@ -2230,18 +2236,25 @@ pub fn reset_subscriptions(core: &CoreLink, subscriptions: &Arc<Subscriptions>, 
             }
         });
     }
-    if stats {
-        let core = core.clone();
-        let subscriptions = subscriptions.clone();
-        tauri::async_runtime::spawn(async move {
-            // In turn with the starts: when a later page has started them
-            // again first, the switch is already as it should be.
-            let _order = subscriptions.stats_order.lock().await;
-            if !subscriptions.wants_stats() {
-                let _ = relay::<()>(&core, Call::CallStats { on: false }).await;
-            }
-        });
+}
+
+/// Counts a new page for the window `label` (ADR-0066) and drops the
+/// statistics channel it had. A start of an older page still on its way
+/// sees the new count and undoes itself. When a channel was dropped, the
+/// core is told to stop, in turn with the starts: when a later page has
+/// started them again first, the switch is already as it should be.
+fn new_stats_page(core: &CoreLink, subscriptions: &Arc<Subscriptions>, label: &str) {
+    if !subscriptions.new_page(label) {
+        return;
     }
+    let core = core.clone();
+    let subscriptions = subscriptions.clone();
+    tauri::async_runtime::spawn(async move {
+        let _order = subscriptions.stats_order.lock().await;
+        if !subscriptions.wants_stats() {
+            let _ = relay::<()>(&core, Call::CallStats { on: false }).await;
+        }
+    });
 }
 
 /// True only for the bundled app's own origin. Tauri serves embedded assets

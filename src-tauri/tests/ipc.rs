@@ -1377,7 +1377,9 @@ fn given_call_statistics_then_only_the_call_window_may_open_them_and_only_while_
     assert_eq!(*core.stats_switches.lock().unwrap(), [true, false, true]);
     let link: CoreLink = core.clone();
     reset_subscriptions(&link, &subscriptions, CALL_WINDOW);
-    // The stop goes on a blocking task, so wait for it, but not forever.
+    // The stop goes on a task of its own, so wait for it, but not forever:
+    // the mock runtime sends no page or window events, so nothing else
+    // would end the wait.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while core.stats_switches.lock().unwrap().len() < 4 && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -1423,6 +1425,55 @@ fn given_call_statistics_then_only_the_call_window_may_open_them_and_only_while_
     invoke_on(&call, "call_stats", app_origin(), stats_on(true)).unwrap();
     subscriptions.dispatch(Event::CallStats { stats: reading(6) });
     assert_eq!(sent(6), 1);
+
+    // A start of the old page whose task begins only after the reload's
+    // reset looks like the new page's. The new page's `watch_session`, its
+    // first request, counts the page again: a start still on its way undoes
+    // itself, and a channel one kept goes, and the core is told to stop.
+    let watch = serde_json::json!({"onChange": "__CHANNEL__:3", "onSoundLevel": "__CHANNEL__:4",
+                                   "onLevels": "__CHANNEL__:5"});
+    let wait_for = |count: usize| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while core.stats_switches.lock().unwrap().len() < count
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    };
+    reset_subscriptions(&link, &subscriptions, CALL_WINDOW);
+    wait_for(8);
+    core.stats_switches.lock().unwrap().clear();
+    let (arrived, at_core) = std::sync::mpsc::channel();
+    let (release, held) = std::sync::mpsc::channel();
+    *core.stats_gate.lock().unwrap() = Some((arrived, held));
+    let window = call.clone();
+    let late = std::thread::spawn(move || {
+        invoke_on(
+            &window,
+            "call_stats",
+            app_origin(),
+            serde_json::json!({"on": true, "onStats": "__CHANNEL__:9"}),
+        )
+    });
+    at_core
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("the late start reached the core");
+    invoke_on(&call, "watch_session", app_origin(), watch.clone()).unwrap();
+    release.send(()).unwrap();
+    assert_eq!(late.join().unwrap(), Ok(serde_json::Value::Null));
+    assert_eq!(*core.stats_switches.lock().unwrap(), [true, false]);
+    subscriptions.dispatch(Event::CallStats { stats: reading(7) });
+    assert_eq!(sent(7), 0);
+    // A late start that already kept its channel when the new page starts.
+    invoke_on(&call, "call_stats", app_origin(), stats_on(true)).unwrap();
+    invoke_on(&call, "watch_session", app_origin(), watch).unwrap();
+    wait_for(4);
+    assert_eq!(
+        *core.stats_switches.lock().unwrap(),
+        [true, false, true, false]
+    );
+    subscriptions.dispatch(Event::CallStats { stats: reading(8) });
+    assert_eq!(sent(8), 0);
 }
 
 /// GIVEN device test commands THEN bounded IDs cross, a bad one never
