@@ -11,6 +11,7 @@ import type {
   CallReadiness,
   CallStatus,
   CallParticipantLevel,
+  CallStats,
   CallDeviceTestKind,
   CallDeviceTestState,
   CallDeviceTestStatus,
@@ -299,6 +300,17 @@ const unknownDeviceChange: CallStatus = { ...idleCall, deviceChange: "unplugged"
 const levelList: CallParticipantLevel[] = [{ userId: "@a:s", deviceId: "D", level: 40 }];
 // @ts-expect-error a level carries the device and a number, nothing else
 const levelWithName: CallParticipantLevel = { ...levelList[0], name: "x" };
+const detailsTable: CallStats = {
+  microphone: { level: 40, bitrateKbps: null, packetsSent: 3, packetsLost: null, jitterMs: null, rttMs: null },
+  camera: null,
+  screen: null,
+  participants: [{ userId: "@a:s", deviceId: "D", audio: null, video: null }],
+  connections: [{ connection: 0, outgoingKbps: null, sendKbps: 40, receiveKbps: null, rttMs: 20 }],
+};
+// @ts-expect-error statistics carry numbers and IDs, never an address or a codec name
+const detailsWithAddress: CallStats = { ...detailsTable, connections: [{ ...detailsTable.connections[0], address: "10.0.0.1" }] };
+// @ts-expect-error an unknown value is null, not missing
+const detailsMissingValue: CallStats = { ...detailsTable, microphone: { level: 1, packetsSent: 3, packetsLost: null, jitterMs: null, rttMs: null } };
 const testStatus: CallDeviceTestStatus = { id: 4, test: "camera", state: "running", stream: 2 };
 // @ts-expect-error the test ID is required
 const noTestId: CallDeviceTestStatus = { test: "camera", state: "running", stream: 2 };
