@@ -63,14 +63,16 @@ constexpr char kForcePlayoutDelayValue[] = "min_ms:0,max_ms:0";
 // that every one of them applies. A factory registers itself after it is
 // built and leaves before it is torn down. The mutex guards these fields
 // only: no blocking call runs while it is held. A state read holds no lock
-// while it queries a factory; it counts itself in `readers`, and a factory
-// that leaves waits on `idle` until no read runs.
+// while it queries a factory; it puts that factory in `reading`, and a
+// factory that leaves waits on `idle` until no read of its own runs. A read
+// of another factory never holds it up.
 struct CaptureGainRegistry {
   std::mutex mutex;
   std::condition_variable idle;
   std::vector<const PeerConnectionFactory*> factories;
   uint16_t gain_percent = 100;
-  size_t readers = 0;
+  // The factory of each state read in progress, once for each read.
+  std::vector<const PeerConnectionFactory*> reading;
 };
 
 CaptureGainRegistry& capture_gain_registry() {
@@ -232,6 +234,10 @@ PeerConnectionFactory::PeerConnectionFactory(
     dependencies.audio_processing_builder =
         webrtc::CustomAudioProcessing(audio_processing_);
   } else {
+    // The engine builds its own module, which the gain cannot reach: the
+    // gain setter reports false while this factory lives.
+    RTC_LOG(LS_ERROR) << "No audio processing module was built; the "
+                         "microphone gain cannot apply";
     dependencies.audio_processing_builder =
         std::make_unique<webrtc::BuiltinAudioProcessingBuilder>();
   }
@@ -258,14 +264,18 @@ PeerConnectionFactory::~PeerConnectionFactory() {
 
   // PERSEPHONE PATCH (ADR-0062): leave the registry first, so no gain change
   // reaches a factory that is being torn down, and wait for a state read
-  // that may have picked this factory before it left.
+  // that picked this factory before it left. Reads of other factories do
+  // not hold this up.
   {
     CaptureGainRegistry& registry = capture_gain_registry();
     std::unique_lock<std::mutex> lock(registry.mutex);
     registry.factories.erase(std::remove(registry.factories.begin(),
                                          registry.factories.end(), this),
                              registry.factories.end());
-    registry.idle.wait(lock, [&registry] { return registry.readers == 0; });
+    registry.idle.wait(lock, [&registry, this] {
+      return std::find(registry.reading.begin(), registry.reading.end(),
+                       this) == registry.reading.end();
+    });
   }
   audio_processing_ = nullptr;
   peer_factory_ = nullptr;
@@ -363,9 +373,10 @@ rust::Vec<rust::String> PeerConnectionFactory::video_encoder_backend_codecs(
 // thread runs its tasks in order: the newest gain is applied last, and a
 // later read on that thread sees it. The task holds its own reference to
 // the module, so a factory torn down before the task runs is no problem.
-void PeerConnectionFactory::apply_capture_gain(uint16_t percent) const {
+// False when this factory has no module to take the gain.
+bool PeerConnectionFactory::apply_capture_gain(uint16_t percent) const {
   if (!audio_processing_ || percent > kMaxCaptureGainPercent) {
-    return;
+    return false;
   }
   const float factor = static_cast<float>(percent) / 100.0f;
   rtc_runtime_->worker_thread()->PostTask(
@@ -375,6 +386,7 @@ void PeerConnectionFactory::apply_capture_gain(uint16_t percent) const {
         config.capture_level_adjustment.pre_gain_factor = factor;
         apm->ApplyConfig(config);
       });
+  return true;
 }
 
 namespace {
@@ -429,33 +441,43 @@ bool set_capture_gain_percent(uint16_t percent) {
   CaptureGainRegistry& registry = capture_gain_registry();
   std::lock_guard<std::mutex> lock(registry.mutex);
   registry.gain_percent = percent;
-  // Each call only posts a task, so the mutex is held for no wait.
+  // Each call only posts a task, so the mutex is held for no wait. With no
+  // live factory the gain waits for the next one.
+  bool taken = true;
   for (const PeerConnectionFactory* factory : registry.factories) {
-    factory->apply_capture_gain(percent);
+    taken = factory->apply_capture_gain(percent) && taken;
   }
-  return true;
+  return taken;
 }
 
 namespace {
 
-// PERSEPHONE PATCH (ADR-0062): one state read in progress. While it lives,
-// a factory that leaves the registry waits in its destructor, so the read
-// can use the factory with no lock held, also if the read throws.
+// PERSEPHONE PATCH (ADR-0062): one state read of `factory` in progress.
+// While it lives, that factory waits in its destructor if it leaves the
+// registry, so the read can use it with no lock held, also if the read
+// throws.
 class CaptureRead {
  public:
-  explicit CaptureRead(CaptureGainRegistry& registry) : registry_(registry) {}
+  CaptureRead(CaptureGainRegistry& registry,
+              const PeerConnectionFactory* factory)
+      : registry_(registry), factory_(factory) {}
   CaptureRead(const CaptureRead&) = delete;
   CaptureRead& operator=(const CaptureRead&) = delete;
   ~CaptureRead() {
     {
       std::lock_guard<std::mutex> lock(registry_.mutex);
-      --registry_.readers;
+      const auto entry = std::find(registry_.reading.begin(),
+                                   registry_.reading.end(), factory_);
+      if (entry != registry_.reading.end()) {
+        registry_.reading.erase(entry);
+      }
     }
     registry_.idle.notify_all();
   }
 
  private:
   CaptureGainRegistry& registry_;
+  const PeerConnectionFactory* factory_;
 };
 
 }  // namespace
@@ -471,9 +493,9 @@ CaptureProcessing capture_processing_state() {
       return unknown_capture_processing();
     }
     factory = registry.factories.front();
-    ++registry.readers;
+    registry.reading.push_back(factory);
   }
-  const CaptureRead read(registry);
+  const CaptureRead read(registry, factory);
   return factory->capture_processing();
 }
 

@@ -295,10 +295,11 @@ fn given_repeated_factories_when_the_gain_is_set_then_each_takes_it_and_resource
 }
 
 /// GIVEN a microphone track from the platform audio device module (a
-/// machine with no audio device has none)
-/// WHEN automatic gain control is turned off and on again, and the gain is
-/// set, while the track exists and with no peer connection
-/// THEN WebRTC takes each request, and the factory's report shows the gain.
+/// machine with no audio device has none, and the test checks nothing there)
+/// WHEN automatic gain control is turned off and on again while the track
+/// exists, with no peer connection
+/// THEN WebRTC takes each request. The gain is not set here: it is one value
+/// for the whole process, and only the factory test above sets it.
 #[test]
 fn given_a_device_track_when_automatic_level_changes_then_webrtc_takes_it() {
     use livekit::prelude::{LocalAudioTrack, PlatformAudio};

@@ -9,7 +9,9 @@ pub const MAX_CAPTURE_GAIN_PERCENT: u16 = 400;
 /// Sets the microphone gain, in percent, for the audio processing module of
 /// every peer connection factory, now and later: a linear gain on the
 /// captured sound before any processing. 100 is no change. A gain over
-/// [`MAX_CAPTURE_GAIN_PERCENT`] changes nothing and returns `false`.
+/// [`MAX_CAPTURE_GAIN_PERCENT`] changes nothing and returns `false`. It is
+/// also `false` when a live factory has no audio processing module to take
+/// the gain; the gain is still kept for later factories.
 pub fn set_capture_gain_percent(percent: u16) -> bool {
     if percent > MAX_CAPTURE_GAIN_PERCENT {
         return false;

@@ -87,8 +87,9 @@ class PeerConnectionFactory {
   // PERSEPHONE PATCH (ADR-0062): sets the capture level adjustment (the
   // microphone gain, applied before any processing) of this factory's audio
   // processing module. Runs on the worker thread, as the voice engine does
-  // when it reads and writes the same configuration.
-  void apply_capture_gain(uint16_t percent) const;
+  // when it reads and writes the same configuration. False when the factory
+  // has no module to take it.
+  bool apply_capture_gain(uint16_t percent) const;
   // PERSEPHONE PATCH (ADR-0062): what this factory's audio processing module
   // does now.
   CaptureProcessing capture_processing() const;
@@ -115,7 +116,9 @@ class PeerConnectionFactory {
 
 // PERSEPHONE PATCH (ADR-0062): sets the microphone gain, in percent, for
 // every live factory and for factories made later. False for a gain over
-// 400 percent, which changes nothing.
+// 400 percent, which changes nothing, and false when a live factory has no
+// audio processing module to take it (the gain is still kept for later
+// factories).
 bool set_capture_gain_percent(uint16_t percent);
 // PERSEPHONE PATCH (ADR-0062): the audio processing state of the oldest live
 // factory, or `found == false` when there is none. In the call worker that is

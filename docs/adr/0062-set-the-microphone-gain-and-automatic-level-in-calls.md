@@ -102,7 +102,10 @@ crate's `PERSEPHONE-PATCH.md`:
 * `webrtc-sys`: a process-wide registry of the live factories (a mutex, raw
   pointers that each factory removes before it is torn down) and the gain.
   `set_capture_gain_percent(percent)` refuses a gain over 400 percent,
-  stores the gain, and applies it to every live factory. A factory that is
+  stores the gain, and applies it to every live factory. It returns false
+  when a live factory has no APM of its own (its build failed and the engine
+  made one the gain cannot reach), so the worker's note shows the gain as
+  refused. A factory that is
   made later takes the stored gain when it joins the registry. This is
   needed because the factory that serves the call is made inside LiveKit and
   is not reachable from the worker.

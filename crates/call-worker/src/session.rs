@@ -3546,7 +3546,8 @@ fn write_microphone_note(note: MicrophoneNote) {
             "microphone: gain {}% asked ({}), {gain}% applied; automatic level {} asked ({}); \
              echo cancellation {echo}; noise suppression {noise}; automatic gain control {agc}",
             microphone.gain_percent,
-            if gain_set { "set" } else { "refused" },
+            // Queued for the audio thread; `applied` is what it reports.
+            if gain_set { "queued" } else { "refused" },
             if microphone.auto_level { "on" } else { "off" },
             if level_set { "set" } else { "refused" },
         ),
