@@ -2232,7 +2232,7 @@ mod tests {
             width: 0,
             height: 0,
         };
-        write_frame(&mut wire, header, &[99, 1]).unwrap();
+        write_frame(&mut wire, header, &[VERSION + 1, 1]).unwrap();
         let result: Result<FromWorker, _> =
             read_message(&mut Cursor::new(wire), &ResourceBudgets::default());
         assert_eq!(result, Err(ReadError::Decode(DecodeError::UnknownVersion)));
