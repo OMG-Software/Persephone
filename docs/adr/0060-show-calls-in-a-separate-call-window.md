@@ -110,3 +110,9 @@ commands.
 * A second web view uses more memory during a call.
 * Names and the chosen theme are not shown in the call window.
 * The page code for the grid repeats some of `CallVideo.svelte`.
+* Known limitation (25 November 2026): the main window counts the call
+  window as open when the host shows it, not when its page works. If the
+  call page fails to start after the window shows, neither window offers
+  mute or leave for that call. A ready signal from the call page, or a
+  Leave button in the short bar, would close this gap; the owner has not
+  chosen one yet.
