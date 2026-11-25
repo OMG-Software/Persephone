@@ -117,7 +117,8 @@ session, and every join passes through it.
 
 * `calls/alone.rs` keeps the set of remote participants by connection number
   and identity, from `ParticipantJoined` and `ParticipantLeft`, and one
-  deadline. The deadline is set when the worker has sent `Connected` and the
+  deadline. `Connection { up: false }` removes every participant of that
+  connection, because another SFU that ends sends no leave for each of them. The deadline is set when the worker has sent `Connected` and the
   set is empty, so a call that is still connecting does not count. It is
   cleared when anyone joins on any connection, and set again to 30 seconds
   from the moment the last one leaves.

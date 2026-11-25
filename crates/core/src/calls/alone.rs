@@ -56,6 +56,13 @@ impl Alone {
             } => {
                 self.peers.remove(&(*connection, identity.clone()));
             }
+            // Another SFU that ended sends no leave for its participants
+            // (ADR-0054), so they all go with it. A connection that comes up
+            // reports its participants itself.
+            FromWorker::Connection {
+                connection,
+                up: false,
+            } => self.peers.retain(|(on, _)| on != connection),
             _ => return,
         }
         let alone = self.connected && !self.overflow && self.peers.is_empty();
@@ -164,6 +171,26 @@ mod tests {
         assert_eq!(alone.deadline(), None);
         alone.observe(&left(2, "@c:example.org:C"), Instant::now());
         assert!(alone.deadline().is_some());
+    }
+
+    /// GIVEN the only other participants on another SFU WHEN that connection
+    /// ends without a leave for each THEN they are gone and the call is due
+    /// 30 seconds later; an end of another connection keeps them.
+    #[tokio::test(start_paused = true)]
+    async fn given_another_sfu_ends_then_its_participants_go_with_it() {
+        let mut alone = Alone::default();
+        alone.observe(&FromWorker::Connected, Instant::now());
+        alone.observe(&joined(1, "@b:example.org:B"), Instant::now());
+        alone.observe(&joined(1, "@c:example.org:C"), Instant::now());
+        let down = |connection| FromWorker::Connection {
+            connection,
+            up: false,
+        };
+        alone.observe(&down(2), Instant::now());
+        assert_eq!(alone.deadline(), None);
+        alone.observe(&down(1), Instant::now());
+        assert!(!fires_within(&alone, Duration::from_secs(29)).await);
+        assert!(fires_within(&alone, Duration::from_secs(1)).await);
     }
 
     /// GIVEN a timer that runs WHEN messages that do not change presence
