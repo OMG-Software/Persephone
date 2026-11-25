@@ -21,6 +21,7 @@ const _: () = {
     assert!(persephone_contracts::CALL_STATS_SIDE_MAX == worker::MAX_STATS_SIDE);
     assert!(persephone_contracts::CALL_STATS_CONNECTIONS_MAX == worker::MAX_STATS_CONNECTIONS);
     assert!(persephone_contracts::CALL_PARTICIPANTS_MAX == worker::MAX_PARTICIPANTS);
+    assert!(persephone_contracts::CALL_SOUND_LEVEL_MAX == worker::MAX_SOUND_LEVEL);
 };
 
 fn limit(limit: worker::QualityLimit) -> CallStatsLimit {

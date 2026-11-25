@@ -236,11 +236,16 @@ export interface StatsRow {
   value: string;
 }
 
-/** The numbers of one source. A device shows its user ID through `userId`; the other sources have a title. */
+/**
+ * The numbers of one source. A device shows its user ID through `userId` and
+ * its device ID as inert text, so one person's two devices can be told apart;
+ * the other sources have a title.
+ */
 export interface StatsSection {
   key: string;
   title: string;
   userId: string | null;
+  deviceId: string | null;
   rows: StatsRow[];
 }
 
@@ -300,19 +305,20 @@ function receivedRows(entry: CallStatsParticipant): StatsRow[] {
 export function statsSections(stats: CallStats): StatsSection[] {
   const sections: StatsSection[] = [];
   if (stats.microphone) {
-    sections.push({ key: 'microphone', title: 'Your microphone', userId: null, rows: audioSentRows(stats.microphone) });
+    sections.push({ key: 'microphone', title: 'Your microphone', userId: null, deviceId: null, rows: audioSentRows(stats.microphone) });
   }
   if (stats.camera) {
-    sections.push({ key: 'camera', title: 'Your camera', userId: null, rows: videoSentRows(stats.camera) });
+    sections.push({ key: 'camera', title: 'Your camera', userId: null, deviceId: null, rows: videoSentRows(stats.camera) });
   }
   if (stats.screen) {
-    sections.push({ key: 'screen', title: 'Your screen share', userId: null, rows: videoSentRows(stats.screen) });
+    sections.push({ key: 'screen', title: 'Your screen share', userId: null, deviceId: null, rows: videoSentRows(stats.screen) });
   }
   for (const entry of stats.participants) {
     sections.push({
       key: JSON.stringify(['device', entry.userId, entry.deviceId]),
       title: '',
       userId: entry.userId,
+      deviceId: entry.deviceId,
       rows: receivedRows(entry)
     });
   }
@@ -321,6 +327,7 @@ export function statsSections(stats: CallStats): StatsSection[] {
       key: `connection ${link.connection}`,
       title: connectionName(link.connection),
       userId: null,
+      deviceId: null,
       rows: [
         { label: 'Available upload bandwidth', value: kbps(link.outgoingKbps) },
         { label: 'Total send rate', value: kbps(link.sendKbps) },

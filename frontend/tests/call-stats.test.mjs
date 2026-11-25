@@ -71,9 +71,35 @@ test('GIVEN a reading WHEN the sections are made THEN own sources come first, th
   assert.equal(rows(3)['Video receive bitrate'], UNKNOWN_VALUE);
   assert.equal(rows(4)['Available upload bandwidth'], '2,500 kbit/s');
   assert.equal(rows(4)['Total receive rate'], UNKNOWN_VALUE);
-  // A device is shown by its user ID component, never as title text.
+  // A device is shown by its user ID component and its device ID, never as title text.
   assert.equal(sections[3].title, '');
   assert.equal(sections[3].userId, '@bob:s');
+  assert.equal(sections[3].deviceId, 'B');
+  assert.deepEqual(
+    sections.filter((section) => section.userId === null).map((section) => section.deviceId),
+    [null, null, null, null]
+  );
+});
+
+test('GIVEN one person in the call from two devices WHEN the sections are made THEN each section names its own device', () => {
+  const sections = statsSections(
+    reading({
+      microphone: null,
+      camera: null,
+      participants: [
+        { userId: '@bob:s', deviceId: 'PHONE', audio: null, video: null },
+        { userId: '@bob:s', deviceId: 'DESK', audio: null, video: null }
+      ],
+      connections: []
+    })
+  );
+  assert.deepEqual(
+    sections.map((section) => [section.userId, section.deviceId]),
+    [
+      ['@bob:s', 'PHONE'],
+      ['@bob:s', 'DESK']
+    ]
+  );
 });
 
 test('GIVEN no camera, no screen and a device without media WHEN the sections are made THEN only what exists shows, and the device says so', () => {

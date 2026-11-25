@@ -1221,7 +1221,10 @@ impl<'de> serde::de::Visitor<'de> for WireStats {
                 Field::Camera => camera.replace(map.next_value()?).is_none(),
                 Field::Screen => screen.replace(map.next_value()?).is_none(),
                 Field::Participants => participants
-                    .replace(map.next_value::<BoundedList<WireParticipant, MAX_CALL_LEVELS>>()?)
+                    .replace(map.next_value::<BoundedList<
+                        WireParticipant,
+                        { persephone_contracts::CALL_PARTICIPANTS_MAX },
+                    >>()?)
                     .is_none(),
                 Field::Connections => connections
                     .replace(map.next_value::<BoundedList<
@@ -4423,10 +4426,11 @@ mod timeline_events_wire_tests {
             })
         };
         let full = persephone_contracts::CALL_STATS_CONNECTIONS_MAX;
-        assert!(event(reading(MAX_CALL_LEVELS, full)).is_ok());
-        assert!(event(reading(MAX_CALL_LEVELS + 1, 0)).is_err());
+        let people = persephone_contracts::CALL_PARTICIPANTS_MAX;
+        assert!(event(reading(people, full)).is_ok());
+        assert!(event(reading(people + 1, 0)).is_err());
         // An entry past the limit is refused unbuilt, whatever it holds.
-        let mut over = reading(MAX_CALL_LEVELS, 0);
+        let mut over = reading(people, 0);
         over["participants"]
             .as_array_mut()
             .unwrap()

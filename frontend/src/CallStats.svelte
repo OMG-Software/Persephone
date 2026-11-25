@@ -53,7 +53,8 @@
     {#each sections as section (section.key)}
       <table class="call-stats-table">
         <caption>
-          {#if section.userId !== null}<PersonName userId={section.userId} />{:else}{section.title}{/if}
+          {#if section.userId !== null}<PersonName userId={section.userId} />{#if section.deviceId !== null}
+              <span class="call-stats-device">({section.deviceId})</span>{/if}{:else}{section.title}{/if}
         </caption>
         <tbody>
           {#each section.rows as row (row.label)}

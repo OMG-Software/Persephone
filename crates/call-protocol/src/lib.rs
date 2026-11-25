@@ -749,7 +749,9 @@ pub enum FromWorker {
         message: String,
     },
     /// The call's statistics, as numbers with units (ADR-0066). Sent at
-    /// most once a second, and only while [`ToWorker::SetStats`] is on.
+    /// most once a second, and only while [`ToWorker::SetStats`] is on. The
+    /// off drops a reading that waits; one that the worker was already
+    /// writing can still follow the off, and the core drops it.
     Stats(CallStats),
 }
 

@@ -1325,12 +1325,18 @@ fn given_call_statistics_then_only_the_call_window_may_open_them_and_only_while_
     };
     // A stop of the host goes on a task of its own, so wait for it, but not
     // forever: the mock runtime sends no page or window events, so nothing
-    // else would end the wait.
+    // else would end the wait. A switch that never comes fails here, by name.
     let wait_for = |count: usize| {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while core.stats_switches.lock().unwrap().len() < count
-            && std::time::Instant::now() < deadline
-        {
+        loop {
+            let seen = core.stats_switches.lock().unwrap().clone();
+            if seen.len() >= count {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "waited 10 s for {count} statistics switches, saw {seen:?}"
+            );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
     };

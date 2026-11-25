@@ -3275,9 +3275,15 @@ async fn event_loop(
                     return End::Left;
                 }
                 Some(Input::Message(message)) => {
+                    // The off also drops a reading that waits in the output
+                    // slot, so none is written after the off (ADR-0066).
+                    let stats_off = matches!(message, ToWorker::SetStats { on: false });
                     match call.handle_command(message).await {
                         Ok(reply) => outgoing.extend(reply),
                         Err(code) => return End::Failed(code),
+                    }
+                    if stats_off {
+                        output.clear_stats();
                     }
                 }
                 Some(Input::Bad) => return End::Failed(FailureCode::Protocol),

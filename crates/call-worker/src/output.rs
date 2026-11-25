@@ -250,6 +250,13 @@ impl Output {
         let _ = self.queue.try_send(Item::Wake);
     }
 
+    /// Drops the statistics reading that waits, when the core turns the
+    /// statistics off (ADR-0066). A reading that the writer took before
+    /// this call can still go out; the core drops a reading while off.
+    pub fn clear_stats(&self) {
+        drop(self.slots.take_stats());
+    }
+
     /// Drops the picture that waits for a tile. Call it after the tile's
     /// producer has stopped and before `VideoStopped`.
     pub fn clear_picture(&self, tile: u8) {
@@ -656,6 +663,36 @@ mod tests {
         assert_eq!(
             items[2],
             WorkerItem::Message(FromWorker::Stats(stats_with_level(5)))
+        );
+    }
+
+    /// GIVEN a reading that waits WHEN the statistics go off before the
+    /// writer runs THEN the reading is not written, and a reading offered
+    /// after that goes out.
+    #[test]
+    fn given_a_waiting_reading_when_stats_go_off_then_it_is_not_written() {
+        let (output, receiver) = Output::new();
+        output.offer_stats(stats_with_level(3));
+        output.clear_stats();
+        output
+            .queue
+            .try_send(output.slots.queued(FromWorker::Left))
+            .unwrap();
+        drop(output);
+        let mut wire = Vec::new();
+        assert!(write_loop(&mut wire, receiver));
+        assert_eq!(read_all(wire), vec![WorkerItem::Message(FromWorker::Left)]);
+
+        let (output, receiver) = Output::new();
+        output.offer_stats(stats_with_level(3));
+        output.clear_stats();
+        output.offer_stats(stats_with_level(4));
+        drop(output);
+        let mut wire = Vec::new();
+        assert!(write_loop(&mut wire, receiver));
+        assert_eq!(
+            read_all(wire),
+            vec![WorkerItem::Message(FromWorker::Stats(stats_with_level(4)))]
         );
     }
 
