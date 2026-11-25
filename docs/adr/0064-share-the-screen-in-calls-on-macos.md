@@ -92,6 +92,9 @@ worker, as on Linux.
   (`-3817`, the share is `off`) or any other stream error (the share is
   `unavailable`) stops the capture and unpublishes the track. A screen share
   problem never ends the call.
+* As on Windows (ADR-0053's amendment), the core queues the worker's stop
+  when it accepts "Stop sharing", before the call bar shows `off`, not after
+  the call's other work.
 
 ### Capture
 

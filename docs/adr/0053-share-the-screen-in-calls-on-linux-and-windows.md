@@ -271,6 +271,12 @@ Decision:
   names the display output: a different monitor
   plugged into the same output, at the same size and place, counts as the
   same screen.
+* A stop reaches the worker at once. A Windows share has no portal session
+  that the desktop revokes, so the core keeps a stop as the share's session:
+  when the core accepts "Stop sharing", it queues the worker's stop before
+  the call bar shows "off", not after the call's other work (a key send can
+  take up to 20 s). Only a full worker command queue makes the stop wait for
+  the call task, as before.
 * The core lists monitors with the worker's list rule, but it asks only about
   a monitor that the GDI capture takes (`screen_capture_size_ok` in the call
   protocol, which the worker also uses: at least 2x2, at most 7680 on a side
