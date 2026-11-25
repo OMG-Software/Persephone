@@ -9,7 +9,9 @@ const stores = {
   key_missing: 'Store key is missing', key_unreadable: 'Store key cannot be read',
   secret_rejected: 'Passphrase rejected', key_rejected: 'Store key rejected',
   profile_in_use: 'Profile is open in another window', store_unavailable: 'Store unavailable',
-  unsupported: 'Store protection is unavailable'
+  unsupported: 'Store protection is unavailable', no_session_bus: 'No session bus',
+  no_secret_service: 'No keyring service', no_default_keyring: 'No default keyring',
+  no_display: 'No display for the core windows', keyring_busy: 'Keyring busy in another window'
 };
 const modes = { unknown: 'Not determined', sliding: 'Sliding Sync', classic: 'Classic sync' };
 

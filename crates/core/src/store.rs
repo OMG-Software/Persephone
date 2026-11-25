@@ -24,6 +24,8 @@
 //! | Stores refuse the key | `KeyRejected` |
 //! | Another process holds the profile | `ProfileInUse` |
 //! | No vault or no prompt on this platform | `Unsupported` |
+//! | Linux: no session bus, Secret Service, default keyring or display | `NoSessionBus`, `NoSecretService`, `NoDefaultKeyring`, `NoDisplay` (ADR-0061) |
+//! | Linux: another core still holds the keyring-item creation lock after the wait | `KeyringBusy` (ADR-0061) |
 //!
 //! Layout: `profile.lock`, `store-key.v2` ([`SEALED_KEY_FILE`]: magic plus the
 //! vault's blob of the sealed key), `store-key.v1` ([`VAULT_KEY_FILE`]: magic
@@ -53,7 +55,7 @@
 
 use crate::credentials::{NewPassphrase, PromptError, SecretPrompt};
 use crate::passphrase::{self, MAX_ATTEMPTS, MIN_PASSPHRASE_CHARS, SealError, Unlock};
-use crate::vault::{KEY_BYTES, KeyProtector, StoreKey, VaultError, generate_key};
+use crate::vault::{KEY_BYTES, KeyProtector, Missing, StoreKey, VaultError, generate_key};
 use matrix_sdk_base::store::StateStore;
 use matrix_sdk_crypto::store::CryptoStore;
 use matrix_sdk_sqlite::{
@@ -294,9 +296,16 @@ fn read_key_file(path: &Path, magic: &[u8]) -> Result<Vec<u8>, StoreState> {
     }
 }
 
+/// The store state for a vault error. A missing part keeps its fixed
+/// reason, so the page can say what to set up (ADR-0061).
 fn vault_error(error: VaultError) -> StoreState {
     match error {
         VaultError::Unsupported => StoreState::Unsupported,
+        VaultError::Missing(Missing::SessionBus) => StoreState::NoSessionBus,
+        VaultError::Missing(Missing::SecretService) => StoreState::NoSecretService,
+        VaultError::Missing(Missing::DefaultKeyring) => StoreState::NoDefaultKeyring,
+        VaultError::Missing(Missing::Display) => StoreState::NoDisplay,
+        VaultError::Busy => StoreState::KeyringBusy,
         VaultError::Failed => StoreState::KeyUnreadable,
     }
 }
@@ -319,9 +328,12 @@ fn exists(path: &Path) -> Result<bool, StoreState> {
 }
 
 /// What a prompt that gave no entry leaves: a cancelled or failed prompt
-/// leaves the profile locked, so Unlock can try again.
+/// leaves the profile locked, so Unlock can try again. On Linux the core's
+/// windows are refused only when there is no display (ADR-0010), so an
+/// unsupported prompt there is [`StoreState::NoDisplay`] (ADR-0061).
 fn prompt_state(error: PromptError) -> StoreState {
     match error {
+        PromptError::Unsupported if cfg!(target_os = "linux") => StoreState::NoDisplay,
         PromptError::Unsupported => StoreState::Unsupported,
         PromptError::Cancelled | PromptError::Invalid | PromptError::Failed => StoreState::Locked,
     }
@@ -716,4 +728,56 @@ fn open_stores(
         passphrase: AtomicBool::new(passphrase),
         _lock: lock,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// GIVEN each vault error WHEN the profile cannot open THEN a missing
+    /// part keeps its own fixed reason (ADR-0061), "no vault" stays
+    /// unsupported and any other refusal is an unreadable key.
+    #[test]
+    fn given_vault_errors_then_each_missing_part_keeps_its_reason() {
+        for (error, state) in [
+            (VaultError::Unsupported, StoreState::Unsupported),
+            (
+                VaultError::Missing(Missing::SessionBus),
+                StoreState::NoSessionBus,
+            ),
+            (
+                VaultError::Missing(Missing::SecretService),
+                StoreState::NoSecretService,
+            ),
+            (
+                VaultError::Missing(Missing::DefaultKeyring),
+                StoreState::NoDefaultKeyring,
+            ),
+            (VaultError::Missing(Missing::Display), StoreState::NoDisplay),
+            (VaultError::Busy, StoreState::KeyringBusy),
+            (VaultError::Failed, StoreState::KeyUnreadable),
+        ] {
+            assert_eq!(vault_error(error), state);
+        }
+    }
+
+    /// GIVEN a prompt that gave no entry THEN a cancelled, invalid or failed
+    /// one leaves the profile locked, and an unsupported one is "no display"
+    /// on Linux and unsupported elsewhere.
+    #[test]
+    fn given_a_prompt_without_an_entry_then_only_unsupported_is_not_locked() {
+        for error in [
+            PromptError::Cancelled,
+            PromptError::Invalid,
+            PromptError::Failed,
+        ] {
+            assert_eq!(prompt_state(error), StoreState::Locked);
+        }
+        let expected = if cfg!(target_os = "linux") {
+            StoreState::NoDisplay
+        } else {
+            StoreState::Unsupported
+        };
+        assert_eq!(prompt_state(PromptError::Unsupported), expected);
+    }
 }

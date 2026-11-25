@@ -184,30 +184,46 @@ class LinuxLiveTest(unittest.TestCase):
         self.assertFalse([command for command, _ in commands if "--ignored" in command])
 
     def test_given_linux_live_then_the_live_tests_run_instrumented_before_the_report(self):
-        commands = coverage("--linux-live")
+        desktop = {"DISPLAY": ":0", "WAYLAND_DISPLAY": "wayland-0", "GNOME_KEYRING_CONTROL": "/run/user/1000/keyring"}
+        with mock.patch.dict(dev.os.environ, desktop):
+            commands = coverage("--linux-live")
         names = [command for command, _ in commands]
         report = names.index(next(c for c in names if c[:3] == ["cargo", "llvm-cov", "report"]))
         live = [index for index, command in enumerate(names) if "--ignored" in command]
-        self.assertEqual(len(live), 2)
+        self.assertEqual(len(live), 3)
         self.assertTrue(all(index < report for index in live))
-        scope, keyring = (commands[index] for index in live)
+        scope, unlocked, bare = (commands[index] for index in live)
         self.assertEqual(scope[0][-1], "platform::linux::ui::")
         self.assertEqual(scope[1]["CARGO_LLVM_COV"], "1", "instrumented")
         self.assertEqual(scope[1]["XDG_RUNTIME_DIR"], "/run/user/1000", "the user manager's")
 
-        # THEN the Secret Service test gets a private bus, keyring data in the
-        # ignored .local tree, and a new runtime directory, so it cannot find
-        # the user's running keyring; both are removed after the run.
-        self.assertEqual(keyring[0][:2], ["dbus-run-session", "--"])
-        self.assertEqual(keyring[0][-1], "platform::linux::vault::")
-        self.assertEqual(keyring[1]["CARGO_LLVM_COV"], "1", "instrumented")
-        data = Path(keyring[1]["XDG_DATA_HOME"])
-        self.assertEqual(data.parent, dev.LIVE_DATA)
-        runtime = Path(keyring[1]["XDG_RUNTIME_DIR"])
-        self.assertTrue(runtime.name.startswith("persephone-keyring-"))
-        self.assertNotEqual(runtime, Path("/run/user/1000"))
-        self.assertFalse(runtime.exists(), "removed after the run")
-        self.assertFalse(data.exists(), "removed after the run")
+        # THEN each Secret Service test gets a private bus, keyring data in
+        # the ignored .local tree, and a new runtime directory, so it cannot
+        # find the user's running keyring; both are removed after the run.
+        for keyring in (unlocked, bare):
+            self.assertEqual(keyring[0][:2], ["dbus-run-session", "--"])
+            # GNOME Keyring reads this before XDG_RUNTIME_DIR.
+            self.assertNotIn("GNOME_KEYRING_CONTROL", keyring[1])
+            self.assertEqual(keyring[1]["CARGO_LLVM_COV"], "1", "instrumented")
+            data = Path(keyring[1]["XDG_DATA_HOME"])
+            self.assertEqual(data.parent, dev.LIVE_DATA)
+            runtime = Path(keyring[1]["XDG_RUNTIME_DIR"])
+            self.assertTrue(runtime.name.startswith("persephone-keyring-"))
+            self.assertNotEqual(runtime, Path("/run/user/1000"))
+            self.assertFalse(runtime.exists(), "removed after the run")
+            self.assertFalse(data.exists(), "removed after the run")
+        self.assertNotEqual(unlocked[1]["XDG_DATA_HOME"], bare[1]["XDG_DATA_HOME"], "a new keyring each")
+
+        # THEN the stored-once test gets an unlocked default keyring, and the
+        # ADR-0061 refusals get a keyring without one and no display, so the
+        # keyring's own prompt can never appear on the user's desktop.
+        vault = "platform::linux::vault::tests::"
+        self.assertEqual(unlocked[0][-1], vault + "given_a_disposable_keyring_then")
+        self.assertIn("--unlock", unlocked[0][4])
+        self.assertEqual(bare[0][-1], vault + "given_a_disposable_provider_without_a_default")
+        self.assertNotIn("--unlock", bare[0][4])
+        self.assertNotIn("DISPLAY", bare[1])
+        self.assertNotIn("WAYLAND_DISPLAY", bare[1])
 
     def test_given_linux_live_off_linux_or_outside_coverage_then_it_is_refused(self):
         for platform, command in (("win32", "coverage"), ("darwin", "coverage"), ("linux", "rust")):

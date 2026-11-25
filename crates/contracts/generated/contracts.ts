@@ -1,4 +1,4 @@
-export type StoreState = "not_configured" | "protected" | "locked" | "locking" | "unlocking" | "lock_failed" | "restart_required" | "key_missing" | "key_unreadable" | "secret_rejected" | "key_rejected" | "profile_in_use" | "store_unavailable" | "unsupported";
+export type StoreState = "not_configured" | "protected" | "locked" | "locking" | "unlocking" | "lock_failed" | "restart_required" | "key_missing" | "key_unreadable" | "secret_rejected" | "key_rejected" | "profile_in_use" | "store_unavailable" | "unsupported" | "no_session_bus" | "no_secret_service" | "no_default_keyring" | "no_display" | "keyring_busy";
 
 export type AccountState = "signed_out" | "signing_in" | "signed_in" | "sign_in_failed";
 

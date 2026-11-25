@@ -1,6 +1,6 @@
 # Privacy policy
 
-Last updated: 23 November 2026
+Last updated: 24 November 2026
 
 This policy tells you what data the Persephone project collects, what the
 Persephone app sends and stores, and where other parties process data. It
@@ -237,8 +237,13 @@ after leaving a room. Use Saved drafts to view or discard those local records.
   You can turn it off again. The app has no way to recover a forgotten
   passphrase. Lock and the idle lock exist only while the passphrase is on.
 * The operating system's keystore protects the key in both cases. On Windows this is
-  DPAPI. The Linux Secret Service adapter is not implemented. The macOS
-  Keychain adapter is implemented but has no recorded native app run.
+  DPAPI. On Linux it is the Secret Service (such as GNOME Keyring or
+  KWallet): the app keeps a random secret there that wraps the key. If the
+  system has no default keyring, the app asks whether the keyring may create
+  one. The keyring then asks for its password in its own window; the app
+  never sees that password. The Linux adapter has no recorded native app
+  run. The macOS Keychain adapter is implemented but has no recorded native
+  app run.
   If no keystore is available, the profile
   stays locked. The app never writes an unprotected key instead.
 

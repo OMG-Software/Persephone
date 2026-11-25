@@ -78,10 +78,10 @@
 
   // Fixed text per step the core is waiting on; none while idle.
   const operationText: Partial<Record<SecurityStatus['operation'], string>> = {
-    waiting_for_password: 'Enter your password in the Windows window Persephone opened.',
-    waiting_for_recovery_key: 'Enter your recovery key in the Windows window Persephone opened.',
-    waiting_for_passphrase: 'Enter the passphrase in the Windows window Persephone opened.',
-    waiting_for_confirmation: 'Answer in the Windows window Persephone opened.',
+    waiting_for_password: 'Enter your password in the Persephone window.',
+    waiting_for_recovery_key: 'Enter your recovery key in the Persephone window.',
+    waiting_for_passphrase: 'Enter the passphrase in the Persephone window.',
+    waiting_for_confirmation: 'Answer the question in the Persephone window.',
     working: 'Working…'
   };
 

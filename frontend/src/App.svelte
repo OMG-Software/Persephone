@@ -31,6 +31,7 @@
     type ShownRing
   } from './calls';
   import { CALL_WINDOW_UNAVAILABLE_TEXT } from './callWindow';
+  import { resettable, storeText, unlockable } from './storeText.ts';
   import RoomTools from './RoomTools.svelte';
   import ConnectionHealth from './ConnectionHealth.svelte';
   import HealthDetails from './HealthDetails.svelte';
@@ -204,7 +205,6 @@
     type ThirdPartyModules,
     type RoomList as Rooms,
     type SecurityStatus,
-    type StoreState,
     type TimelineItem
   } from './bridge';
 
@@ -461,46 +461,7 @@
   // Whether a read of older undecryptable events is running (at most one).
   let rereading = false;
 
-  // Fixed text per store state; the core sends codes only.
-  const storeText: Record<StoreState, string> = {
-    not_configured: 'Demo rooms with synthetic data: nothing is stored',
-    protected: 'Local store protected',
-    locked: 'Local store locked',
-    locking: 'Locking: work in progress is finishing',
-    unlocking: 'Unlocking: if the profile has a passphrase, enter it in the Persephone window',
-    lock_failed: 'Local store did not close cleanly; restart Persephone',
-    restart_required: 'Locked: restart Persephone to unlock',
-    key_missing: 'Local store locked: its key is missing',
-    key_unreadable: 'Local store locked: its key cannot be unlocked',
-    secret_rejected: 'Local store locked: the passphrase was wrong too many times',
-    key_rejected: 'Local store locked: the key does not match',
-    profile_in_use: 'Local store locked: open in another window',
-    store_unavailable: 'Local store unavailable',
-    unsupported: 'Local store unavailable on this system'
-  };
-
-  // States the core can try to unlock from; the others need a restart or
-  // have nothing to unlock.
-  const unlockable: StoreState[] = [
-    'locked',
-    'secret_rejected',
-    'key_missing',
-    'key_unreadable',
-    'key_rejected',
-    'profile_in_use',
-    'store_unavailable'
-  ];
-
-  // Closed profiles the core may reset after a forgotten passphrase or a lost key. The core
-  // checks again and asks for confirmation in its own window.
-  const resettable: StoreState[] = [
-    'locked',
-    'secret_rejected',
-    'key_missing',
-    'key_unreadable',
-    'key_rejected',
-    'store_unavailable'
-  ];
+  // Fixed store texts and the states Unlock and Reset apply to.
 
   // Signed in, signed out, or no profile (synthetic data only).
   const profileOpen = $derived(status?.store === 'protected');

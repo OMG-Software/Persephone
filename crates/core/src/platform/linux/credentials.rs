@@ -523,6 +523,28 @@ impl CredentialSource for NativePrompt {
     }
 }
 
+/// The question before the vault asks the Secret Service to create a
+/// default keyring (ADR-0061). "No" is the default.
+pub const KEYRING_QUESTION: (&str, &str) = (
+    "Create a keyring for Persephone?",
+    "This system has no default keyring, so Persephone cannot protect the key \
+     of its local store.\n\n\
+     Persephone can ask the system's keyring to create one, named \"Login\", \
+     and make it the default. The keyring then asks you for a new password in \
+     its own window. Persephone never sees that password.\n\n\
+     If you answer No, the profile stays locked. You can create a keyring \
+     yourself in Passwords and Keys, make it the default, and then choose \
+     Unlock.",
+);
+
+/// Asks whether the vault may have the Secret Service create a default
+/// keyring: `Ok(true)` only for "Yes". Closing the window is "No"; no
+/// display is `Unsupported`.
+pub fn confirm_keyring_creation() -> Result<bool, PromptError> {
+    let (caption, message) = KEYRING_QUESTION;
+    yes(prompt(question_alert(caption, message))?.response)
+}
+
 /// Asks whether to start the failed window again; `true` only for Retry.
 /// No display, or a window that did not run, closes.
 pub fn ask_to_retry() -> bool {
@@ -573,6 +595,29 @@ mod tests {
         assert_eq!(yes(Response::Closed), Ok(false));
         assert_eq!(yes(Response::Other), Err(PromptError::Failed));
         assert_eq!(yes(Response::Button(2)), Err(PromptError::Failed));
+    }
+
+    /// GIVEN the create-keyring question (ADR-0061) THEN it is a warning
+    /// whose default is "No", it says that the keyring asks for its own
+    /// password, which Persephone never sees, and it says what to do after
+    /// a "No".
+    #[test]
+    fn given_the_keyring_question_then_no_is_the_default_and_it_explains() {
+        let (caption, message) = KEYRING_QUESTION;
+        let alert = question_alert(caption, message);
+        assert_eq!(alert.style, Style::Warning);
+        assert_eq!(alert.buttons, ["No", "Yes"]);
+        assert_eq!(alert.entry, Entry::Message);
+        for words in [
+            "no default keyring",
+            "\"Login\"",
+            "asks you for a new password in its own window",
+            "never sees that password",
+            "the profile stays locked",
+            "Passwords and Keys",
+        ] {
+            assert!(message.contains(words), "{words}");
+        }
     }
 
     /// GIVEN each secret prompt THEN it has one hidden entry with the fixed

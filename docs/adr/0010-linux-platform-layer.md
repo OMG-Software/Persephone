@@ -138,3 +138,6 @@ Owner decisions recorded with the implementation in
   [ADR-0006](0006-require-an-unlock-secret-for-the-local-profile.md)
 * [ADR-0011](0011-macos-platform-layer.md) (macOS), [ADR-0012](0012-sign-and-publish-releases-as-drafts.md) (release)
 * Refined by [ADR-0046](0046-do-not-block-same-user-attach-to-the-linux-core.md) (the core stays dumpable)
+* Refinement proposed in [ADR-0061](0061-offer-to-create-a-default-keyring-on-linux.md)
+  (offer to create a default keyring, and a fixed reason for each
+  `unsupported` case); not yet approved by the owner

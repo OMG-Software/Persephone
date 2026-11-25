@@ -1802,7 +1802,11 @@ fn security_prompt_error(error: PromptError) -> SecurityError {
 fn passphrase_error(state: StoreState) -> SecurityError {
     match state {
         StoreState::Locked => SecurityError::Cancelled,
-        StoreState::Unsupported => SecurityError::Unsupported,
+        StoreState::Unsupported
+        | StoreState::NoSessionBus
+        | StoreState::NoSecretService
+        | StoreState::NoDefaultKeyring
+        | StoreState::NoDisplay => SecurityError::Unsupported,
         StoreState::SecretRejected => SecurityError::PassphraseRejected,
         _ => SecurityError::ProfileUnavailable,
     }

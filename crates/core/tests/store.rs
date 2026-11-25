@@ -551,6 +551,9 @@ fn given_turning_the_passphrase_on_then_it_must_be_long_enough_and_confirmed() {
         assert_eq!(
             state,
             Err(match answer {
+                // On Linux the core's windows are refused only without a
+                // display (ADR-0061).
+                PromptError::Unsupported if cfg!(target_os = "linux") => StoreState::NoDisplay,
                 PromptError::Unsupported => StoreState::Unsupported,
                 _ => StoreState::Locked,
             })

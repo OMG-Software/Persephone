@@ -28,9 +28,14 @@ pub enum BusError {
 /// call. See [`configured_address`] and [`connect_error`] for what counts
 /// as no session bus.
 pub fn session() -> Result<Connection, BusError> {
+    session_with(METHOD_TIMEOUT)
+}
+
+/// As [`session`], with `timeout` for every method reply instead.
+pub fn session_with(timeout: Duration) -> Result<Connection, BusError> {
     let configured = configured_address(std::env::var_os("DBUS_SESSION_BUS_ADDRESS").as_deref())?;
     Builder::session()
-        .and_then(|builder| builder.method_timeout(METHOD_TIMEOUT).build())
+        .and_then(|builder| builder.method_timeout(timeout).build())
         .map_err(|error| connect_error(&error, configured))
 }
 
@@ -51,8 +56,13 @@ pub fn configured_address(value: Option<&std::ffi::OsStr>) -> Result<bool, BusEr
 /// behind it), sorted as for [`session`], with `address` as a configured
 /// address.
 pub fn at(address: &str) -> Result<Connection, BusError> {
+    at_with(address, METHOD_TIMEOUT)
+}
+
+/// As [`at`], with `timeout` for every method reply instead.
+pub fn at_with(address: &str, timeout: Duration) -> Result<Connection, BusError> {
     Builder::address(address)
-        .and_then(|builder| builder.method_timeout(METHOD_TIMEOUT).build())
+        .and_then(|builder| builder.method_timeout(timeout).build())
         .map_err(|error| connect_error(&error, true))
 }
 

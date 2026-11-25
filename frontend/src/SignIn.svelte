@@ -152,11 +152,11 @@
       {/if}
       <p class="auth-note">
         Persephone then asks for the new password, twice, and a registration token if the server needs
-        one, in separate Windows windows. This page never sees them.
+        one, in separate Persephone windows. This page never sees them.
       </p>
     {:else}
       <p class="auth-note">
-        Persephone asks for your username and password in a separate Windows sign-in window, which
+        Persephone asks for your username and password in a separate Persephone sign-in window, which
         names the homeserver. This page never sees your password.
       </p>
     {/if}
@@ -195,8 +195,8 @@
   {#if account.state === 'signing_in'}
     <p role="status">
       {registering
-        ? 'Checking the name, then waiting for the Windows windows…'
-        : 'Waiting for the Windows sign-in window…'}
+        ? 'Checking the name, then waiting for the Persephone windows…'
+        : 'Waiting for the Persephone sign-in window…'}
     </p>
   {:else if account.state === 'sign_in_failed' && account.error}
     <p role="alert" class="error">{errors[account.error] ?? errors.failed}</p>
