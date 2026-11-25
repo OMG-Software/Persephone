@@ -779,10 +779,19 @@
   // the call's controls and video itself; otherwise only the call window
   // does. A later open that works hides them again.
   let callWindowFailed = $state(false);
+  // The newest open request. Only its reply counts, so a slow reply from an
+  // earlier request, or from before a session change, changes nothing.
+  let callWindowRequest = 0;
   function showCallWindow() {
+    const request = ++callWindowRequest;
     openCallWindow().then(
-      () => (callWindowFailed = false),
       () => {
+        if (request !== callWindowRequest) return;
+        callWindowFailed = false;
+        if (error === CALL_WINDOW_UNAVAILABLE_TEXT) error = null;
+      },
+      () => {
+        if (request !== callWindowRequest) return;
         // A window that cannot open leaves the call here; say so, so no
         // window is missed without a reason.
         callWindowFailed = true;
@@ -1221,6 +1230,7 @@
     screenRequest += 1;
     callDismissed = false;
     callWindowFailed = false;
+    callWindowRequest += 1;
     callNames = new Map();
     callNamesFor = null;
     callRefresher.request();
