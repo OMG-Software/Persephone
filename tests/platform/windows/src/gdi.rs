@@ -109,10 +109,11 @@ pub fn open(choice: Choice<'_>) -> Result<Capture, Stage> {
     // The coordinates of the monitor list and of the screen DC must be
     // physical pixels, whatever the process manifest says. The setting is
     // for this thread only, and stays for the copies.
-    let monitor = monitor::choose(&physical_monitors(), choice).map_err(|mismatch| match mismatch {
-        Mismatch::NoMonitor => Stage::NoMonitor,
-        Mismatch::SizeChanged => Stage::SizeChanged,
-    })?;
+    let monitor =
+        monitor::choose(&physical_monitors(), choice).map_err(|mismatch| match mismatch {
+            Mismatch::NoMonitor => Stage::NoMonitor,
+            Mismatch::SizeChanged => Stage::SizeChanged,
+        })?;
     if !size_ok(monitor.width, monitor.height) {
         return Err(Stage::BadSize);
     }

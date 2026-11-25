@@ -541,13 +541,18 @@ class BundleConfigTests(TempTree):
     def test_windows_config_names_all_sidecars_and_licence_files(self):
         # GIVEN generated notices WHEN the Windows release configuration is written
         code, _, notices, output = self.write_config("windows")
-        # THEN it adds the call worker, both licence files, and no signing hook.
+        # THEN it adds the call worker and the screen helper (ADR-0067), both licence files, and no signing hook.
         self.assertEqual(code, 0)
         bundle = json.loads(output.read_text(encoding="utf-8"))["bundle"]
         self.assertIs(bundle["active"], True)
         self.assertEqual(
             bundle["externalBin"],
-            ["binaries/persephone", "binaries/persephone-media-worker", "binaries/persephone-call-worker"],
+            [
+                "binaries/persephone",
+                "binaries/persephone-media-worker",
+                "binaries/persephone-call-worker",
+                "binaries/persephone-screen-helper",
+            ],
         )
         resources = {(release.ROOT / "src-tauri" / source).resolve(): target for source, target in bundle["resources"].items()}
         self.assertEqual(resources, {(release.ROOT / "LICENSE").resolve(): "LICENSE.txt",

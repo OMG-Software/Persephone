@@ -228,7 +228,10 @@ mod tests {
             let Ok(ScreenItem::Frame(frame)) = read_item(&mut reader, 3) else {
                 panic!("a picture expected");
             };
-            assert_eq!((frame.width, frame.height, frame.data), (4, 2, body.clone()));
+            assert_eq!(
+                (frame.width, frame.height, frame.data),
+                (4, 2, body.clone())
+            );
         }
         assert_eq!(
             read_item(&mut reader, 3),
@@ -245,16 +248,10 @@ mod tests {
     fn given_bad_items_when_read_then_they_are_refused() {
         let (mut reader, mut write, _stop) = reader();
         write.write_all(&[0xFF; 40]).expect("garbage");
-        assert_eq!(
-            read_item(&mut reader, 3),
-            Err(ScreenFrameError::BadHeader)
-        );
+        assert_eq!(read_item(&mut reader, 3), Err(ScreenFrameError::BadHeader));
         let (mut reader, mut write, _stop) = self::reader();
         write_picture(&mut write, 4, 4, 2, &[0; 32]).expect("a picture");
-        assert_eq!(
-            read_item(&mut reader, 3),
-            Err(ScreenFrameError::WrongShare)
-        );
+        assert_eq!(read_item(&mut reader, 3), Err(ScreenFrameError::WrongShare));
     }
 
     /// GIVEN a pipe with nothing on it WHEN waited for THEN the wait is idle
@@ -285,10 +282,7 @@ mod tests {
         let started = Instant::now();
         let result = read_item(&mut reader, 3);
         stopper.join().expect("the stopper");
-        assert_eq!(
-            result,
-            Err(ScreenFrameError::Io(io::ErrorKind::TimedOut))
-        );
+        assert_eq!(result, Err(ScreenFrameError::Io(io::ErrorKind::TimedOut)));
         assert!(started.elapsed() < Duration::from_secs(2));
     }
 }

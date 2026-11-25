@@ -22,7 +22,7 @@ use windows::core::Interface;
 /// Which method a child run measures.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Method {
-    /// Windows.Graphics.Capture (`screen/wgc.rs`).
+    /// Windows.Graphics.Capture (`wgc.rs` of the screen helper).
     Wgc,
     /// `IDXGIOutput1::DuplicateOutput`, `AcquireNextFrame`, a CPU copy.
     Dxgi,
@@ -336,10 +336,10 @@ fn copy_and_check(
     stage
 }
 
-/// The call worker's own GDI capture (`screen/gdi.rs`): one frame of
+/// The GDI capture of the gate (`gdi.rs`, which the call worker no longer uses): one frame of
 /// monitor 0, checked for black or uniform pixels.
 fn gdi() -> u32 {
-    let mut capture = match super::gdi::open(super::gdi::Choice::First) {
+    let mut capture = match super::gdi::open(super::monitor::Choice::First) {
         Ok(capture) => capture,
         Err(stage) => return stage as u32,
     };

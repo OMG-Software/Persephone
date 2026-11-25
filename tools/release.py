@@ -309,9 +309,11 @@ def cargo_lock_is_valid(root):
 
 
 SIDECARS = ("binaries/persephone", "binaries/persephone-media-worker")
-# Every bundle carries the call worker (ADR-0049 adds Linux and macOS).
+# Every bundle carries the call worker (ADR-0049 adds Linux and macOS). Only
+# Windows carries the screen helper, which captures the screen outside the
+# call worker's AppContainer (ADR-0067); Linux and macOS capture in the worker.
 PLATFORM_SIDECARS = {
-    "windows": SIDECARS + ("binaries/persephone-call-worker",),
+    "windows": SIDECARS + ("binaries/persephone-call-worker", "binaries/persephone-screen-helper"),
     "linux": SIDECARS + ("binaries/persephone-call-worker",),
     "macos": SIDECARS + ("binaries/persephone-call-worker",),
 }

@@ -69,6 +69,12 @@ pub trait HelperProcess: Send + Sync + 'static {
     fn terminate(&self);
     /// The exit code, once the process has exited.
     fn exit_code(&self) -> Option<u32>;
+    /// The peak committed memory of the process in bytes; 0 when unknown.
+    /// Only a test of the real helper reads it.
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn peak_memory(&self) -> usize {
+        0
+    }
 }
 
 /// The exit of a helper, set by its waiter thread.

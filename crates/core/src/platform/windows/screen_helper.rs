@@ -95,6 +95,10 @@ impl HelperProcess for BrokerProcess {
     fn exit_code(&self) -> Option<u32> {
         self.process.exit_code()
     }
+
+    fn peak_memory(&self) -> usize {
+        self.process.peak_memory()
+    }
 }
 
 impl HelperLaunch for BrokerHelper {
@@ -186,6 +190,7 @@ mod tests {
         let launched = BrokerHelper::at(built_helper())
             .launch(1, &monitors)
             .expect("the helper starts");
+        let process = launched.process.clone();
         let helper = HelperShare::start(1, launched.process).expect("a helper share");
         let frames = launched.frames;
         let (sender, receiver) = mpsc::channel();
@@ -214,5 +219,14 @@ mod tests {
             .count();
         assert!(lit > 0, "the picture is black");
         assert_eq!(helper.stop_and_join(), Some(EXIT_STOPPED));
+        // The Job's memory cap is 512 MiB; this is the measured peak.
+        let peak = process.peak_memory();
+        eprintln!(
+            "screen helper peak committed memory: {} MiB for a {}x{} picture",
+            peak >> 20,
+            frame.width,
+            frame.height
+        );
+        assert!(peak > 0 && peak < 512 << 20, "{peak}");
     }
 }

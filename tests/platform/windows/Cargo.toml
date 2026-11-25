@@ -19,8 +19,9 @@ windows-sys = { version = "=0.61.2", features = [
   "Win32_System_Memory",
   "Win32_System_Threading",
 ] }
-# The screen capture probe compiles the call worker's `screen/wgc.rs`
-# (ADR-0053): the same locked crate and only the features that file needs.
+# The screen capture probe compiles the screen helper's `wgc.rs` and
+# `monitor.rs` (ADR-0053, ADR-0067) and its own `gdi.rs`: the same locked crate
+# and only the features those files need.
 windows = { version = "=0.62.2", default-features = false, features = [
   "Foundation",
   "Graphics_Capture",

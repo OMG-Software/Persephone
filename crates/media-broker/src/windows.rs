@@ -782,8 +782,10 @@ fn launch(
 
 /// Committed memory for the screen helper: two 3840x2160 BGRA pictures (the
 /// staging copy and the repacked copy, about 64 MiB) and the Direct3D and
-/// WinRT runtime, which commits a few hundred MiB of its own.
-const SCREEN_HELPER_MEMORY_LIMIT_BYTES: usize = 1024 * 1024 * 1024;
+/// WinRT runtime. The peak measured on 25 November 2026 was 85 MiB for one
+/// monitor on the development machine; the limit leaves room for a 4K
+/// monitor and for a graphics driver that commits more.
+const SCREEN_HELPER_MEMORY_LIMIT_BYTES: usize = 512 * 1024 * 1024;
 
 /// What the screen helper's Job forbids the process to do with the desktop.
 /// None of it is needed for Windows.Graphics.Capture of one monitor.
@@ -1390,7 +1392,7 @@ mod tests {
         }
         assert_eq!(flags & JOB_OBJECT_LIMIT_PROCESS_TIME, 0);
         assert_eq!(limits.BasicLimitInformation.ActiveProcessLimit, 1);
-        assert_eq!(limits.ProcessMemoryLimit, 1024 * 1024 * 1024);
+        assert_eq!(limits.ProcessMemoryLimit, 512 * 1024 * 1024);
         assert_eq!(ui.UIRestrictionsClass, HELPER_UI_LIMITS);
         assert_ne!(HELPER_UI_LIMITS & JOB_OBJECT_UILIMIT_HANDLES, 0);
         assert_ne!(HELPER_UI_LIMITS & JOB_OBJECT_UILIMIT_READCLIPBOARD, 0);

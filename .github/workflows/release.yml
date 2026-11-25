@@ -297,14 +297,16 @@ jobs:
           (cd frontend && npm run build)
           cargo build --locked --release -p persephone-media-decoder --target wasm32-unknown-unknown
           cargo build --locked --release --target "$TRIPLE" \
-            -p persephone-core --bin persephone -p persephone-media-worker --bin persephone-media-worker
+            -p persephone-core --bin persephone -p persephone-media-worker --bin persephone-media-worker \
+            -p persephone-screen-helper --bin persephone-screen-helper
           # The prebuilt libwebrtc uses the static C runtime, so the call worker
           # builds apart from the rest, with crt-static (tools/dev.py does the same).
           RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static" \
             cargo build --locked --release --target "$TRIPLE" \
             -p persephone-call-worker --bin persephone-call-worker
           mkdir -p src-tauri/binaries
-          for name in persephone persephone-media-worker persephone-call-worker; do
+          # The screen helper (ADR-0067) is a Windows sidecar beside the core.
+          for name in persephone persephone-media-worker persephone-call-worker persephone-screen-helper; do
             cp ".local/build/rust/$TRIPLE/release/$name.exe" "src-tauri/binaries/$name-$TRIPLE.exe"
           done
           # Per-platform notices: the call worker links libwebrtc in every bundle.
@@ -324,6 +326,7 @@ jobs:
           cp "src-tauri/binaries/persephone-$TRIPLE.exe" "$RUNNER_TEMP/stage/exes/persephone.exe"
           cp "src-tauri/binaries/persephone-media-worker-$TRIPLE.exe" "$RUNNER_TEMP/stage/exes/persephone-media-worker.exe"
           cp "src-tauri/binaries/persephone-call-worker-$TRIPLE.exe" "$RUNNER_TEMP/stage/exes/persephone-call-worker.exe"
+          cp "src-tauri/binaries/persephone-screen-helper-$TRIPLE.exe" "$RUNNER_TEMP/stage/exes/persephone-screen-helper.exe"
           cp ".local/build/rust/$TRIPLE/release/persephone-ui.exe" "$RUNNER_TEMP/stage/exes/persephone-ui.exe"
           cp "$RUNNER_TEMP/tools/bin/cargo-tauri.exe" "$RUNNER_TEMP/stage/tauri-cli/cargo-tauri.exe"
           ls -l "$RUNNER_TEMP/stage/exes" "$RUNNER_TEMP/stage/tauri-cli"
@@ -372,7 +375,7 @@ jobs:
           WINDOWS_SIGNATURE_STATE: ${{ runner.temp }}/windows-signature.txt
         run: |
           $dir = Join-Path $env:RUNNER_TEMP 'exes'
-          $names = @('persephone-call-worker.exe', 'persephone-media-worker.exe', 'persephone-ui.exe', 'persephone.exe')
+          $names = @('persephone-call-worker.exe', 'persephone-media-worker.exe', 'persephone-screen-helper.exe', 'persephone-ui.exe', 'persephone.exe')
           $found = @(Get-ChildItem -LiteralPath $dir -Recurse -Force | ForEach-Object { $_.FullName.Substring($dir.Length + 1) })
           if ($found.Count -ne $names.Count -or (Compare-Object $found $names)) { throw "unexpected files to sign: $($found -join ', ')" }
           & ./tools/sign_windows.ps1 @($names | ForEach-Object { Join-Path $dir $_ })
@@ -446,7 +449,7 @@ jobs:
           echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
           exes="$RUNNER_TEMP/exes"
           found=$(cd "$exes" && find . -mindepth 1 | LC_ALL=C sort | tr '\n' ' ')
-          [ "$found" = "./persephone-call-worker.exe ./persephone-media-worker.exe ./persephone-ui.exe ./persephone.exe " ] \
+          [ "$found" = "./persephone-call-worker.exe ./persephone-media-worker.exe ./persephone-screen-helper.exe ./persephone-ui.exe ./persephone.exe " ] \
             || { echo "::error::unexpected executables: $found"; exit 1; }
           release=".local/build/rust/$TRIPLE/release"
           [ ! -e "$release" ] || { echo "::error::$release already exists"; exit 1; }
@@ -454,6 +457,7 @@ jobs:
           cp "$exes/persephone.exe" "src-tauri/binaries/persephone-$TRIPLE.exe"
           cp "$exes/persephone-media-worker.exe" "src-tauri/binaries/persephone-media-worker-$TRIPLE.exe"
           cp "$exes/persephone-call-worker.exe" "src-tauri/binaries/persephone-call-worker-$TRIPLE.exe"
+          cp "$exes/persephone-screen-helper.exe" "src-tauri/binaries/persephone-screen-helper-$TRIPLE.exe"
           cp "$exes/persephone-ui.exe" "$release/persephone-ui.exe"
           python tools/release.py append-notice --platform windows
           python tools/release.py bundle-config --platform windows --notices .local/release/notices/THIRD-PARTY-NOTICES-windows.txt \
@@ -477,9 +481,10 @@ jobs:
       - name: Check that bundling changed no executable and compiled nothing
         run: |
           release=".local/build/rust/$TRIPLE/release"
-          expected=$(cd "$RUNNER_TEMP/exes" && sha256sum persephone.exe persephone-media-worker.exe persephone-call-worker.exe persephone-ui.exe | cut -d' ' -f1)
+          expected=$(cd "$RUNNER_TEMP/exes" && sha256sum persephone.exe persephone-media-worker.exe persephone-call-worker.exe persephone-screen-helper.exe persephone-ui.exe | cut -d' ' -f1)
           actual=$(sha256sum "src-tauri/binaries/persephone-$TRIPLE.exe" \
             "src-tauri/binaries/persephone-media-worker-$TRIPLE.exe" "src-tauri/binaries/persephone-call-worker-$TRIPLE.exe" \
+            "src-tauri/binaries/persephone-screen-helper-$TRIPLE.exe" \
             "$release/persephone-ui.exe" | cut -d' ' -f1)
           echo "$actual"
           [ "$expected" = "$actual" ] || { echo "::error::the bundler changed an executable"; exit 1; }
@@ -592,7 +597,7 @@ jobs:
           if ($admin.ExitCode -ne 0) { throw "MSI extraction failed with $($admin.ExitCode)" }
           7z x -y "-o$extract\nsis" $nsis[0].FullName | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "NSIS extraction failed with $LASTEXITCODE" }
-          $names = 'persephone.exe', 'persephone-ui.exe', 'persephone-media-worker.exe', 'persephone-call-worker.exe'
+          $names = 'persephone.exe', 'persephone-ui.exe', 'persephone-media-worker.exe', 'persephone-call-worker.exe', 'persephone-screen-helper.exe'
           $files = @($nsis[0].FullName, $msi[0].FullName)
           foreach ($kind in 'msi', 'nsis') {
             foreach ($name in $names) {

@@ -26,8 +26,6 @@ use persephone_call_protocol::{ScreenState, ScreenTarget};
 use crate::camera::{Capture, DoneSignal};
 
 #[cfg(windows)]
-mod frame_pipe;
-#[cfg(windows)]
 #[path = "windows.rs"]
 mod backend;
 #[cfg(target_os = "linux")]
@@ -39,6 +37,8 @@ mod backend;
 #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 #[path = "unsupported.rs"]
 mod backend;
+#[cfg(windows)]
+mod frame_pipe;
 
 /// The rules of a display share that need no OS type (ADR-0064); `macos.rs`
 /// uses them, and the tests run them everywhere.

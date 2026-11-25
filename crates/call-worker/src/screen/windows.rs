@@ -22,9 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::time::Duration;
 
-use persephone_call_protocol::screen_frame::{
-    ScreenEnd, ScreenFrameError, ScreenItem, read_item,
-};
+use persephone_call_protocol::screen_frame::{ScreenEnd, ScreenFrameError, ScreenItem, read_item};
 use persephone_call_protocol::{ScreenState, ScreenTarget};
 
 use super::frame_pipe::{PipeReader, Wait};
@@ -208,11 +206,11 @@ mod tests {
                 &flag,
                 open_tx,
                 move |frame| {
-                    frame_seen
-                        .lock()
-                        .unwrap()
-                        .frames
-                        .push((frame.width, frame.height, frame.data.len()));
+                    frame_seen.lock().unwrap().frames.push((
+                        frame.width,
+                        frame.height,
+                        frame.data.len(),
+                    ));
                 },
                 move |ended| end_seen.lock().unwrap().ended = Some(ended),
             );
@@ -221,7 +219,8 @@ mod tests {
     }
 
     fn open_result(rx: &mpsc::Receiver<Result<(), ScreenState>>) -> Result<(), ScreenState> {
-        rx.recv_timeout(Duration::from_secs(10)).expect("an open result")
+        rx.recv_timeout(Duration::from_secs(10))
+            .expect("an open result")
     }
 
     /// GIVEN a pipe with pictures and an end item WHEN the backend runs THEN
@@ -349,7 +348,10 @@ mod tests {
     fn given_end_items_when_mapped_then_they_mean_their_reason() {
         assert_eq!(start_state(ScreenEnd::Stopped), ScreenState::Off);
         assert_eq!(ended_for(ScreenEnd::Stopped), Ended::Source);
-        assert_eq!(ended_for(ScreenEnd::NotFound).state(), ScreenState::NotFound);
+        assert_eq!(
+            ended_for(ScreenEnd::NotFound).state(),
+            ScreenState::NotFound
+        );
         assert_eq!(
             ended_for(ScreenEnd::Unavailable).state(),
             ScreenState::Unavailable
