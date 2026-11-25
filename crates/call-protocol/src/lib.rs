@@ -6,6 +6,7 @@
 //! Decoding rejects anything outside the limits below. Errors carry no text.
 
 pub mod screen_frame;
+pub mod screen_helper;
 
 use std::io::{self, Read, Write};
 

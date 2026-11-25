@@ -896,6 +896,10 @@ mod tests {
                 on: true,
                 remote: false,
             },
+            ToWorker::ScreenFrames {
+                share: 1,
+                handle: 4,
+            },
             ToWorker::SetScreen {
                 target: None,
                 share: 1,

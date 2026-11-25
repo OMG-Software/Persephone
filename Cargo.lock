@@ -4692,6 +4692,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "persephone-screen-helper"
+version = "0.3.0"
+dependencies = [
+ "persephone-call-protocol",
+ "windows",
+]
+
+[[package]]
 name = "persephone-test-matrix"
 version = "0.3.0"
 dependencies = [

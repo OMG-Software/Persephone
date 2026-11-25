@@ -1,9 +1,10 @@
-//! Windows.Graphics.Capture of one monitor (ADR-0053).
+//! Windows.Graphics.Capture of one monitor (ADR-0053, ADR-0067).
 //!
-//! This file uses only `std` and the `windows` crate, so the call worker
-//! (`screen/windows.rs`) and the native containment gate
-//! (`tests/platform/windows`) compile the same source. The gate runs it
-//! inside the worker's AppContainer to measure whether capture works there.
+//! This file uses only `std` and the `windows` crate, so the screen helper
+//! (`persephone-screen-helper`) and the native containment gate
+//! (`tests/platform/windows`) compile the same source. The helper runs it
+//! with the user's token; the gate runs it inside the call worker's
+//! AppContainer to measure that capture is denied there.
 //!
 //! The monitor list is read in display order (`EnumDisplayMonitors`). Each
 //! size is the monitor's current mode in pixels (`EnumDisplaySettingsW`), not
@@ -90,14 +91,14 @@ pub enum Stage {
 pub struct Monitor {
     pub handle: HMONITOR,
     /// The GDI device name (`MONITORINFOEXW::szDevice`, for example
-    /// `\\.\DISPLAY1`), with zeros after the name. Only the GDI capture
-    /// (`gdi.rs`) reads it: the share names its monitor by it.
+    /// `\\.\DISPLAY1`), with zeros after the name. The share names its
+    /// monitor by it (`monitor.rs`).
     #[allow(dead_code)]
     pub device: [u16; DEVICE_NAME_UNITS],
     /// The rectangle on the virtual screen (left, top, right, bottom), in
     /// the pixels of the calling thread's DPI awareness (physical pixels for
-    /// a per-monitor aware thread). Only the GDI capture (`gdi.rs`) reads it:
-    /// it copies this rectangle.
+    /// a per-monitor aware thread). The share names its monitor by it too
+    /// (`monitor.rs`).
     #[allow(dead_code)]
     pub rect: (i32, i32, i32, i32),
     /// The size the user is shown: the current display mode, else the
@@ -141,7 +142,7 @@ pub struct Place {
 }
 
 /// A monitor's place from one `GetMonitorInfoW` call, or `None` when Windows
-/// no longer knows the handle. The list and the GDI capture's place checks
+/// no longer knows the handle. The list and the helper's place checks
 /// both read a monitor through this, so their readings compare equal while
 /// it does not change.
 pub fn monitor_place(monitor: HMONITOR) -> Option<Place> {
@@ -243,7 +244,7 @@ impl Drop for ComGuard {
 
 thread_local! {
     /// The `HRESULT` of the last failure on this thread, for the gate's
-    /// probe. The worker never reads it, and it is never sent anywhere.
+    /// probe. The helper never reads it, and it is never sent anywhere.
     static LAST_ERROR: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
 }
 
@@ -284,6 +285,12 @@ pub fn open(index: usize, expected: Option<(u32, u32)>) -> Result<Capture, Stage
     if expected.is_some_and(|size| size != (monitor.width, monitor.height)) {
         return Err(Stage::SizeChanged);
     }
+    open_monitor(&monitor)
+}
+
+/// Starts capturing `monitor`, which the caller took from [`monitors`] a
+/// moment ago (the helper chooses it by name, size and rectangle).
+pub fn open_monitor(monitor: &Monitor) -> Result<Capture, Stage> {
     let interop = factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()
         .map_err(|error| note(Stage::Interop, error))?;
     // SAFETY: `monitor.handle` came from `EnumDisplayMonitors` just now.
@@ -333,6 +340,12 @@ pub fn open(index: usize, expected: Option<(u32, u32)>) -> Result<Capture, Stage
     let session = pool
         .CreateCaptureSession(&item)
         .map_err(|error| note(Stage::Session, error))?;
+    // The cursor is part of the picture. This is the default; it is set so
+    // the rule is in the code. The yellow border is never touched
+    // (`IsBorderRequired` stays at its default, on): the user always sees
+    // that the screen is shared. A system that lacks the property keeps its
+    // default, which is also on.
+    let _ = session.SetIsCursorCaptureEnabled(true);
     let closed = Arc::new(AtomicBool::new(false));
     let flag = closed.clone();
     item.Closed(
