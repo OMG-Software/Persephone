@@ -161,6 +161,23 @@ fn control_open(control: HANDLE) -> bool {
     peeked.is_ok() && available == 0
 }
 
+/// Writes one picture, unless the core asked for the end since the loop
+/// last looked: a picture that is not on its way yet never goes after a
+/// stop. A picture that is already being written goes whole, so the
+/// worker reads every item complete and the end item follows it.
+fn send_picture<W: Write>(
+    control: HANDLE,
+    frames: &mut W,
+    share: u32,
+    (width, height): (u32, u32),
+    data: &[u8],
+) -> Result<(), Outcome> {
+    if !control_open(control) {
+        return Err(Outcome::Stopped);
+    }
+    write_picture(frames, share, width, height, data).map_err(|_| Outcome::PipeClosed)
+}
+
 fn serve(start: &HelperStart) -> u32 {
     let control = handle_of(start.control);
     let frames = handle_of(start.frames);
@@ -288,8 +305,10 @@ fn capture(start: &HelperStart, control: HANDLE, frames: &mut File) -> Outcome {
                 failure = Some(Outcome::Unavailable);
                 return;
             }
-            if write_picture(frames, start.share, width, height, &buffer).is_err() {
-                failure = Some(Outcome::PipeClosed);
+            if let Err(outcome) =
+                send_picture(control, frames, start.share, (width, height), &buffer)
+            {
+                failure = Some(outcome);
             }
         };
         let polled = capture.poll(&mut admit, &mut deliver);
@@ -427,6 +446,32 @@ mod tests {
         assert!(!control_open(read));
         drop(file);
         assert!(!control_open(read));
+        // SAFETY: closes the read end made above.
+        unsafe {
+            let _ = windows::Win32::Foundation::CloseHandle(read);
+        }
+    }
+
+    /// GIVEN a picture ready to go WHEN the control pipe is open THEN it is
+    /// written; WHEN the core closed the control pipe since the loop looked
+    /// THEN nothing is written and the run ends as a stop.
+    #[test]
+    fn given_a_stop_before_the_write_when_a_picture_is_sent_then_nothing_goes() {
+        let (read, write) = pipe();
+        let mut frames = Vec::new();
+        assert_eq!(send_picture(read, &mut frames, 4, (4, 2), &[9; 32]), Ok(()));
+        assert!(!frames.is_empty(), "the picture went");
+
+        // SAFETY: closes the core's end made above, as a stop does.
+        unsafe {
+            let _ = windows::Win32::Foundation::CloseHandle(write);
+        }
+        let mut frames = Vec::new();
+        assert_eq!(
+            send_picture(read, &mut frames, 4, (4, 2), &[9; 32]),
+            Err(Outcome::Stopped)
+        );
+        assert!(frames.is_empty(), "nothing goes after the stop");
         // SAFETY: closes the read end made above.
         unsafe {
             let _ = windows::Win32::Foundation::CloseHandle(read);

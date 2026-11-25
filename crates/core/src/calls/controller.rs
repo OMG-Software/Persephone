@@ -980,7 +980,12 @@ async fn finish_worker(link: CallWorkerLink) {
 /// earlier stop left to its reaper has ended too. A launch under way counts
 /// as active (`LaunchGuard`): a pick that outlived [`PICK_END_WAIT`] after
 /// its last cancel check is waited for here, and it stops its helper
-/// itself when it sees the cancel.
+/// itself when it sees the cancel. Both waits are bounded, so a stuck launch
+/// cannot hold the end of the call or of the session. A launch that is
+/// still under way after them gets no worker: its pick reads the cancel
+/// after the launch and drops the helper (its reaper stops it), the frame
+/// pipe's read end goes with the grant, and the next share starts only
+/// when no helper is active.
 async fn end_screen_helpers(pick: Option<ScreenPick>, helper: Option<HelperShare>) {
     let mut helpers: Vec<HelperShare> = helper.into_iter().collect();
     if let Some(mut pick) = pick {

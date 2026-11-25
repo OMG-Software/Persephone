@@ -35,16 +35,17 @@ const TERMINATE_WAIT: Duration = Duration::from_secs(5);
 /// How often the waiter thread looks at the process.
 const WATCH_INTERVAL: Duration = Duration::from_millis(50);
 
-/// Helpers that were started and whose stop-and-join is not finished.
+/// One count for each launch under way ([`LaunchGuard`]) and for each helper
+/// that was started and whose stop-and-join is not finished. It is one
+/// counter, so one read sees a launch and its helper together: a launch
+/// counts its helper before it gives up its own count, and the count never
+/// falls to 0 in between.
 static ACTIVE: AtomicUsize = AtomicUsize::new(0);
-/// Launches under way ([`LaunchGuard`]): from the last cancel check before a
-/// launch until its helper counts in [`ACTIVE`] or the launch failed.
-static LAUNCHING: AtomicUsize = AtomicUsize::new(0);
 
 /// The number of helpers that are being launched, still run or are being
 /// stopped.
 pub fn helpers_active() -> usize {
-    ACTIVE.load(Ordering::SeqCst) + LAUNCHING.load(Ordering::SeqCst)
+    ACTIVE.load(Ordering::SeqCst)
 }
 
 /// A launch under way. The pick takes it for its last cancel check and
@@ -59,7 +60,7 @@ impl LaunchGuard {
     /// Counts a launch, then reads `cancel`. `None` when it is set: nothing
     /// may be launched then.
     pub fn begin(cancel: &AtomicBool) -> Option<Self> {
-        LAUNCHING.fetch_add(1, Ordering::SeqCst);
+        ACTIVE.fetch_add(1, Ordering::SeqCst);
         let guard = Self(());
         if cancel.load(Ordering::SeqCst) {
             return None;
@@ -70,7 +71,7 @@ impl LaunchGuard {
 
 impl Drop for LaunchGuard {
     fn drop(&mut self) {
-        LAUNCHING.fetch_sub(1, Ordering::SeqCst);
+        ACTIVE.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -199,7 +200,7 @@ impl HelperShare {
             changed: Condvar::new(),
         });
         let (sender, exited) = oneshot::channel();
-        ACTIVE.fetch_add(1, Ordering::AcqRel);
+        ACTIVE.fetch_add(1, Ordering::SeqCst);
         let watched = process.clone();
         let seen = exit.clone();
         let waiter = std::thread::Builder::new()
@@ -219,7 +220,7 @@ impl HelperShare {
                 seen.set(code);
                 let _ = sender.send(code);
                 // The process has ended: only now may another helper start.
-                ACTIVE.fetch_sub(1, Ordering::AcqRel);
+                ACTIVE.fetch_sub(1, Ordering::SeqCst);
             });
         let Ok(waiter) = waiter else {
             process.close_control();
@@ -228,7 +229,7 @@ impl HelperShare {
             // when this wait sees it. Otherwise it stays active, and no
             // other helper starts.
             if process.wait_exit(TERMINATE_WAIT) {
-                ACTIVE.fetch_sub(1, Ordering::AcqRel);
+                ACTIVE.fetch_sub(1, Ordering::SeqCst);
             }
             return None;
         };
@@ -574,7 +575,9 @@ mod tests {
 
     /// GIVEN a set cancel WHEN a launch begins THEN it is refused; GIVEN a
     /// launch under way THEN the helpers count as active until it ends, so
-    /// the end of a call waits for it.
+    /// the end of a call waits for it; GIVEN a launch that started its
+    /// helper WHEN the launch ends THEN the helper still counts, until its
+    /// stop-and-join.
     #[test]
     fn given_a_cancel_or_a_launch_under_way_then_the_launch_guard_says_so() {
         let cancel = AtomicBool::new(true);
@@ -587,6 +590,18 @@ mod tests {
             "a launch under way is waited for"
         );
         drop(launching);
+        assert!(wait_until_idle(Duration::from_secs(10)));
+
+        let launching = LaunchGuard::begin(&cancel).expect("a launch may begin");
+        let helper = FakeHelper::new(true, EXIT_STOPPED);
+        let share = start(&helper, 3);
+        drop(launching);
+        assert!(helpers_active() >= 1, "the launch handed its count on");
+        assert!(
+            !wait_until_idle(Duration::from_millis(100)),
+            "the started helper is waited for"
+        );
+        assert_eq!(share.stop_and_join(), Some(EXIT_STOPPED));
         assert!(wait_until_idle(Duration::from_secs(10)));
     }
 }

@@ -20,10 +20,13 @@
 //! The helper sends a picture only when the screen changed, so a picture
 //! that is dropped can stay the last one for a long time. This backend
 //! never drops the newest: it hands pictures on at most once for each
-//! [`PICTURE_GAP`], a little more than the worker's screen limit, and keeps
-//! the newest one that came too soon until its time comes. Two buffers
-//! serve the whole share; a picture of the same size is read into one
-//! without a new allocation.
+//! [`PICTURE_GAP`], counted from the end of the last hand-on, a little more
+//! than the worker's screen limit, and keeps the newest one that came too
+//! soon until its time comes. While the screen stays still, it hands the
+//! newest picture on again every [`REPEAT_GAP`]: the feed drops pictures
+//! until the track is published, so the first one of a still screen would
+//! otherwise never go. Two buffers serve the whole share; a picture of the
+//! same size is read into one without a new allocation.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -49,8 +52,12 @@ const IDLE_WAIT: Duration = Duration::from_millis(100);
 /// drops a picture that comes too soon; with this gap it never has to, so
 /// the newest picture is never lost there.
 pub const PICTURE_GAP: Duration = Duration::from_millis(1000 / MAX_SCREEN_FPS as u64 + 20);
+/// How often the newest picture goes again while no new one comes.
+pub const REPEAT_GAP: Duration = Duration::from_secs(1);
 
-/// When the last picture was handed on.
+/// When the last hand-on ended. The feed's limiter runs inside the
+/// callback, so a gap counted from the end of the callback is never shorter
+/// at the limiter, however long the callback took to reach it.
 struct Pace {
     last: Instant,
 }
@@ -60,10 +67,22 @@ impl Pace {
         now.saturating_duration_since(self.last) >= PICTURE_GAP
     }
 
+    fn repeat_due(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.last) >= REPEAT_GAP
+    }
+
     /// How long until the next picture may go.
     fn left(&self, now: Instant) -> Duration {
         PICTURE_GAP.saturating_sub(now.saturating_duration_since(self.last))
     }
+}
+
+/// The newest picture: its size, and whether it still waits for its first
+/// hand-on (it came too soon) or went already (it goes again while the
+/// screen stays still).
+struct Kept {
+    size: (u32, u32),
+    waiting: bool,
 }
 
 pub fn accepts(target: &ScreenTarget) -> bool {
@@ -131,9 +150,9 @@ pub fn capture<F, E>(
     let Ok(mut pipe) = PipeReader::new(frames, stop.clone()) else {
         return fail(ScreenState::Unavailable);
     };
-    // The picture being read, and the newest one that came too soon.
+    // The picture being read, and the newest one (`kept`).
     let mut buffer = Vec::new();
-    let mut waiting = Vec::new();
+    let mut newest = Vec::new();
     let first = match first_item(&mut pipe, share, &mut buffer) {
         Ok(ScreenRead::Frame { width, height }) => (width, height),
         Ok(ScreenRead::End(end)) => return fail(start_state(end)),
@@ -141,33 +160,41 @@ pub fn capture<F, E>(
     };
     let _ = open_result.send(Ok(()));
     drop(open_result);
+    // Hands a picture on and says when that ended.
     let deliver = |on_frame: &mut F, (width, height): (u32, u32), data: &[u8]| {
         if let Some(frame) = CapturedFrame::checked(Format::Bgra, width, height, width * 4, data) {
             on_frame(frame);
         }
+        Instant::now()
     };
-    deliver(&mut on_frame, first, &buffer);
     let mut pace = Pace {
-        last: Instant::now(),
+        last: deliver(&mut on_frame, first, &buffer),
     };
-    // The size of the picture in `waiting`, while one waits.
-    let mut held: Option<(u32, u32)> = None;
+    std::mem::swap(&mut buffer, &mut newest);
+    let mut kept = Kept {
+        size: first,
+        waiting: false,
+    };
     let ended = loop {
         if stop.load(Ordering::Acquire) {
             return;
         }
         let now = Instant::now();
-        if let Some(size) = held
-            && pace.due(now)
-        {
-            held = None;
-            deliver(&mut on_frame, size, &waiting);
-            pace.last = now;
+        let due = if kept.waiting {
+            pace.due(now)
+        } else {
+            pace.repeat_due(now)
+        };
+        if due {
+            kept.waiting = false;
+            pace.last = deliver(&mut on_frame, kept.size, &newest);
         }
         // With a picture waiting, look again when it is due.
-        let wait = match held {
-            Some(_) => pace.left(now).clamp(Duration::from_millis(1), IDLE_WAIT),
-            None => IDLE_WAIT,
+        let now = Instant::now();
+        let wait = if kept.waiting {
+            pace.left(now).clamp(Duration::from_millis(1), IDLE_WAIT)
+        } else {
+            IDLE_WAIT
         };
         match pipe.wait_for_data(wait) {
             Wait::Idle => continue,
@@ -178,16 +205,14 @@ pub fn capture<F, E>(
         }
         match read_item_into(&mut pipe, share, &mut buffer) {
             Ok(ScreenRead::Frame { width, height }) => {
-                let now = Instant::now();
-                if pace.due(now) {
-                    // A newer picture goes: an older waiting one never does.
-                    held = None;
-                    deliver(&mut on_frame, (width, height), &buffer);
-                    pace.last = now;
-                } else {
-                    std::mem::swap(&mut buffer, &mut waiting);
-                    held = Some((width, height));
-                }
+                // The newer picture takes the older one's place, also one
+                // that still waits: that one never goes. The top of the loop
+                // hands it on when it is due.
+                std::mem::swap(&mut buffer, &mut newest);
+                kept = Kept {
+                    size: (width, height),
+                    waiting: true,
+                };
             }
             Ok(ScreenRead::End(end)) => break ended_for(end),
             // The stop flag cut the read short: no report.
@@ -261,10 +286,24 @@ mod tests {
     /// Runs `capture` on its own thread over a pipe and gives the open
     /// result, what was seen, and the write end.
     fn run(share: u32, frames: Option<OwnedHandle>, target: ScreenTarget) -> Started {
+        run_slow(share, frames, target, 0, Duration::ZERO)
+    }
+
+    /// As [`run`], but callback number `slow_one` (from 0) waits `slow`
+    /// before it notes its picture, as a callback whose thread paused before
+    /// the feed's limiter.
+    fn run_slow(
+        share: u32,
+        frames: Option<OwnedHandle>,
+        target: ScreenTarget,
+        slow_one: usize,
+        slow: Duration,
+    ) -> Started {
         let (open_tx, open_rx) = mpsc::channel();
         let seen = Arc::new(Mutex::new(Seen::default()));
         let stop = Arc::new(AtomicBool::new(false));
         let (frame_seen, end_seen, flag) = (seen.clone(), seen.clone(), stop.clone());
+        let mut calls = 0_usize;
         let thread = std::thread::spawn(move || {
             capture(
                 target,
@@ -272,6 +311,10 @@ mod tests {
                 &flag,
                 open_tx,
                 move |frame| {
+                    if calls == slow_one {
+                        std::thread::sleep(slow);
+                    }
+                    calls += 1;
                     let mut seen = frame_seen.lock().unwrap();
                     seen.frames
                         .push((frame.width, frame.height, frame.data.len()));
@@ -281,6 +324,15 @@ mod tests {
             );
         });
         (open_rx, seen, stop, thread)
+    }
+
+    /// Waits until `count` pictures were seen, at most 5 s.
+    fn wait_for_fills(seen: &Mutex<Seen>, count: usize) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while seen.lock().unwrap().fills.len() < count {
+            assert!(Instant::now() < deadline, "{count} pictures go");
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     fn open_result(rx: &mpsc::Receiver<Result<(), ScreenState>>) -> Result<(), ScreenState> {
@@ -320,12 +372,8 @@ mod tests {
         for fill in [2, 3, 4] {
             write_picture(&mut write, 9, 4, 2, &[fill; 32]).expect("a picture");
         }
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while seen.lock().unwrap().fills.len() < 2 {
-            assert!(Instant::now() < deadline, "the newest picture goes");
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        // Nothing else waits, so nothing else comes.
+        wait_for_fills(&seen, 2);
+        // Nothing else waits, so nothing else comes before the repeat.
         std::thread::sleep(PICTURE_GAP * 2);
         stop.store(true, Ordering::Release);
         thread.join().expect("the capture thread");
@@ -333,6 +381,50 @@ mod tests {
         let fills: Vec<u8> = seen.fills.iter().map(|(fill, _)| *fill).collect();
         assert_eq!(fills, [1, 4]);
         assert!(seen.fills[1].1.duration_since(seen.fills[0].1) >= PICTURE_GAP);
+    }
+
+    /// GIVEN one picture WHEN the screen then stays still THEN the picture
+    /// goes again after the repeat gap, so a picture that the feed dropped
+    /// before the track was published still reaches the call.
+    #[test]
+    fn given_a_still_screen_when_time_passes_then_the_newest_picture_goes_again() {
+        let (read, mut write) = pipe();
+        let (open, seen, stop, thread) = run(9, Some(read), monitor());
+        write_picture(&mut write, 9, 4, 2, &[7; 32]).expect("a picture");
+        assert_eq!(open_result(&open), Ok(()));
+        wait_for_fills(&seen, 2);
+        stop.store(true, Ordering::Release);
+        thread.join().expect("the capture thread");
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.fills[0].0, 7);
+        assert_eq!(seen.fills[1].0, 7);
+        assert!(seen.fills[1].1.duration_since(seen.fills[0].1) >= REPEAT_GAP);
+        assert_eq!(seen.ended, None, "a stop reports nothing");
+    }
+
+    /// GIVEN a callback that pauses before the feed's limiter could see its
+    /// picture WHEN the next picture waits THEN it goes at least the
+    /// worker's screen limit after the slow picture was seen, so the limiter
+    /// does not drop it.
+    #[test]
+    fn given_a_slow_callback_when_the_next_picture_waits_then_the_limiter_gap_holds() {
+        let limit = Duration::from_millis(1000 / u64::from(MAX_SCREEN_FPS));
+        let slow = Duration::from_millis(80);
+        let (read, mut write) = pipe();
+        let (open, seen, stop, thread) = run_slow(9, Some(read), monitor(), 1, slow);
+        write_picture(&mut write, 9, 4, 2, &[1; 32]).expect("a picture");
+        assert_eq!(open_result(&open), Ok(()));
+        std::thread::sleep(PICTURE_GAP + Duration::from_millis(50));
+        // Picture 2 goes at once and its callback is slow; picture 3 waits.
+        write_picture(&mut write, 9, 4, 2, &[2; 32]).expect("a picture");
+        write_picture(&mut write, 9, 4, 2, &[3; 32]).expect("a picture");
+        wait_for_fills(&seen, 3);
+        stop.store(true, Ordering::Release);
+        thread.join().expect("the capture thread");
+        let seen = seen.lock().unwrap();
+        let fills: Vec<u8> = seen.fills.iter().map(|(fill, _)| *fill).collect();
+        assert_eq!(fills, [1, 2, 3]);
+        assert!(seen.fills[2].1.duration_since(seen.fills[1].1) >= limit);
     }
 
     /// GIVEN no pipe, a handle that is not a pipe or a target of another

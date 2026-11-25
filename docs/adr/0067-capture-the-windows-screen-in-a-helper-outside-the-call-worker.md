@@ -94,7 +94,11 @@ it as accepted.
   that comes too soon is not copied but kept, in place of an older kept
   one, and copied when its time comes: the last change of a burst always
   reaches the call. The worker does the same with the pictures it reads,
-  a little slower than its own limit, so its limiter never drops one.
+  a little slower than its own limit and counted from the end of the last
+  hand-on, so its limiter never drops one. While the screen stays still,
+  the worker hands the newest picture on again once a second: pictures that
+  come before the track is published are dropped, and a still screen would
+  otherwise send nothing after that.
 
 ### How the helper starts
 
@@ -179,12 +183,21 @@ it as accepted.
   they wait until no helper that an earlier stop left to its reaper is
   active (at most 5 seconds). A pick looks at the cancel again just before
   it starts the helper, and from that look until the helper counts as
-  active the launch counts as active too, so the end of the call also
-  waits for a launch that passed the look.
+  active the launch counts as active too, in the same count, so the end of
+  the call also waits for a launch that passed the look. Both waits are
+  bounded, so a stuck launch cannot hold the end of the call or of the
+  session; a launch that ends after them has no worker, and its pick
+  stops the helper when it reads the cancel.
   A stop from the page closes the helper's control pipe at once, before
   the page shows "off", also when the worker's command queue is full and
   the call task is busy; the exit that follows is not taken as the
-  helper's own end. The call task then drops the share's helper, and a
+  helper's own end. The helper looks at the control pipe before each
+  picture that it writes, so no new picture goes after it saw the stop; a
+  picture that it is writing goes whole, so the worker reads only complete
+  items. Pictures that were written before the stop was seen can still
+  reach the call before the worker reads its own stop: "off" means that
+  the capture was told to stop, as with the Linux portal, not that every
+  sent picture was revoked. The call task then drops the share's helper, and a
   reaper thread does the wait, the terminate and the join. The
   next share starts its helper only after no earlier helper is active. A
   helper counts as active until its exit is seen. One that the terminate
