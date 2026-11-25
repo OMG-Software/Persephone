@@ -231,16 +231,32 @@ Decision:
   The WGC code stays, because the gate measures it.
 * The core shows its own window for each monitor (a message box per monitor:
   Yes shares, No shows the next one, Cancel stops; No is the default), as the
-  "Starting and stopping" section says. The target is the index in display
-  order and the size in pixels, as before.
-* The core lists monitors with the worker's list rule, so an index names the
-  same monitor on both sides, but it asks only about a monitor that the GDI
-  capture takes (`screen_capture_size_ok` in the call protocol, which the
-  worker also uses: at least 2x2, at most 7680 on a side and 3840x2160
-  pixels). The question numbers the offered monitors ("Screen 2 of 2") and
-  says how many it left out; the target keeps the monitor's index in the
-  full list. With none that fits, no window opens and the share is
-  "unavailable".
+  "Starting and stopping" section says. When the call ends while a box is
+  open, a thread timer on the asking thread ends the box's loop within about
+  100 ms (a quit message, the way Windows documents to time out a message
+  box), and the pick is cancelled.
+* The target is no longer the index in display order. It is
+  `ScreenTarget::Monitor { name, width, height }`: the monitor's GDI device
+  name (`MONITORINFOEXW::szDevice`, such as `\\.\DISPLAY1`, printable ASCII,
+  at most 32 characters) and its size in pixels when the user said Yes (call
+  protocol version 12). The worker takes only the listed monitor with that
+  name and size; none, or another size, is "not found". An index could name
+  another monitor of the same size after a monitor was removed or the order
+  changed while the question was open.
+* The GDI copy reads a rectangle of the whole desktop. Before and after each
+  copy the worker reads the monitor's name and rectangle again
+  (`GetMonitorInfoW`); a monitor that moved, changed or went away ends the
+  share as "off" (the source ended), and the copy made while it changed is
+  dropped. The device name names the display output: a different monitor
+  plugged into the same output, at the same size and place, counts as the
+  same screen.
+* The core lists monitors with the worker's list rule, but it asks only about
+  a monitor that the GDI capture takes (`screen_capture_size_ok` in the call
+  protocol, which the worker also uses: at least 2x2, at most 7680 on a side
+  and 3840x2160 pixels). A monitor whose device name is not printable ASCII
+  is not listed. The question numbers the offered monitors ("Screen 2 of 2")
+  and says how many it left out. With none that fits, no window opens and the
+  share is "unavailable".
 * The question says that the shared screen can show Persephone's messages,
   as on macOS, because the display affinity of ADR-0045 was not measured
   against a GDI copy (see below).

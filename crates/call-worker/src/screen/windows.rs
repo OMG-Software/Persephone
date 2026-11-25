@@ -3,9 +3,11 @@
 //! are denied in the call AppContainer; GDI runs there with no new
 //! capability and no relaxed mitigation (`docs/evidence/screen-share-windows.md`).
 //!
-//! The core named the monitor by its index in display order and its size.
-//! The worker reads its own list when the share starts; a monitor that is
-//! gone, or has another size at that index, is `NotFound`. The code never
+//! The core named the monitor by its GDI device name and its size. The
+//! worker reads its own list when the share starts; no monitor of that name,
+//! or one of another size, is `NotFound`. Before and after each copy the
+//! capture checks that the monitor is still in the same place; a change ends
+//! the share as `Ended::Source` and the copy is dropped. The code never
 //! shows a picker and never takes another monitor. GDI draws no capture
 //! border and no cursor: the call bar says that the screen is shared.
 
@@ -62,7 +64,7 @@ pub fn capture<F, E>(
     E: FnOnce(Ended) + Send,
 {
     let ScreenTarget::Monitor {
-        index,
+        name,
         width,
         height,
     } = target
@@ -70,7 +72,13 @@ pub fn capture<F, E>(
         let _ = open_result.send(Err(ScreenState::Unavailable));
         return;
     };
-    let mut capture = match gdi::open(usize::from(index), Some((width, height))) {
+    let device = name.to_wide();
+    let choice = gdi::Choice::Named {
+        device: &device,
+        width,
+        height,
+    };
+    let mut capture = match gdi::open(choice) {
         Ok(capture) => capture,
         Err(stage) => {
             let _ = open_result.send(Err(state_for(stage)));
@@ -104,6 +112,8 @@ pub fn capture<F, E>(
         match capture.poll(&mut admit, &mut deliver) {
             Ok(true) => {}
             Ok(false) => std::thread::sleep(POLL_SLEEP),
+            // The monitor changed around a copy: the screen is gone.
+            Err(Stage::NoMonitor | Stage::SizeChanged) => break Ended::Source,
             Err(_) => break Ended::Failed,
         }
     };
@@ -132,29 +142,38 @@ mod tests {
         }
     }
 
-    /// GIVEN a portal target WHEN the backend is asked THEN it does not
-    /// accept it: Windows shares a monitor only (Portal is the Linux target).
+    fn named(name: &[u8]) -> persephone_call_protocol::MonitorName {
+        persephone_call_protocol::MonitorName::new(name).expect("a monitor name")
+    }
+
+    /// GIVEN a portal or macOS display target WHEN the backend is asked THEN
+    /// it does not accept it: Windows shares a monitor only.
     #[test]
     fn given_a_non_monitor_target_then_the_backend_does_not_accept_it() {
         assert!(accepts(&ScreenTarget::Monitor {
-            index: 0,
+            name: named(br"\\.\DISPLAY1"),
             width: 2,
             height: 2,
         }));
         assert!(!accepts(&ScreenTarget::Portal { node: 7 }));
+        assert!(!accepts(&ScreenTarget::Display {
+            id: 1,
+            width: 2,
+            height: 2,
+        }));
     }
 
-    /// GIVEN a monitor at an index nobody has WHEN the capture code opens it
-    /// THEN it reports `NotFound` and no other monitor is taken.
+    /// GIVEN a monitor name nobody has WHEN the capture code opens it THEN
+    /// it reports `NotFound` and no other monitor is taken.
     #[test]
     fn given_an_unknown_monitor_when_opened_then_it_is_not_found() {
         let (open_tx, open_rx) = std::sync::mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
         capture(
             ScreenTarget::Monitor {
-                index: 15,
-                width: 1,
-                height: 1,
+                name: named(br"\\.\PERSEPHONE-NO-SUCH-DISPLAY"),
+                width: 1920,
+                height: 1080,
             },
             Grant::default(),
             &stop,

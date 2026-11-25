@@ -2,15 +2,18 @@
 //! through `objc2`. macOS code is not compiled on the development machine;
 //! CI builds and tests it, and a Mac must measure it.
 //!
-//! The core named the display by its index in `CGGetActiveDisplayList` order
-//! and its size in points. The worker reads its own list when the share
-//! starts; a display that is gone, or has another size at that index, is
-//! `NotFound`. The code never shows a picker, never asks for the Screen
+//! The core named the display by its CoreGraphics display ID and its size in
+//! points. The worker reads the shareable content when the share starts and
+//! takes only the display with that ID; one that is gone or has another size
+//! is `NotFound`. The shareable content also lists the windows and
+//! applications on screen: the worker reads only its displays and uses no
+//! window from it. The code never shows a picker, never asks for the Screen
 //! Recording permission (the core did, before it sent the command) and never
 //! takes another display. A refusal by the system is `Refused`.
 //!
 //! The stream captures one display with no windows left out, no audio and
-//! no microphone, as BGRA at most 1920x1080 and 5 frames a second. Its
+//! no microphone (the microphone switch exists from macOS 15 and is set only
+//! there), as BGRA at most 1920x1080 and 5 frames a second. Its
 //! delegate runs on a serial dispatch queue, checks each picture before it
 //! reads a pixel and hands the locked pixel buffer to the callback; nothing
 //! is copied here.
@@ -24,7 +27,7 @@ use block2::RcBlock;
 use dispatch2::{DispatchQueue, DispatchQueueAttr, DispatchRetained};
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::ProtocolObject;
-use objc2::{AnyThread, DefinedClass, define_class, msg_send};
+use objc2::{AnyThread, DefinedClass, available, define_class, msg_send};
 use objc2_core_media::{CMSampleBuffer, CMTime};
 use objc2_core_video::{
     CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow, CVPixelBufferGetHeight,
@@ -41,8 +44,7 @@ use objc2_screen_capture_kit::{
 use persephone_call_protocol::{ScreenState, ScreenTarget};
 
 use super::display::{
-    Admit, Cause, FRAMES_PER_SECOND, MAX_DISPLAYS, cause_of, display_at, frame_fits, output_size,
-    size_matches,
+    Admit, Cause, FRAMES_PER_SECOND, cause_of, frame_fits, output_size, size_matches,
 };
 use super::{CapturedFrame, Ended, Format, Grant};
 
@@ -61,32 +63,6 @@ const QUEUE_DEPTH: isize = 3;
 const RUNNING: u8 = 0;
 const SOURCE_GONE: u8 = 1;
 const FAILED: u8 = 2;
-
-// CoreGraphics is a system framework; the worker declares this one function
-// instead of adding a binding feature. The core reads the same list in the
-// same order to name the display.
-#[link(name = "CoreGraphics", kind = "framework")]
-unsafe extern "C" {
-    /// `CGError CGGetActiveDisplayList(uint32_t maxDisplays,
-    /// CGDirectDisplayID *activeDisplays, uint32_t *displayCount)`.
-    fn CGGetActiveDisplayList(max: u32, active: *mut u32, count: *mut u32) -> i32;
-}
-
-/// The IDs of the active displays, in the order the core used (at most
-/// [`MAX_DISPLAYS`]). Empty when CoreGraphics fails.
-fn active_displays() -> Vec<u32> {
-    let mut ids = [0_u32; MAX_DISPLAYS];
-    let mut count = 0_u32;
-    // SAFETY: `ids` has room for `MAX_DISPLAYS` entries, which is the limit
-    // passed; `count` is a live `u32`. The call writes at most that many.
-    let status =
-        unsafe { CGGetActiveDisplayList(MAX_DISPLAYS as u32, ids.as_mut_ptr(), &mut count) };
-    if status != 0 {
-        return Vec::new();
-    }
-    let count = (count as usize).min(MAX_DISPLAYS);
-    ids[..count].to_vec()
-}
 
 /// What the delegate needs on its queue.
 struct Sink {
@@ -258,14 +234,13 @@ struct Content(Retained<SCShareableContent>);
 // goes to exactly one thread, which is the only one that uses it.
 unsafe impl Send for Content {}
 
-/// The display the core named, with its size in points.
+/// The display the core named by its ID, with its size in points.
 fn find_display(
-    index: u8,
+    wanted: u32,
     width: u32,
     height: u32,
     stop: &AtomicBool,
 ) -> Result<Retained<SCDisplay>, ScreenState> {
-    let wanted = display_at(&active_displays(), index).ok_or(ScreenState::NotFound)?;
     let (sender, receiver) = mpsc::channel::<Result<Content, Cause>>();
     let handler = RcBlock::new(
         move |content: *mut SCShareableContent, error: *mut NSError| {
@@ -287,6 +262,8 @@ fn find_display(
         None => return Err(ScreenState::Unavailable),
     };
     // SAFETY: `content` is live; the list and each display are read only.
+    // Only the displays are read: the windows and applications that the
+    // content also lists are not used.
     let displays = unsafe { content.displays() };
     for display in displays.to_vec() {
         // SAFETY: `display` is a live `SCDisplay`.
@@ -340,14 +317,14 @@ impl Drop for Opened {
 }
 
 fn open(
-    index: u8,
+    id: u32,
     width: u32,
     height: u32,
     stop: &AtomicBool,
     on_frame: Box<dyn FnMut(CapturedFrame<'_>) + Send>,
 ) -> Result<Opened, ScreenState> {
     let (out_width, out_height) = output_size(width, height).ok_or(ScreenState::Unavailable)?;
-    let display = find_display(index, width, height, stop)?;
+    let display = find_display(id, width, height, stop)?;
     if stop.load(Ordering::Acquire) {
         return Err(ScreenState::Unavailable);
     }
@@ -371,7 +348,12 @@ fn open(
         config.setPixelFormat(kCVPixelFormatType_32BGRA);
         config.setShowsCursor(true);
         config.setCapturesAudio(false);
-        config.setCaptureMicrophone(false);
+        // `captureMicrophone` exists from macOS 15. An older system has no
+        // such selector, and sending it would raise an exception; there a
+        // stream never captures the microphone.
+        if available!(macos = 15.0) {
+            config.setCaptureMicrophone(false);
+        }
         config.setQueueDepth(QUEUE_DEPTH);
         config
     };
@@ -435,17 +417,12 @@ pub fn capture<F, E>(
     F: FnMut(CapturedFrame<'_>) + Send + 'static,
     E: FnOnce(Ended) + Send,
 {
-    let ScreenTarget::Monitor {
-        index,
-        width,
-        height,
-    } = target
-    else {
+    let ScreenTarget::Display { id, width, height } = target else {
         let _ = open_result.send(Err(ScreenState::Unavailable));
         return;
     };
     autoreleasepool(|_| {
-        let opened = match open(index, width, height, stop, Box::new(on_frame)) {
+        let opened = match open(id, width, height, stop, Box::new(on_frame)) {
             Ok(opened) => opened,
             Err(state) => {
                 let _ = open_result.send(Err(state));
@@ -475,5 +452,5 @@ pub fn capture<F, E>(
 }
 
 pub fn accepts(target: &ScreenTarget) -> bool {
-    matches!(target, ScreenTarget::Monitor { .. })
+    matches!(target, ScreenTarget::Display { .. })
 }

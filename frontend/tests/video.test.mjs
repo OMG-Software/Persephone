@@ -671,12 +671,33 @@ test('GIVEN each screen state WHEN the call bar is rendered THEN the button and 
   assert.match(bar('off', { screenBusy: true }), /call-screen[^>]*disabled/);
   assert.match(bar('refused'), /aria-pressed="false"/);
   assert.match(bar('on'), /aria-pressed="true"/);
-  // Both windows show the platform's refusal text (the macOS one names the
-  // setting), from the one helper.
-  for (const file of ['CallBar.svelte', 'CallWindow.svelte']) {
-    const source = await readFile(new URL(`../src/${file}`, import.meta.url), 'utf8');
-    assert.match(source, /screenNote\(status\.screen, platform\)/, file);
-    assert.doesNotMatch(source, /SCREEN_TEXT\[status\.screen\]/, file);
+  // Both windows show the platform's refusal text as rendered: on macOS it
+  // names the setting, elsewhere it does not.
+  const { default: CallWindow } = await vite.ssrLoadModule('/src/CallWindow.svelte');
+  const asPlatform = (platform, draw) => {
+    const real = globalThis.navigator;
+    Object.defineProperty(globalThis, 'navigator', { value: { platform }, configurable: true, writable: true });
+    try {
+      return draw();
+    } finally {
+      Object.defineProperty(globalThis, 'navigator', { value: real, configurable: true, writable: true });
+    }
+  };
+  const windowStatus = {
+    ...base, deafened: false, volume: 100, ringDeclined: false, deviceChange: null, screen: 'refused'
+  };
+  const windows = {
+    'call bar': () => bar('refused'),
+    'call window': () => render(CallWindow, { props: { initialStatus: windowStatus } }).body
+  };
+  for (const [name, draw] of Object.entries(windows)) {
+    const mac = asPlatform('MacIntel', draw);
+    assert.match(mac, /did not allow the screen share\. On macOS, allow Persephone in System Settings/, name);
+    for (const other of ['Win32', 'Linux x86_64']) {
+      const shown = asPlatform(other, draw);
+      assert.match(shown, /did not allow the screen share\./, `${name} ${other}`);
+      assert.doesNotMatch(shown, /System Settings/, `${name} ${other}`);
+    }
   }
 });
 

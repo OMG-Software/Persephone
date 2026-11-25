@@ -2311,10 +2311,10 @@ impl Call<'_> {
     /// after the stop's state.
     fn screen_on(&mut self, target: ScreenTarget, share: u32) -> Vec<FromWorker> {
         // The remote that came with this command, taken now so it cannot go
-        // to another one. A Windows monitor has none.
+        // to another one. A Windows monitor or a macOS display has none.
         let grant = match target {
             ScreenTarget::Portal { .. } => screen::Grant::take(),
-            ScreenTarget::Monitor { .. } => screen::Grant::default(),
+            ScreenTarget::Monitor { .. } | ScreenTarget::Display { .. } => screen::Grant::default(),
         };
         match self
             .screen_next

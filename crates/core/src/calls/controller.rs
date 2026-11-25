@@ -3298,7 +3298,7 @@ impl Call {
                 self.link.send_screen_handle(remote.as_fd()).is_ok()
             }
             (ScreenTarget::Portal { .. }, None) => false,
-            (ScreenTarget::Monitor { .. }, _) => true,
+            (ScreenTarget::Monitor { .. } | ScreenTarget::Display { .. }, _) => true,
         }
     }
 
@@ -3312,6 +3312,7 @@ impl Call {
         matches!(
             target,
             persephone_call_protocol::ScreenTarget::Monitor { .. }
+                | persephone_call_protocol::ScreenTarget::Display { .. }
         )
     }
 
@@ -7244,7 +7245,7 @@ mod tests {
 
     fn monitor() -> persephone_call_protocol::ScreenTarget {
         persephone_call_protocol::ScreenTarget::Monitor {
-            index: 1,
+            name: persephone_call_protocol::MonitorName::new(br"\\.\DISPLAY2").expect("a name"),
             width: 1920,
             height: 1080,
         }
@@ -7265,13 +7266,9 @@ mod tests {
         matches!(
             message,
             Some(ToWorker::SetScreen {
-                target: Some(persephone_call_protocol::ScreenTarget::Monitor {
-                    index: 1,
-                    width: 1920,
-                    height: 1080
-                }),
+                target: Some(target),
                 ..
-            })
+            }) if target == monitor()
         )
     }
 

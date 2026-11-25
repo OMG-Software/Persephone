@@ -79,14 +79,15 @@ worker, as on Linux.
   see it, and that it can show Persephone's messages. "No" goes to the next
   display; "No" on the last one cancels. No display question runs without the
   permission.
-* The core sends the existing target `ScreenTarget::Monitor { index, width,
-  height }`: the display's index in `CGGetActiveDisplayList` order and its
-  size in points. The wire format does not change.
-* The worker reads its own `CGGetActiveDisplayList` and `SCShareableContent`
-  when the share starts. A missing index, a display that ScreenCaptureKit does
-  not list, or another size at that index is `not_found`. It never takes
-  another display. A refusal by the system (`-3801`) is `refused`; any other
-  failure is `unavailable`.
+* The core sends the target `ScreenTarget::Display { id, width, height }`:
+  the display's CoreGraphics ID (`CGDirectDisplayID`, never 0) and its size in
+  points when the user said Yes. This adds a target kind to the call protocol
+  (version 12).
+* The worker reads `SCShareableContent` when the share starts and takes only
+  the display with that ID. A display that ScreenCaptureKit does not list, or
+  another size, is `not_found`. It never takes another display, also when the
+  displays change while the question is open. A refusal by the system
+  (`-3801`) is `refused`; any other failure is `unavailable`.
 * "Stop sharing", the end of the call, a stop from the system's indicator
   (`-3817`, the share is `off`) or any other stream error (the share is
   `unavailable`) stops the capture and unpublishes the track. A screen share
@@ -98,7 +99,10 @@ worker, as on Linux.
   `SCStreamConfiguration`: BGRA, at most 1920x1080 (the display's size in
   points, scaled down and never up, aspect ratio kept, even sides), one frame
   every 200 ms, the cursor drawn in, no audio, no microphone, a queue depth
-  of 3.
+  of 3. The microphone switch (`captureMicrophone`) exists from macOS 15; it
+  is set only there (`objc2::available!`), because an older system raises an
+  exception for the unknown selector and never captures the microphone in a
+  stream.
 * The sample handler runs on its own serial queue. It drops a picture with no
   image buffer, in another pixel format, with planes, larger than 1920x1080,
   with a size or stride that `CapturedFrame::expected_len` refuses, or less
@@ -118,7 +122,10 @@ worker, as on Linux.
   (`IOSurfaceRootUserClient`). The list is marked "to be measured on a Mac",
   like the existing lists: a missing service fails the share closed, and an
   unneeded one is removed after the measurement. No file write, no process
-  start, no Apple Events and no window listing are added.
+  start and no Apple Events are added. The profile does not stop a window
+  listing: the `SCShareableContent` that the worker reads to find its display
+  also lists the windows and applications on screen. The worker reads only
+  its displays.
 * The Screen Recording permission belongs to the app that the system holds
   responsible for the worker. Whether a sandboxed helper that has no bundle of
   its own is covered by the permission of Persephone is not known.
@@ -144,8 +151,9 @@ worker, as on Linux.
 
 * macOS users can share a display. The core and the page learn nothing about
   the picture, and no new secret reaches the worker.
-* The pure rules (display index, size match, output size, frame bounds, rate
-  gap, error causes, the core's flow) have unit tests that run on every OS.
+* The pure rules (size match, output size, frame bounds, rate gap, error
+  causes, the core's flow and its display target) have unit tests that run on
+  every OS.
 
 ### Negative Consequences
 
@@ -158,9 +166,9 @@ worker, as on Linux.
   small text is softer than the screen.
 * The first ask for the permission always ends in `refused`; the user must
   start the share again, and macOS may need Persephone restarted.
-* The core and the worker read the display list in two calls. A display that
-  changes in between gives `not_found` or, with the same size, the new display
-  at that index.
+* The core and the worker read the displays in two calls. A display that is
+  gone or has another size in between gives `not_found`. The display ID keeps
+  another display of the same size from taking its place.
 * The stop from the system's indicator and the worker's end report are not
   tested on a Mac.
 

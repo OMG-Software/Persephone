@@ -1,48 +1,56 @@
 //! The Windows screen source (ADR-0053): the core's own window names each
 //! monitor, and the user shares one or cancels.
 //!
-//! The core names the monitor to the worker by its index in display order
-//! (`EnumDisplayMonitors`) and its size in pixels. The worker reads its own
-//! list when the share starts and refuses another size at that index. This
-//! module lists monitors with the same rules as
+//! The core names the monitor to the worker by its GDI device name
+//! (`MONITORINFOEXW::szDevice`, such as `\\.\DISPLAY1`) and its size in
+//! pixels when the user saw it. The worker takes only the monitor with that
+//! name and size, and checks its place again before and after each copy, so
+//! monitors that change while the question is open give "not found", never
+//! another screen. This module lists monitors with the same rules as
 //! `crates/call-worker/src/screen/wgc.rs` (the call protocol's
 //! `MAX_SCREEN_MONITORS` and `MAX_MONITOR_SIDE`, the size of the current
-//! display mode), so an index names the same monitor on both sides. It
-//! offers only the monitors that the worker's GDI capture takes
-//! (`screen_capture_size_ok`); another one keeps its place in the list, is
-//! not asked, and the question says how many were left out.
+//! display mode, in display order). A monitor whose name is not printable
+//! ASCII is not listed. It offers only the monitors that the worker's GDI
+//! capture takes (`screen_capture_size_ok`); another one is not asked, and
+//! the question says how many were left out.
 //!
 //! The window is a message box: Yes shares the shown screen, No shows the
-//! next one (a single screen has only Yes and Cancel), Cancel stops. A
-//! message box cannot be closed from another thread, so a call that ends
-//! while it is open leaves it until the user answers; the answer is then
-//! dropped.
+//! next one (a single screen has only Yes and No), Cancel stops. A thread
+//! timer on the asking thread looks at the cancel flag ten times a second;
+//! when the call ends, it ends the box's message loop with a quit message
+//! (the way Windows documents to time out a message box), and the answer is
+//! a cancel.
 
+use std::cell::{Cell, RefCell};
 use std::ptr::null_mut;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use persephone_call_protocol::{
-    MAX_MONITOR_SIDE, MAX_SCREEN_MONITORS, ScreenTarget, screen_capture_size_ok,
+    MAX_MONITOR_SIDE, MAX_SCREEN_MONITORS, MonitorName, ScreenTarget, screen_capture_size_ok,
 };
-use windows_sys::Win32::Foundation::{LPARAM, RECT};
+use windows_sys::Win32::Foundation::{HWND, LPARAM, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
     DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDisplayMonitors, EnumDisplaySettingsW, GetMonitorInfoW,
     HDC, HMONITOR, MONITORINFO, MONITORINFOEXW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    IDNO, IDYES, MB_DEFBUTTON2, MB_ICONWARNING, MB_SETFOREGROUND, MB_TOPMOST, MB_YESNO,
-    MB_YESNOCANCEL, MessageBoxW,
+    IDNO, IDYES, KillTimer, MB_DEFBUTTON2, MB_ICONWARNING, MB_SETFOREGROUND, MB_TOPMOST, MB_YESNO,
+    MB_YESNOCANCEL, MSG, MessageBoxW, PM_REMOVE, PeekMessageW, PostQuitMessage, SetTimer, WM_QUIT,
 };
 
 use crate::calls::screen::{ScreenGrant, ScreenRefusal, ScreenSource};
 
 /// The most monitors the list keeps (as in the worker).
 const MAX_MONITORS: usize = MAX_SCREEN_MONITORS as usize;
+/// How often an open question looks at the cancel flag, in milliseconds.
+const CANCEL_CHECK_MS: u32 = 100;
 
-/// One monitor, as the user sees it.
+/// One monitor, as the user sees it, with the device name the worker finds
+/// it by.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Screen {
+    pub name: MonitorName,
     pub width: u32,
     pub height: u32,
 }
@@ -68,7 +76,7 @@ impl ScreenSource for MonitorScreen {
             return Err(ScreenRefusal::Cancelled);
         }
         let screens = monitors();
-        let target = pick(&screens, cancel, ask)?;
+        let target = pick(&screens, cancel, |text, several| ask(text, several, cancel))?;
         Ok(ScreenGrant {
             target,
             remote: None,
@@ -116,9 +124,9 @@ pub fn prompt_text(place: usize, count: usize, screen: Screen, left_out: usize) 
 
 /// Shows each screen that can be shared in turn until the user shares one or
 /// stops. `screens` is the whole list in the worker's order; the target
-/// names a screen by its place in it. `ask` shows one window and returns the
-/// answer. A cancel flag set while a window was open ends the pick even
-/// after "Share".
+/// names the chosen screen by its device name and size. `ask` shows one
+/// window and returns the answer. A cancel flag set while a window was open
+/// ends the pick even after "Share".
 pub fn pick(
     screens: &[Screen],
     cancel: &AtomicBool,
@@ -136,7 +144,7 @@ pub fn pick(
     let left_out = screens.len() - offered.len();
     let mut at = 0;
     loop {
-        let (index, screen) = offered[at];
+        let (_, screen) = offered[at];
         let text = prompt_text(at, offered.len(), screen, left_out);
         let answer = ask(&text, offered.len() > 1);
         if cancel.load(Ordering::SeqCst) {
@@ -144,10 +152,8 @@ pub fn pick(
         }
         match answer {
             Answer::Share => {
-                // The list holds at most `MAX_MONITORS`, so the index fits.
-                let index = u8::try_from(index).map_err(|_| ScreenRefusal::Refused)?;
                 return Ok(ScreenTarget::Monitor {
-                    index,
+                    name: screen.name,
                     width: screen.width,
                     height: screen.height,
                 });
@@ -168,12 +174,43 @@ fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(Some(0)).collect()
 }
 
+thread_local! {
+    /// The cancel flag of the question open on this thread, for
+    /// [`watch_cancel`].
+    static OPEN_QUESTION: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
+    /// Whether [`watch_cancel`] ended the open question's loop.
+    static QUIT_POSTED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// The thread timer of an open question. The message box's own loop calls it
+/// on the asking thread. When the call ended, a quit message ends that loop
+/// (once); the box closes and `ask` takes the quit message back.
+unsafe extern "system" fn watch_cancel(_window: HWND, _message: u32, _timer: usize, _time: u32) {
+    let cancelled = OPEN_QUESTION.with(|open| {
+        open.borrow()
+            .as_ref()
+            .is_some_and(|cancel| cancel.load(Ordering::SeqCst))
+    });
+    if cancelled && !QUIT_POSTED.replace(true) {
+        // SAFETY: posts WM_QUIT to this thread's own queue.
+        unsafe { PostQuitMessage(0) };
+    }
+}
+
 /// One message box. No (the second button) is the default, like the core's
-/// other questions, so an Enter press never shares a screen.
-fn ask(text: &str, several: bool) -> Answer {
+/// other questions, so an Enter press never shares a screen. The box closes
+/// within about [`CANCEL_CHECK_MS`] when `cancel` is set, and the answer is
+/// then [`Answer::Cancel`].
+fn ask(text: &str, several: bool, cancel: &Arc<AtomicBool>) -> Answer {
     let text = wide(text);
     let caption = wide("Persephone: share your screen");
     let kind = if several { MB_YESNOCANCEL } else { MB_YESNO };
+    OPEN_QUESTION.with(|open| *open.borrow_mut() = Some(cancel.clone()));
+    QUIT_POSTED.set(false);
+    // SAFETY: a thread timer with no window; `watch_cancel` matches the
+    // TIMERPROC signature. A failed timer (0) leaves the box open until the
+    // user answers, and the answer is then dropped by the caller.
+    let timer = unsafe { SetTimer(null_mut(), 0, CANCEL_CHECK_MS, Some(watch_cancel)) };
     // SAFETY: both strings are NUL-terminated and live for the call; the box
     // has no owner window.
     let answer = unsafe {
@@ -184,6 +221,21 @@ fn ask(text: &str, several: bool) -> Answer {
             kind | MB_DEFBUTTON2 | MB_ICONWARNING | MB_SETFOREGROUND | MB_TOPMOST,
         )
     };
+    if timer != 0 {
+        // SAFETY: the thread timer made above, on this thread.
+        unsafe { KillTimer(null_mut(), timer) };
+    }
+    OPEN_QUESTION.with(|open| open.borrow_mut().take());
+    if QUIT_POSTED.replace(false) {
+        // The box's loop posts the quit message again when it ends; take it
+        // off this thread's queue so it ends no later loop.
+        // SAFETY: `message` is plain data that the call fills.
+        unsafe {
+            let mut message: MSG = std::mem::zeroed();
+            PeekMessageW(&mut message, null_mut(), WM_QUIT, WM_QUIT, PM_REMOVE);
+        }
+        return Answer::Cancel;
+    }
     match answer {
         IDYES => Answer::Share,
         IDNO if several => Answer::Next,
@@ -204,18 +256,18 @@ unsafe extern "system" fn collect(
     // SAFETY: `data` is the `&mut Collector` that `monitors` passed and keeps
     // alive for the whole enumeration.
     let collector = unsafe { &mut *(data as *mut Collector) };
-    if let Some((width, height)) = monitor_size(monitor)
+    if let Some(screen) = monitor_screen(monitor)
         && collector.found.len() < MAX_MONITORS
-        && listed(width, height)
+        && listed(screen.width, screen.height)
     {
-        collector.found.push(Screen { width, height });
+        collector.found.push(screen);
     }
     1
 }
 
-/// The size of a monitor in pixels: its current display mode, else its
-/// rectangle.
-fn monitor_size(monitor: HMONITOR) -> Option<(u32, u32)> {
+/// A monitor's device name and its size in pixels: its current display
+/// mode, else its rectangle. A name that is not printable ASCII is `None`.
+fn monitor_screen(monitor: HMONITOR) -> Option<Screen> {
     // SAFETY: both structures are plain data and are zeroed before use.
     unsafe {
         let mut info: MONITORINFOEXW = std::mem::zeroed();
@@ -223,18 +275,27 @@ fn monitor_size(monitor: HMONITOR) -> Option<(u32, u32)> {
         if GetMonitorInfoW(monitor, (&raw mut info).cast::<MONITORINFO>()) == 0 {
             return None;
         }
+        let name = MonitorName::from_wide(&info.szDevice)?;
         let mut mode: DEVMODEW = std::mem::zeroed();
         mode.dmSize = size_of::<DEVMODEW>() as u16;
         if EnumDisplaySettingsW(info.szDevice.as_ptr(), ENUM_CURRENT_SETTINGS, &mut mode) != 0
             && mode.dmPelsWidth > 0
             && mode.dmPelsHeight > 0
         {
-            return Some((mode.dmPelsWidth, mode.dmPelsHeight));
+            return Some(Screen {
+                name,
+                width: mode.dmPelsWidth,
+                height: mode.dmPelsHeight,
+            });
         }
         let rect = info.monitorInfo.rcMonitor;
         let width = u32::try_from(rect.right.checked_sub(rect.left)?).ok()?;
         let height = u32::try_from(rect.bottom.checked_sub(rect.top)?).ok()?;
-        Some((width, height))
+        Some(Screen {
+            name,
+            width,
+            height,
+        })
     }
 }
 
@@ -258,14 +319,30 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
 
-    const HD: Screen = Screen {
-        width: 1920,
-        height: 1080,
-    };
-    const QHD: Screen = Screen {
-        width: 2560,
-        height: 1440,
-    };
+    fn screen(number: u8, width: u32, height: u32) -> Screen {
+        let name = format!(r"\\.\DISPLAY{number}");
+        Screen {
+            name: MonitorName::new(name.as_bytes()).expect("a name"),
+            width,
+            height,
+        }
+    }
+
+    fn target(screen: Screen) -> ScreenTarget {
+        ScreenTarget::Monitor {
+            name: screen.name,
+            width: screen.width,
+            height: screen.height,
+        }
+    }
+
+    fn hd() -> Screen {
+        screen(1, 1920, 1080)
+    }
+
+    fn qhd() -> Screen {
+        screen(2, 2560, 1440)
+    }
 
     fn scripted(answers: Vec<Answer>) -> impl FnMut(&str, bool) -> Answer {
         let answers = RefCell::new(answers.into_iter());
@@ -273,23 +350,16 @@ mod tests {
     }
 
     /// GIVEN two screens WHEN the user skips the first and shares the second
-    /// THEN the target names index 1 with its size.
+    /// THEN the target names the second by its device name and size.
     #[test]
-    fn given_two_screens_when_the_second_is_shared_then_it_is_named_by_index_and_size() {
+    fn given_two_screens_when_the_second_is_shared_then_it_is_named_by_device_and_size() {
         let cancel = AtomicBool::new(false);
-        let target = pick(
-            &[HD, QHD],
+        let chosen = pick(
+            &[hd(), qhd()],
             &cancel,
             scripted(vec![Answer::Next, Answer::Share]),
         );
-        assert_eq!(
-            target,
-            Ok(ScreenTarget::Monitor {
-                index: 1,
-                width: 2560,
-                height: 1440
-            })
-        );
+        assert_eq!(chosen, Ok(target(qhd())));
     }
 
     /// GIVEN screens WHEN the user cancels THEN the share stays off and no
@@ -298,7 +368,7 @@ mod tests {
     fn given_a_cancel_then_no_screen_is_picked() {
         let cancel = AtomicBool::new(false);
         assert_eq!(
-            pick(&[HD], &cancel, scripted(vec![Answer::Cancel])),
+            pick(&[hd()], &cancel, scripted(vec![Answer::Cancel])),
             Err(ScreenRefusal::Cancelled)
         );
     }
@@ -308,19 +378,12 @@ mod tests {
     #[test]
     fn given_the_last_screen_when_next_then_the_first_shows_again() {
         let cancel = AtomicBool::new(false);
-        let target = pick(
-            &[HD, QHD],
+        let chosen = pick(
+            &[hd(), qhd()],
             &cancel,
             scripted(vec![Answer::Next, Answer::Next, Answer::Share]),
         );
-        assert_eq!(
-            target,
-            Ok(ScreenTarget::Monitor {
-                index: 0,
-                width: 1920,
-                height: 1080
-            })
-        );
+        assert_eq!(chosen, Ok(target(hd())));
     }
 
     /// GIVEN a call that ends while the window is open WHEN the user answers
@@ -328,11 +391,11 @@ mod tests {
     #[test]
     fn given_the_cancel_flag_set_while_asking_then_a_share_is_dropped() {
         let cancel = AtomicBool::new(false);
-        let target = pick(&[HD], &cancel, |_, _| {
+        let chosen = pick(&[hd()], &cancel, |_, _| {
             cancel.store(true, Ordering::SeqCst);
             Answer::Share
         });
-        assert_eq!(target, Err(ScreenRefusal::Cancelled));
+        assert_eq!(chosen, Err(ScreenRefusal::Cancelled));
     }
 
     /// GIVEN no monitor THEN screen sharing is unavailable and no window
@@ -340,8 +403,8 @@ mod tests {
     #[test]
     fn given_no_monitor_then_the_share_is_unavailable() {
         let cancel = AtomicBool::new(false);
-        let target = pick(&[], &cancel, |_, _| panic!("no window"));
-        assert_eq!(target, Err(ScreenRefusal::Unavailable));
+        let chosen = pick(&[], &cancel, |_, _| panic!("no window"));
+        assert_eq!(chosen, Err(ScreenRefusal::Unavailable));
     }
 
     /// GIVEN the window text THEN it names the screen and its size, says that
@@ -349,45 +412,35 @@ mod tests {
     /// the number of screens.
     #[test]
     fn given_the_prompt_then_it_names_the_screen_the_audience_and_the_buttons() {
-        let one = prompt_text(0, 1, QHD, 0);
+        let one = prompt_text(0, 1, qhd(), 0);
         assert!(one.contains("Screen 1 (2560x1440)"));
         assert!(one.contains("Everyone in the call"));
         assert!(one.contains("no border"));
         assert!(one.contains("No cancels"));
         assert!(one.contains("Persephone's messages"));
         assert!(!one.contains("not shown"));
-        let two = prompt_text(1, 2, HD, 1);
+        let two = prompt_text(1, 2, hd(), 1);
         assert!(two.contains("Screen 2 of 2 (1920x1080)"));
         assert!(two.contains("No shows the next screen"));
         assert!(two.contains("One screen cannot be shared at its size"));
-        assert!(prompt_text(0, 1, HD, 2).contains("2 screens cannot be shared"));
+        assert!(prompt_text(0, 1, hd(), 2).contains("2 screens cannot be shared"));
     }
 
     /// GIVEN a monitor too large to capture between two others WHEN the user
     /// goes to the next screen and shares it THEN the large one is never
-    /// asked, and the target keeps the shared screen's place in the list.
+    /// asked, and the target names the shared screen.
     #[test]
-    fn given_a_screen_too_large_to_capture_then_it_is_skipped_and_the_index_kept() {
-        const WIDE: Screen = Screen {
-            width: 8000,
-            height: 1000,
-        };
+    fn given_a_screen_too_large_to_capture_then_it_is_skipped() {
+        let wide = screen(3, 8000, 1000);
         let cancel = AtomicBool::new(false);
         let asked = RefCell::new(Vec::new());
         let mut answers = vec![Answer::Next, Answer::Share].into_iter();
-        let target = pick(&[HD, WIDE, QHD], &cancel, |text, several| {
+        let chosen = pick(&[hd(), wide, qhd()], &cancel, |text, several| {
             assert!(several);
             asked.borrow_mut().push(text.to_owned());
             answers.next().expect("an answer")
         });
-        assert_eq!(
-            target,
-            Ok(ScreenTarget::Monitor {
-                index: 2,
-                width: 2560,
-                height: 1440
-            })
-        );
+        assert_eq!(chosen, Ok(target(qhd())));
         let asked = asked.borrow();
         assert!(asked.iter().all(|text| !text.contains("8000x1000")));
         assert!(asked[1].contains("Screen 2 of 2 (2560x1440)"));
@@ -399,12 +452,9 @@ mod tests {
     #[test]
     fn given_only_screens_too_large_to_capture_then_the_share_is_unavailable() {
         let cancel = AtomicBool::new(false);
-        let big = Screen {
-            width: 5120,
-            height: 2880,
-        };
-        let target = pick(&[big], &cancel, |_, _| panic!("no window"));
-        assert_eq!(target, Err(ScreenRefusal::Unavailable));
+        let big = screen(1, 5120, 2880);
+        let chosen = pick(&[big], &cancel, |_, _| panic!("no window"));
+        assert_eq!(chosen, Err(ScreenRefusal::Unavailable));
     }
 
     /// GIVEN monitor sizes WHEN listed THEN the rule is the worker's:
@@ -416,5 +466,47 @@ mod tests {
         assert!(!listed(0, 1080));
         assert!(!listed(1920, 0));
         assert!(!listed(16_385, 1080));
+    }
+
+    /// GIVEN an open question WHEN the call ends THEN the box closes within
+    /// a moment and the answer is a cancel; the next question on the same
+    /// thread is not ended by a left-over quit message.
+    ///
+    /// Ignored: it shows a real message box on the desktop for about 300 ms.
+    /// Run it on Windows after a change to `ask`:
+    /// `cargo test -p persephone-core --lib -- --ignored open_question`.
+    #[test]
+    #[ignore = "shows a real message box on the desktop"]
+    fn given_an_open_question_when_the_call_ends_then_it_closes() {
+        use std::time::{Duration, Instant};
+        let cancel = Arc::new(AtomicBool::new(false));
+        let setter = cancel.clone();
+        let started = Instant::now();
+        let timer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            setter.store(true, Ordering::SeqCst);
+        });
+        let answer = ask("Persephone test: this closes by itself.", true, &cancel);
+        timer.join().expect("the timer thread");
+        assert_eq!(answer, Answer::Cancel);
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            started.elapsed()
+        );
+        // A second question on this thread with the flag already set closes
+        // at the first timer tick too, which shows that the quit message of
+        // the first one was taken off the queue (it would end this one at
+        // once, before any tick, with no cancel at all).
+        let again = Instant::now();
+        assert_eq!(
+            ask("Persephone test: second.", false, &cancel),
+            Answer::Cancel
+        );
+        assert!(
+            again.elapsed() >= Duration::from_millis(50),
+            "{:?}",
+            again.elapsed()
+        );
     }
 }

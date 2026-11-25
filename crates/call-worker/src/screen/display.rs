@@ -1,5 +1,6 @@
-//! The pure rules of a macOS display share (ADR-0064): which display the core
-//! named, how large the capture is, and which frames the worker takes. No OS
+//! The pure rules of a macOS display share (ADR-0064): whether a display has
+//! the size the core saw, how large the capture is, and which frames the
+//! worker takes. No OS
 //! type, so the tests run on every OS. `macos.rs` is the only user outside
 //! tests.
 
@@ -8,10 +9,6 @@
 
 use std::time::{Duration, Instant};
 
-/// The most displays the worker reads from CoreGraphics. The core reads the
-/// same number from the call protocol; an index (a `u8` on the wire) beyond
-/// it is `NotFound`.
-pub const MAX_DISPLAYS: usize = persephone_call_protocol::MAX_SCREEN_MONITORS as usize;
 /// The capture is asked for at most this size (ADR-0053).
 pub const OUTPUT_MAX_WIDTH: u32 = 1920;
 pub const OUTPUT_MAX_HEIGHT: u32 = 1080;
@@ -21,12 +18,6 @@ pub const FRAMES_PER_SECOND: i32 = 5;
 /// stream is asked for, so a frame that arrives a few ms early still counts,
 /// and a burst never gets through.
 pub const MIN_FRAME_GAP: Duration = Duration::from_millis(150);
-
-/// The display list entry (by index) that the core named, or `None` for an
-/// index that the list does not have.
-pub fn display_at(active: &[u32], index: u8) -> Option<u32> {
-    active.get(usize::from(index)).copied()
-}
 
 /// Whether a display's size in points is the size the core saw when the user
 /// chose it. A different size, or one that is not positive, is not the
@@ -112,18 +103,6 @@ pub fn cause_of(code: i64) -> Cause {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// GIVEN a display list WHEN an index is looked up THEN the entry at
-    /// that place is named and an index past the end names nothing.
-    #[test]
-    fn given_a_display_list_when_an_index_is_looked_up_then_only_a_listed_one_is_named() {
-        let active = [69_733, 3];
-        assert_eq!(display_at(&active, 0), Some(active[0]));
-        assert_eq!(display_at(&active, 1), Some(3));
-        assert_eq!(display_at(&active, 2), None);
-        assert_eq!(display_at(&[], 0), None);
-        assert_eq!(display_at(&active, u8::MAX), None);
-    }
 
     /// GIVEN the size the core saw WHEN the display's size is compared THEN
     /// only the same size matches.

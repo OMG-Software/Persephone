@@ -179,9 +179,10 @@ Notes:
 * The pixel check counts pixels with a non-zero colour channel and pixels that
   differ from the first pixel. All-black and one-colour copies are failures
   (`BLACK`, `UNIFORM` in `screen_alt.rs`). The control and the container copy
-  gave the same mean colour on the same desktop, so the container copy is the
-  desktop and not a blank or partial buffer. The mean is a coarse check; the
-  picture itself was not compared or looked at.
+  gave the same mean colour on the same desktop. That is consistent with a
+  copy of the desktop, but it does not exclude a partial or wrong picture:
+  two different pictures, or a partly zero-filled buffer, can have the same
+  mean. The picture itself was not compared or looked at.
 * The GDI run in the container is the worker's own code (`screen/gdi.rs`,
   compiled into the gate), on a thread set to per-monitor DPI awareness.
 * The DXGI control did not capture on this static desktop: the first

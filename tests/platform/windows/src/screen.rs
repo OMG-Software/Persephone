@@ -355,13 +355,28 @@ fn parent() -> i32 {
                         Ok(mean) if (mean & !0x00FF_FFFF) == MEAN_FLAG => {
                             line.push_str(&format!(", mean colour {:#08x}", mean & 0x00FF_FFFF));
                         }
-                        other => line.push_str(&format!(
+                        // A capture result of the repeat is a result.
+                        Ok(other) => line.push_str(&format!(
                             ", mean colour unknown (repeat gave {})",
-                            other.map_or_else(|_| "no result".to_owned(), describe)
+                            describe(other)
                         )),
+                        Err(RunError::Unconfirmed(error, child)) => {
+                            return abandon(container, name, &error, child);
+                        }
+                        // A repeat that did not run is a failed measurement.
+                        Err(RunError::Failed(error)) => {
+                            line.push_str(&format!(
+                                ", mean colour unknown (repeat run failed: {error})"
+                            ));
+                            failed = true;
+                        }
                     }
                 }
-                if code != 0 {
+                if alt::is_unvaried(code) {
+                    // The capture call succeeded and the pixels were judged:
+                    // no call failed, so there is no error code to read.
+                    line.push_str(", no HRESULT: the capture call succeeded");
+                } else if code != 0 {
                     // The error code of the failed call, in two more runs. Each
                     // run reports its own stage. Use the halves only when both
                     // runs failed at the stage of the first run.
@@ -379,6 +394,9 @@ fn parent() -> i32 {
                     };
                     match (high, low) {
                         (Ok(high), Ok(low)) => match combine(code, high, low) {
+                            // A stage that failed with no recorded error (for
+                            // example a null handle) has no HRESULT.
+                            Some(0) => line.push_str(", no error recorded for this stage"),
                             Some(hresult) => line.push_str(&format!(
                                 ", HRESULT {hresult:#010x} (halves of two repeat runs, same stage)"
                             )),

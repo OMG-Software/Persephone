@@ -12,7 +12,7 @@ use persephone_media_protocol::{
 };
 use zeroize::Zeroizing;
 
-pub const VERSION: u8 = 11;
+pub const VERSION: u8 = 12;
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 /// Longest diagnostic record target (ADR-0058).
 pub const MAX_DIAGNOSTIC_TARGET_BYTES: usize = 64;
@@ -80,6 +80,8 @@ pub const MAX_SCREEN_FPS: u32 = 5;
 pub const MAX_SCREEN_MONITORS: u8 = 16;
 /// The largest side of a monitor the core names, in pixels.
 pub const MAX_MONITOR_SIDE: u32 = 16_384;
+/// The longest GDI device name of a Windows monitor (`CCHDEVICENAME`).
+pub const MAX_MONITOR_NAME: usize = 32;
 /// The longest side of a screen the worker captures: pixels on Windows,
 /// points on macOS. A listed monitor can be larger; the core does not offer
 /// it then.
@@ -558,18 +560,86 @@ impl TryFrom<u8> for FailureCode {
     }
 }
 
-/// What the core grants for one screen share (ADR-0053).
+/// A Windows monitor's GDI device name (`MONITORINFOEXW::szDevice`, for
+/// example `\\.\DISPLAY1`): 1 to [`MAX_MONITOR_NAME`] printable ASCII
+/// characters. It names the display output, which keeps its name when the
+/// monitors change places.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MonitorName {
+    len: u8,
+    bytes: [u8; MAX_MONITOR_NAME],
+}
+
+impl MonitorName {
+    /// `None` for an empty or too long name, or one with a character that
+    /// is not printable ASCII.
+    pub fn new(name: &[u8]) -> Option<Self> {
+        if name.is_empty()
+            || name.len() > MAX_MONITOR_NAME
+            || !name.iter().all(u8::is_ascii_graphic)
+        {
+            return None;
+        }
+        let mut bytes = [0; MAX_MONITOR_NAME];
+        bytes[..name.len()].copy_from_slice(name);
+        Some(Self {
+            len: name.len() as u8,
+            bytes,
+        })
+    }
+
+    /// The name in a UTF-16 buffer as Windows fills it: up to the first NUL,
+    /// or the whole buffer when it has none.
+    pub fn from_wide(wide: &[u16]) -> Option<Self> {
+        let end = wide
+            .iter()
+            .position(|&unit| unit == 0)
+            .unwrap_or(wide.len());
+        if end > MAX_MONITOR_NAME {
+            return None;
+        }
+        let mut narrow = [0_u8; MAX_MONITOR_NAME];
+        for (to, &unit) in narrow.iter_mut().zip(&wide[..end]) {
+            *to = u8::try_from(unit).ok()?;
+        }
+        Self::new(&narrow[..end])
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..usize::from(self.len)]
+    }
+
+    /// The name as UTF-16 code units, with no NUL.
+    pub fn to_wide(&self) -> Vec<u16> {
+        self.as_bytes()
+            .iter()
+            .map(|&byte| u16::from(byte))
+            .collect()
+    }
+}
+
+/// What the core grants for one screen share (ADR-0053, ADR-0064). Each
+/// target names the screen the user approved by an identity that the worker
+/// reads again for itself, so a change of the screens between the question
+/// and the capture is "not found", never another screen.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ScreenTarget {
     /// Linux: the portal remote went over the camera channel with kind `s`,
     /// directly before this command. `node` is the PipeWire node ID.
     Portal { node: u32 },
-    /// Windows: the monitor's index in display order and its size in pixels
-    /// when the user chose it. macOS (ADR-0064): the display's index in
-    /// `CGGetActiveDisplayList` order and its size in points. The worker
-    /// reads its own list when the share starts; another size at that index
-    /// is "not found".
-    Monitor { index: u8, width: u32, height: u32 },
+    /// Windows (ADR-0053): the monitor's GDI device name and its size in
+    /// pixels when the user chose it. The worker takes only the listed
+    /// monitor with that name and size, and checks the name and the
+    /// monitor's rectangle again before and after each copy.
+    Monitor {
+        name: MonitorName,
+        width: u32,
+        height: u32,
+    },
+    /// macOS (ADR-0064): the display's CoreGraphics ID (`CGDirectDisplayID`,
+    /// never 0) and its size in points when the user chose it. The worker
+    /// takes only the display with that ID and size.
+    Display { id: u32, width: u32, height: u32 },
 }
 
 /// The state of the screen share, as the worker reports it. A closed set
@@ -843,6 +913,16 @@ impl<'a> Reader<'a> {
         } else {
             Err(DecodeError::InvalidValue)
         }
+    }
+
+    /// A screen's width and height, each 1 to [`MAX_MONITOR_SIDE`].
+    fn monitor_size(&mut self) -> Result<(u32, u32), DecodeError> {
+        let width = self.u32()?;
+        let height = self.u32()?;
+        if !(1..=MAX_MONITOR_SIDE).contains(&width) || !(1..=MAX_MONITOR_SIDE).contains(&height) {
+            return Err(DecodeError::InvalidValue);
+        }
+        Ok((width, height))
     }
 
     fn bool(&mut self) -> Result<bool, DecodeError> {
@@ -1122,12 +1202,21 @@ impl ToWorker {
                         out.extend_from_slice(&node.to_be_bytes());
                     }
                     Some(ScreenTarget::Monitor {
-                        index,
+                        name,
                         width,
                         height,
                     }) => {
                         out.push(2);
-                        out.push(*index);
+                        let name = name.as_bytes();
+                        // A `MonitorName` holds at most 32 bytes.
+                        out.push(name.len() as u8);
+                        out.extend_from_slice(name);
+                        out.extend_from_slice(&width.to_be_bytes());
+                        out.extend_from_slice(&height.to_be_bytes());
+                    }
+                    Some(ScreenTarget::Display { id, width, height }) => {
+                        out.push(3);
+                        out.extend_from_slice(&id.to_be_bytes());
                         out.extend_from_slice(&width.to_be_bytes());
                         out.extend_from_slice(&height.to_be_bytes());
                     }
@@ -1254,20 +1343,26 @@ impl ToWorker {
                         node: reader.u32()?,
                     }),
                     2 => {
-                        let index = reader.u8()?;
-                        let width = reader.u32()?;
-                        let height = reader.u32()?;
-                        if index >= MAX_SCREEN_MONITORS
-                            || !(1..=MAX_MONITOR_SIDE).contains(&width)
-                            || !(1..=MAX_MONITOR_SIDE).contains(&height)
-                        {
+                        let length = usize::from(reader.u8()?);
+                        if !(1..=MAX_MONITOR_NAME).contains(&length) {
                             return Err(DecodeError::InvalidValue);
                         }
+                        let name = MonitorName::new(reader.take(length)?)
+                            .ok_or(DecodeError::InvalidValue)?;
+                        let (width, height) = reader.monitor_size()?;
                         Some(ScreenTarget::Monitor {
-                            index,
+                            name,
                             width,
                             height,
                         })
+                    }
+                    3 => {
+                        let id = reader.u32()?;
+                        let (width, height) = reader.monitor_size()?;
+                        if id == 0 {
+                            return Err(DecodeError::InvalidValue);
+                        }
+                        Some(ScreenTarget::Display { id, width, height })
                     }
                     _ => return Err(DecodeError::InvalidValue),
                 };
@@ -1956,11 +2051,27 @@ mod tests {
             },
             ToWorker::SetScreen {
                 target: Some(ScreenTarget::Monitor {
-                    index: 15,
+                    name: MonitorName::new(br"\\.\DISPLAY1").unwrap(),
                     width: 16_384,
                     height: 1,
                 }),
                 share: 7,
+            },
+            ToWorker::SetScreen {
+                target: Some(ScreenTarget::Monitor {
+                    name: MonitorName::new(&[b'~'; MAX_MONITOR_NAME]).unwrap(),
+                    width: 1,
+                    height: 16_384,
+                }),
+                share: 8,
+            },
+            ToWorker::SetScreen {
+                target: Some(ScreenTarget::Display {
+                    id: u32::MAX,
+                    width: 1440,
+                    height: 900,
+                }),
+                share: 9,
             },
             ToWorker::SetDeafened { deafened: true },
             ToWorker::SetDeafened { deafened: false },
@@ -2980,7 +3091,7 @@ mod tests {
     /// 640x360 at 15 per second.
     #[test]
     fn given_tiles_when_limits_asked_then_screen_differs_from_camera() {
-        assert_eq!((VIDEO_TILES, SCREEN_TILE, VERSION), (6, 5, 11));
+        assert_eq!((VIDEO_TILES, SCREEN_TILE, VERSION), (6, 5, 12));
         assert_eq!(MAX_SCREEN_BYTES, 3_686_400);
         assert_eq!(MAX_SCREEN_PIXELS, 921_600);
         for tile in 0..SCREEN_TILE {
@@ -3056,19 +3167,27 @@ mod tests {
 
     /// GIVEN bad values in a SetScreen
     /// WHEN it is decoded
-    /// THEN a bad kind, monitor index or monitor size is rejected, and a cut
-    /// message is truncated.
+    /// THEN a bad kind, monitor name, display ID or screen size is rejected,
+    /// and a cut message is truncated.
     #[test]
     fn given_bad_set_screen_when_decoded_then_it_is_rejected() {
         let invalid = DecodeError::InvalidValue;
-        let monitor = |index: u8, width: u32, height: u32| {
-            let mut body = vec![VERSION, TO_SET_SCREEN, 0, 0, 0, 9, 2, index];
+        let monitor = |name: &[u8], width: u32, height: u32| {
+            let mut body = vec![VERSION, TO_SET_SCREEN, 0, 0, 0, 9, 2, name.len() as u8];
+            body.extend(name);
+            body.extend(width.to_be_bytes());
+            body.extend(height.to_be_bytes());
+            body
+        };
+        let display = |id: u32, width: u32, height: u32| {
+            let mut body = vec![VERSION, TO_SET_SCREEN, 0, 0, 0, 9, 3];
+            body.extend(id.to_be_bytes());
             body.extend(width.to_be_bytes());
             body.extend(height.to_be_bytes());
             body
         };
         assert_eq!(
-            ToWorker::decode(&[VERSION, TO_SET_SCREEN, 0, 0, 0, 1, 3]),
+            ToWorker::decode(&[VERSION, TO_SET_SCREEN, 0, 0, 0, 1, 4]),
             Err(invalid)
         );
         assert_eq!(
@@ -3091,22 +3210,73 @@ mod tests {
             FromWorker::decode(&[VERSION, FROM_SCREEN, 0, 0, 0]),
             Err(DecodeError::Truncated)
         );
-        assert_eq!(ToWorker::decode(&monitor(16, 1920, 1080)), Err(invalid));
-        assert_eq!(ToWorker::decode(&monitor(0, 0, 1080)), Err(invalid));
-        assert_eq!(ToWorker::decode(&monitor(0, 1920, 0)), Err(invalid));
-        assert_eq!(ToWorker::decode(&monitor(0, 16_385, 1)), Err(invalid));
-        assert_eq!(ToWorker::decode(&monitor(0, 1, 16_385)), Err(invalid));
+        let name = br"\\.\DISPLAY2";
+        assert_eq!(ToWorker::decode(&monitor(b"", 1920, 1080)), Err(invalid));
         assert_eq!(
-            ToWorker::decode(&monitor(0, 1920, 1080)),
+            ToWorker::decode(&monitor(&[b'a'; 33], 1920, 1080)),
+            Err(invalid)
+        );
+        assert_eq!(
+            ToWorker::decode(&monitor(b"DISPLAY 2", 1920, 1080)),
+            Err(invalid)
+        );
+        assert_eq!(
+            ToWorker::decode(&monitor(&[0xC3, 0xA9], 1920, 1080)),
+            Err(invalid)
+        );
+        assert_eq!(ToWorker::decode(&monitor(name, 0, 1080)), Err(invalid));
+        assert_eq!(ToWorker::decode(&monitor(name, 1920, 0)), Err(invalid));
+        assert_eq!(ToWorker::decode(&monitor(name, 16_385, 1)), Err(invalid));
+        assert_eq!(ToWorker::decode(&monitor(name, 1, 16_385)), Err(invalid));
+        let mut cut = monitor(name, 1920, 1080);
+        cut.truncate(8 + name.len() - 1);
+        assert_eq!(ToWorker::decode(&cut), Err(DecodeError::Truncated));
+        assert_eq!(
+            ToWorker::decode(&monitor(name, 1920, 1080)),
             Ok(ToWorker::SetScreen {
                 target: Some(ScreenTarget::Monitor {
-                    index: 0,
+                    name: MonitorName::new(name).unwrap(),
                     width: 1920,
                     height: 1080
                 }),
                 share: 9,
             })
         );
+        assert_eq!(ToWorker::decode(&display(0, 1440, 900)), Err(invalid));
+        assert_eq!(ToWorker::decode(&display(7, 0, 900)), Err(invalid));
+        assert_eq!(ToWorker::decode(&display(7, 1440, 16_385)), Err(invalid));
+        assert_eq!(
+            ToWorker::decode(&display(7, 1440, 900)),
+            Ok(ToWorker::SetScreen {
+                target: Some(ScreenTarget::Display {
+                    id: 7,
+                    width: 1440,
+                    height: 900
+                }),
+                share: 9,
+            })
+        );
+    }
+
+    /// GIVEN monitor names as Windows reports them WHEN read THEN a printable
+    /// ASCII name of 1 to 32 characters is taken up to its NUL, and an empty,
+    /// longer or non-ASCII one is refused.
+    #[test]
+    fn given_windows_device_names_when_read_then_only_printable_ascii_is_taken() {
+        let text = r"\\.\DISPLAY3";
+        let mut buffer = [0_u16; 32];
+        for (to, from) in buffer.iter_mut().zip(text.encode_utf16()) {
+            *to = from;
+        }
+        let name = MonitorName::from_wide(&buffer).expect("a name");
+        assert_eq!(name.as_bytes(), text.as_bytes());
+        assert_eq!(name.to_wide(), text.encode_utf16().collect::<Vec<_>>());
+        assert_eq!(MonitorName::from_wide(&[0; 32]), None);
+        assert_eq!(MonitorName::from_wide(&[u16::from(b'a'); 33]), None);
+        assert!(MonitorName::from_wide(&[u16::from(b'a'); 32]).is_some());
+        assert_eq!(MonitorName::from_wide(&[0x00E9]), None);
+        assert_eq!(MonitorName::from_wide(&[0x0144, 0]), None);
+        assert_eq!(MonitorName::new(b"a b"), None);
     }
 
     /// GIVEN a message made for wire version 4
@@ -3352,13 +3522,13 @@ mod tests {
         );
     }
 
-    /// GIVEN a message of the previous wire versions (6 to 9)
+    /// GIVEN a message of the previous wire versions (6 to 11)
     /// WHEN it is decoded in either direction
     /// THEN the version is refused.
     #[test]
     fn given_older_wire_versions_when_decoded_then_they_are_refused() {
-        assert_eq!(VERSION, 11);
-        for old in [6, 7, 8, 9, 10] {
+        assert_eq!(VERSION, 12);
+        for old in [6, 7, 8, 9, 10, 11] {
             assert_eq!(
                 ToWorker::decode(&[old, TO_LEAVE]),
                 Err(DecodeError::UnknownVersion)

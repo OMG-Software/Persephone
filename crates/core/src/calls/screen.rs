@@ -53,8 +53,9 @@ pub fn macos_screen_question(index: usize, width: u32, height: u32, main: bool) 
     )
 }
 
-/// One display as the core reads it from the system: its ID, and its size in
-/// points. The worker reads the same sizes (ADR-0064).
+/// One display as the core reads it from the system: its CoreGraphics ID,
+/// and its size in points. The share names the display by both, and the
+/// worker reads them again for itself (ADR-0064).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub struct Display {
@@ -63,8 +64,7 @@ pub struct Display {
     pub height: u32,
 }
 
-/// The most displays the core and the worker read, in the same order (the
-/// call protocol's limit, which the worker also uses).
+/// The most displays the core reads (the call protocol's limit).
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub const MAX_DISPLAYS: usize = MAX_SCREEN_MONITORS as usize;
 
@@ -84,17 +84,19 @@ pub fn points(value: f64) -> Option<u32> {
         .then(|| value.round() as u32)
 }
 
-/// The target for the display at `index` of `displays`, or `None` when the
-/// index is past the limit or the list, or the size is not one the worker
-/// takes.
+/// The target for the display at `index` of `displays`: its ID and size.
+/// `None` when the index is past the limit or the list, the ID is 0 (no
+/// display), or the size is not one the worker takes.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn display_target(displays: &[Display], index: usize) -> Option<ScreenTarget> {
     let display = displays.get(index).filter(|_| index < MAX_DISPLAYS)?;
-    display_size_ok(display.width, display.height).then_some(ScreenTarget::Monitor {
-        index: u8::try_from(index).ok()?,
-        width: display.width,
-        height: display.height,
-    })
+    (display.id != 0 && display_size_ok(display.width, display.height)).then_some(
+        ScreenTarget::Display {
+            id: display.id,
+            width: display.width,
+            height: display.height,
+        },
+    )
 }
 
 /// What the macOS source needs from the system. A test supplies its own.
@@ -411,7 +413,7 @@ mod tests {
 
     /// GIVEN two displays WHEN the user says No to the main one and Yes to
     /// the other THEN the main display is asked first, and the grant names
-    /// the other one by its index in list order and its size.
+    /// the other one by its display ID and its size.
     #[test]
     fn given_two_displays_when_the_user_picks_the_second_then_the_target_names_it() {
         let system = FakeSystem::new(true, vec![Some(false), Some(true)]);
@@ -419,8 +421,8 @@ mod tests {
         let grant = choose_display(&system, &cancel).expect("grant");
         assert_eq!(
             grant.target,
-            ScreenTarget::Monitor {
-                index: 0,
+            ScreenTarget::Display {
+                id: 7,
                 width: 1440,
                 height: 900
             }
@@ -499,7 +501,8 @@ mod tests {
     }
 
     /// GIVEN display lists WHEN a target is made THEN only a listed index
-    /// within the limit and a size the worker takes gives one.
+    /// within the limit, a display ID and a size the worker takes give one,
+    /// and the target names the display by its ID.
     #[test]
     fn given_display_lists_when_a_target_is_made_then_the_limits_hold() {
         let list = [
@@ -513,18 +516,24 @@ mod tests {
                 width: 1,
                 height: 1,
             },
+            Display {
+                id: 0,
+                width: 1512,
+                height: 982,
+            },
         ];
         assert_eq!(
             display_target(&list, 0),
-            Some(ScreenTarget::Monitor {
-                index: 0,
+            Some(ScreenTarget::Display {
+                id: 1,
                 width: 1512,
                 height: 982
             })
         );
         assert_eq!(display_target(&list, 1), None);
-        assert_eq!(display_target(&list, 2), None);
-        let many: Vec<Display> = (0..40)
+        assert_eq!(display_target(&list, 2), None, "no display has ID 0");
+        assert_eq!(display_target(&list, 3), None);
+        let many: Vec<Display> = (1..=40)
             .map(|id| Display {
                 id,
                 width: 800,

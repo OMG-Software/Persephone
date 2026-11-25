@@ -339,7 +339,7 @@ fn copy_and_check(
 /// The call worker's own GDI capture (`screen/gdi.rs`): one frame of
 /// monitor 0, checked for black or uniform pixels.
 fn gdi() -> u32 {
-    let mut capture = match super::gdi::open(0, None) {
+    let mut capture = match super::gdi::open(super::gdi::Choice::First) {
         Ok(capture) => capture,
         Err(stage) => return stage as u32,
     };

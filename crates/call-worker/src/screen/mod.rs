@@ -301,20 +301,31 @@ mod tests {
         assert_eq!(frame.data.len(), 64);
     }
 
-    /// GIVEN a target of the other OS's kind WHEN it is opened THEN the
-    /// result is `Unavailable` and no thread starts.
+    /// GIVEN a target of another OS's kind WHEN it is opened THEN the result
+    /// is `Unavailable` and no thread starts.
     #[test]
     fn given_a_target_of_another_os_when_opened_then_it_is_unavailable() {
-        let wrong = if cfg!(any(windows, target_os = "macos")) {
-            ScreenTarget::Portal { node: 1 }
-        } else {
-            ScreenTarget::Monitor {
-                index: 0,
-                width: 1920,
-                height: 1080,
-            }
+        let portal = ScreenTarget::Portal { node: 1 };
+        let monitor = ScreenTarget::Monitor {
+            name: persephone_call_protocol::MonitorName::new(br"\\.\DISPLAY1").expect("a name"),
+            width: 1920,
+            height: 1080,
         };
-        let result = open(wrong, Grant::default(), |_| {}, |_| {});
-        assert_eq!(result.err(), Some(ScreenState::Unavailable));
+        let display = ScreenTarget::Display {
+            id: 1,
+            width: 1920,
+            height: 1080,
+        };
+        let wrong = if cfg!(windows) {
+            [portal, display]
+        } else if cfg!(target_os = "macos") {
+            [portal, monitor]
+        } else {
+            [monitor, display]
+        };
+        for target in wrong {
+            let result = open(target, Grant::default(), |_| {}, |_| {});
+            assert_eq!(result.err(), Some(ScreenState::Unavailable), "{target:?}");
+        }
     }
 }
