@@ -29,6 +29,26 @@ pub mod ffi {
         remote: SharedPtr<Candidate>,
     }
 
+    /// PERSEPHONE PATCH (ADR-0062): the audio processing state of a factory.
+    /// The `i8` fields are -1 for unknown, 0 for off and 1 for on.
+    pub struct CaptureProcessing {
+        pub found: bool,
+        /// The microphone gain in percent that the module applies now: 100
+        /// when the adjustment is off.
+        pub gain_percent: u32,
+        pub echo_requested: i8,
+        pub echo_active: i8,
+        pub noise_requested: i8,
+        pub noise_active: i8,
+        pub agc_requested: i8,
+        pub agc_active: i8,
+        /// What the audio device module does now: playout prepared and
+        /// running, and capture running.
+        pub playout_initialized: bool,
+        pub playing: bool,
+        pub recording: bool,
+    }
+
     pub struct CandidatePairChangeEvent {
         selected_candidate_pair: CandidatePair,
         last_data_received_ms: i64,
@@ -97,6 +117,10 @@ pub mod ffi {
         ) -> SharedPtr<PeerConnectionFactory>;
 
         fn zero_playout_delay_enabled(self: &PeerConnectionFactory) -> bool;
+
+        // PERSEPHONE PATCH (ADR-0062).
+        fn set_capture_gain_percent(percent: u16) -> bool;
+        fn capture_processing_state() -> CaptureProcessing;
 
         fn create_peer_connection(
             self: &PeerConnectionFactory,

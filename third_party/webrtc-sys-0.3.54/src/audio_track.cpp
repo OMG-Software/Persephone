@@ -95,6 +95,22 @@ void AudioTrack::set_volume(double volume) const {
   });
 }
 
+// PERSEPHONE PATCH (ADR-0062): the options are the ones create_device_audio_track
+// sets, with the automatic gain control as asked. SetAudioProcessingOptions
+// reaches the active sender and the shared audio processing module, so the
+// change applies without publishing the track again.
+int32_t AudioTrack::set_auto_gain_control(bool enabled) const {
+  webrtc::AudioTrackInterface* audio = track();
+  if (audio == nullptr) {
+    return -1;
+  }
+  webrtc::AudioOptions options;
+  options.echo_cancellation = true;
+  options.noise_suppression = true;
+  options.auto_gain_control = enabled;
+  return static_cast<int32_t>(audio->SetAudioProcessingOptions(options).code);
+}
+
 NativeAudioSink::NativeAudioSink(rust::Box<AudioSinkWrapper> observer,
                                  int sample_rate,
                                  int num_channels)

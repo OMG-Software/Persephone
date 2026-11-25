@@ -16,7 +16,11 @@
 
 #include "livekit/peer_connection_factory.h"
 
+#include <algorithm>
+#include <cmath>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -53,6 +57,27 @@ namespace {
 constexpr char kForcePlayoutDelayFieldTrial[] =
     "WebRTC-ForcePlayoutDelay/min_ms:0,max_ms:0/";
 constexpr char kForcePlayoutDelayValue[] = "min_ms:0,max_ms:0";
+
+// PERSEPHONE PATCH (ADR-0062): the live factories and the microphone gain
+// that every one of them applies. A factory registers itself after it is
+// built and leaves before it is torn down; the mutex also keeps a gain
+// change from running on a factory that is going away.
+struct CaptureGainRegistry {
+  std::mutex mutex;
+  std::vector<const PeerConnectionFactory*> factories;
+  uint16_t gain_percent = 100;
+};
+
+CaptureGainRegistry& capture_gain_registry() {
+  static CaptureGainRegistry registry;
+  return registry;
+}
+
+constexpr uint16_t kMaxCaptureGainPercent = 400;
+
+int8_t tri_state(const std::optional<bool>& value) {
+  return value.has_value() ? (*value ? 1 : 0) : -1;
+}
 
 class ZeroPlayoutDelayFieldTrials final : public webrtc::FieldTrialsView {
  public:
@@ -194,7 +219,17 @@ PeerConnectionFactory::PeerConnectionFactory(
       std::move(std::make_unique<livekit_ffi::VideoDecoderFactory>());
   dependencies.audio_encoder_factory = webrtc::CreateBuiltinAudioEncoderFactory();
   dependencies.audio_decoder_factory = webrtc::CreateBuiltinAudioDecoderFactory();
-  dependencies.audio_processing_builder = std::make_unique<webrtc::BuiltinAudioProcessingBuilder>();
+  // PERSEPHONE PATCH (ADR-0062): the module is built here and handed to the
+  // voice engine, so the microphone gain can reach it. It is the module that
+  // BuiltinAudioProcessingBuilder would have built.
+  audio_processing_ = webrtc::BuiltinAudioProcessingBuilder().Build(env_);
+  if (audio_processing_) {
+    dependencies.audio_processing_builder =
+        webrtc::CustomAudioProcessing(audio_processing_);
+  } else {
+    dependencies.audio_processing_builder =
+        std::make_unique<webrtc::BuiltinAudioProcessingBuilder>();
+  }
 
   webrtc::EnableMedia(dependencies);
   peer_factory_ =
@@ -204,11 +239,28 @@ PeerConnectionFactory::PeerConnectionFactory(
     RTC_LOG_ERR(LS_ERROR) << "Failed to create PeerConnectionFactory";
     return;
   }
+
+  // PERSEPHONE PATCH (ADR-0062): join the registry and take the gain that is
+  // set now, so a gain chosen before the factory exists still applies.
+  CaptureGainRegistry& registry = capture_gain_registry();
+  std::lock_guard<std::mutex> lock(registry.mutex);
+  registry.factories.push_back(this);
+  apply_capture_gain(registry.gain_percent);
 }
 
 PeerConnectionFactory::~PeerConnectionFactory() {
   RTC_LOG(LS_VERBOSE) << "PeerConnectionFactory::~PeerConnectionFactory()";
 
+  // PERSEPHONE PATCH (ADR-0062): leave the registry first, so no gain change
+  // reaches a factory that is being torn down.
+  {
+    CaptureGainRegistry& registry = capture_gain_registry();
+    std::lock_guard<std::mutex> lock(registry.mutex);
+    registry.factories.erase(std::remove(registry.factories.begin(),
+                                         registry.factories.end(), this),
+                             registry.factories.end());
+  }
+  audio_processing_ = nullptr;
   peer_factory_ = nullptr;
   audio_device_ = nullptr;
   rtc_runtime_->worker_thread()->BlockingCall(
@@ -288,6 +340,84 @@ rust::Vec<rust::String> PeerConnectionFactory::video_encoder_backend_codecs(
     codecs.push_back(codec);
   }
   return codecs;
+}
+
+// PERSEPHONE PATCH (ADR-0062). The voice engine reads the module's
+// configuration, changes some fields and applies it again on the worker
+// thread (`ApplyOptions`), so this does the same there and no change is
+// lost between the read and the write. The engine leaves
+// `capture_level_adjustment` alone.
+void PeerConnectionFactory::apply_capture_gain(uint16_t percent) const {
+  if (!audio_processing_ || percent > kMaxCaptureGainPercent) {
+    return;
+  }
+  const float factor = static_cast<float>(percent) / 100.0f;
+  rtc_runtime_->worker_thread()->BlockingCall([this, factor] {
+    webrtc::AudioProcessing::Config config = audio_processing_->GetConfig();
+    config.capture_level_adjustment.enabled = factor != 1.0f;
+    config.capture_level_adjustment.pre_gain_factor = factor;
+    audio_processing_->ApplyConfig(config);
+  });
+}
+
+CaptureProcessing PeerConnectionFactory::capture_processing() const {
+  CaptureProcessing state{};
+  state.gain_percent = 100;
+  state.echo_requested = state.echo_active = -1;
+  state.noise_requested = state.noise_active = -1;
+  state.agc_requested = state.agc_active = -1;
+  if (!audio_processing_ || !peer_factory_) {
+    return state;
+  }
+  state.found = true;
+  rtc_runtime_->worker_thread()->BlockingCall([this, &state] {
+    const webrtc::AudioProcessing::Config config = audio_processing_->GetConfig();
+    if (config.capture_level_adjustment.enabled) {
+      state.gain_percent = static_cast<uint32_t>(
+          std::lround(config.capture_level_adjustment.pre_gain_factor * 100.0f));
+    }
+  });
+  // The audio device module's own state, read outside the lambda above: the
+  // proxy marshals each call to the worker thread itself.
+  state.playout_initialized = adm_proxy_->PlayoutIsInitialized();
+  state.playing = adm_proxy_->Playing();
+  state.recording = adm_proxy_->Recording();
+  const webrtc::AudioProcessingState reported =
+      peer_factory_->GetAudioProcessingState();
+  state.echo_requested = tri_state(reported.echo_cancellation.requested_enabled);
+  state.echo_active = tri_state(reported.echo_cancellation.software_active);
+  state.noise_requested = tri_state(reported.noise_suppression.requested_enabled);
+  state.noise_active = tri_state(reported.noise_suppression.software_active);
+  state.agc_requested = tri_state(reported.auto_gain_control.requested_enabled);
+  state.agc_active = tri_state(reported.auto_gain_control.software_active);
+  return state;
+}
+
+bool set_capture_gain_percent(uint16_t percent) {
+  if (percent > kMaxCaptureGainPercent) {
+    return false;
+  }
+  CaptureGainRegistry& registry = capture_gain_registry();
+  std::lock_guard<std::mutex> lock(registry.mutex);
+  registry.gain_percent = percent;
+  for (const PeerConnectionFactory* factory : registry.factories) {
+    factory->apply_capture_gain(percent);
+  }
+  return true;
+}
+
+CaptureProcessing capture_processing_state() {
+  CaptureGainRegistry& registry = capture_gain_registry();
+  std::lock_guard<std::mutex> lock(registry.mutex);
+  if (registry.factories.empty()) {
+    CaptureProcessing none{};
+    none.gain_percent = 100;
+    none.echo_requested = none.echo_active = -1;
+    none.noise_requested = none.noise_active = -1;
+    none.agc_requested = none.agc_active = -1;
+    return none;
+  }
+  return registry.factories.back()->capture_processing();
 }
 
 std::shared_ptr<AudioDeviceController> PeerConnectionFactory::audio_device() const {

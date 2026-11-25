@@ -35,4 +35,10 @@ impl RtcAudioTrack {
     pub fn set_volume(&self, volume: f64) {
         self.sys_handle.set_volume(volume);
     }
+
+    // PERSEPHONE PATCH (ADR-0062): automatic gain control of a local track.
+    pub fn set_auto_gain_control(&self, enabled: bool) -> bool {
+        // 0 applied, 1 stored; anything else is a refusal.
+        matches!(self.sys_handle.set_auto_gain_control(enabled), 0 | 1)
+    }
 }

@@ -60,6 +60,13 @@ class AudioTrack : public MediaStreamTrack {
   // PERSEPHONE PATCH (ADR-0055): the playout gain of a remote audio track.
   void set_volume(double volume) const;
 
+  // PERSEPHONE PATCH (ADR-0062): turns automatic gain control on or off for
+  // this local track while it is published, keeping the echo canceller and
+  // the noise suppression on, as the track was made. Returns the result code
+  // of WebRTC's SetAudioProcessingOptions: 0 applied, 1 stored, anything
+  // else refused; -1 when the track has gone.
+  int32_t set_auto_gain_control(bool enabled) const;
+
  private:
   webrtc::AudioTrackInterface* track() const {
     return static_cast<webrtc::AudioTrackInterface*>(track_.get());

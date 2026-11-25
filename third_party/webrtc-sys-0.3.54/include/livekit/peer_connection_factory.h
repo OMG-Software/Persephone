@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include "api/audio/audio_processing.h"
 #include "api/environment/environment_factory.h"
 #include "api/peer_connection_interface.h"
 #include "api/scoped_refptr.h"
@@ -83,6 +84,15 @@ class PeerConnectionFactory {
   std::shared_ptr<AudioDeviceController> audio_device() const;
   bool zero_playout_delay_enabled() const;
 
+  // PERSEPHONE PATCH (ADR-0062): sets the capture level adjustment (the
+  // microphone gain, applied before any processing) of this factory's audio
+  // processing module. Runs on the worker thread, as the voice engine does
+  // when it reads and writes the same configuration.
+  void apply_capture_gain(uint16_t percent) const;
+  // PERSEPHONE PATCH (ADR-0062): what this factory's audio processing module
+  // does now.
+  CaptureProcessing capture_processing() const;
+
  private:
   // Declaration order matters: rtc_runtime_ must be declared before
   // adm_proxy_/audio_device_ so it is destroyed last. Releasing the proxy
@@ -92,11 +102,24 @@ class PeerConnectionFactory {
   webrtc::scoped_refptr<AdmProxy> adm_proxy_;
   std::shared_ptr<AudioDeviceController> audio_device_;
   webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> peer_factory_;
+  // PERSEPHONE PATCH (ADR-0062): the audio processing module that
+  // peer_factory_'s voice engine uses. Built here, and handed to the engine
+  // through CustomAudioProcessing, so the gain can reach it. Ref counted: the
+  // engine holds its own reference.
+  webrtc::scoped_refptr<webrtc::AudioProcessing> audio_processing_;
   // Not owned: the media engine inside peer_factory_ owns it, so it lives as
   // long as peer_factory_ does.
   const VideoEncoderFactory* video_encoder_factory_ = nullptr;
   webrtc::Environment env_;
 };
+
+// PERSEPHONE PATCH (ADR-0062): sets the microphone gain, in percent, for
+// every live factory and for factories made later. False for a gain over
+// 400 percent, which changes nothing.
+bool set_capture_gain_percent(uint16_t percent);
+// PERSEPHONE PATCH (ADR-0062): the audio processing state of the newest live
+// factory, or `found == false` when there is none.
+CaptureProcessing capture_processing_state();
 
 std::shared_ptr<PeerConnectionFactory> create_peer_connection_factory();
 std::shared_ptr<PeerConnectionFactory>
