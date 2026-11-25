@@ -28,6 +28,7 @@ use super::other_sfu::{Home, MAX_OTHER_SFUS, OtherSfus, Plan, home, is_other_hos
 use super::readiness::{Discovery, Flow, TurnServers, sfu_transport, turn_servers};
 use super::rings::{self, Plan as RingPlan, Watch};
 use super::screen::{ScreenGrant, ScreenRefusal, ScreenSource};
+use super::screen_helper::HelperShare;
 use super::sfu::{self, OpenIdToken, SfuError, SfuGrant};
 use super::status::can_send_member_state;
 use super::video::{Notifier, Picture, VideoStore};
@@ -1960,6 +1961,7 @@ impl CallController {
             screen_wanted: false,
             screen_last_on: false,
             screen_closed: None,
+            screen_helper: None,
             screen_sent: false,
             proxy: setup.proxy,
             consent: None,
@@ -2584,6 +2586,9 @@ struct Call {
     screen_last_on: bool,
     /// Fires when the desktop closes the portal session.
     screen_closed: Option<oneshot::Receiver<()>>,
+    /// Windows (ADR-0067): the capture helper of the running share. Dropping
+    /// it stops it. It ends with the share, the call and the session.
+    screen_helper: Option<HelperShare>,
     /// A `SetScreen` start went to the worker and no stop or end since.
     screen_sent: bool,
     /// The profile has a SOCKS5 proxy, which the connection to another SFU
@@ -2790,6 +2795,15 @@ async fn screen_session_closed(slot: &mut Option<oneshot::Receiver<()>>) {
     // A dropped sender is a closed session too.
     let _ = closed.await;
     *slot = None;
+}
+
+/// Waits until the share's capture helper exits by itself, if one runs;
+/// otherwise it never ends. Gives the share state that its exit means.
+async fn screen_helper_exited(slot: &mut Option<HelperShare>) -> ScreenState {
+    let Some(helper) = slot.as_mut() else {
+        return std::future::pending().await;
+    };
+    helper.exited().await
 }
 
 /// Frees the slot when the task ends, also after a panic.
@@ -3257,8 +3271,9 @@ impl Call {
         }
         self.screen_closed = None;
         // On Windows and macOS this queues the worker's stop, unless the
-        // handle's close already did.
+        // handle's close already did. The helper stops with the share.
         self.close_screen_session();
+        self.screen_helper = None;
         if self.screen_sent {
             self.screen_sent = false;
             if self.screen_stop_needed() {
@@ -3276,8 +3291,16 @@ impl Call {
         let source = self.screens.clone();
         let cancel = Arc::new(AtomicBool::new(false));
         let flag = cancel.clone();
+        // The number the share will have: only a finished pick starts a
+        // share, and picks run one at a time, so `screen_picked` takes the
+        // same number (and refuses a helper that has another one).
+        let share = self.screen_share.wrapping_add(1);
         self.screen_pick = Some(ScreenPick {
-            task: tokio::task::spawn_blocking(move || source.choose(&flag)),
+            task: tokio::task::spawn_blocking(move || {
+                let grant = source.choose(&flag)?;
+                // Windows: the helper starts here, after the user's Yes.
+                source.capture(grant, share, &flag)
+            }),
             cancel,
         });
     }
@@ -3336,16 +3359,31 @@ impl Call {
             remote,
             session,
             closed,
+            helper,
         } = grant;
+        let share = self.screen_share.wrapping_add(1);
+        // A helper that serves another share than this one would write
+        // frames that the worker refuses: it is stopped (dropped) and the
+        // share fails.
+        if helper
+            .as_ref()
+            .is_some_and(|helper| helper.share() != share)
+        {
+            drop(accepted);
+            self.screen_failed(inner);
+            return Ok(());
+        }
         // The remote goes first and the command says so by its target: the
-        // worker takes the oldest screen remote with it.
-        if !self.send_screen_remote(remote, &target) {
+        // worker takes the oldest screen remote with it (Windows: the frame
+        // pipe goes into the worker process and `ScreenFrames` names it).
+        if !self.send_screen_remote(remote, &target, share) {
             drop(accepted);
             self.screen_failed(inner);
             return Ok(());
         }
         accepted.session = session;
         self.screen_closed = closed;
+        self.screen_helper = helper;
         self.screen_sent = true;
         self.screen_share = self.screen_share.wrapping_add(1);
         let sent = self.send_worker(ToWorker::SetScreen {
@@ -3393,6 +3431,7 @@ impl Call {
         &self,
         remote: Option<super::screen::Remote>,
         target: &persephone_call_protocol::ScreenTarget,
+        _share: u32,
     ) -> bool {
         use persephone_call_protocol::ScreenTarget;
         use std::os::fd::AsFd;
@@ -3405,12 +3444,36 @@ impl Call {
         }
     }
 
-    /// Off Linux there is no remote: a target that needs one is refused.
-    #[cfg(not(target_os = "linux"))]
+    /// Windows (ADR-0067): a monitor's frame pipe goes into the worker
+    /// process, and `ScreenFrames` names it for share `share`; the caller
+    /// sends the share's `SetScreen` next. The core's own copy of the pipe
+    /// closes when `remote` drops. A monitor without a pipe goes on: the
+    /// worker has none for it and answers `Unavailable`. A target of another
+    /// OS is refused.
+    #[cfg(windows)]
+    fn send_screen_remote(
+        &self,
+        remote: Option<super::screen::Remote>,
+        target: &persephone_call_protocol::ScreenTarget,
+        share: u32,
+    ) -> bool {
+        use persephone_call_protocol::ScreenTarget;
+        match (target, remote) {
+            (ScreenTarget::Monitor { .. }, Some(frames)) => {
+                self.link.send_screen_frames(&frames, share).is_ok()
+            }
+            (ScreenTarget::Monitor { .. }, None) => true,
+            (ScreenTarget::Portal { .. } | ScreenTarget::Display { .. }, _) => false,
+        }
+    }
+
+    /// On macOS there is no remote: a target that needs one is refused.
+    #[cfg(not(any(target_os = "linux", windows)))]
     fn send_screen_remote(
         &self,
         _remote: Option<super::screen::Remote>,
         target: &persephone_call_protocol::ScreenTarget,
+        _share: u32,
     ) -> bool {
         matches!(
             target,
@@ -3423,6 +3486,7 @@ impl Call {
     /// from the desktop). The worker's capture ends with it: say so.
     fn screen_ended_by_desktop(&mut self, inner: &Inner) -> Result<(), EndReason> {
         self.close_screen_session();
+        self.screen_helper = None;
         self.screen_wanted = false;
         if self.screen_sent {
             self.screen_sent = false;
@@ -3431,6 +3495,40 @@ impl Call {
             }
         }
         if self.view.set_screen(CallScreen::Off) == Applied::Changed {
+            self.publish(inner);
+        }
+        Ok(())
+    }
+
+    /// The capture helper exited by itself (ADR-0067): a monitor that went
+    /// or changed is `NotFound`, a refused or failed capture is
+    /// `Unavailable`, and an end that nobody asked for is `Off`. The
+    /// worker's capture is stopped and the share is over; the call goes on.
+    /// The worker's own end item says the same, so whichever comes first
+    /// shows, and the later state of the same share is ignored.
+    fn screen_ended_by_helper(
+        &mut self,
+        inner: &Inner,
+        state: ScreenState,
+    ) -> Result<(), EndReason> {
+        self.close_screen_session();
+        self.screen_wanted = false;
+        self.screen_closed = None;
+        // The helper is gone; its share state stands for the whole share.
+        self.screen_helper = None;
+        if self.screen_sent {
+            self.screen_sent = false;
+            if self.screen_stop_needed() {
+                self.send_screen_stop()?;
+            }
+        }
+        let shown = match state {
+            ScreenState::NotFound => CallScreen::NotFound,
+            ScreenState::Refused => CallScreen::Refused,
+            ScreenState::Unavailable => CallScreen::Unavailable,
+            ScreenState::Off | ScreenState::Starting | ScreenState::On => CallScreen::Off,
+        };
+        if self.view.set_screen(shown) == Applied::Changed {
             self.publish(inner);
         }
         Ok(())
@@ -3464,6 +3562,9 @@ impl Call {
         if !running {
             self.screen_sent = false;
             self.screen_closed = None;
+            // The worker ended the share (its end item says why): the
+            // helper has nothing left to serve.
+            self.screen_helper = None;
             // The worker ended the share: its `WorkerStop` sends nothing.
             if let Some(settled) = self.screen_stop_settled.take() {
                 settled.store(true, Ordering::SeqCst);
@@ -4226,6 +4327,9 @@ impl Call {
                 () = screen_session_closed(&mut self.screen_closed) => {
                     self.screen_ended_by_desktop(inner)?;
                 }
+                state = screen_helper_exited(&mut self.screen_helper) => {
+                    self.screen_ended_by_helper(inner, state)?;
+                }
                 event = self.link.events.recv() => {
                     let Some(event) = event else {
                         return Err(EndReason::WorkerStopped);
@@ -4420,6 +4524,7 @@ impl Call {
             screen_pick,
             screen_control,
             screen_closed,
+            screen_helper,
             ..
         } = self;
         // A portal request still waiting for the user is cancelled first, so
@@ -4429,6 +4534,12 @@ impl Call {
         drop(screen_pick);
         drop(screen_closed);
         close_session(&mut plain(&screen_control));
+        // The capture helper ends with the call and with the session:
+        // stop it and wait for it before anything else goes on. It never
+        // outlives the call.
+        if let Some(helper) = screen_helper {
+            let _ = tokio::task::spawn_blocking(move || helper.stop_and_join()).await;
+        }
         // No more restarts, so the leave cannot be pushed back.
         tasks.abort_all();
         if session_ended {
@@ -6196,6 +6307,7 @@ mod tests {
             screen_wanted: false,
             screen_last_on: false,
             screen_closed: None,
+            screen_helper: None,
             screen_sent: false,
             proxy: false,
             consent: None,
@@ -7613,6 +7725,7 @@ mod tests {
             remote: None,
             session: Some(Box::new(SessionGuard(dropped.clone()))),
             closed: None,
+            helper: None,
         }
     }
 
@@ -7833,6 +7946,7 @@ mod tests {
             remote: None,
             session: None,
             closed: None,
+            helper: None,
         }
     }
 
@@ -9197,6 +9311,7 @@ mod tests {
             remote: Some(remote),
             session: Some(Box::new(SessionGuard(dropped.clone()))),
             closed: None,
+            helper: None,
         };
         fixture.call.screen_picked(&inner, Ok(portal)).unwrap();
         let mut byte = [0_u8; 1];
@@ -9218,9 +9333,268 @@ mod tests {
             remote: None,
             session: None,
             closed: None,
+            helper: None,
         };
         fixture.call.screen_picked(&inner, Ok(no_remote)).unwrap();
         assert_eq!(fixture.call.view.screen, CallScreen::Unavailable);
+    }
+
+    // ---- The Windows capture helper (ADR-0067) ----
+
+    use crate::calls::screen_helper::HelperShare;
+    use crate::calls::screen_helper::fake::FakeHelper;
+
+    /// A bare grant of one monitor with a fake helper for share `share`.
+    fn helper_grant(helper: &Arc<FakeHelper>, share: u32) -> ScreenGrant {
+        ScreenGrant {
+            helper: Some(
+                HelperShare::start(share, Arc::new(helper.clone())).expect("a helper share"),
+            ),
+            ..bare_grant()
+        }
+    }
+
+    fn closed(helper: &Arc<FakeHelper>) -> usize {
+        helper.controls_closed.load(Ordering::SeqCst)
+    }
+
+    /// GIVEN a grant with the helper of the next share WHEN the share starts
+    /// THEN the call keeps the helper and the start goes to the worker; WHEN
+    /// the share is stopped THEN the helper's control pipe closes and the
+    /// worker's stop is queued, once.
+    #[tokio::test]
+    async fn given_a_helper_when_the_share_starts_and_stops_then_the_helper_stops_with_it() {
+        let (mut fixture, inner, _) = call_with_source(true);
+        let helper = FakeHelper::new(true, 0);
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        fixture
+            .call
+            .screen_picked(&inner, Ok(helper_grant(&helper, 1)))
+            .unwrap();
+        assert!(is_monitor_start(fixture.to_worker.try_recv().ok()));
+        assert!(fixture.call.screen_helper.is_some());
+        assert_eq!(closed(&helper), 0, "the helper runs");
+        fixture.call.screen_command(&inner, false, 0).unwrap();
+        assert!(fixture.call.screen_helper.is_none());
+        assert_eq!(closed(&helper), 1, "its control pipe closed");
+        assert!(is_stop_of(fixture.to_worker.try_recv(), 1));
+        assert!(fixture.to_worker.try_recv().is_err(), "one stop only");
+        assert_eq!(fixture.call.view.screen, CallScreen::Off);
+    }
+
+    /// GIVEN a helper that serves another share than the next one WHEN the
+    /// grant arrives THEN the share is unavailable, the helper is stopped and
+    /// nothing goes to the worker.
+    #[tokio::test]
+    async fn given_a_helper_of_another_share_when_the_grant_arrives_then_it_is_stopped() {
+        let (mut fixture, inner, _) = call_with_source(true);
+        let helper = FakeHelper::new(true, 0);
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        fixture
+            .call
+            .screen_picked(&inner, Ok(helper_grant(&helper, 7)))
+            .unwrap();
+        assert_eq!(fixture.call.view.screen, CallScreen::Unavailable);
+        assert!(fixture.call.screen_helper.is_none());
+        assert_eq!(closed(&helper), 1);
+        assert!(fixture.to_worker.try_recv().is_err());
+        assert!(!fixture.call.screen_sent);
+    }
+
+    /// GIVEN a stop that the handle accepted after the pick began WHEN the
+    /// pick's grant with a helper arrives THEN the helper is stopped at once
+    /// and no start goes to the worker; and GIVEN a stop that cancelled the
+    /// pick (a stop during the helper's start) WHEN the cancelled pick ends
+    /// THEN its helper is stopped too.
+    #[tokio::test]
+    async fn given_a_stop_during_the_helper_start_when_the_pick_ends_then_the_helper_is_stopped() {
+        let (mut fixture, inner, _) = call_with_source(true);
+        let helper = FakeHelper::new(true, 0);
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        handle_stop(&fixture.call);
+        fixture
+            .call
+            .screen_picked(&inner, Ok(helper_grant(&helper, 1)))
+            .unwrap();
+        assert_eq!(closed(&helper), 1, "a stale grant's helper stops");
+        assert!(fixture.to_worker.try_recv().is_err(), "no start went");
+        assert!(fixture.call.screen_helper.is_none());
+
+        let (mut fixture, inner, _) = call_with_source(true);
+        let helper = FakeHelper::new(true, 0);
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        fixture.call.screen_command(&inner, false, 1).unwrap();
+        fixture
+            .call
+            .stopped_pick_ended(Ok(helper_grant(&helper, 1)));
+        assert_eq!(closed(&helper), 1, "a cancelled pick's helper stops");
+        assert!(fixture.to_worker.try_recv().is_err());
+    }
+
+    /// GIVEN a running share WHEN its helper exits by itself with each state
+    /// THEN the page shows that state, the worker's capture is stopped once,
+    /// the helper is released and the call goes on; and a later worker state
+    /// of the same share changes nothing.
+    #[tokio::test]
+    async fn given_a_helper_that_exits_when_the_share_runs_then_the_state_and_a_stop_follow() {
+        for (state, shown) in [
+            (ScreenState::NotFound, CallScreen::NotFound),
+            (ScreenState::Unavailable, CallScreen::Unavailable),
+            (ScreenState::Off, CallScreen::Off),
+        ] {
+            let (mut fixture, inner, _) = call_with_source(true);
+            let helper = FakeHelper::new(true, 0);
+            fixture.call.screen_command(&inner, true, 0).unwrap();
+            fixture
+                .call
+                .screen_picked(&inner, Ok(helper_grant(&helper, 1)))
+                .unwrap();
+            assert!(is_monitor_start(fixture.to_worker.try_recv().ok()));
+            fixture.call.screen_ended_by_helper(&inner, state).unwrap();
+            assert_eq!(fixture.call.view.screen, shown, "{state:?}");
+            assert!(fixture.call.screen_helper.is_none());
+            assert!(!fixture.call.screen_sent);
+            assert!(is_stop_of(fixture.to_worker.try_recv(), 1));
+            assert!(fixture.to_worker.try_recv().is_err(), "one stop only");
+            assert!(!fixture.call.screen_state_from_worker(ScreenState::On, 1));
+        }
+    }
+
+    /// GIVEN a running share WHEN the worker reports that it ended (its end
+    /// item named the reason) THEN the helper is released with the share and
+    /// the worker's state shows; a state of an older share does not end it.
+    #[tokio::test]
+    async fn given_the_worker_ends_the_share_then_the_helper_is_released() {
+        let (mut fixture, inner, _) = call_with_source(true);
+        let helper = FakeHelper::new(true, 0);
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        fixture
+            .call
+            .screen_picked(&inner, Ok(helper_grant(&helper, 1)))
+            .unwrap();
+        let _ = fixture.to_worker.try_recv();
+        assert!(!fixture.call.screen_state_from_worker(ScreenState::Off, 9));
+        assert!(
+            fixture.call.screen_helper.is_some(),
+            "another share's state"
+        );
+        assert!(
+            fixture
+                .call
+                .screen_state_from_worker(ScreenState::NotFound, 1)
+        );
+        assert!(fixture.call.screen_helper.is_none());
+        assert_eq!(closed(&helper), 1);
+    }
+
+    /// GIVEN a running share WHEN the call ends, or the core's session ends
+    /// THEN the helper's control pipe closes and the helper is joined before
+    /// the call is gone, with no stop of the share needed.
+    #[tokio::test]
+    async fn given_a_running_share_when_the_call_or_the_session_ends_then_the_helper_is_joined() {
+        for session_ended in [false, true] {
+            let (mut fixture, inner, _) = call_with_source(true);
+            let helper = FakeHelper::new(true, 0);
+            fixture.call.screen_command(&inner, true, 0).unwrap();
+            fixture
+                .call
+                .screen_picked(&inner, Ok(helper_grant(&helper, 1)))
+                .unwrap();
+            assert_eq!(closed(&helper), 0);
+            fixture.call.finish(session_ended).await;
+            assert_eq!(closed(&helper), 1, "session_ended {session_ended}");
+            assert!(!helper.terminated.load(Ordering::SeqCst));
+            assert!(
+                helper.wait_exit_for_test(Duration::from_secs(1)),
+                "the helper ended"
+            );
+        }
+    }
+
+    /// GIVEN a helper that ignores its control pipe WHEN the call ends THEN
+    /// the end waits the bounded time and terminates the Job: no helper is
+    /// left running.
+    #[tokio::test]
+    async fn given_a_helper_that_hangs_when_the_call_ends_then_it_is_terminated() {
+        let (mut fixture, inner, _) = call_with_source(true);
+        let helper = FakeHelper::new(false, 0);
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        fixture
+            .call
+            .screen_picked(&inner, Ok(helper_grant(&helper, 1)))
+            .unwrap();
+        fixture.call.finish(true).await;
+        assert!(helper.terminated.load(Ordering::SeqCst));
+    }
+
+    /// A worker process that takes handles, as the Windows one does.
+    #[cfg(windows)]
+    struct GivingProcess(Arc<AtomicBool>);
+
+    #[cfg(windows)]
+    impl WorkerProcess for GivingProcess {
+        fn kill(&self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+        fn wait_exit(&self, _: Duration) -> bool {
+            true
+        }
+        fn give_handle(&self, _handle: &std::os::windows::io::OwnedHandle) -> Option<u32> {
+            Some(77)
+        }
+    }
+
+    /// GIVEN a grant with a frame pipe and a helper WHEN the share starts
+    /// THEN the pipe goes into the worker (`ScreenFrames` with the handle
+    /// value and the share number) and the start follows it, in that order;
+    /// a worker that cannot take the handle fails the share and stops the
+    /// helper.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn given_a_frame_pipe_when_the_share_starts_then_screen_frames_goes_before_the_start() {
+        use std::os::windows::io::OwnedHandle;
+        let pipe = || {
+            let (read, write) = std::io::pipe().expect("a pipe");
+            (OwnedHandle::from(read), OwnedHandle::from(write))
+        };
+        let (mut fixture, inner, _) = call_with_source(true);
+        let (command_tx, mut commands) = mpsc::channel(4);
+        fixture.call.link = CallWorkerLink::from_parts(
+            command_tx,
+            mpsc::channel(1).1,
+            Box::new(GivingProcess(Arc::new(AtomicBool::new(false)))),
+        );
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        let helper = FakeHelper::new(true, 0);
+        let (read, _write) = pipe();
+        let grant = ScreenGrant {
+            remote: Some(read),
+            ..helper_grant(&helper, 1)
+        };
+        fixture.call.screen_picked(&inner, Ok(grant)).unwrap();
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ToWorker::ScreenFrames {
+                share: 1,
+                handle: 77
+            })
+        ));
+        assert!(is_monitor_start(commands.try_recv().ok()));
+        assert!(fixture.call.screen_helper.is_some());
+
+        // A worker that cannot take the handle: the share fails.
+        let (mut fixture, inner, _) = call_with_source(true);
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        let helper = FakeHelper::new(true, 0);
+        let (read, _write) = pipe();
+        let grant = ScreenGrant {
+            remote: Some(read),
+            ..helper_grant(&helper, 1)
+        };
+        fixture.call.screen_picked(&inner, Ok(grant)).unwrap();
+        assert_eq!(fixture.call.view.screen, CallScreen::Unavailable);
+        assert_eq!(closed(&helper), 1, "the helper stops");
+        assert!(fixture.to_worker.try_recv().is_err());
     }
 
     // ---- Other SFUs (ADR-0054) ----

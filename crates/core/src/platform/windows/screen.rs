@@ -55,6 +55,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::calls::screen::{ScreenGrant, ScreenRefusal, ScreenSource};
+use crate::calls::screen_helper::{HelperShare, wait_until_idle};
+
+use super::screen_helper::{BrokerHelper, HelperLaunch};
 
 /// The most monitors the list keeps (as in the worker).
 const MAX_MONITORS: usize = MAX_SCREEN_MONITORS as usize;
@@ -81,8 +84,27 @@ pub enum Answer {
     Cancel,
 }
 
-/// The Windows monitor source.
-pub struct MonitorScreen;
+/// How long a new share waits for the helper of the last share to be
+/// stopped and joined. Two helpers never run at once.
+const HELPER_IDLE_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The Windows monitor source. After the user's Yes it starts the capture
+/// helper for the share (ADR-0067).
+pub struct MonitorScreen {
+    launcher: Arc<dyn HelperLaunch>,
+}
+
+impl MonitorScreen {
+    /// The source that starts the helper executable next to the core.
+    pub fn next_to_core() -> Self {
+        Self::with_launcher(Arc::new(BrokerHelper::next_to_core()))
+    }
+
+    /// The source that starts helpers with `launcher`.
+    pub fn with_launcher(launcher: Arc<dyn HelperLaunch>) -> Self {
+        Self { launcher }
+    }
+}
 
 impl ScreenSource for MonitorScreen {
     fn available(&self) -> bool {
@@ -105,8 +127,55 @@ impl ScreenSource for MonitorScreen {
             remote: None,
             session: None,
             closed: None,
+            helper: None,
         })
     }
+
+    /// Starts the capture helper for the monitor that the user approved and
+    /// the layout check confirmed. The helper takes only that monitor (name,
+    /// size and rectangle), and its frame pipe's read end goes into the
+    /// grant for the call worker. A previous share's helper is stopped and
+    /// joined first, so no two run at once. A cancel in between stops the
+    /// helper again. Any failure is `Unavailable`; no other capture is tried.
+    fn capture(
+        &self,
+        grant: ScreenGrant,
+        share: u32,
+        cancel: &Arc<AtomicBool>,
+    ) -> Result<ScreenGrant, ScreenRefusal> {
+        if cancel.load(Ordering::SeqCst) {
+            return Err(ScreenRefusal::Cancelled);
+        }
+        if !wait_until_idle(HELPER_IDLE_WAIT) {
+            return Err(ScreenRefusal::Unavailable);
+        }
+        let launched = self.launcher.launch(share, &grant.target)?;
+        let helper =
+            HelperShare::start(share, launched.process).ok_or(ScreenRefusal::Unavailable)?;
+        if cancel.load(Ordering::SeqCst) {
+            // Dropping the helper stops it.
+            return Err(ScreenRefusal::Cancelled);
+        }
+        Ok(ScreenGrant {
+            remote: Some(launched.frames),
+            helper: Some(helper),
+            ..grant
+        })
+    }
+}
+
+/// The first monitor that a share can take, as a target: the ignored test
+/// of the real helper uses it.
+#[cfg(test)]
+pub fn first_capturable_target() -> Option<ScreenTarget> {
+    monitors().screens.into_iter().find_map(|screen| {
+        screen_capture_size_ok(screen.width, screen.height).then_some(ScreenTarget::Monitor {
+            name: screen.name,
+            width: screen.width,
+            height: screen.height,
+            rect: screen.rect,
+        })
+    })
 }
 
 /// The question for the monitor at `place` (from 0) among the `count`

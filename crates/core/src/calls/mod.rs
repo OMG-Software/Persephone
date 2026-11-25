@@ -57,6 +57,7 @@ pub mod readiness;
 pub mod ring_events;
 pub mod rings;
 pub mod screen;
+pub mod screen_helper;
 pub mod sfu;
 pub mod status;
 pub mod video;

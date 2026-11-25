@@ -184,6 +184,14 @@ pub trait WorkerProcess: Send + Sync {
     fn confirm_contained(&self) -> bool {
         true
     }
+
+    /// Windows (ADR-0067): duplicates `handle` into the worker process and
+    /// gives its value there; `None` when the process cannot take it. The
+    /// caller keeps and closes its own handle.
+    #[cfg(windows)]
+    fn give_handle(&self, _handle: &std::os::windows::io::OwnedHandle) -> Option<u32> {
+        None
+    }
 }
 
 /// One running, contained call worker.
@@ -261,6 +269,21 @@ impl CallWorkerLink {
 
     /// Uses `video` as the link's picture store: the one the host's read
     /// thread writes to.
+    /// Windows (ADR-0067): gives the worker the read end of the capture
+    /// helper's frame pipe for share `share`. The pipe is duplicated into
+    /// the worker process, and `ScreenFrames` names it there; the worker
+    /// checks that it is a pipe before it reads. Send the share's
+    /// `SetScreen` directly after. The caller closes its own copy.
+    #[cfg(windows)]
+    pub fn send_screen_frames(
+        &self,
+        frames: &std::os::windows::io::OwnedHandle,
+        share: u32,
+    ) -> Result<(), WorkerGone> {
+        let handle = self.process.give_handle(frames).ok_or(WorkerGone)?;
+        self.send(ToWorker::ScreenFrames { share, handle })
+    }
+
     pub fn with_video(mut self, video: VideoStore) -> Self {
         self.video = video;
         self

@@ -11,6 +11,7 @@ pub mod pick;
 pub mod profile;
 pub mod save;
 pub mod screen;
+pub mod screen_helper;
 pub mod ui;
 pub mod vault;
 

@@ -4,8 +4,9 @@
 //! The page never names a source. A share starts when the page asks, and
 //! the core asks a [`ScreenSource`] to pick one: on Linux the core shows its
 //! own warning window and then runs the ScreenCast portal; on Windows the
-//! core's own window names each monitor (`platform/windows/screen.rs`; the
-//! worker captures it with GDI, `docs/evidence/screen-share-windows.md`); on
+//! core's own window names each monitor (`platform/windows/screen.rs`; a
+//! capture helper outside the call worker captures it with
+//! Windows.Graphics.Capture, ADR-0067); on
 //! macOS it checks the Screen Recording permission and asks which display to
 //! share (ADR-0064). A cancelled or refused pick leaves the share off. It
 //! never falls back to another source.
@@ -22,6 +23,8 @@ use persephone_call_protocol::{
 };
 use persephone_contracts::CallScreen;
 use tokio::sync::oneshot;
+
+use super::screen_helper::HelperShare;
 
 /// What the user reads before a Linux screen share starts.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -159,6 +162,7 @@ pub fn choose_display(
                     remote: None,
                     session: None,
                     closed: None,
+                    helper: None,
                 });
             }
             Some(false) => {}
@@ -172,11 +176,15 @@ pub fn choose_display(
     })
 }
 
-/// The PipeWire remote that goes to the worker over the camera channel
-/// (Linux). Other platforms never have one.
+/// What goes to the worker before the start command: on Linux and macOS the
+/// PipeWire remote over the camera channel (macOS has none); on Windows the
+/// read end of the capture helper's frame pipe (ADR-0067), which the core
+/// duplicates into the worker process.
 #[cfg(unix)]
 pub type Remote = std::os::fd::OwnedFd;
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub type Remote = std::os::windows::io::OwnedHandle;
+#[cfg(not(any(unix, windows)))]
 pub type Remote = ();
 
 /// The source types the core asks the portal for: monitors (1) and windows
@@ -242,6 +250,10 @@ pub struct ScreenGrant {
     /// Fires when the desktop closes the session (the user stopped the share
     /// from the desktop's own control).
     pub closed: Option<oneshot::Receiver<()>>,
+    /// Windows: the capture helper that serves this share (ADR-0067). The
+    /// call task keeps it until the share ends; dropping it stops the
+    /// helper. Its `remote` is the frame pipe's read end.
+    pub helper: Option<HelperShare>,
 }
 
 impl std::fmt::Debug for ScreenGrant {
@@ -250,6 +262,7 @@ impl std::fmt::Debug for ScreenGrant {
             .field("target", &self.target)
             .field("remote", &self.remote.is_some())
             .field("session", &self.session.is_some())
+            .field("helper", &self.helper)
             .finish()
     }
 }
@@ -264,6 +277,21 @@ pub trait ScreenSource: Send + Sync {
     /// the pick. Blocks until answered; call it from a blocking task.
     /// Setting `cancel` ends the wait and closes any window.
     fn choose(&self, cancel: &Arc<AtomicBool>) -> Result<ScreenGrant, ScreenRefusal>;
+
+    /// Windows (ADR-0067): starts the capture helper for the screen that
+    /// `choose` gave, as share `share`, and returns the grant with the
+    /// helper and its frame pipe in it. It runs right after `choose` on the
+    /// same blocking thread, so the helper starts only after the user said
+    /// Yes and the core read the layout again. A refusal here leaves the
+    /// share off or unavailable. Other platforms keep the grant as it is.
+    fn capture(
+        &self,
+        grant: ScreenGrant,
+        _share: u32,
+        _cancel: &Arc<AtomicBool>,
+    ) -> Result<ScreenGrant, ScreenRefusal> {
+        Ok(grant)
+    }
 }
 
 /// A platform without screen sharing: every OS without its own source (the

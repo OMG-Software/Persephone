@@ -409,6 +409,7 @@ fn share_on(connection: &Connection, cancel: &AtomicBool) -> Result<ScreenGrant,
         remote: Some(remote),
         session: Some(Box::new(session)),
         closed: Some(closed),
+        helper: None,
     })
 }
 
