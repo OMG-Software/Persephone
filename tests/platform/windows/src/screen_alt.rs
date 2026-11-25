@@ -175,12 +175,15 @@ fn verdict(pixels: Pixels) -> u32 {
 }
 
 /// The capture attempt of `method`: 0 for a real picture, else a stage.
-/// WGC has its own code in `wgc.rs`; it is not run here.
+/// Each attempt clears the last `HRESULT` first, so a failure never shows
+/// the code of an earlier one.
 pub fn run(method: Method) -> u32 {
+    LAST_ERROR.with(|cell| cell.set(0));
     match method {
         Method::Dxgi => dxgi(),
         Method::Gdi => gdi(),
-        Method::Wgc => 0,
+        // 0 would read as a captured frame.
+        Method::Wgc => unreachable!("WGC has its own code in wgc.rs and is not run here"),
     }
 }
 
@@ -267,10 +270,12 @@ fn duplicate_frame(
         };
         // SAFETY: balances the successful acquire.
         let _ = unsafe { duplication.ReleaseFrame() };
-        // A frame with no picture update is the cursor only: ask again.
+        // A frame with no picture update is the cursor only: ask again, and
+        // keep a failed copy as the result if no later frame works.
         if stage == 0 || info.LastPresentTime != 0 {
             return stage;
         }
+        last = stage;
     }
     last
 }
@@ -345,7 +350,16 @@ fn gdi() -> u32 {
     match capture.poll(&mut admit, &mut deliver) {
         Ok(true) => stage,
         Ok(false) => GDI_BLT,
-        Err(error) => error as u32,
+        Err(error) => {
+            if error == super::gdi::Stage::Blit {
+                // `poll` returns at once after `BitBlt` fails, so the thread's
+                // last error is still the one `BitBlt` set.
+                // SAFETY: reads the calling thread's last error code.
+                let code = unsafe { windows_sys::Win32::Foundation::GetLastError() };
+                LAST_ERROR.with(|cell| cell.set(windows::core::HRESULT::from_win32(code).0));
+            }
+            error as u32
+        }
     }
 }
 

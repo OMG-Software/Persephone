@@ -4,9 +4,13 @@
 //! The core names the monitor to the worker by its index in display order
 //! (`EnumDisplayMonitors`) and its size in pixels. The worker reads its own
 //! list when the share starts and refuses another size at that index. This
-//! module keeps the same list rules as `crates/call-worker/src/screen/wgc.rs`
-//! (at most 16 monitors, each side 1 to 16,384 pixels, the size of the
-//! current display mode).
+//! module lists monitors with the same rules as
+//! `crates/call-worker/src/screen/wgc.rs` (the call protocol's
+//! `MAX_SCREEN_MONITORS` and `MAX_MONITOR_SIDE`, the size of the current
+//! display mode), so an index names the same monitor on both sides. It
+//! offers only the monitors that the worker's GDI capture takes
+//! (`screen_capture_size_ok`); another one keeps its place in the list, is
+//! not asked, and the question says how many were left out.
 //!
 //! The window is a message box: Yes shares the shown screen, No shows the
 //! next one (a single screen has only Yes and Cancel), Cancel stops. A
@@ -18,7 +22,9 @@ use std::ptr::null_mut;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use persephone_call_protocol::ScreenTarget;
+use persephone_call_protocol::{
+    MAX_MONITOR_SIDE, MAX_SCREEN_MONITORS, ScreenTarget, screen_capture_size_ok,
+};
 use windows_sys::Win32::Foundation::{LPARAM, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
     DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDisplayMonitors, EnumDisplaySettingsW, GetMonitorInfoW,
@@ -32,10 +38,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use crate::calls::screen::{ScreenGrant, ScreenRefusal, ScreenSource};
 
 /// The most monitors the list keeps (as in the worker).
-const MAX_MONITORS: usize = 16;
-/// The largest side of a monitor the list keeps, in pixels (as in the
-/// worker).
-const MAX_SIDE: u32 = 16_384;
+const MAX_MONITORS: usize = MAX_SCREEN_MONITORS as usize;
 
 /// One monitor, as the user sees it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -75,8 +78,10 @@ impl ScreenSource for MonitorScreen {
     }
 }
 
-/// The text of the window for the screen at `index` of `count`.
-pub fn prompt_text(index: usize, count: usize, screen: Screen) -> String {
+/// The text of the window for the screen at `index` of the `count` that are
+/// offered. `left_out` screens are listed but have a size that cannot be
+/// shared.
+pub fn prompt_text(index: usize, count: usize, screen: Screen, left_out: usize) -> String {
     let name = index + 1;
     let (what, buttons) = if count > 1 {
         (
@@ -92,28 +97,45 @@ pub fn prompt_text(index: usize, count: usize, screen: Screen) -> String {
             "Yes shares this screen. No cancels.",
         )
     };
+    let left_out = match left_out {
+        0 => String::new(),
+        1 => "\n\nOne screen cannot be shared at its size and is not shown.".to_owned(),
+        n => format!("\n\n{n} screens cannot be shared at their size and are not shown."),
+    };
+    // A GDI copy was not measured against the display affinity that hides
+    // the main window (ADR-0045), so the question warns as on macOS.
     format!(
-        "{what}\n\nEveryone in the call can see it. Windows draws no border around a \
-         shared screen; the call bar shows that it is shared.\n\n{buttons}"
+        "{what}\n\nEveryone in the call can see it. It can show Persephone's \
+         messages. Windows draws no border around a shared screen; the call bar \
+         shows that it is shared.{left_out}\n\n{buttons}"
     )
 }
 
-/// Shows each screen in turn until the user shares one or stops. `ask` shows
-/// one window and returns the answer. A cancel flag set while a window was
-/// open ends the pick even after "Share".
+/// Shows each screen that can be shared in turn until the user shares one or
+/// stops. `screens` is the whole list in the worker's order; the target
+/// names a screen by its place in it. `ask` shows one window and returns the
+/// answer. A cancel flag set while a window was open ends the pick even
+/// after "Share".
 pub fn pick(
     screens: &[Screen],
     cancel: &AtomicBool,
     mut ask: impl FnMut(&str, bool) -> Answer,
 ) -> Result<ScreenTarget, ScreenRefusal> {
-    if screens.is_empty() {
+    let offered: Vec<(usize, Screen)> = screens
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(|(_, screen)| screen_capture_size_ok(screen.width, screen.height))
+        .collect();
+    if offered.is_empty() {
         return Err(ScreenRefusal::Unavailable);
     }
-    let mut index = 0;
+    let left_out = screens.len() - offered.len();
+    let mut at = 0;
     loop {
-        let screen = screens[index];
-        let text = prompt_text(index, screens.len(), screen);
-        let answer = ask(&text, screens.len() > 1);
+        let (index, screen) = offered[at];
+        let text = prompt_text(at, offered.len(), screen, left_out);
+        let answer = ask(&text, offered.len() > 1);
         if cancel.load(Ordering::SeqCst) {
             return Err(ScreenRefusal::Cancelled);
         }
@@ -127,15 +149,16 @@ pub fn pick(
                     height: screen.height,
                 });
             }
-            Answer::Next => index = (index + 1) % screens.len(),
+            Answer::Next => at = (at + 1) % offered.len(),
             Answer::Cancel => return Err(ScreenRefusal::Cancelled),
         }
     }
 }
 
-/// Whether a monitor of this size is listed (the worker's rule).
+/// Whether a monitor of this size is listed (the worker's list rule). A
+/// listed monitor is offered only when the capture takes its size.
 pub fn listed(width: u32, height: u32) -> bool {
-    (1..=MAX_SIDE).contains(&width) && (1..=MAX_SIDE).contains(&height)
+    (1..=MAX_MONITOR_SIDE).contains(&width) && (1..=MAX_MONITOR_SIDE).contains(&height)
 }
 
 fn wide(text: &str) -> Vec<u16> {
@@ -323,14 +346,62 @@ mod tests {
     /// the number of screens.
     #[test]
     fn given_the_prompt_then_it_names_the_screen_the_audience_and_the_buttons() {
-        let one = prompt_text(0, 1, QHD);
+        let one = prompt_text(0, 1, QHD, 0);
         assert!(one.contains("Screen 1 (2560x1440)"));
         assert!(one.contains("Everyone in the call"));
         assert!(one.contains("no border"));
         assert!(one.contains("No cancels"));
-        let two = prompt_text(1, 2, HD);
+        assert!(one.contains("Persephone's messages"));
+        assert!(!one.contains("not shown"));
+        let two = prompt_text(1, 2, HD, 1);
         assert!(two.contains("Screen 2 of 2 (1920x1080)"));
         assert!(two.contains("No shows the next screen"));
+        assert!(two.contains("One screen cannot be shared at its size"));
+        assert!(prompt_text(0, 1, HD, 2).contains("2 screens cannot be shared"));
+    }
+
+    /// GIVEN a monitor too large to capture between two others WHEN the user
+    /// goes to the next screen and shares it THEN the large one is never
+    /// asked, and the target keeps the shared screen's place in the list.
+    #[test]
+    fn given_a_screen_too_large_to_capture_then_it_is_skipped_and_the_index_kept() {
+        const WIDE: Screen = Screen {
+            width: 8000,
+            height: 1000,
+        };
+        let cancel = AtomicBool::new(false);
+        let asked = RefCell::new(Vec::new());
+        let mut answers = vec![Answer::Next, Answer::Share].into_iter();
+        let target = pick(&[HD, WIDE, QHD], &cancel, |text, several| {
+            assert!(several);
+            asked.borrow_mut().push(text.to_owned());
+            answers.next().expect("an answer")
+        });
+        assert_eq!(
+            target,
+            Ok(ScreenTarget::Monitor {
+                index: 2,
+                width: 2560,
+                height: 1440
+            })
+        );
+        let asked = asked.borrow();
+        assert!(asked.iter().all(|text| !text.contains("8000x1000")));
+        assert!(asked[1].contains("Screen 2 of 2 (2560x1440)"));
+        assert!(asked[1].contains("One screen cannot be shared"));
+    }
+
+    /// GIVEN only monitors that cannot be captured WHEN a screen is picked
+    /// THEN no window opens and the share is unavailable.
+    #[test]
+    fn given_only_screens_too_large_to_capture_then_the_share_is_unavailable() {
+        let cancel = AtomicBool::new(false);
+        let big = Screen {
+            width: 5120,
+            height: 2880,
+        };
+        let target = pick(&[big], &cancel, |_, _| panic!("no window"));
+        assert_eq!(target, Err(ScreenRefusal::Unavailable));
     }
 
     /// GIVEN monitor sizes WHEN listed THEN the rule is the worker's:

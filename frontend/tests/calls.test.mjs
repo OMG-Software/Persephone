@@ -24,6 +24,8 @@ import {
   cameraButton,
   screenButton,
   SCREEN_TEXT,
+  SCREEN_REFUSED_TEXT,
+  screenNote,
   hasVideo,
   videoCallButton,
   deviceChoice,
@@ -283,6 +285,17 @@ test('GIVEN each screen state WHEN the button is built THEN it offers to stop on
     assert.notEqual(SCREEN_TEXT[state], '', state);
   }
   assert.equal(IDLE_CALL.screen, 'off');
+});
+
+test('GIVEN a refused screen share WHEN the note is read THEN only macOS names the Screen Recording setting', () => {
+  assert.match(screenNote('refused', 'mac'), /System Settings, Privacy & Security, Screen Recording/);
+  for (const platform of ['windows', 'linux', 'other']) {
+    assert.equal(screenNote('refused', platform), SCREEN_REFUSED_TEXT, platform);
+    assert.doesNotMatch(screenNote('refused', platform), /macOS|System Settings/, platform);
+  }
+  for (const state of ['off', 'starting', 'on', 'not_found', 'unavailable']) {
+    assert.equal(screenNote(state, 'mac'), SCREEN_TEXT[state], state);
+  }
 });
 
 test('GIVEN the same room states WHEN both buttons are built THEN the video button follows the call button and only the label differs', () => {

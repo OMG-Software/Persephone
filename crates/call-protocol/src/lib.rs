@@ -80,6 +80,24 @@ pub const MAX_SCREEN_FPS: u32 = 5;
 pub const MAX_SCREEN_MONITORS: u8 = 16;
 /// The largest side of a monitor the core names, in pixels.
 pub const MAX_MONITOR_SIDE: u32 = 16_384;
+/// The longest side of a screen the worker captures: pixels on Windows,
+/// points on macOS. A listed monitor can be larger; the core does not offer
+/// it then.
+pub const MAX_CAPTURE_SIDE: u32 = 7680;
+/// The most pixels (or points) in one screen capture: 3840 x 2160.
+pub const MAX_CAPTURE_PIXELS: u64 = 3840 * 2160;
+
+/// A screen size the worker captures: at least 2 x 2, at most
+/// [`MAX_CAPTURE_SIDE`] on a side and [`MAX_CAPTURE_PIXELS`] in all. The
+/// core offers only such a screen, and the worker checks it before any
+/// buffer exists, so both use this one rule.
+pub const fn screen_capture_size_ok(width: u32, height: u32) -> bool {
+    width >= 2
+        && height >= 2
+        && width <= MAX_CAPTURE_SIDE
+        && height <= MAX_CAPTURE_SIDE
+        && (width as u64) * (height as u64) <= MAX_CAPTURE_PIXELS
+}
 
 /// The longest side of a picture on this tile.
 pub const fn max_side(tile: u8) -> u32 {

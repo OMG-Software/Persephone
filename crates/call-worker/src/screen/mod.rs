@@ -54,21 +54,25 @@ mod wgc;
 /// on Linux the PipeWire connection and the wait for the stream (up to 6 s),
 /// or on macOS the display list and the stream start (up to 4 s each).
 const OPEN_TIMEOUT: Duration = Duration::from_secs(10);
-/// No screen picture is larger than this on either side (a 4K screen, a wide
-/// screen).
-const MAX_CAPTURE_SIDE: u32 = 7680;
-/// Nor has it more pixels than 3840x2160.
-const MAX_CAPTURE_PIXELS: u64 = 3840 * 2160;
+#[cfg(target_os = "linux")]
+use persephone_call_protocol::MAX_CAPTURE_SIDE;
+/// A screen size the worker can take: at most 7680 on a side and 3840x2160
+/// pixels. Checked before any buffer for the frame is made. The core offers
+/// only screens within the same rule, from the call protocol.
+pub use persephone_call_protocol::screen_capture_size_ok as capture_size_ok;
 
-/// A screen size the worker can take. Checked before any buffer for the
-/// frame is made.
-pub fn capture_size_ok(width: u32, height: u32) -> bool {
-    width >= 2
-        && height >= 2
-        && width <= MAX_CAPTURE_SIDE
-        && height <= MAX_CAPTURE_SIDE
-        && u64::from(width) * u64::from(height) <= MAX_CAPTURE_PIXELS
-}
+// The Windows monitor list and the GDI capture keep their own numbers,
+// because the containment gate compiles those files without this crate.
+// They must equal the protocol's, which the core uses to name and offer a
+// monitor: a different list rule moves the indexes, a different capture
+// rule offers a monitor that the worker then refuses.
+#[cfg(windows)]
+const _: () = assert!(
+    wgc::MAX_MONITORS == persephone_call_protocol::MAX_SCREEN_MONITORS as usize
+        && wgc::MAX_MONITOR_SIDE == persephone_call_protocol::MAX_MONITOR_SIDE
+        && gdi::MAX_SIDE == persephone_call_protocol::MAX_CAPTURE_SIDE
+        && gdi::MAX_PIXELS == persephone_call_protocol::MAX_CAPTURE_PIXELS
+);
 
 /// The byte order of the 32-bit pixels in a [`CapturedFrame`], as in memory.
 /// The fourth byte is alpha or padding; it is never used.

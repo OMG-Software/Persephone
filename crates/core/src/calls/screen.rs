@@ -17,7 +17,9 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use persephone_call_protocol::ScreenTarget;
+use persephone_call_protocol::{
+    MAX_CAPTURE_SIDE, MAX_SCREEN_MONITORS, ScreenTarget, screen_capture_size_ok,
+};
 use persephone_contracts::CallScreen;
 use tokio::sync::oneshot;
 
@@ -61,26 +63,25 @@ pub struct Display {
     pub height: u32,
 }
 
-/// The most displays the core and the worker read, in the same order.
+/// The most displays the core and the worker read, in the same order (the
+/// call protocol's limit, which the worker also uses).
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub const MAX_DISPLAYS: usize = 16;
+pub const MAX_DISPLAYS: usize = MAX_SCREEN_MONITORS as usize;
 
 /// A display size, in points, that the worker takes: at least 2x2, at most
-/// 7680 on a side and 3840x2160 pixels.
+/// 7680 on a side and 3840x2160 pixels. It is the worker's own rule, from
+/// the call protocol.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn display_size_ok(width: u32, height: u32) -> bool {
-    width >= 2
-        && height >= 2
-        && width <= 7680
-        && height <= 7680
-        && u64::from(width) * u64::from(height) <= 3840 * 2160
+    screen_capture_size_ok(width, height)
 }
 
 /// A display side in points, from CoreGraphics' `double`, as whole points.
 /// A value that is not finite, is under 1 or is over 7680 is `None`.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn points(value: f64) -> Option<u32> {
-    (value.is_finite() && (1.0..=7680.0).contains(&value)).then(|| value.round() as u32)
+    (value.is_finite() && (1.0..=f64::from(MAX_CAPTURE_SIDE)).contains(&value))
+        .then(|| value.round() as u32)
 }
 
 /// The target for the display at `index` of `displays`, or `None` when the
@@ -116,7 +117,9 @@ pub trait DisplayShare {
 /// one question for each display, the main one first. "Yes" is the pick; a
 /// "No" on every display, or a cancel, leaves the share off. A permission
 /// that is not given is `Refused`, and the page then tells the user to allow
-/// Persephone in System Settings.
+/// Persephone in System Settings. When no display has a size the worker
+/// takes, nothing is asked and the share is `Unavailable`, not a cancel the
+/// user did not make.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn choose_display(
     system: &dyn DisplayShare,
@@ -135,10 +138,12 @@ pub fn choose_display(
     let mut order: Vec<usize> = (0..displays.len().min(MAX_DISPLAYS)).collect();
     // The main display first; the others keep their order.
     order.sort_by_key(|&index| displays[index].id != main);
+    let mut asked = false;
     for index in order {
         let Some(target) = display_target(&displays, index) else {
             continue;
         };
+        asked = true;
         let display = displays[index];
         let text = macos_screen_question(index, display.width, display.height, display.id == main);
         let answer = system.ask(&text);
@@ -158,7 +163,11 @@ pub fn choose_display(
             None => return Err(ScreenRefusal::Unavailable),
         }
     }
-    Err(ScreenRefusal::Cancelled)
+    Err(if asked {
+        ScreenRefusal::Cancelled
+    } else {
+        ScreenRefusal::Unavailable
+    })
 }
 
 /// The PipeWire remote that goes to the worker over the camera channel
@@ -438,6 +447,30 @@ mod tests {
             choose_display(&no_window, &cancel).err(),
             Some(ScreenRefusal::Unavailable)
         );
+    }
+
+    /// GIVEN displays whose sizes the worker does not take WHEN a display is
+    /// chosen THEN nothing is asked and the share is unavailable, not a
+    /// cancel; a size it takes is still asked.
+    #[test]
+    fn given_no_display_the_worker_takes_then_the_share_is_unavailable() {
+        let cancel = AtomicBool::new(false);
+        let mut system = FakeSystem::new(true, vec![]);
+        for display in &mut system.displays {
+            display.width = 7681;
+        }
+        assert_eq!(
+            choose_display(&system, &cancel).err(),
+            Some(ScreenRefusal::Unavailable)
+        );
+        assert!(system.asked.lock().expect("asked").is_empty());
+        let mut one = FakeSystem::new(true, vec![Some(false)]);
+        one.displays[1].width = 7681;
+        assert_eq!(
+            choose_display(&one, &cancel).err(),
+            Some(ScreenRefusal::Cancelled)
+        );
+        assert_eq!(one.asked.lock().expect("asked").len(), 1);
     }
 
     /// GIVEN a cancel flag WHEN a display is chosen THEN nothing is asked.

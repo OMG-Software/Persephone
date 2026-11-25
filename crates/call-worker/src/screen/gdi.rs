@@ -27,8 +27,13 @@ use windows::Win32::UI::HiDpi::{
 
 use super::wgc;
 
-/// The most pixels one capture copies (a 4K screen), as in `screen/mod.rs`.
+/// The most pixels one capture copies (a 4K screen), as in the call
+/// protocol's `MAX_CAPTURE_PIXELS`.
 pub const MAX_PIXELS: u64 = 3840 * 2160;
+/// The longest side one capture copies, as in the call protocol's
+/// `MAX_CAPTURE_SIDE`. A larger monitor is refused at the start, because
+/// the frame check would drop each of its frames.
+pub const MAX_SIDE: u32 = 7680;
 /// How often the monitor list is read again to see that the monitor is
 /// still there with its size.
 const RECHECK: Duration = Duration::from_millis(500);
@@ -58,8 +63,8 @@ pub enum Stage {
 pub fn size_ok(width: u32, height: u32) -> bool {
     width >= 2
         && height >= 2
-        && width <= wgc::MAX_MONITOR_SIDE
-        && height <= wgc::MAX_MONITOR_SIDE
+        && width <= MAX_SIDE
+        && height <= MAX_SIDE
         && u64::from(width) * u64::from(height) <= MAX_PIXELS
 }
 
@@ -136,7 +141,15 @@ pub fn open(index: usize, expected: Option<(u32, u32)>) -> Result<Capture, Stage
                 return Err(Stage::Bitmap);
             }
         };
+        // A DIB section that is not selected would leave every copy black
+        // and give `Drop` no object to put back.
         let old = SelectObject(memory, bitmap.into());
+        if old.is_invalid() {
+            let _ = DeleteObject(bitmap.into());
+            let _ = DeleteDC(memory);
+            ReleaseDC(Some(HWND::default()), screen);
+            return Err(Stage::Bitmap);
+        }
         Ok(Capture {
             screen,
             memory,
@@ -224,18 +237,22 @@ impl Drop for Capture {
 mod tests {
     use super::*;
 
-    /// GIVEN monitor sizes WHEN checked THEN a size the buffer can hold
-    /// passes, and a degenerate, huge or overflowing one does not.
+    /// GIVEN monitor sizes WHEN checked THEN a size the buffer can hold and
+    /// the frame check takes passes, and a degenerate, huge, too wide or
+    /// overflowing one does not.
     #[test]
     fn given_monitor_sizes_when_checked_then_only_bounded_sizes_pass() {
         assert!(size_ok(1920, 1080));
         assert!(size_ok(3840, 2160));
         assert!(size_ok(2, 2));
+        assert!(size_ok(MAX_SIDE, 1000));
         assert!(!size_ok(1, 1080));
         assert!(!size_ok(1920, 0));
         assert!(!size_ok(3840, 2161));
         assert!(!size_ok(7680, 4320));
         assert!(!size_ok(u32::MAX, u32::MAX));
-        assert!(!size_ok(wgc::MAX_MONITOR_SIDE + 1, 2));
+        // Under the pixel limit, but wider than any frame the worker sends.
+        assert!(!size_ok(8000, 1000));
+        assert!(!size_ok(MAX_SIDE + 1, 2));
     }
 }

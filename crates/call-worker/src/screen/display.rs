@@ -9,8 +9,9 @@
 use std::time::{Duration, Instant};
 
 /// The most displays the worker reads from CoreGraphics. The core reads the
-/// same number; an index (a `u8` on the wire) beyond it is `NotFound`.
-pub const MAX_DISPLAYS: usize = 16;
+/// same number from the call protocol; an index (a `u8` on the wire) beyond
+/// it is `NotFound`.
+pub const MAX_DISPLAYS: usize = persephone_call_protocol::MAX_SCREEN_MONITORS as usize;
 /// The capture is asked for at most this size (ADR-0053).
 pub const OUTPUT_MAX_WIDTH: u32 = 1920;
 pub const OUTPUT_MAX_HEIGHT: u32 = 1080;
@@ -55,9 +56,11 @@ pub fn output_size(width: u32, height: u32) -> Option<(u32, u32)> {
     Some((even(out_w) as u32, even(out_h) as u32))
 }
 
-/// Whether a delivered picture is one the worker takes: not larger than the
-/// size that was asked for (plus nothing), and a size the capture limits
-/// accept. The check runs before any pixel is read.
+/// Whether a delivered picture is one the worker takes: within the capture
+/// limits and not larger than 1920x1080, the most that [`output_size`] ever
+/// asks for. It does not compare with the size asked for one display: a
+/// smaller request can still get a frame up to 1920x1080. The check runs
+/// before any pixel is read.
 pub fn frame_fits(width: usize, height: usize) -> bool {
     let (Ok(w), Ok(h)) = (u32::try_from(width), u32::try_from(height)) else {
         return false;

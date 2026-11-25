@@ -14,9 +14,11 @@
 //! capability SID, mitigations, Job limits) plus one candidate capability.
 //! Keep the two in step.
 //!
-//! Exit status of the parent: 0 when the control captured a frame and every
-//! container run finished (whatever it measured); 1 when the control failed
-//! or a run could not be launched; the result lines say what each set got.
+//! Exit status of the parent: 0 when the control and the GDI control
+//! captured a frame and every container run finished (whatever it
+//! measured); 1 when either control failed or a run could not be launched;
+//! the result lines say what each set got. A DXGI control with no frame (a
+//! still desktop gives none) is printed only.
 //! A set that cannot capture is a measurement, not a gate failure: the
 //! worker is granted only a capability that a set below shows to work.
 
@@ -285,8 +287,10 @@ fn parent() -> i32 {
         let mut line = describe(stage);
         if stage != 0 {
             line.push_str(&format!(", HRESULT {:#010x}", alt::last_error() as u32));
-            // Another method that fails in the control is a failed measurement.
-            failed = true;
+            // DXGI waits for a screen change, so a still desktop gives it no
+            // frame: its control is information. GDI copies the screen as it
+            // is, so a GDI control that fails is a failed measurement.
+            failed |= method == Method::Gdi;
         } else {
             line.push_str(&format!(", mean colour {:#08x}", alt::last_mean()));
         }
