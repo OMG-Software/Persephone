@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import AccountPage from './AccountPage.svelte';
   import BrandMark from './BrandMark.svelte';
   import Accounts from './Accounts.svelte';
@@ -799,12 +799,18 @@
       }
     );
   }
+  // Ends the call window state of a call that is over: no fallback, no
+  // "could not open" message, and no reply from an open still waiting.
+  function forgetCallWindow() {
+    callWindowFailed = false;
+    callWindowRequest += 1;
+    if (error === CALL_WINDOW_UNAVAILABLE_TEXT) error = null;
+  }
   $effect(() => {
     const joined = inCall(callState);
-    if (joined && !callWindowFor) {
-      callWindowFailed = false;
-      showCallWindow();
-    }
+    if (joined && !callWindowFor) showCallWindow();
+    // Not read: an error change must not run this again.
+    else if (!joined && callWindowFor) untrack(forgetCallWindow);
     callWindowFor = joined;
   });
   let callJoinText = $state<string | null>(null);
@@ -1229,8 +1235,10 @@
     screenText = null;
     screenRequest += 1;
     callDismissed = false;
-    callWindowFailed = false;
-    callWindowRequest += 1;
+    // The next call status opens the call window again if a call still
+    // runs, so the fallback follows that open, not the old session's.
+    forgetCallWindow();
+    callWindowFor = false;
     callNames = new Map();
     callNamesFor = null;
     callRefresher.request();
