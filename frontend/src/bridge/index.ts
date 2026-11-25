@@ -580,9 +580,11 @@ export async function startCallStats(onStats: (stats: CallStats) => void): Promi
       statsHandled(page);
     }
   });
+  // The bridge fails with the host's code strings, as `invoke` does, and the
+  // page maps each code to its text, so this failure is a code too.
   await inStatsTurn(() =>
     statsPage === null
-      ? Promise.reject('core_unavailable')
+      ? Promise.reject('core_unavailable') // NOSONAR: a host code string, not an Error
       : invoke<null>('call_stats', { on: true, page: statsPage, onStats: channel })
   );
 }
@@ -602,14 +604,12 @@ export async function stopCallStats(): Promise<void> {
 
 // Tells the host that the page handled a statistics reading, so it sends the
 // next. Nothing waits for the answer: a reload makes the count stale, and the
-// host refuses it, which is expected.
+// host refuses it, which is expected. `invoke` is async, so every failure,
+// also a bridge that is gone with the page, is a rejection that the catch
+// takes.
 function statsHandled(page: number | null): void {
   if (page === null) return;
-  try {
-    invoke<null>('call_stats_read', { page }).catch(() => undefined);
-  } catch {
-    // The bridge is gone with the page.
-  }
+  invoke<null>('call_stats_read', { page }).catch(() => undefined);
 }
 
 // The page's count from `watch_session` (ADR-0066). The host takes a

@@ -361,9 +361,11 @@ test('GIVEN statistics tables WHEN their captions render THEN a device shows its
   assert.match(device, /<bdi>@bob:s<\/bdi>/);
   assert.match(device, /class="call-stats-device">\(<span class="visually-hidden">device <\/span><bdi>PHONE<\/bdi>\)<\/span>/);
 
-  // A right-to-left override in a device ID stays inside its own isolate.
-  const hostile = caption({ userId: '@eve:s', deviceId: '‮<img src=x onerror=alert(1)>' });
-  assert.match(hostile, /<bdi>‮&lt;img src=x onerror=alert\(1\)>?(&gt;)?<\/bdi>\)<\/span>/);
+  // A device ID with a right-to-left override and markup is escaped text in
+  // its own <bdi>. The markup shows the escaping and the wrapper only, not how
+  // a browser draws the override.
+  const hostile = caption({ userId: '@eve:s', deviceId: '\u202e<img src=x onerror=alert(1)>' });
+  assert.match(hostile, /<bdi>\u202e&lt;img src=x onerror=alert\(1\)(?:>|&gt;)<\/bdi>\)<\/span>/);
   assert.doesNotMatch(hostile, /<img/);
 
   const own = caption({ title: 'Your microphone' });
