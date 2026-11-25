@@ -43,6 +43,7 @@
 //! Every limit below applies before data is kept. Malformed input is skipped
 //! or refused; nothing here panics on peer data.
 
+pub mod alone;
 pub mod controller;
 pub mod delayed;
 pub mod device_test;

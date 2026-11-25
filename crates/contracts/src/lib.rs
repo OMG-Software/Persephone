@@ -994,11 +994,14 @@ pub enum LevelKey {
     /// Upgrade the room to a new version.
     Tombstone,
     PinnedEvents,
+    /// Join a call: send the call membership state event
+    /// (`org.matrix.msc3401.call.member`).
+    JoinCalls,
 }
 
 impl LevelKey {
     /// Every key, in the order the settings show them.
-    pub const ALL: [LevelKey; 20] = [
+    pub const ALL: [LevelKey; 21] = [
         LevelKey::UsersDefault,
         LevelKey::EventsDefault,
         LevelKey::StateDefault,
@@ -1019,6 +1022,7 @@ impl LevelKey {
         LevelKey::ServerAcl,
         LevelKey::Tombstone,
         LevelKey::PinnedEvents,
+        LevelKey::JoinCalls,
     ];
 }
 
@@ -2508,6 +2512,8 @@ pub enum CallEnd {
     Internal,
     /// The chosen microphone or speaker is not connected.
     DeviceNotFound,
+    /// This account was the only one in the call for 30 seconds.
+    Alone,
 }
 
 /// Why a join was refused or failed.
@@ -2528,6 +2534,9 @@ pub enum CallJoinError {
     NoWorker,
     NoDelayedEvents,
     Membership,
+    /// The room's power levels do not let this account send the call
+    /// membership, or the homeserver refused it with `M_FORBIDDEN`.
+    NotPermitted,
     CallServer,
     Keys,
     ProxyUnreadable,

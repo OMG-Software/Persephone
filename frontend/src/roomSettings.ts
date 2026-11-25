@@ -76,13 +76,15 @@ export const levelLabels: Record<LevelKey, string> = {
   power_levels: 'Change permissions and roles',
   server_acl: 'Change which servers may take part',
   tombstone: 'Upgrade the room',
-  pinned_events: 'Pin messages'
+  pinned_events: 'Pin messages',
+  join_calls: 'Join calls'
 };
 
 /** The power levels in the order and groups the settings show them. */
 export const levelGroups: readonly { title: string; keys: readonly LevelKey[] }[] = [
   { title: 'Members', keys: ['users_default'] },
   { title: 'Messages', keys: ['events_default', 'notify_room', 'redact', 'pinned_events'] },
+  { title: 'Calls', keys: ['join_calls'] },
   { title: 'Moderation', keys: ['invite', 'kick', 'ban'] },
   {
     title: 'Settings',

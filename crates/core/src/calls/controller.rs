@@ -15,6 +15,7 @@
 //! delayed leave ends the membership. [`CallController::stop_for_session_end`]
 //! does the same for a lock, a sign-out or any other end of the session.
 
+use super::alone::Alone;
 use super::delayed::{DelayedLeave, RestartHealth};
 use super::encryption_keys::{self, IncomingKey};
 use super::incoming::{self, Candidate};
@@ -28,6 +29,7 @@ use super::readiness::{Discovery, Flow, TurnServers, sfu_transport, turn_servers
 use super::rings::{self, Plan as RingPlan, Watch};
 use super::screen::{ScreenGrant, ScreenRefusal, ScreenSource};
 use super::sfu::{self, OpenIdToken, SfuError, SfuGrant};
+use super::status::can_send_member_state;
 use super::video::{Notifier, Picture, VideoStore};
 use super::worker::{
     CallHost, CallWorkerLink, StartError, WorkerAudio, WorkerExit, WorkerProcess, exit_is_crash,
@@ -40,6 +42,7 @@ use matrix_sdk::{
     ruma::{
         OwnedDeviceId, OwnedEventId, OwnedRoomId, OwnedUserId, RoomId,
         api::client::account::request_openid_token,
+        api::error::ErrorKind,
         events::{AnySyncMessageLikeEvent, AnySyncStateEvent},
         serde::Raw,
     },
@@ -122,6 +125,9 @@ pub enum CallError {
     NoDelayedEvents,
     /// Own membership could not be written or read.
     Membership,
+    /// The room's power levels, or the homeserver's `M_FORBIDDEN`, do not let
+    /// this account send the call membership state event.
+    NotPermitted,
     OpenId,
     Sfu(SfuError),
     /// No random key, or the worker queue refused it.
@@ -152,6 +158,9 @@ pub enum EndReason {
     MembershipLost,
     /// No random key could be made.
     KeysUnavailable,
+    /// No other participant was on any SFU connection for
+    /// [`ALONE_LIMIT`](super::alone::ALONE_LIMIT).
+    Alone,
     /// The session locked, signed out or otherwise stopped admitting work.
     SessionEnded,
     Internal,
@@ -1685,6 +1694,13 @@ impl CallController {
         }
         let user_id = client.user_id().ok_or(CallError::NotJoined)?.to_owned();
         let device_id = client.device_id().ok_or(CallError::NotJoined)?.to_owned();
+        // The room's power levels must let this account send the call
+        // membership. The check reads the local store and comes before any
+        // request, delayed event or worker (ADR-0063).
+        let levels = room.power_levels_or_default().await;
+        if !can_send_member_state(&levels, &user_id) {
+            return Err(CallError::NotPermitted);
+        }
         flags.halt()?;
 
         // 3. An SFU; TURN is optional.
@@ -1797,7 +1813,7 @@ impl CallController {
                 // leave instead of sending it.
                 setup.membership_sent = false;
             }
-            CallError::Membership
+            membership_error(&error)
         })?;
         flags.halt()?;
         // The ring follows the membership. It runs beside the join, and its
@@ -1892,6 +1908,7 @@ impl CallController {
             remote: RemoteKeys::new(),
             unsent: BTreeMap::new(),
             unsent_retry: None,
+            alone: Alone::default(),
             view: View::new(room_id.to_owned(), sfu.url, scope.video)
                 .with_video_streams(video_streams)
                 .with_volume(scope.devices.volume()),
@@ -2456,6 +2473,8 @@ struct Call {
     /// When the keys of `unsent` go again.
     unsent_retry: Option<Instant>,
     view: View,
+    /// Who else is in the call, and the 30 second rule (ADR-0063).
+    alone: Alone,
     changes: mpsc::Receiver<()>,
     incoming: mpsc::Receiver<Candidate>,
     failed: mpsc::Receiver<EndReason>,
@@ -2707,6 +2726,24 @@ fn membership_refused(error: &matrix_sdk::Error) -> bool {
     error
         .as_client_api_error()
         .is_some_and(|api| api.status_code.is_client_error())
+}
+
+/// Whether the homeserver answered the membership send with 403
+/// `M_FORBIDDEN`: this account may not send it.
+fn membership_forbidden(error: &matrix_sdk::Error) -> bool {
+    error.as_client_api_error().is_some_and(|api| {
+        api.status_code.as_u16() == 403
+            && matches!(error.client_api_error_kind(), Some(ErrorKind::Forbidden))
+    })
+}
+
+/// The join error for a failed membership send.
+fn membership_error(error: &matrix_sdk::Error) -> CallError {
+    if membership_forbidden(error) {
+        CallError::NotPermitted
+    } else {
+        CallError::Membership
+    }
 }
 
 /// How long the core waits for an ended worker to show its exit status.
@@ -3428,6 +3465,7 @@ impl Call {
     /// picture of a new stream shows under the old participant, even on a
     /// page whose status is older.
     fn worker_event(&mut self, inner: &Inner, event: &FromWorker) -> Result<(), EndReason> {
+        self.alone.observe(event, time::Instant::now());
         if let FromWorker::Diagnostic {
             level,
             target,
@@ -4037,6 +4075,7 @@ impl Call {
                     self.key_received(inner, candidate, &mut parked)?;
                 }
                 Some(reason) = self.failed.recv() => return Err(reason),
+                () = self.alone.due() => return Err(EndReason::Alone),
                 () = async {
                     match due {
                         Some(at) => time::sleep_until(at.into()).await,
@@ -4344,6 +4383,177 @@ mod tests {
                 refused,
                 "{status}"
             );
+        }
+    }
+
+    /// GIVEN the homeserver refuses the call membership WHEN the refusal is
+    /// mapped THEN only 403 with `M_FORBIDDEN` is `NotPermitted`: a 403
+    /// with another code, other client errors and a server error stay
+    /// `Membership`.
+    #[tokio::test]
+    async fn given_a_refused_membership_then_only_m_forbidden_is_not_permitted() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        for (status, errcode, expected) in [
+            (403, "M_FORBIDDEN", CallError::NotPermitted),
+            (403, "M_UNKNOWN", CallError::Membership),
+            (400, "M_BAD_JSON", CallError::Membership),
+            (429, "M_LIMIT_EXCEEDED", CallError::Membership),
+            (500, "M_UNKNOWN", CallError::Membership),
+        ] {
+            let server = MockServer::start().await;
+            let client = crate::calls::readiness::tests::signed_in(&server).await;
+            Mock::given(method("GET"))
+                .and(path("/_matrix/client/v3/voip/turnServer"))
+                .respond_with(
+                    ResponseTemplate::new(status)
+                        .set_body_json(serde_json::json!({ "errcode": errcode, "error": "no" })),
+                )
+                .mount(&server)
+                .await;
+            let error = client
+                .send(matrix_sdk::ruma::api::client::voip::get_turn_server_info::v3::Request::new())
+                .await
+                .unwrap_err();
+            assert_eq!(
+                membership_error(&matrix_sdk::Error::from(error)),
+                expected,
+                "{status} {errcode}"
+            );
+        }
+    }
+
+    /// A joined, encrypted room `!r:synthetic.test` on `server`, in which
+    /// `alice` has level `alice_level` and the creator 100. `state_default`
+    /// and `call_level` (when given) are the room's levels for state events
+    /// and for the call membership.
+    async fn encrypted_room(
+        server: &wiremock::MockServer,
+        alice_level: i64,
+        call_level: Option<i64>,
+    ) -> matrix_sdk::Client {
+        use matrix_sdk::config::SyncSettings;
+        use wiremock::{
+            Mock, ResponseTemplate,
+            matchers::{method, path},
+        };
+        let client = crate::calls::readiness::tests::signed_in(server).await;
+        let event = |kind: &str, key: &str, content: serde_json::Value| {
+            serde_json::json!({
+                "type": kind,
+                "state_key": key,
+                "sender": "@creator:synthetic.test",
+                "event_id": format!("${}", kind.replace('.', "_")),
+                "origin_server_ts": 1,
+                "content": content,
+            })
+        };
+        let events = match call_level {
+            Some(level) => serde_json::json!({ EVENT_TYPE: level }),
+            None => serde_json::json!({}),
+        };
+        let body = serde_json::json!({
+            "next_batch": "s1",
+            "rooms": { "join": { "!r:synthetic.test": {
+                "state": { "events": [
+                    event("m.room.create", "", serde_json::json!({
+                        "creator": "@creator:synthetic.test", "room_version": "10"
+                    })),
+                    event("m.room.member", "@alice:synthetic.test",
+                        serde_json::json!({ "membership": "join" })),
+                    event("m.room.encryption", "",
+                        serde_json::json!({ "algorithm": "m.megolm.v1.aes-sha2" })),
+                    event("m.room.power_levels", "", serde_json::json!({
+                        "users": {
+                            "@creator:synthetic.test": 100,
+                            "@alice:synthetic.test": alice_level,
+                        },
+                        "users_default": 0,
+                        "state_default": 50,
+                        "events": events,
+                    })),
+                ] },
+                "timeline": { "events": [] },
+            } } }
+        });
+        Mock::given(method("GET"))
+            .and(path("/_matrix/client/v3/sync"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(server)
+            .await;
+        client.sync_once(SyncSettings::default()).await.unwrap();
+        client
+    }
+
+    /// The requests the server saw after the first `seen`, as method and path.
+    async fn requests_after(server: &wiremock::MockServer, seen: usize) -> Vec<String> {
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .skip(seen)
+            .map(|request| format!("{} {}", request.method, request.url.path()))
+            .collect()
+    }
+
+    /// GIVEN an encrypted room whose levels do not let this member send the
+    /// call membership WHEN the member joins THEN the join ends with
+    /// `NotPermitted` before any request, delayed event or worker launch,
+    /// and the controller is free again.
+    #[tokio::test]
+    async fn given_no_permission_then_the_join_is_refused_before_any_action() {
+        let server = wiremock::MockServer::start().await;
+        let client = encrypted_room(&server, 0, None).await;
+        let seen = server.received_requests().await.unwrap().len();
+        let host = FakeHost::new(true, None);
+        let calls = controller(host.clone());
+        let consent = calls.confirm_direct(false).unwrap();
+        let scope = JoinScope {
+            generation: 0,
+            runtime: Handle::current(),
+            devices: Default::default(),
+            video: false,
+        };
+        let result = calls
+            .join(scope, &client, room_id!("!r:synthetic.test"), consent)
+            .await;
+        assert_eq!(result.err(), Some(CallError::NotPermitted));
+        assert_eq!(host.starts.load(Ordering::SeqCst), 0);
+        assert_eq!(requests_after(&server, seen).await, Vec::<String>::new());
+        assert!(matches!(calls.state(), CallState::Idle));
+        assert!(calls.claim(room_id!("!r:synthetic.test")).is_ok());
+    }
+
+    /// GIVEN the same room WHEN a moderator's level, or an event level of 0
+    /// for the call membership, allows it THEN the join passes the
+    /// permission check and goes on to the call server (here none: the
+    /// transports request is the first request, and it fails).
+    #[tokio::test]
+    async fn given_permission_then_the_join_goes_past_the_check() {
+        for (alice, call_level) in [(50, None), (0, Some(0))] {
+            let server = wiremock::MockServer::start().await;
+            let client = encrypted_room(&server, alice, call_level).await;
+            let seen = server.received_requests().await.unwrap().len();
+            let calls = controller(FakeHost::new(true, None));
+            let consent = calls.confirm_direct(false).unwrap();
+            let scope = JoinScope {
+                generation: 0,
+                runtime: Handle::current(),
+                devices: Default::default(),
+                video: false,
+            };
+            let result = calls
+                .join(scope, &client, room_id!("!r:synthetic.test"), consent)
+                .await;
+            assert_eq!(
+                result.err(),
+                Some(CallError::NoSfu),
+                "{alice} {call_level:?}"
+            );
+            assert!(!requests_after(&server, seen).await.is_empty());
         }
     }
 
@@ -5688,6 +5898,7 @@ mod tests {
             unsent: BTreeMap::new(),
             unsent_retry: None,
             view: view().with_video_streams(video_streams),
+            alone: Alone::default(),
             changes,
             incoming,
             failed,

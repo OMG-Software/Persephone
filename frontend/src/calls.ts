@@ -31,11 +31,19 @@ export const CAMERA_COMMAND_TEXT = 'The camera did not change. Try again.';
 /** Shown when a screen share command fails before the core answers. */
 export const SCREEN_COMMAND_TEXT = 'The screen share did not change. Try again.';
 
+/**
+ * Shown where a join control is blocked or a join is refused because the
+ * room's power levels do not let this account send the call membership
+ * (ADR-0063). The path names the setting a moderator changes.
+ */
+export const NOT_PERMITTED_TEXT =
+  'You do not have permission to join calls in this room. A room moderator can allow it in Room settings, Permissions, Join calls.';
+
 export const UNAVAILABLE_TEXT: Record<CallUnavailable, string> = {
   unsupported_platform: 'Calls are not available on this system yet.',
   not_joined: 'Join the room to start a call.',
   not_encrypted: 'Calls need an encrypted room.',
-  not_permitted: 'You do not have permission to start a call in this room.',
+  not_permitted: NOT_PERMITTED_TEXT,
   no_call_server: 'Your homeserver has no call service.',
   call_server_unsupported: "Your homeserver's call service is not one Persephone supports.",
   server_unreachable: 'Cannot reach your homeserver to check for calls.'
@@ -54,6 +62,7 @@ export const JOIN_ERROR_TEXT: Record<CallJoinError, string> = {
   no_delayed_events:
     'Your homeserver cannot end a call membership safely, so the call was not started.',
   membership: 'Your homeserver refused the call membership.',
+  not_permitted: NOT_PERMITTED_TEXT,
   call_server: 'The call server refused the connection.',
   keys: 'The call keys could not be made.',
   proxy_unreadable: 'The proxy setting cannot be read, so the call was not started.',
@@ -73,6 +82,7 @@ export const END_TEXT: Record<CallEnd, string> = {
   worker_crashed: 'The call process failed with an internal error.',
   membership_lost: 'Your homeserver ended your call membership.',
   keys_unavailable: 'The call keys are not available.',
+  alone: 'You were the only person in the call for 30 seconds, so the call ended.',
   session_ended: 'The call ended because Persephone locked.',
   internal: 'The call ended because of an error.'
 };

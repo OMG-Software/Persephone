@@ -671,6 +671,44 @@ fn room_account_and_profile_replies_keep_their_documented_shape() {
     }
 }
 
+/// GIVEN the level key for joining calls WHEN read THEN only its exact
+/// name is accepted, it is listed once, and a call refusal and end code have
+/// their own names.
+#[test]
+fn the_call_join_permission_has_closed_names() {
+    use persephone_contracts::{CallEnd, CallJoinError, LevelKey, RoomLevel};
+    assert!(
+        serde_json::from_str::<RoomLevel>(r#"{"key":"join_calls","level":0}"#)
+            .is_ok_and(|level| level.key == LevelKey::JoinCalls)
+    );
+    for invalid in [
+        r#"{"key":"join_call","level":0}"#,
+        r#"{"key":"JoinCalls","level":0}"#,
+        r#"{"key":"org.matrix.msc3401.call.member","level":0}"#,
+        r#"{"key":"join_calls","level":9007199254740992}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<RoomLevel>(invalid).is_err(),
+            "{invalid}"
+        );
+    }
+    assert_eq!(
+        LevelKey::ALL
+            .iter()
+            .filter(|key| **key == LevelKey::JoinCalls)
+            .count(),
+        1
+    );
+    assert_eq!(
+        serde_json::to_string(&CallJoinError::NotPermitted).unwrap(),
+        r#""not_permitted""#
+    );
+    assert_eq!(
+        serde_json::to_string(&CallEnd::Alone).unwrap(),
+        r#""alone""#
+    );
+}
+
 /// GIVEN power levels WHEN read THEN only whole numbers JavaScript holds
 /// exactly are accepted, in settings and in changes alike.
 #[test]
