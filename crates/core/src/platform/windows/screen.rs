@@ -81,8 +81,11 @@ impl ScreenSource for MonitorScreen {
 /// The text of the window for the screen at `index` of the `count` that are
 /// offered. `left_out` screens are listed but have a size that cannot be
 /// shared.
-pub fn prompt_text(index: usize, count: usize, screen: Screen, left_out: usize) -> String {
-    let name = index + 1;
+/// The question for the monitor at `place` (from 0) among the `count`
+/// offered ones. The number the user reads counts the offered monitors; the
+/// share's target keeps the monitor's index in the worker's list.
+pub fn prompt_text(place: usize, count: usize, screen: Screen, left_out: usize) -> String {
+    let name = place + 1;
     let (what, buttons) = if count > 1 {
         (
             format!(

@@ -72,7 +72,37 @@ const _: () = assert!(
         && wgc::MAX_MONITOR_SIDE == persephone_call_protocol::MAX_MONITOR_SIDE
         && gdi::MAX_SIDE == persephone_call_protocol::MAX_CAPTURE_SIDE
         && gdi::MAX_PIXELS == persephone_call_protocol::MAX_CAPTURE_PIXELS
+        && gdi_rule_matches()
 );
+
+/// The GDI rule and the protocol's agree at each edge: the 2x2 minimum, the
+/// side limit and the pixel limit, each just inside and just outside.
+#[cfg(windows)]
+const fn gdi_rule_matches() -> bool {
+    use persephone_call_protocol::MAX_CAPTURE_SIDE as SIDE;
+    let edges: [(u32, u32); 11] = [
+        (2, 2),
+        (1, 2),
+        (2, 1),
+        (0, 0),
+        (SIDE, 2),
+        (SIDE + 1, 2),
+        (2, SIDE + 1),
+        (3840, 2160),
+        (3840, 2161),
+        (2880, 2880),
+        (2881, 2880),
+    ];
+    let mut at = 0;
+    while at < edges.len() {
+        let (width, height) = edges[at];
+        if gdi::size_ok(width, height) != capture_size_ok(width, height) {
+            return false;
+        }
+        at += 1;
+    }
+    true
+}
 
 /// The byte order of the 32-bit pixels in a [`CapturedFrame`], as in memory.
 /// The fourth byte is alpha or padding; it is never used.

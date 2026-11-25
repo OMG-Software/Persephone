@@ -69,6 +69,12 @@ pub const UNIFORM: u32 = 24;
 /// The last stage of any method.
 pub const LAST_STAGE: u32 = UNIFORM;
 
+/// True for a frame that arrived but was black or one colour: the call
+/// worked, and no `HRESULT` belongs to it.
+pub fn is_unvaried(stage: u32) -> bool {
+    matches!(stage, BLACK | UNIFORM)
+}
+
 /// The name of a stage of these methods; `None` for the others.
 pub fn describe(stage: u32) -> Option<&'static str> {
     Some(match stage {

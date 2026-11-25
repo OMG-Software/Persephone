@@ -12,7 +12,7 @@
     PARTICIPANT_MUTED_LABEL,
     PHASE_TEXT,
     RING_DECLINED_TEXT,
-    SCREEN_TEXT,
+    screenNote,
     screenButton,
     SHARING_TEXT,
     showCallBar,
@@ -29,6 +29,7 @@
   } from './calls';
   import Icon from './Icon.svelte';
   import PersonName from './PersonName.svelte';
+  import { platformOf } from './modules';
 
   // The call, across every room. Names and room IDs are untrusted text; the
   // core's codes show as fixed texts from calls.ts. The live region stays in
@@ -86,7 +87,9 @@
   const camera = $derived(cameraButton(status.camera));
   const cameraText = $derived(CAMERA_TEXT[status.camera]);
   const screen = $derived(screenButton(status.screen));
-  const screenText = $derived(SCREEN_TEXT[status.screen]);
+  // The macOS refusal names the setting to change, as in the call window.
+  const platform = platformOf(typeof navigator !== 'undefined' ? navigator.platform : '');
+  const screenText = $derived(screenNote(status.screen, platform));
 </script>
 
 <div class="visually-hidden" aria-live="polite" aria-atomic="true">

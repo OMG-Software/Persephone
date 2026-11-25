@@ -237,8 +237,10 @@ Decision:
   same monitor on both sides, but it asks only about a monitor that the GDI
   capture takes (`screen_capture_size_ok` in the call protocol, which the
   worker also uses: at least 2x2, at most 7680 on a side and 3840x2160
-  pixels). The question says how many monitors it left out. With none that
-  fits, no window opens and the share is "unavailable".
+  pixels). The question numbers the offered monitors ("Screen 2 of 2") and
+  says how many it left out; the target keeps the monitor's index in the
+  full list. With none that fits, no window opens and the share is
+  "unavailable".
 * The question says that the shared screen can show Persephone's messages,
   as on macOS, because the display affinity of ADR-0045 was not measured
   against a GDI copy (see below).

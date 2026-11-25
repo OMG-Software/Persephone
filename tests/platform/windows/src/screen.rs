@@ -14,11 +14,15 @@
 //! capability SID, mitigations, Job limits) plus one candidate capability.
 //! Keep the two in step.
 //!
-//! Exit status of the parent: 0 when the control and the GDI control
-//! captured a frame and every container run finished (whatever it
-//! measured); 1 when either control failed or a run could not be launched;
-//! the result lines say what each set got. A DXGI control with no frame (a
-//! still desktop gives none) is printed only.
+//! Exit status of the parent: 0 when the control captured a frame, the GDI
+//! control captured a picture with more than one colour, and every
+//! container run finished (whatever it measured); 1 when a control failed,
+//! when the GDI control saw only black or one colour (the measurement then
+//! cannot tell a blocked copy in the container from the screen itself, so
+//! it is inconclusive: show a varied screen and run it again), or when a run
+//! could not be launched. The result lines say what each set got. A DXGI
+//! control with no frame (a still desktop gives none) is printed only. An
+//! `HRESULT` is printed only when a call recorded one.
 //! A set that cannot capture is a measurement, not a gate failure: the
 //! worker is granted only a capability that a set below shows to work.
 
@@ -226,6 +230,19 @@ fn child(index: usize) -> u32 {
     if got { 0 } else { wgc::Stage::NoFrame as u32 }
 }
 
+/// What follows a method's result: the mean colour for a frame that
+/// arrived (also a black or one-colour one), the `HRESULT` for a failed call
+/// that recorded one, else nothing.
+fn result_detail(stage: u32) -> String {
+    if stage == 0 || alt::is_unvaried(stage) {
+        return format!(", mean colour {:#08x}", alt::last_mean());
+    }
+    match alt::last_error() {
+        0 => ", no HRESULT recorded".to_owned(),
+        code => format!(", HRESULT {:#010x}", code as u32),
+    }
+}
+
 fn describe(code: u32) -> String {
     let name = match code {
         0 => "captured a frame",
@@ -285,14 +302,18 @@ fn parent() -> i32 {
     for method in [Method::Dxgi, Method::Gdi] {
         let stage = child_for(method, 0);
         let mut line = describe(stage);
+        line.push_str(&result_detail(stage));
         if stage != 0 {
-            line.push_str(&format!(", HRESULT {:#010x}", alt::last_error() as u32));
             // DXGI waits for a screen change, so a still desktop gives it no
             // frame: its control is information. GDI copies the screen as it
-            // is, so a GDI control that fails is a failed measurement.
+            // is, so a GDI control without a varied picture fails the
+            // measurement (inconclusive for black or one colour).
             failed |= method == Method::Gdi;
-        } else {
-            line.push_str(&format!(", mean colour {:#08x}", alt::last_mean()));
+            if method == Method::Gdi && alt::is_unvaried(stage) {
+                line.push_str(
+                    "; INCONCLUSIVE, a container copy could not be told from this screen",
+                );
+            }
         }
         println!(
             "screen-probe: control {} (this process, no container): {line}",
@@ -942,6 +963,26 @@ mod tests {
         }
         assert!(describe(0xC000_0005).contains("another code"));
         assert!(describe(NOT_STARTED).contains("did not run"));
+    }
+
+    /// GIVEN a control result WHEN its detail is printed THEN a frame, also a
+    /// black or one-colour one, shows its mean colour and no HRESULT, and a
+    /// failed call without a recorded HRESULT says so instead of printing 0.
+    #[test]
+    fn given_control_results_when_detailed_then_no_hresult_is_made_up() {
+        assert!(alt::is_unvaried(alt::BLACK) && alt::is_unvaried(alt::UNIFORM));
+        assert!(!alt::is_unvaried(0) && !alt::is_unvaried(alt::COPY));
+        // A new test thread has recorded nothing.
+        assert_eq!(alt::last_error(), 0);
+        for stage in [0, alt::BLACK, alt::UNIFORM] {
+            assert!(
+                result_detail(stage).starts_with(", mean colour "),
+                "{stage}"
+            );
+        }
+        for stage in [alt::COPY, alt::DEVICE, alt::GDI_BLT] {
+            assert_eq!(result_detail(stage), ", no HRESULT recorded", "{stage}");
+        }
     }
 
     /// GIVEN two runs that failed at the stage of the first run WHEN the

@@ -629,7 +629,7 @@ test('GIVEN the screen tile WHEN the fetcher asks THEN it is asked like any othe
   assert.deepEqual(fetcher.active, [5]);
 });
 
-test('GIVEN each screen state WHEN the call bar is rendered THEN the button and the note follow the state and nothing names a source', () => {
+test('GIVEN each screen state WHEN the call bar is rendered THEN the button and the note follow the state and nothing names a source', async () => {
   const base = {
     phase: 'active',
     roomId: '!r:s',
@@ -671,6 +671,13 @@ test('GIVEN each screen state WHEN the call bar is rendered THEN the button and 
   assert.match(bar('off', { screenBusy: true }), /call-screen[^>]*disabled/);
   assert.match(bar('refused'), /aria-pressed="false"/);
   assert.match(bar('on'), /aria-pressed="true"/);
+  // Both windows show the platform's refusal text (the macOS one names the
+  // setting), from the one helper.
+  for (const file of ['CallBar.svelte', 'CallWindow.svelte']) {
+    const source = await readFile(new URL(`../src/${file}`, import.meta.url), 'utf8');
+    assert.match(source, /screenNote\(status\.screen, platform\)/, file);
+    assert.doesNotMatch(source, /SCREEN_TEXT\[status\.screen\]/, file);
+  }
 });
 
 test('GIVEN a participant that shares WHEN the call bar is rendered THEN the mark is plain text, also for a hostile name', () => {

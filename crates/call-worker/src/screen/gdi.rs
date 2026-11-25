@@ -60,12 +60,12 @@ pub enum Stage {
 
 /// Whether a monitor of this size can be copied. Checked before the buffer
 /// exists.
-pub fn size_ok(width: u32, height: u32) -> bool {
+pub const fn size_ok(width: u32, height: u32) -> bool {
     width >= 2
         && height >= 2
         && width <= MAX_SIDE
         && height <= MAX_SIDE
-        && u64::from(width) * u64::from(height) <= MAX_PIXELS
+        && (width as u64) * (height as u64) <= MAX_PIXELS
 }
 
 /// One running capture of a monitor. Use it on the thread that made it.
