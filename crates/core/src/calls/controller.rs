@@ -29,6 +29,7 @@ use super::readiness::{Discovery, Flow, TurnServers, sfu_transport, turn_servers
 use super::rings::{self, Plan as RingPlan, Watch};
 use super::screen::{ScreenGrant, ScreenRefusal, ScreenSource};
 use super::sfu::{self, OpenIdToken, SfuError, SfuGrant};
+use super::stats;
 use super::status::can_send_member_state;
 use super::video::{Notifier, Picture, VideoStore};
 use super::worker::{
@@ -54,7 +55,8 @@ use persephone_call_protocol::{
 };
 use persephone_contracts::{
     CALL_PARTICIPANTS_MAX, CallCamera, CallDeviceChange, CallDeviceTestKind, CallDeviceTestState,
-    CallDeviceTestStatus, CallParticipantLevel, CallParticipantRef, CallScreen, CallVideoTile,
+    CallDeviceTestStatus, CallParticipantLevel, CallParticipantRef, CallScreen, CallStats,
+    CallVideoTile,
 };
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet, VecDeque},
@@ -663,12 +665,14 @@ impl View {
     fn apply(&mut self, event: &FromWorker) -> Applied {
         match event {
             // A record goes to the diagnostic log, never to the view.
-            // A sound level goes to the level meters, never to the view.
+            // A sound level goes to the level meters, never to the view; the
+            // statistics go to their own listener (ADR-0066).
             FromWorker::Ready { .. }
             | FromWorker::ParticipantJoined { .. }
             | FromWorker::Diagnostic { .. }
             | FromWorker::SoundLevel { .. }
-            | FromWorker::ParticipantLevel { .. } => Applied::Same,
+            | FromWorker::ParticipantLevel { .. }
+            | FromWorker::Stats(_) => Applied::Same,
             FromWorker::ParticipantMuted {
                 connection,
                 identity,
@@ -1175,6 +1179,10 @@ enum Command {
 type Listener = Arc<dyn Fn() + Send + Sync>;
 /// Takes the call's sound levels (ADR-0055, ADR-0059).
 pub type SoundListener = Arc<dyn Fn(SoundUpdate) + Send + Sync>;
+/// Takes the call's technical details (ADR-0066): the newest reading, or
+/// `None` when there is none any more (the statistics went off, or the call
+/// ended). It must not block and must not call the controller.
+pub type StatsListener = Arc<dyn Fn(Option<CallStats>) + Send + Sync>;
 
 /// A member as the page names it: user ID and device ID.
 type CallParticipantLevelKey = (String, String);
@@ -1203,6 +1211,13 @@ struct Inner {
     /// Takes each sound level of the running call; see
     /// [`CallController::set_sound_listener`].
     sound_listener: Mutex<Option<SoundListener>>,
+    /// Whether the page shows the technical details (ADR-0066). Only a
+    /// running or joining call can have it on, and the end of the call turns
+    /// it off under the slot lock.
+    stats_on: watch::Sender<bool>,
+    /// Takes each statistics reading of the running call; see
+    /// [`CallController::set_stats_listener`].
+    stats_listener: Mutex<Option<StatsListener>>,
     /// The picture store of the running worker, from its start to the end of
     /// the call or join, or of a camera test while no call runs (ADR-0059).
     video: Mutex<Option<VideoStore>>,
@@ -1347,6 +1362,12 @@ impl Inner {
             *slot = Slot::Idle;
             // Under the slot lock, so a later join cannot meet this close.
             self.close_video();
+            // The details never carry over to another call (ADR-0066).
+            self.stats_on.send_replace(false);
+        }
+        drop(slot);
+        if mine && let Some(listener) = plain(&self.stats_listener).clone() {
+            listener(None);
         }
         mine
     }
@@ -1408,6 +1429,8 @@ impl CallController {
                 listener: Mutex::new(None),
                 video_listener: Mutex::new(None),
                 sound_listener: Mutex::new(None),
+                stats_on: watch::channel(false).0,
+                stats_listener: Mutex::new(None),
                 video: Mutex::new(None),
                 next_id: AtomicU64::new(0),
                 device_test: Mutex::new(DeviceTestSlot::default()),
@@ -1440,6 +1463,34 @@ impl CallController {
     /// not call the controller. The level is not part of the call state.
     pub fn set_sound_listener(&self, listener: SoundListener) {
         *plain(&self.inner.sound_listener) = Some(listener);
+    }
+
+    /// Sets what takes the call's statistics readings (ADR-0066). It is
+    /// called from the call task with the newest reading while they are on,
+    /// and with `None` when they stop.
+    pub fn set_stats_listener(&self, listener: StatsListener) {
+        *plain(&self.inner.stats_listener) = Some(listener);
+    }
+
+    /// Turns the call's technical details on or off (ADR-0066): the worker
+    /// reads its statistics only while they are on. Turning them on needs a
+    /// running or joining call (`NotInCall` otherwise); off always works.
+    /// They are off again when the call ends.
+    pub fn set_stats(&self, on: bool) -> Result<(), CallError> {
+        let slot = self.inner.slot();
+        if on && matches!(&*slot, Slot::Idle) {
+            return Err(CallError::NotInCall);
+        }
+        // Under the slot lock, so the end of a call cannot meet a late `on`.
+        let was = self.inner.stats_on.send_replace(on);
+        drop(slot);
+        if was
+            && !on
+            && let Some(listener) = plain(&self.inner.stats_listener).clone()
+        {
+            listener(None);
+        }
+        Ok(())
     }
 
     /// Calls `listener` after each change of the device test's status, on
@@ -3567,6 +3618,19 @@ impl Call {
             self.participant_level(inner, *connection, identity, *level);
             return Ok(());
         }
+        // The technical details go to the page only while it asks for them
+        // (ADR-0066); a reading that comes after they went off is dropped.
+        if let FromWorker::Stats(stats) = event {
+            if *inner.stats_on.borrow()
+                && let Some(listener) = plain(&inner.stats_listener).clone()
+                && let Some(view) = stats::view(stats, |connection, identity| {
+                    self.view.level_member(connection, identity)
+                })
+            {
+                listener(Some(view));
+            }
+            return Ok(());
+        }
         // A camera that is not on has no capture left: its remote is used up.
         // An `On` after a remote went (and no off since) is a capture over it.
         if let FromWorker::Camera { state } = event {
@@ -3878,6 +3942,28 @@ impl Call {
         Ok(())
     }
 
+    /// Gives the worker the statistics switch in `pending` (ADR-0066). A
+    /// value that the worker already has is not sent again. When the queue
+    /// is full, the switch waits for the next retry instead of ending the
+    /// call; a newer value replaces a waiting one.
+    fn apply_stats(
+        &self,
+        pending: &mut Option<(Instant, bool)>,
+        sent: &mut bool,
+    ) -> Result<(), EndReason> {
+        if let Some((_, on)) = pending.take() {
+            if on == *sent {
+                return Ok(());
+            }
+            if self.queue_worker(ToWorker::SetStats { on })? {
+                *sent = on;
+            } else {
+                *pending = Some((Instant::now() + UNSENT_RETRY, on));
+            }
+        }
+        Ok(())
+    }
+
     /// Sends the pending device choice (ADR-0059). A full queue keeps it for
     /// a retry, so a busy worker does not end the call; a newer choice
     /// replaces it.
@@ -4066,6 +4152,12 @@ impl Call {
         let mut diagnostics = crate::diagnostics::global().watch();
         diagnostics.mark_changed();
         let mut pending_diagnostics: Option<(Instant, bool)> = None;
+        // The statistics switch (ADR-0066), sent on each change. The worker
+        // starts with it off, so `stats_sent` starts off too.
+        let mut stats_switch = inner.stats_on.subscribe();
+        stats_switch.mark_changed();
+        let mut pending_stats: Option<(Instant, bool)> = None;
+        let mut stats_sent = false;
         // The newest device choice while the worker's queue is full.
         let mut pending_devices: Option<(Instant, DeviceChoice)> = None;
         self.start_keys(inner).await?;
@@ -4079,6 +4171,7 @@ impl Call {
             let due = pending_own.as_ref().map(|(at, _)| *at);
             let retry = self.unsent_retry;
             let diagnostics_due = pending_diagnostics.map(|(at, _)| at);
+            let stats_due = pending_stats.map(|(at, _)| at);
             let devices_due = pending_devices.as_ref().map(|(at, _)| *at);
             tokio::select! {
                 _ = &mut *stop => return Ok(()),
@@ -4140,6 +4233,17 @@ impl Call {
                         None => std::future::pending().await,
                     }
                 } => self.apply_diagnostics(&mut pending_diagnostics)?,
+                Ok(()) = stats_switch.changed() => {
+                    let on = *stats_switch.borrow_and_update();
+                    pending_stats = Some((Instant::now(), on));
+                    self.apply_stats(&mut pending_stats, &mut stats_sent)?;
+                }
+                () = async {
+                    match stats_due {
+                        Some(at) => time::sleep_until(at.into()).await,
+                        None => std::future::pending().await,
+                    }
+                } => self.apply_stats(&mut pending_stats, &mut stats_sent)?,
                 remote = portal_done(&mut self.portal) => self.portal_finished(inner, remote)?,
                 (picked, cancelled) = screen_pick_done(&mut self.screen_pick) => {
                     if cancelled {
@@ -6732,6 +6836,164 @@ mod tests {
         assert_eq!(*plain(&levels), [0, 55, 100].map(SoundUpdate::Own));
         assert_eq!(call.view.state(), state);
         assert_eq!(changes.load(Ordering::SeqCst), before);
+    }
+
+    /// A slot with a running call, for the statistics switch.
+    fn run_slot(calls: &CallController, id: u64) {
+        let (commands, _rx) = mpsc::channel(1);
+        *calls.inner.slot() = Slot::Running(RunHandle {
+            id,
+            room_id: room_id!("!r:example.org").to_owned(),
+            flags: Arc::new(Flags::default()),
+            kill: killer().1,
+            stop: None,
+            commands,
+            camera_wanted: Arc::new(AtomicBool::new(false)),
+            screen_control: Arc::default(),
+            volume: watch::channel(MAX_VOLUME_PERCENT).0,
+            devices: watch::channel(None).0,
+            task: None,
+        });
+    }
+
+    fn stats_reading(identity: &str) -> persephone_call_protocol::CallStats {
+        persephone_call_protocol::CallStats {
+            remotes: vec![persephone_call_protocol::RemoteStats {
+                connection: 0,
+                identity: identity.to_owned(),
+                audio: None,
+                video: None,
+            }],
+            ..persephone_call_protocol::CallStats::default()
+        }
+    }
+
+    /// GIVEN a call WHEN the worker reports statistics THEN they reach the
+    /// listener only while the page has them on, named by member, and never
+    /// change the call state; a reading after they went off is dropped.
+    #[test]
+    fn given_statistics_then_only_a_page_that_asked_for_them_gets_them() {
+        let fixture = test_call(
+            no_admission(),
+            Arc::new(Flags::default()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let calls = controller(FakeHost::new(true, None));
+        let changes = Arc::new(AtomicUsize::new(0));
+        let seen = changes.clone();
+        calls.set_listener(Arc::new(move || {
+            seen.fetch_add(1, Ordering::SeqCst);
+        }));
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let taken = heard.clone();
+        calls.set_stats_listener(Arc::new(move |stats| plain(&taken).push(stats)));
+        let inner = calls.inner.clone();
+        let mut call = fixture.call;
+        call.view = view();
+        call.view.set_members(vec![member(
+            "@a:example.org",
+            "A",
+            "https://sfu.example.org",
+        )]);
+        let backend = call.view.members[0].backend_identities[0].clone();
+        let reading = FromWorker::Stats(stats_reading(&backend));
+        let state = call.view.state();
+        let before = changes.load(Ordering::SeqCst);
+
+        // Off: nothing leaves.
+        assert_eq!(call.worker_event(&inner, &reading), Ok(()));
+        assert!(plain(&heard).is_empty());
+
+        // On: the reading leaves, named by the member the identity stands for.
+        inner.stats_on.send_replace(true);
+        assert_eq!(call.worker_event(&inner, &reading), Ok(()));
+        let sent = plain(&heard).clone();
+        assert_eq!(sent.len(), 1);
+        let stats = sent[0].as_ref().expect("a reading");
+        assert_eq!(stats.participants.len(), 1);
+        assert_eq!(stats.participants[0].user_id, "@a:example.org");
+        assert_eq!(stats.participants[0].device_id, "A");
+
+        // A participant that is no member is left out; the rest goes.
+        let stranger = FromWorker::Stats(stats_reading("stranger"));
+        assert_eq!(call.worker_event(&inner, &stranger), Ok(()));
+        assert!(
+            plain(&heard)[1]
+                .as_ref()
+                .is_some_and(|stats| stats.participants.is_empty())
+        );
+
+        // Off again: a reading that was already on its way is dropped.
+        inner.stats_on.send_replace(false);
+        assert_eq!(call.worker_event(&inner, &reading), Ok(()));
+        assert_eq!(plain(&heard).len(), 2);
+        assert_eq!(call.view.state(), state);
+        assert_eq!(changes.load(Ordering::SeqCst), before);
+    }
+
+    /// GIVEN no call WHEN the page turns the statistics on THEN it is refused
+    /// and nothing is on; GIVEN a call WHEN it turns them on and off THEN the
+    /// switch follows, and turning them off tells the listener once.
+    #[test]
+    fn given_no_call_then_statistics_cannot_be_turned_on() {
+        let calls = controller(FakeHost::new(true, None));
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let taken = heard.clone();
+        calls.set_stats_listener(Arc::new(move |stats| plain(&taken).push(stats)));
+        assert!(matches!(calls.set_stats(true), Err(CallError::NotInCall)));
+        assert!(!*calls.inner.stats_on.borrow());
+        assert!(calls.set_stats(false).is_ok(), "off always works");
+        assert!(plain(&heard).is_empty(), "off while off tells nobody");
+        run_slot(&calls, 3);
+        assert!(calls.set_stats(true).is_ok());
+        assert!(*calls.inner.stats_on.borrow());
+        assert!(calls.set_stats(false).is_ok());
+        assert!(!*calls.inner.stats_on.borrow());
+        assert_eq!(*plain(&heard), [None]);
+    }
+
+    /// GIVEN statistics on WHEN the call ends THEN they are off in the same
+    /// step, so the next call starts with them off, and the listener drops
+    /// the last reading.
+    #[test]
+    fn given_statistics_on_when_the_call_ends_then_they_are_off() {
+        let calls = controller(FakeHost::new(true, None));
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let taken = heard.clone();
+        calls.set_stats_listener(Arc::new(move |stats| plain(&taken).push(stats)));
+        run_slot(&calls, 5);
+        assert!(calls.set_stats(true).is_ok());
+        assert!(
+            !calls.inner.release(4),
+            "another call's end changes nothing"
+        );
+        assert!(*calls.inner.stats_on.borrow());
+        assert!(calls.inner.release(5));
+        assert!(!*calls.inner.stats_on.borrow());
+        assert_eq!(*plain(&heard), [None]);
+        assert!(matches!(calls.set_stats(true), Err(CallError::NotInCall)));
+    }
+
+    /// GIVEN a running call WHEN its task runs THEN a switch of the statistics
+    /// reaches the worker once, and the same value is not sent again.
+    #[test]
+    fn given_the_statistics_switch_when_applied_then_the_worker_gets_each_change_once() {
+        let mut fixture = test_call(
+            no_admission(),
+            Arc::new(Flags::default()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let call = &mut fixture.call;
+        let mut sent = false;
+        let mut pending = Some((Instant::now(), false));
+        assert_eq!(call.apply_stats(&mut pending, &mut sent), Ok(()));
+        assert!(pending.is_none() && !sent, "off to off is not sent");
+        pending = Some((Instant::now(), true));
+        assert_eq!(call.apply_stats(&mut pending, &mut sent), Ok(()));
+        assert!(pending.is_none() && sent);
+        pending = Some((Instant::now(), true));
+        assert_eq!(call.apply_stats(&mut pending, &mut sent), Ok(()));
+        assert!(sent, "on to on is not sent again");
     }
 
     /// GIVEN a call alone for 30 seconds with a join that waits unread

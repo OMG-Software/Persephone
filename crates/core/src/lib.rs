@@ -179,6 +179,9 @@ struct Notifications {
     /// The newest levels of the other devices in the call, not yet sent
     /// (ADR-0059). They leave with the sound level, under its gap.
     participant_levels: Option<Vec<persephone_contracts::CallParticipantLevel>>,
+    /// The newest call statistics reading, not yet sent (ADR-0066). A newer
+    /// one replaces it; it is dropped when the statistics go off.
+    call_stats: Option<persephone_contracts::CallStats>,
     /// The device test changed since the last notification (ADR-0059).
     device_test_changed: bool,
     /// The report of third-party modules changed since the last notification.
@@ -336,6 +339,17 @@ impl Hub {
         let mut notifications = lock(&self.notifications);
         notifications.participant_levels = Some(levels);
         self.changed.notify_all();
+    }
+
+    /// Keeps `stats` as the call statistics to send, or drops the waiting
+    /// reading for `None`. Only the newest waits.
+    fn call_stats_changed(&self, stats: Option<persephone_contracts::CallStats>) {
+        let mut notifications = lock(&self.notifications);
+        let wake = stats.is_some();
+        notifications.call_stats = stats;
+        if wake {
+            self.changed.notify_all();
+        }
     }
 
     /// The device test changed: one `call_device_test_changed` event waits.
@@ -773,6 +787,12 @@ impl Core {
                         hub.participant_levels_changed(levels);
                     }
                 }
+            }
+        }));
+        let tell = Arc::downgrade(&hub);
+        calls.set_stats_listener(Arc::new(move |stats| {
+            if let Some(hub) = tell.upgrade() {
+                hub.call_stats_changed(stats);
             }
         }));
         let tell = Arc::downgrade(&hub);
@@ -1537,6 +1557,7 @@ impl Core {
                 }
                 self.call_microphone(*auto_level, *gain)
             }
+            Call::CallStats { on } => self.call_stats(*on),
             Call::CallCamera { on } => self.call_camera(*on),
             Call::CallScreen { on } => self.call_screen(*on),
             // Its picture reaches only `serve`.
@@ -2751,6 +2772,24 @@ impl Core {
         ok(&calls::status::status(&self.calls.state()))
     }
 
+    /// Turns the call's technical details on or off (ADR-0066). They are
+    /// read and sent only while on, which needs a call; turning them off
+    /// also drops a reading that waits.
+    fn call_stats(&self, on: bool) -> Outcome {
+        if let Err(code) = self.calls_open() {
+            return Outcome::Error(code);
+        }
+        match self.calls.set_stats(on) {
+            Ok(()) => {
+                if !on {
+                    self.hub.call_stats_changed(None);
+                }
+                Outcome::Ok(serde_json::Value::Null)
+            }
+            Err(_) => Outcome::Error(ErrorCode::Unavailable),
+        }
+    }
+
     /// Turns the camera on or off. Unlike mute, no call is an error: there is
     /// nothing to turn on.
     fn call_camera(&self, on: bool) -> Outcome {
@@ -3875,6 +3914,7 @@ impl Core {
                 && !notifications.modules_changed
                 && !notifications.diagnostics_changed
                 && !notifications.device_test_changed
+                && notifications.call_stats.is_none()
                 && notifications.toast.is_none()
                 && !video_due
                 && !sound_due
@@ -3939,6 +3979,10 @@ impl Core {
         };
         let device_test = std::mem::take(&mut notifications.device_test_changed)
             .then_some(Event::CallDeviceTestChanged {});
+        let call_stats = notifications
+            .call_stats
+            .take()
+            .map(|stats| Event::CallStats { stats });
         let session =
             std::mem::take(&mut notifications.session_changed).then_some(Event::SessionChanged {});
         let list = std::mem::take(&mut notifications.room_list_changed)
@@ -3979,6 +4023,7 @@ impl Core {
                 .chain(video)
                 .chain(sound)
                 .chain(levels)
+                .chain(call_stats)
                 .chain(device_test)
                 .chain(modules)
                 .chain(diagnostics)
@@ -4021,6 +4066,8 @@ impl Core {
     }
 
     fn close(&self) {
+        // The page that asked for the call statistics is gone (ADR-0066).
+        let _ = self.calls.set_stats(false);
         self.hub.closing.store(true, Ordering::SeqCst);
         lock(&self.hub.notifications).closed = true;
         self.hub.changed.notify_all();
@@ -4662,6 +4709,53 @@ mod tests {
             taken.elapsed() >= VIDEO_EVENT_GAP,
             "the second video event came after the gap"
         );
+    }
+
+    /// GIVEN several statistics readings before the event writer runs WHEN
+    /// the events are taken THEN only the newest leaves, at once, and a
+    /// reading dropped by the switch never does.
+    #[test]
+    fn given_statistics_readings_then_only_the_newest_leaves() {
+        let core = Core::default();
+        let reading = |level: u8| persephone_contracts::CallStats {
+            microphone: Some(persephone_contracts::CallStatsAudioSent {
+                level,
+                bitrate_kbps: None,
+                packets_sent: 0,
+                packets_lost: None,
+                jitter_ms: None,
+                rtt_ms: None,
+            }),
+            ..persephone_contracts::CallStats::default()
+        };
+        core.hub.call_stats_changed(Some(reading(1)));
+        core.hub.call_stats_changed(Some(reading(2)));
+        assert_eq!(
+            core.take_events(),
+            Some(vec![Event::CallStats { stats: reading(2) }])
+        );
+        // Dropped while it waits: nothing leaves, and the writer does not
+        // wake for it.
+        core.hub.call_stats_changed(Some(reading(3)));
+        core.hub.call_stats_changed(None);
+        core.hub.calls_changed();
+        assert_eq!(core.take_events(), Some(vec![Event::CallChanged {}]));
+    }
+
+    /// GIVEN the statistics command WHEN there is no call THEN turning them
+    /// on is `unavailable` and turning them off works, also after the UI
+    /// connection closed.
+    #[test]
+    fn given_the_statistics_command_then_it_needs_a_call() {
+        let core = Core::default();
+        let stats = |on| core.call_stats(on);
+        assert!(matches!(
+            stats(true),
+            Outcome::Error(ErrorCode::Unavailable)
+        ));
+        assert!(matches!(stats(false), Outcome::Ok(serde_json::Value::Null)));
+        core.close();
+        assert!(core.calls.set_stats(false).is_ok());
     }
 
     /// GIVEN a waiting video event WHEN the connection closes THEN the writer

@@ -768,6 +768,13 @@ pub enum Call {
         auto_level: bool,
         gain: u16,
     },
+    /// Start or stop the call statistics (ADR-0066). While on, the core
+    /// asks the worker to read them and sends [`Event::CallStats`], at most
+    /// about once a second. Only the call window may send it. Off at every
+    /// call start, and off again when the call ends. Replies `null`.
+    CallStats {
+        on: bool,
+    },
     /// Turn the camera on or off during a call. Replies `CallStatus`, with the
     /// camera `starting` when turned on; the worker's answer arrives as
     /// [`Event::CallChanged`]. Refused when no call is connected.
@@ -1117,6 +1124,14 @@ pub enum Event {
         #[serde(deserialize_with = "bounded_levels")]
         levels: Vec<persephone_contracts::CallParticipantLevel>,
     },
+    /// The call's technical details (ADR-0066), sent only while
+    /// [`Call::CallStats`] is on: numbers with units, and the validated IDs
+    /// of the devices. Coalesced: only the newest waits. A reading that is
+    /// out of bounds is refused whole.
+    CallStats {
+        #[serde(deserialize_with = "bounded_stats")]
+        stats: persephone_contracts::CallStats,
+    },
     /// A device test started, changed or ended (ADR-0059): ask for
     /// `call_device_test_status`. Content-free and coalesced.
     CallDeviceTestChanged {},
@@ -1159,6 +1174,20 @@ pub fn levels_within_limits(levels: &[persephone_contracts::CallParticipantLevel
                 && level.device_id.len() <= MAX_DEVICE_ID_BYTES
                 && level.level <= MAX_CALL_SOUND_LEVEL
         })
+}
+
+/// Reads a statistics reading and refuses one with a number over its bound,
+/// too many or repeated entries or an overlong ID. The frame that carries it
+/// is already bounded by the transport.
+fn bounded_stats<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<persephone_contracts::CallStats, D::Error> {
+    let stats = persephone_contracts::CallStats::deserialize(deserializer)?;
+    if stats.within_limits() {
+        Ok(stats)
+    } else {
+        Err(serde::de::Error::custom("call statistics out of bounds"))
+    }
 }
 
 /// Reads a level list and refuses an entry past [`MAX_CALL_LEVELS`], an
@@ -2348,6 +2377,10 @@ mod tests {
             (
                 Call::CallScreen { on: true },
                 r#"{"id":1,"call":{"command":"call_screen","on":true}}"#,
+            ),
+            (
+                Call::CallStats { on: true },
+                r#"{"id":1,"call":{"command":"call_stats","on":true}}"#,
             ),
             (
                 Call::CallVideoFrame {
@@ -4149,6 +4182,60 @@ mod timeline_events_wire_tests {
             )
             .is_err()
         );
+    }
+
+    /// GIVEN the statistics command WHEN it is decoded THEN it carries only
+    /// the flag.
+    #[test]
+    fn given_the_stats_command_then_it_carries_only_the_flag() {
+        let decoded = |json: &[u8]| serde_json::from_slice::<Request>(json);
+        assert!(decoded(br#"{"id":1,"call":{"command":"call_stats","on":true}}"#).is_ok());
+        assert!(decoded(br#"{"id":1,"call":{"command":"call_stats","on":false}}"#).is_ok());
+        for json in [
+            &br#"{"id":1,"call":{"command":"call_stats"}}"#[..],
+            br#"{"id":1,"call":{"command":"call_stats","on":1}}"#,
+            br#"{"id":1,"call":{"command":"call_stats","on":true,"interval":1}}"#,
+        ] {
+            assert!(decoded(json).is_err(), "{}", String::from_utf8_lossy(json));
+        }
+    }
+
+    /// GIVEN statistics events WHEN read THEN a reading inside its bounds
+    /// is kept, and one with a number over its bound, an overlong ID, a
+    /// repeated device or an unknown field is refused whole.
+    #[test]
+    fn given_call_stats_events_then_only_bounded_readings_are_read() {
+        let event = |stats: serde_json::Value| {
+            serde_json::from_value::<CoreMessage>(
+                serde_json::json!({"event": {"call_stats": {"stats": stats}}}),
+            )
+        };
+        let reading = |fps: u32, user: &str| {
+            serde_json::json!({
+                "microphone": null,
+                "camera": {"fps": fps, "width": 640, "height": 360, "bitrateKbps": null,
+                           "limit": "none", "packetsLost": null},
+                "screen": null,
+                "participants": [{"userId": user, "deviceId": "D", "audio": null, "video": null}],
+                "connections": [],
+            })
+        };
+        assert!(event(reading(120, "@a:example.org")).is_ok());
+        assert!(event(reading(121, "@a:example.org")).is_err());
+        assert!(event(reading(1, &"a".repeat(MAX_USER_ID_BYTES + 1))).is_err());
+        let mut twice = reading(1, "@a:example.org");
+        let again = twice["participants"][0].clone();
+        twice["participants"].as_array_mut().unwrap().push(again);
+        assert!(event(twice).is_err());
+        let mut extra = reading(1, "@a:example.org");
+        extra["address"] = "10.0.0.1".into();
+        assert!(event(extra).is_err());
+        let wire = serde_json::to_string(&CoreMessage::Event(Event::CallStats {
+            stats: persephone_contracts::CallStats::default(),
+        }))
+        .unwrap();
+        assert!(wire.starts_with(r#"{"event":{"call_stats":{"stats":{"microphone":null"#));
+        assert!(serde_json::from_str::<CoreMessage>(&wire).is_ok());
     }
 
     /// GIVEN call level events WHEN read THEN bounded ones are kept, and a
