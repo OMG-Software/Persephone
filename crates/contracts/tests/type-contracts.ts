@@ -284,7 +284,7 @@ const unknownReason: CallUnavailable = "no_microphone";
 const unknownEnd: CallEnd = "crashed";
 // @ts-expect-error only the defined join errors are accepted
 const unknownJoin: CallJoinError = "busy";
-const noDevices: CallDevices = { supported: true, recording: [{ id: "a", name: "Microphone" }], playout: [], cameras: [{ id: "c", name: "Camera" }], selectedRecording: null, selectedPlayout: null, selectedCamera: null, volume: 100, unreadable: false };
+const noDevices: CallDevices = { supported: true, recording: [{ id: "a", name: "Microphone" }], playout: [], cameras: [{ id: "c", name: "Camera" }], selectedRecording: null, selectedPlayout: null, selectedCamera: null, volume: 100, autoLevel: true, micGain: 100, unreadable: false };
 // @ts-expect-error a device list carries IDs and names, nothing else
 const deviceWithPath: CallDevices = { ...noDevices, recording: [{ id: "a", name: "b", path: "c" }] };
 // @ts-expect-error the saved choice must be explicit null, not missing

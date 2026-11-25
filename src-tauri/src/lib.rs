@@ -731,6 +731,22 @@ async fn call_volume(core: State<'_, CoreLink>, percent: u8) -> Result<CallStatu
     relay(core.inner(), call).await
 }
 
+/// Sets the automatic microphone level and the manual microphone gain, 0 to
+/// 400 percent in steps of 5, for the running call and later ones (ADR-0062).
+/// The core checks the range again.
+#[tauri::command]
+async fn call_microphone(
+    core: State<'_, CoreLink>,
+    auto_level: bool,
+    gain: u16,
+) -> Result<CallStatus, String> {
+    let call = Call::CallMicrophone { auto_level, gain };
+    if !call_video_within_limits(&call) {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), call).await
+}
+
 /// Turns the camera on or off. The worker's answer arrives as a call change.
 #[tauri::command]
 async fn call_camera(core: State<'_, CoreLink>, on: bool) -> Result<CallStatus, String> {
@@ -2165,6 +2181,7 @@ pub fn configure<R: Runtime>(
             call_mute,
             call_deafen,
             call_volume,
+            call_microphone,
             call_camera,
             call_screen,
             call_video_frame,

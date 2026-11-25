@@ -49,5 +49,74 @@ Each change is marked `PERSEPHONE PATCH (ADR-0055)`.
 
 Each change is marked `PERSEPHONE PATCH (ADR-0043)`.
 
+## Microphone gain and automatic gain control (ADR-0062)
+
+- `include/livekit/peer_connection_factory.h`, `src/peer_connection_factory.cpp`
+  and `.rs`: the factory builds its audio processing module (APM) with
+  `BuiltinAudioProcessingBuilder().Build(env_)`, which is what the voice
+  engine would have built, keeps a reference in `audio_processing_`, and
+  gives it to the engine with `CustomAudioProcessing`. If the build returns
+  nothing, the factory logs an error and the old builder is used; the gain
+  cannot reach that engine's module. Check this against the libwebrtc
+  `BuiltinAudioProcessingBuilder` for each update.
+- `PeerConnectionFactory::apply_capture_gain(percent)` posts a task to the
+  worker thread that reads `AudioProcessing::GetConfig()`, sets
+  `capture_level_adjustment.enabled` and `pre_gain_factor` (percent / 100),
+  and calls `ApplyConfig`: `WebRtcVoiceEngine::ApplyOptions` reads and writes
+  the same configuration there, so neither loses the other's change. The
+  task holds its own reference to the APM. A thread runs its tasks in order,
+  so the newest gain wins and a later read there sees it. It returns false
+  when the factory has no APM of its own.
+- The range: the pinned `capture_levels_adjuster.h` takes any `pre_gain`
+  from 0 and multiplies each sample by it (clamped to 16 bits), so 0 to 99
+  percent lowers the sound. The lifecycle test reads the configuration back
+  at 0, 5, 50, 400 and 100 percent; that checks what `ApplyConfig` keeps,
+  not the sound.
+- A file-local registry (`CaptureGainRegistry`: a mutex, the live factories
+  as raw pointers, the gain, 100 at the start, and the factory of each read
+  in progress, with a condition variable) serves the free functions
+  `set_capture_gain_percent(uint16_t)` (false for over 400, otherwise stores
+  the gain and posts it to every live factory; false also when a live
+  factory has no APM to take it) and
+  `capture_processing_state()` (read only, for the oldest factory, which in
+  the worker is LiveKit's one runtime factory: the gain
+  the APM applies and, for echo cancellation, noise suppression and
+  automatic gain control, what was requested and what runs, from
+  `GetAudioProcessingState()`, and whether the audio device module has
+  playout prepared, playout running and capture running). `found` is false
+  only with no live factory. A factory with no APM of its own is found with
+  `module` false: its gain is unknown, and the rest is still read. The two
+  per-factory members, `apply_capture_gain` and `capture_processing`, are
+  private, with these two functions as their only friends, so no caller can
+  skip the registry's mutex or its read record. A factory joins
+  the registry at the end of its constructor, takes the stored gain, and
+  leaves it first in its destructor, so a gain change never reaches a
+  factory that is going away. The mutex guards the registry's fields only:
+  a read records the factory it picked, releases the mutex and then queries
+  that factory, and a factory that leaves waits until no read of its own
+  runs. A read of another factory does not hold it up.
+- `AudioTrack::set_auto_gain_control` needs no marshalling: the track is
+  WebRTC's `AudioTrack` proxy, which runs `SetAudioProcessingOptions` on
+  the signaling thread.
+  The registry holds no strong reference.
+- `include/livekit/audio_track.h`, `src/audio_track.cpp` and `.rs`:
+  `AudioTrack::set_auto_gain_control(bool)` calls `SetAudioProcessingOptions`
+  with echo cancellation and noise suppression on (the options that
+  `create_device_audio_track` sets) and automatic gain control as asked. It
+  returns the `AudioProcessingOptionsResultCode` (pinned
+  `api/audio/audio_processing_options_result.h`: 0 applied, 1 stored, 2 to
+  5 refused), not an `RTCErrorType`.
+- No native thread, callback or observer is added. The only new strong edge
+  is the factory's reference to its APM, which the voice engine also holds.
+- Lifecycle checks, in `crates/call-worker/src/native_volume_tests.rs`:
+  `given_repeated_factories_when_the_gain_is_set_then_each_takes_it_and_resources_are_released`
+  (repeated factories, gain changes and automatic gain control calls, with the
+  handle count back at its level), `given_a_device_track_when_automatic_level_changes_then_webrtc_takes_it`
+  and the ignored `loopback_automatic_level_follows_the_request_while_the_track_is_sent`
+  (a real microphone track in a loopback pair: automatic gain control and the
+  gain follow the requests, and capture runs with no playout).
+
+Each change is marked `PERSEPHONE PATCH (ADR-0062)`.
+
 `build.rs` is unchanged. Build with `LK_CUSTOM_WEBRTC` set to the verified
 libwebrtc, so the build never downloads one.

@@ -22,3 +22,23 @@ crate clamps the ring size again in C++. The prebuilt libwebrtc allows 256
   it for the call volume and deafen of remote tracks.
 
 Each change is marked `PERSEPHONE PATCH (ADR-0055)`.
+
+## Microphone gain and automatic gain control (ADR-0062)
+
+- `src/native/audio_track.rs` and `src/audio_track.rs`:
+  `RtcAudioTrack::set_auto_gain_control(bool) -> bool` calls `webrtc-sys`'s
+  `AudioTrack::set_auto_gain_control`. It is true when WebRTC applied or
+  stored the options. The call worker uses it for the automatic microphone
+  level of the published track.
+- `src/native/capture_processing.rs` (new, exported as
+  `native::capture_processing`): `set_capture_gain_percent(u16) -> bool` (false
+  over `MAX_CAPTURE_GAIN_PERCENT`, 400, checked here and again in C++, and
+  false when a live factory has no audio processing module to take it) and
+  `capture_processing() -> Option<CaptureProcessing>` (the oldest live
+  factory, `None` only when there is none; its `gain_percent` is `None` when
+  that factory has no audio processing module of its own; it waits for the
+  worker thread) call the free functions of
+  `webrtc-sys`. The call worker uses them for the manual
+  microphone gain and for its diagnostic notes.
+
+Each change is marked `PERSEPHONE PATCH (ADR-0062)`.

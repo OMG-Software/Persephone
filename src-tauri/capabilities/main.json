@@ -50,6 +50,7 @@
     "allow-call-mute",
     "allow-call-deafen",
     "allow-call-volume",
+    "allow-call-microphone",
     "allow-call-camera",
     "allow-call-screen",
     "allow-call-video-frame",

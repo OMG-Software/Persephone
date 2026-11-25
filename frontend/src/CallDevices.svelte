@@ -10,6 +10,7 @@
     callDeviceTest,
     callDeviceTestStatus,
     callDeviceTestStop,
+    callMicrophone,
     callVolume,
     setCallDevices
   } from './bridge';
@@ -24,6 +25,16 @@
     SOUND_LEVEL_LOUD,
     SOUND_LEVEL_MAX,
     soundLevelText,
+    AUTO_LEVEL_HELP,
+    AUTO_LEVEL_LABEL,
+    MIC_GAIN_DEFAULT,
+    MIC_GAIN_HELP,
+    MIC_GAIN_LABEL,
+    MIC_GAIN_MAX,
+    MIC_GAIN_STEP,
+    MIC_SAVE_TEXT,
+    micGainText,
+    micGainValue,
     deviceChoice,
     deviceOptions,
     deviceValue,
@@ -95,11 +106,15 @@
   let camera = $state('');
   let volume = $state(VOLUME_MAX);
   let volumeSaving = $state(false);
+  // The automatic microphone level and the manual gain (ADR-0062).
+  let autoLevel = $state(true);
+  let micGain = $state(MIC_GAIN_DEFAULT);
+  let micSaving = $state(false);
   let loading = $state(false);
   let saving = $state(false);
   // Any request that reads or writes the device record. A refresh or device
   // save during a volume save could bring back the old volume, so each waits.
-  const busy = $derived(loading || saving || volumeSaving);
+  const busy = $derived(loading || saving || volumeSaving || micSaving);
   let failure = $state<string | null>(null);
   let generation = 0;
 
@@ -123,6 +138,8 @@
       playout = deviceValue(next.selectedPlayout);
       camera = deviceValue(next.selectedCamera);
       volume = next.volume;
+      autoLevel = next.autoLevel;
+      micGain = next.micGain;
     } catch (reason) {
       if (mine === generation) failure = failures[String(reason)] ?? 'The call devices could not be listed.';
     } finally {
@@ -162,6 +179,29 @@
       if (devices) volume = devices.volume;
     } finally {
       volumeSaving = false;
+    }
+  }
+
+  // Saves the microphone level and gain, the gain when the slider is let go
+  // and the level when the box changes. Both apply at once to a call that
+  // runs. On failure they go back to the saved values.
+  async function saveMicrophone() {
+    if (busy || !devices) return;
+    micSaving = true;
+    failure = null;
+    const wantedLevel = autoLevel;
+    const wantedGain = micGain;
+    try {
+      await callMicrophone(wantedLevel, wantedGain);
+      if (devices) devices = { ...devices, autoLevel: wantedLevel, micGain: wantedGain };
+    } catch (reason) {
+      failure = failures[String(reason)] ?? MIC_SAVE_TEXT;
+      if (devices) {
+        autoLevel = devices.autoLevel;
+        micGain = devices.micGain;
+      }
+    } finally {
+      micSaving = false;
     }
   }
 
@@ -223,6 +263,31 @@
       oninput={(event) => (volume = volumeValue(Number(event.currentTarget.value)))}
       onchange={saveVolume}
     />
+    <label class="switch-row">
+      <input
+        type="checkbox"
+        role="switch"
+        disabled={!devices || devices.unreadable || busy}
+        bind:checked={autoLevel}
+        onchange={saveMicrophone}
+      />
+      <span>{AUTO_LEVEL_LABEL}</span>
+    </label>
+    <p class="note switch-note">{AUTO_LEVEL_HELP}</p>
+    <label for="call-mic-gain">{MIC_GAIN_LABEL}: <output for="call-mic-gain">{micGainText(micGain)}</output></label>
+    <input
+      id="call-mic-gain"
+      type="range"
+      min="0"
+      max={MIC_GAIN_MAX}
+      step={MIC_GAIN_STEP}
+      disabled={!devices || devices.unreadable || busy}
+      value={micGain}
+      aria-valuetext={micGainText(micGain)}
+      oninput={(event) => (micGain = micGainValue(Number(event.currentTarget.value)))}
+      onchange={saveMicrophone}
+    />
+    <p class="note">{MIC_GAIN_HELP}</p>
     {#if devices}
       <p class="note">{devicesNote(devices)}</p>
     {/if}

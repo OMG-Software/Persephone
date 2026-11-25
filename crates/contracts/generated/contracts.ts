@@ -213,7 +213,7 @@ export type CallRings = { rings: Array<CallRing>, };
 
 export type CallDevice = { id: string, name: string, };
 
-export type CallDevices = { supported: boolean, recording: Array<CallDevice>, playout: Array<CallDevice>, cameras: Array<CallDevice>, selectedRecording: string | null, selectedPlayout: string | null, selectedCamera: string | null, volume: number, unreadable: boolean, };
+export type CallDevices = { supported: boolean, recording: Array<CallDevice>, playout: Array<CallDevice>, cameras: Array<CallDevice>, selectedRecording: string | null, selectedPlayout: string | null, selectedCamera: string | null, volume: number, autoLevel: boolean, micGain: number, unreadable: boolean, };
 
 export type ContactTrust = "unknown" | "no_identity" | "unverified" | "verified" | "changed" | "verified_changed";
 

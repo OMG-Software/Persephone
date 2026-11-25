@@ -34,6 +34,15 @@ impl RtcAudioTrack {
     pub fn set_volume(&self, volume: f64) {
         self.handle.set_volume(volume);
     }
+
+    /// PERSEPHONE PATCH (ADR-0062): turns automatic gain control on or off
+    /// for a published local audio track, with echo cancellation and noise
+    /// suppression on. Returns whether WebRTC applied or stored the options.
+    /// A remote track refuses them.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_auto_gain_control(&self, enabled: bool) -> bool {
+        self.handle.set_auto_gain_control(enabled)
+    }
 }
 
 impl Debug for RtcAudioTrack {

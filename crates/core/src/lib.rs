@@ -1531,6 +1531,12 @@ impl Core {
                 }
                 self.call_volume(*percent)
             }
+            Call::CallMicrophone { auto_level, gain } => {
+                if !call_video_within_limits(call) {
+                    return Outcome::Error(ErrorCode::InvalidArgument);
+                }
+                self.call_microphone(*auto_level, *gain)
+            }
             Call::CallCamera { on } => self.call_camera(*on),
             Call::CallScreen { on } => self.call_screen(*on),
             // Its picture reaches only `serve`.
@@ -2706,6 +2712,45 @@ impl Core {
         ok(&calls::status::status(&self.calls.state()))
     }
 
+    /// Sets the automatic microphone level and the manual microphone gain
+    /// (ADR-0062): at once for a running call, and saved in the profile's
+    /// call device record for later calls, like the volume (`call_volume`).
+    /// The other choices in the record are kept. A record that cannot be read
+    /// is not replaced; the reply is then `unavailable`.
+    fn call_microphone(&self, auto_level: bool, gain: u16) -> Outcome {
+        if let Err(code) = self.calls_open() {
+            return Outcome::Error(code);
+        }
+        // A running call changes now, even if the save below fails.
+        let _ = self.calls.set_microphone(auto_level, gain);
+        if self.session.is_configured() {
+            let lease = match self.session.admit() {
+                Ok(lease) => lease,
+                Err(session::AdmissionError::Locked) => return Outcome::Error(ErrorCode::Locked),
+                Err(session::AdmissionError::Saturated) => {
+                    return Outcome::Error(ErrorCode::LimitExceeded);
+                }
+            };
+            let stores = lease.stores();
+            let saved = stores.block_on(async {
+                let Ok(mut selection) = calls::devices::load(stores).await else {
+                    return Err(ErrorCode::Unavailable);
+                };
+                selection.auto_level = Some(auto_level);
+                selection.mic_gain = Some(gain);
+                if calls::devices::save(stores, &selection).await {
+                    Ok(())
+                } else {
+                    Err(ErrorCode::Internal)
+                }
+            });
+            if let Err(code) = saved {
+                return Outcome::Error(code);
+            }
+        }
+        ok(&calls::status::status(&self.calls.state()))
+    }
+
     /// Turns the camera on or off. Unlike mute, no call is an error: there is
     /// nothing to turn on.
     fn call_camera(&self, on: bool) -> Outcome {
@@ -2814,6 +2859,7 @@ impl Core {
                 name: device.name,
             };
         let volume = selection.volume();
+        let (auto_level, mic_gain) = (selection.auto_level(), selection.mic_gain());
         let devices = persephone_contracts::CallDevices {
             supported: listing.supported,
             recording: listing.recording.into_iter().map(device).collect(),
@@ -2823,6 +2869,8 @@ impl Core {
             selected_playout: selection.playout,
             selected_camera: selection.camera,
             volume,
+            auto_level,
+            mic_gain,
             unreadable,
         };
         within_device_reply(&devices)?;
@@ -2866,6 +2914,8 @@ impl Core {
             playout: playout.map(str::to_owned),
             camera: camera.map(str::to_owned),
             volume: None,
+            auto_level: None,
+            mic_gain: None,
         };
         if !selection.is_valid() {
             return Outcome::Error(ErrorCode::InvalidArgument);
@@ -2882,10 +2932,12 @@ impl Core {
         };
         let stores = lease.stores();
         if stores.block_on(async {
-            selection.volume = calls::devices::load(stores)
-                .await
-                .ok()
-                .and_then(|saved| saved.volume);
+            // The volume and the microphone settings are kept.
+            if let Ok(saved) = calls::devices::load(stores).await {
+                selection.volume = saved.volume;
+                selection.auto_level = saved.auto_level;
+                selection.mic_gain = saved.mic_gain;
+            }
             calls::devices::save(stores, &selection).await
         }) {
             // A running call moves to the new microphone and speaker at once,
@@ -4227,6 +4279,8 @@ mod tests {
             selected_playout: None,
             selected_camera: None,
             volume: 100,
+            auto_level: true,
+            mic_gain: 100,
             unreadable: false,
         };
         let ordinary = devices(
