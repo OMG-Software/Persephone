@@ -183,18 +183,17 @@ mod tests {
         ended: Option<Ended>,
     }
 
-    /// Runs `capture` on its own thread over a pipe and gives the open
-    /// result, what was seen, and the write end.
-    fn run(
-        share: u32,
-        frames: Option<OwnedHandle>,
-        target: ScreenTarget,
-    ) -> (
+    /// The open result, what was seen, the stop flag and the thread.
+    type Started = (
         mpsc::Receiver<Result<(), ScreenState>>,
         Arc<Mutex<Seen>>,
         Arc<AtomicBool>,
         std::thread::JoinHandle<()>,
-    ) {
+    );
+
+    /// Runs `capture` on its own thread over a pipe and gives the open
+    /// result, what was seen, and the write end.
+    fn run(share: u32, frames: Option<OwnedHandle>, target: ScreenTarget) -> Started {
         let (open_tx, open_rx) = mpsc::channel();
         let seen = Arc::new(Mutex::new(Seen::default()));
         let stop = Arc::new(AtomicBool::new(false));
