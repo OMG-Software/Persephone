@@ -1208,13 +1208,125 @@ async fn measure_levels(
         inbound.push((connection, summary));
     }
     if crate::diagnostics::global().is_on() && stats_note_due() {
-        // Blocking calls into libwebrtc's worker thread: not on the runtime.
-        let device = tokio::task::spawn_blocking(audio_device_state)
-            .await
-            .unwrap_or_else(|_| "device state unknown".to_owned());
-        note_inbound_audio(levels.own, &inbound, &enabled, playout, &device);
+        // The note reads libwebrtc's worker thread, so it is written off the
+        // runtime, and outside this measurement's time limit: a slow answer
+        // delays the note and never drops it.
+        INBOUND_NOTES.push(InboundNote {
+            own: levels.own,
+            inbound,
+            enabled,
+            playout,
+        });
     }
     levels
+}
+
+/// The notes that read libwebrtc's worker thread (ADR-0062) are written off
+/// the runtime by one blocking task per kind, never more: a note that comes
+/// while one is written waits, and only the newest waits. So a slow answer
+/// never holds the event loop and never stacks blocking tasks.
+struct NoteQueue<T> {
+    state: std::sync::Mutex<NoteState<T>>,
+    write: fn(T),
+}
+
+/// The note that waits, and whether a writer runs.
+struct NoteState<T> {
+    waiting: Option<T>,
+    writing: bool,
+}
+
+impl<T> NoteState<T> {
+    const fn new() -> Self {
+        Self {
+            waiting: None,
+            writing: false,
+        }
+    }
+
+    /// Keeps `note` as the waiting one, in place of an older one. True when
+    /// no writer runs: the caller then starts one.
+    fn offer(&mut self, note: T) -> bool {
+        self.waiting = Some(note);
+        !std::mem::replace(&mut self.writing, true)
+    }
+
+    /// The writer's next note. `None` ends the writer in the same step, so a
+    /// note offered after it starts a new one.
+    fn next(&mut self) -> Option<T> {
+        let note = self.waiting.take();
+        self.writing = note.is_some();
+        note
+    }
+}
+
+impl<T> NoteQueue<T> {
+    const fn new(write: fn(T)) -> Self {
+        Self {
+            state: std::sync::Mutex::new(NoteState::new()),
+            write,
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, NoteState<T>> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn drain(&self) {
+        /// A writer that panics leaves no writer marked as running.
+        struct Unwind<'a, T>(&'a NoteQueue<T>);
+        impl<T> Drop for Unwind<'_, T> {
+            fn drop(&mut self) {
+                if std::thread::panicking() {
+                    self.0.lock().writing = false;
+                }
+            }
+        }
+        let _unwind = Unwind(self);
+        loop {
+            // The lock ends with this statement, before the write.
+            let next = self.lock().next();
+            let Some(note) = next else {
+                return;
+            };
+            (self.write)(note);
+        }
+    }
+}
+
+impl<T: Send + 'static> NoteQueue<T> {
+    /// Queues `note` and starts the writer when none runs. Called on the
+    /// runtime.
+    fn push(&'static self, note: T) {
+        if self.lock().offer(note) {
+            tokio::task::spawn_blocking(move || self.drain());
+        }
+    }
+}
+
+/// One note about the audio that arrives (ADR-0062).
+struct InboundNote {
+    own: Option<f64>,
+    inbound: Vec<(u8, Option<InboundAudio>)>,
+    enabled: Vec<bool>,
+    playout: Playout,
+}
+
+static INBOUND_NOTES: NoteQueue<InboundNote> = NoteQueue::new(write_inbound_note);
+
+/// Writes the note with the audio device module's state: blocking calls into
+/// libwebrtc's worker thread.
+fn write_inbound_note(note: InboundNote) {
+    let device = audio_device_state();
+    note_inbound_audio(
+        note.own,
+        &note.inbound,
+        &note.enabled,
+        note.playout,
+        &device,
+    );
 }
 
 /// How often the log gets a note about the audio that arrives (ADR-0062).
@@ -3377,11 +3489,33 @@ fn note_devices(
 /// Notes the microphone settings and what the audio processing module
 /// reports for them (ADR-0062): the gain it applies, and for echo
 /// cancellation, noise suppression and automatic gain control what was
-/// requested and what runs.
+/// requested and what runs. The report waits for libwebrtc's worker thread,
+/// so the note is written off the runtime ([`NoteQueue`]).
 fn note_microphone(microphone: Microphone, gain_set: bool, level_set: bool) {
-    if !crate::diagnostics::global().is_on() {
-        return;
+    if crate::diagnostics::global().is_on() {
+        MICROPHONE_NOTES.push(MicrophoneNote {
+            microphone,
+            gain_set,
+            level_set,
+        });
     }
+}
+
+/// The microphone settings that were asked, and whether each was taken.
+struct MicrophoneNote {
+    microphone: Microphone,
+    gain_set: bool,
+    level_set: bool,
+}
+
+static MICROPHONE_NOTES: NoteQueue<MicrophoneNote> = NoteQueue::new(write_microphone_note);
+
+fn write_microphone_note(note: MicrophoneNote) {
+    let MicrophoneNote {
+        microphone,
+        gain_set,
+        level_set,
+    } = note;
     let state = |component: capture_processing::Component| {
         let text = |value: Option<bool>| match value {
             Some(true) => "on",
@@ -3419,8 +3553,14 @@ fn note_microphone(microphone: Microphone, gain_set: bool, level_set: bool) {
     );
 }
 
-pub(crate) fn start_audio() -> Result<PlatformAudio, FailureCode> {
+fn start_audio() -> Result<PlatformAudio, FailureCode> {
     let audio = PlatformAudio::new().map_err(|_| FailureCode::AudioDevice)?;
+    configure_audio(&audio)?;
+    Ok(audio)
+}
+
+/// The worker's audio processing request for the platform module.
+pub(crate) fn configure_audio(audio: &PlatformAudio) -> Result<(), FailureCode> {
     audio
         .configure_audio_processing(AudioProcessingOptions {
             echo_cancellation: true,
@@ -3428,8 +3568,7 @@ pub(crate) fn start_audio() -> Result<PlatformAudio, FailureCode> {
             auto_gain_control: true,
             prefer_hardware_processing: false,
         })
-        .map_err(|_| FailureCode::AudioDevice)?;
-    Ok(audio)
+        .map_err(|_| FailureCode::AudioDevice)
 }
 
 async fn publish_microphone(
@@ -3738,6 +3877,51 @@ async fn fail(output: &Output, code: FailureCode) -> u8 {
 mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
+
+    /// GIVEN notes that come while one is written THEN one writer starts,
+    /// only the newest note waits, and after the writer ends the next note
+    /// starts a writer again.
+    #[test]
+    fn given_notes_while_one_is_written_then_one_writer_takes_the_newest() {
+        let mut state = NoteState::new();
+        assert!(state.offer(1), "the first note starts a writer");
+        assert_eq!(state.next(), Some(1));
+        assert!(!state.offer(2), "a writer runs");
+        assert!(!state.offer(3), "a writer runs");
+        assert_eq!(state.next(), Some(3), "only the newest waits");
+        assert_eq!(state.next(), None, "the writer ends");
+        assert!(state.offer(4), "a note after the end starts a writer again");
+    }
+
+    static WRITTEN: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+
+    fn record_note(note: u32) {
+        WRITTEN.lock().unwrap().push(note);
+    }
+
+    static TEST_NOTES: NoteQueue<u32> = NoteQueue::new(record_note);
+
+    /// GIVEN notes queued on the runtime THEN a blocking writer writes them
+    /// in order, none twice, ending with the newest, and then ends.
+    #[tokio::test]
+    async fn given_queued_notes_then_the_newest_is_written_and_the_writer_ends() {
+        for note in 1..=3 {
+            TEST_NOTES.push(note);
+        }
+        for _ in 0..400 {
+            if !TEST_NOTES.lock().writing {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(!TEST_NOTES.lock().writing, "the writer ended");
+        let written = WRITTEN.lock().unwrap().clone();
+        assert_eq!(written.last(), Some(&3), "the newest is written");
+        assert!(
+            written.windows(2).all(|pair| pair[0] < pair[1]),
+            "in order and none twice: {written:?}"
+        );
+    }
 
     /// GIVEN the devices a call uses and a new choice WHEN a change during
     /// the call is planned THEN an equal choice changes nothing, a new one

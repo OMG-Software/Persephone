@@ -22,8 +22,9 @@ pub struct Component {
     pub active: Option<bool>,
 }
 
-/// What the audio processing module of the newest peer connection factory
-/// does now.
+/// What the audio processing module of the oldest live peer connection
+/// factory does now. In the call worker that is LiveKit's one runtime
+/// factory, which every room shares.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CaptureProcessing {
     /// The microphone gain in percent that the module applies. 100 when the
@@ -47,7 +48,9 @@ fn tri(value: i8) -> Option<bool> {
     }
 }
 
-/// The state of the newest live factory, or `None` when there is none.
+/// The state of the oldest live factory, or `None` when there is none. It
+/// reads the factory's worker thread and waits for it: call it off an async
+/// runtime.
 pub fn capture_processing() -> Option<CaptureProcessing> {
     let state = sys_pcf::capture_processing_state();
     state.found.then(|| CaptureProcessing {

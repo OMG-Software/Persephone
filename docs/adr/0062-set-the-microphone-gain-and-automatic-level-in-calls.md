@@ -104,10 +104,17 @@ crate's `PERSEPHONE-PATCH.md`:
   made later takes the stored gain when it joins the registry. This is
   needed because the factory that serves the call is made inside LiveKit and
   is not reachable from the worker.
-* `webrtc-sys`: `capture_processing_state()` reports, for the newest factory,
-  the gain the APM applies and, for echo cancellation, noise suppression and
-  automatic gain control, what was asked and what runs. It is read only and
-  feeds the diagnostic notes.
+* `webrtc-sys`: `capture_processing_state()` reports, for the oldest live
+  factory (in the worker, LiveKit's one runtime factory, which every room
+  shares), the gain the APM applies and, for echo cancellation, noise
+  suppression and automatic gain control, what was asked and what runs. It
+  is read only and feeds the diagnostic notes. It waits for the worker
+  thread, so the worker writes those notes from a blocking task, one at a
+  time per kind, never on its event loop.
+* The gain is posted to the worker thread, not waited for, and the
+  registry's mutex is never held across a wait. The pinned
+  `CaptureLevelsAdjuster` takes any `pre_gain` from 0, so a gain under 100
+  percent lowers the sound.
 * `webrtc-sys`, `AudioTrack::set_auto_gain_control(bool)`: calls
   `SetAudioProcessingOptions` with the options that
   `create_device_audio_track` sets (echo cancellation and noise suppression
@@ -156,8 +163,9 @@ control and the gain follow the requests while the track is sent.
   fields `auto_level` and `mic_gain`), next to the devices and the volume. A
   setting that was never changed is not written. Saving the devices keeps
   them. The core sends the saved values in `Join`, and sends each change to a
-  running call through a watch channel that keeps only the newest value, so
-  a slider never fills the command queue.
+  joining or running call through a watch channel that keeps only the newest
+  value, so a slider never fills the command queue. A change made while the
+  call joins is sent once the worker is connected.
 
 ### Verification on 25 November 2026
 

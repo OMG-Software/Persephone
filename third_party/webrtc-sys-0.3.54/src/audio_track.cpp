@@ -98,7 +98,11 @@ void AudioTrack::set_volume(double volume) const {
 // PERSEPHONE PATCH (ADR-0062): the options are the ones create_device_audio_track
 // sets, with the automatic gain control as asked. SetAudioProcessingOptions
 // reaches the active sender and the shared audio processing module, so the
-// change applies without publishing the track again.
+// change applies without publishing the track again. Safe from any thread:
+// track() is WebRTC's AudioTrack proxy, whose SetAudioProcessingOptions is a
+// PROXY_METHOD1 (pc/media_stream_track_proxy.h) that runs the call on the
+// signaling thread and waits for it. set_volume marshals by hand because
+// GetSource bypasses the proxy.
 int32_t AudioTrack::set_auto_gain_control(bool enabled) const {
   webrtc::AudioTrackInterface* audio = track();
   if (audio == nullptr) {

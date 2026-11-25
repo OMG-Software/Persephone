@@ -117,8 +117,9 @@ class PeerConnectionFactory {
 // every live factory and for factories made later. False for a gain over
 // 400 percent, which changes nothing.
 bool set_capture_gain_percent(uint16_t percent);
-// PERSEPHONE PATCH (ADR-0062): the audio processing state of the newest live
-// factory, or `found == false` when there is none.
+// PERSEPHONE PATCH (ADR-0062): the audio processing state of the oldest live
+// factory, or `found == false` when there is none. In the call worker that is
+// LiveKit's one runtime factory, which every room shares.
 CaptureProcessing capture_processing_state();
 
 std::shared_ptr<PeerConnectionFactory> create_peer_connection_factory();

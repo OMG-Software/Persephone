@@ -199,16 +199,13 @@ fn given_repeated_calls_when_the_volume_is_used_and_dropped_then_native_resource
 fn platform_audio_offers_no_builtin_aec() {
     use livekit::prelude::{AudioProcessingOptions, PlatformAudio};
     for _ in 0..3 {
-        let audio = match crate::session::start_audio() {
-            Ok(audio) => audio,
-            Err(_) => {
-                assert!(
-                    PlatformAudio::new().is_err(),
-                    "the worker's audio setup failed with a platform module present"
-                );
-                return;
-            }
+        let Ok(audio) = PlatformAudio::new() else {
+            return;
         };
+        // With a module present, the worker's own setup must take it: a
+        // refusal would fail every call with an audio device error.
+        crate::session::configure_audio(&audio)
+            .expect("the worker's audio setup takes the platform module");
         assert!(!audio.is_hardware_aec_available());
         audio
             .configure_audio_processing(AudioProcessingOptions {
@@ -226,6 +223,12 @@ fn platform_audio_offers_no_builtin_aec() {
 /// One round of the microphone gain workload (ADR-0062): a factory made
 /// while a gain is set, a gain change while it lives, the automatic gain
 /// control call on a track, and the factory dropped.
+///
+/// The report is the oldest live factory's, which can be another test's
+/// factory. Each read is still exact: every live factory takes each gain
+/// that is set and a new factory takes the gain set before it, so all live
+/// factories hold the gain set last. A read runs on the factory's worker
+/// thread after the gain task posted before it.
 fn gain_round() {
     let factory = PeerConnectionFactory::default();
     let report = capture_processing::capture_processing().expect("a live factory reports");
@@ -233,16 +236,27 @@ fn gain_round() {
         report.gain_percent, 250,
         "a factory made after the gain was set takes it"
     );
-    // The gain moves while the factory lives, and a gain over the limit
-    // changes nothing.
-    for (percent, accepted) in [(0, true), (5, true), (400, true), (405, false), (100, true)] {
+    // The gain moves while the factory lives, also under 100 percent, which
+    // must not be clamped; a gain over the limit changes nothing.
+    let mut expected = 250;
+    for (percent, accepted) in [
+        (0, true),
+        (5, true),
+        (50, true),
+        (400, true),
+        (405, false),
+        (100, true),
+    ] {
         assert_eq!(
             capture_processing::set_capture_gain_percent(percent),
             accepted
         );
+        if accepted {
+            expected = u32::from(percent);
+        }
+        let read = capture_processing::capture_processing().expect("the factory is alive");
+        assert_eq!(read.gain_percent, expected, "after a gain of {percent}");
     }
-    let after = capture_processing::capture_processing().expect("the factory is alive");
-    assert_eq!(after.gain_percent, 100);
     // A track that no device feeds may refuse the options. The call must be
     // safe either way, also after the factory's other tracks are dropped.
     let track = local_track(&factory);
@@ -288,10 +302,11 @@ fn given_repeated_factories_when_the_gain_is_set_then_each_takes_it_and_resource
 #[test]
 fn given_a_device_track_when_automatic_level_changes_then_webrtc_takes_it() {
     use livekit::prelude::{LocalAudioTrack, PlatformAudio};
-    let Ok(audio) = crate::session::start_audio() else {
-        assert!(PlatformAudio::new().is_err());
+    let Ok(audio) = PlatformAudio::new() else {
         return;
     };
+    crate::session::configure_audio(&audio)
+        .expect("the worker's audio setup takes the platform module");
     let track = LocalAudioTrack::create_audio_track("persephone-gain", audio.rtc_source());
     let rtc = track.rtc_track();
     for enabled in [false, true, false, true] {
