@@ -94,7 +94,8 @@ worker, as on Linux.
   problem never ends the call.
 * As on Windows (ADR-0053's amendment), the core queues the worker's stop
   when it accepts "Stop sharing", before the call bar shows `off`, not after
-  the call's other work.
+  the call's other work. Only a full worker command queue makes the stop wait
+  for the call task, so then it can reach the worker after `off` shows.
 
 ### Capture
 
