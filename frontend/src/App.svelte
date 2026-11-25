@@ -30,7 +30,7 @@
     VOLUME_SAVE_TEXT,
     type ShownRing
   } from './calls';
-  import { CALL_WINDOW_UNAVAILABLE_TEXT, CallWindowOpener } from './callWindow';
+  import { CALL_WINDOW_UNAVAILABLE_TEXT, CallWindowOpener } from './callWindow.ts';
   import { resettable, storeText, unlockable } from './storeText.ts';
   import RoomTools from './RoomTools.svelte';
   import ConnectionHealth from './ConnectionHealth.svelte';
