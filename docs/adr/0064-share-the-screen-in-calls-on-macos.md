@@ -35,8 +35,10 @@ Facts from the research of 25 November 2026 (not measured on a Mac):
 
 ## Decision Drivers
 
-* The worker gets one grant for each share and no listing right. The user
-  picks every share.
+* The worker gets one grant for each share, and its code takes only that
+  display. It can still list the windows and applications on screen: the
+  `SCShareableContent` it reads lists them, and the profile does not stop
+  that (see "Containment"). The user picks every share.
 * Bound the pictures and the work before allocation, as in ADR-0048 and
   ADR-0053.
 * Fail closed where the permission, the display or the containment is not
@@ -193,7 +195,9 @@ Seatbelt denials the system log shows.
 
 ### The core asks for the permission and picks the display; the worker captures it with ScreenCaptureKit
 
-* Good, because the worker gets one display and no listing right.
+* Good, because the worker gets one display, though the
+  `SCShareableContent` it reads also lists the windows and applications on
+  screen.
 * Good, because it reuses the Windows target and the Linux flow.
 * Bad, because the pick is a plain question for each display.
 

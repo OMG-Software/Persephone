@@ -266,10 +266,11 @@ test (no box opens), not a measurement.
 
 ## Rerun of the capture measurement, 25 November 2026
 
-Question: does the result of the DXGI and GDI measurement above hold at the
-current branch head, with the desktop unlocked, on a machine with two
-monitors? The probe lists both monitors but copies monitor 0 only, so this
-says nothing about a copy of the second monitor.
+Question: does the result of the DXGI and GDI measurement above hold at
+commit 6056764 (the branch head on 25 November 2026, 20:46 UTC), with the
+desktop unlocked, on a machine with two monitors? The probe lists both
+monitors but copies monitor 0 only, so this says nothing about a copy of the
+second monitor.
 
 A run at commit 5e98e72 on a locked desktop (`LogonUI.exe` running) was
 inconclusive: the uncontained GDI control also copied an all-black screen,
