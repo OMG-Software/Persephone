@@ -6874,6 +6874,7 @@ mod tests {
             screen_control: Arc::default(),
             volume: watch::channel(MAX_VOLUME_PERCENT).0,
             devices: watch::channel(None).0,
+            microphone: watch::channel(None).0,
             task: None,
         });
     }
@@ -6885,6 +6886,7 @@ mod tests {
             flags: Arc::new(Flags::default()),
             kill: Arc::default(),
             devices: watch::channel(None).0,
+            microphone: watch::channel(None).0,
         });
     }
 
