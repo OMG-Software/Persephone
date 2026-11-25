@@ -2,9 +2,10 @@
 //! LiveKit types.
 //!
 //! One backend per OS: `windows.rs` (Windows.Graphics.Capture, through
-//! `wgc.rs`), `linux.rs` (PipeWire over the ScreenCast portal remote) and
-//! `unsupported.rs` for the rest (macOS reports screen sharing as
-//! unavailable until its own decision). A backend offers `capture()`; this
+//! `wgc.rs`), `linux.rs` (PipeWire over the ScreenCast portal remote),
+//! `macos.rs` (ScreenCaptureKit, ADR-0064, with its pure rules in
+//! `display.rs`) and `unsupported.rs` for the rest. A backend offers
+//! `capture()`; this
 //! module wraps it in [`open`]. The core names the screen: the worker never
 //! lists screens to the user and never picks another one. A capture runs on
 //! its own thread. [`Capture::stop`] and `Drop` ask it to end and wait for
@@ -29,15 +30,24 @@ mod backend;
 #[cfg(target_os = "linux")]
 #[path = "linux.rs"]
 mod backend;
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(target_os = "macos")]
+#[path = "macos.rs"]
+mod backend;
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 #[path = "unsupported.rs"]
 mod backend;
+
+/// The rules of a display share that need no OS type (ADR-0064); `macos.rs`
+/// uses them, and the tests run them everywhere.
+#[cfg(any(target_os = "macos", test))]
+mod display;
 
 #[cfg(windows)]
 mod wgc;
 
 /// The longest wait for the screen to open: the Windows capture setup, or
-/// on Linux the PipeWire connection and the wait for the stream (up to 6 s).
+/// on Linux the PipeWire connection and the wait for the stream (up to 6 s),
+/// or on macOS the display list and the stream start (up to 4 s each).
 const OPEN_TIMEOUT: Duration = Duration::from_secs(10);
 /// No screen picture is larger than this on either side (a 4K screen, a wide
 /// screen).
@@ -57,14 +67,17 @@ pub fn capture_size_ok(width: u32, height: u32) -> bool {
 
 /// The byte order of the 32-bit pixels in a [`CapturedFrame`], as in memory.
 /// The fourth byte is alpha or padding; it is never used.
-/// `unsupported.rs` (macOS) makes no frame, so only tests make one there.
-#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
+/// `unsupported.rs` makes no frame, so only tests make one there.
+#[cfg_attr(
+    not(any(windows, target_os = "linux", target_os = "macos")),
+    allow(dead_code)
+)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Format {
-    /// B, G, R, A (Windows BGRA; PipeWire BGRx and BGRA).
+    /// B, G, R, A (Windows and macOS BGRA; PipeWire BGRx and BGRA).
     Bgra,
     /// R, G, B, A (PipeWire RGBx and RGBA).
-    #[cfg_attr(windows, allow(dead_code))]
+    #[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
     Rgba,
 }
 
@@ -91,7 +104,10 @@ impl<'a> CapturedFrame<'a> {
 
     /// A frame over `data`, or `None` when `data` is shorter than a whole
     /// picture or the size is outside the capture limits.
-    #[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
+    #[cfg_attr(
+        not(any(windows, target_os = "linux", target_os = "macos")),
+        allow(dead_code)
+    )]
     pub fn checked(
         format: Format,
         width: u32,
@@ -110,9 +126,12 @@ impl<'a> CapturedFrame<'a> {
     }
 }
 
-/// Why a capture ended by itself. `unsupported.rs` (macOS) starts no
-/// capture, so only tests make one there.
-#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
+/// Why a capture ended by itself. `unsupported.rs` starts no capture, so
+/// only tests make one there.
+#[cfg_attr(
+    not(any(windows, target_os = "linux", target_os = "macos")),
+    allow(dead_code)
+)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Ended {
     /// The source went: the window or screen closed, the portal session
@@ -123,7 +142,8 @@ pub enum Ended {
 }
 
 /// What one screen start brought for its open: on Linux, the PipeWire remote
-/// the core sent over the camera channel with kind `s`. Empty on Windows.
+/// the core sent over the camera channel with kind `s`. Empty on Windows
+/// and macOS.
 /// Dropping it closes the remote.
 #[derive(Default)]
 pub struct Grant {
@@ -246,7 +266,7 @@ mod tests {
     /// result is `Unavailable` and no thread starts.
     #[test]
     fn given_a_target_of_another_os_when_opened_then_it_is_unavailable() {
-        let wrong = if cfg!(windows) {
+        let wrong = if cfg!(any(windows, target_os = "macos")) {
             ScreenTarget::Portal { node: 1 }
         } else {
             ScreenTarget::Monitor {
