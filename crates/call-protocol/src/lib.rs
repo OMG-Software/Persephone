@@ -5,6 +5,8 @@
 //! `u16` length and UTF-8 bytes. A byte field is a `u8` length and bytes.
 //! Decoding rejects anything outside the limits below. Errors carry no text.
 
+pub mod screen_frame;
+
 use std::io::{self, Read, Write};
 
 use persephone_media_protocol::{
@@ -330,6 +332,18 @@ pub enum ToWorker {
         /// share is never taken for the newer one.
         share: u32,
     },
+    /// Windows only (ADR-0067): the read end of the frame pipe of share
+    /// `share`, as a handle value inside the worker. The core made the
+    /// capture helper's pipe and duplicated its read end into the worker
+    /// process, then sends this directly before the `SetScreen` of the same
+    /// share. The worker keeps at most one such handle, checks that it is a
+    /// pipe before it reads, and takes it with the start of that share. A
+    /// handle that no start takes is closed when the next one comes or the
+    /// worker ends. The handle value is never 0. No answer.
+    ScreenFrames {
+        share: u32,
+        handle: u32,
+    },
     /// Turn the camera on or off. The worker answers with
     /// [`FromWorker::Camera`].
     SetCamera {
@@ -466,6 +480,11 @@ impl std::fmt::Debug for ToWorker {
                 .debug_struct("SetCamera")
                 .field("on", on)
                 .field("remote", remote)
+                .finish(),
+            Self::ScreenFrames { share, handle } => f
+                .debug_struct("ScreenFrames")
+                .field("share", share)
+                .field("handle", handle)
                 .finish(),
             Self::SetScreen { target, share } => f
                 .debug_struct("SetScreen")
@@ -891,6 +910,7 @@ const TO_SET_DIAGNOSTICS: u8 = 13;
 const TO_TEST_DEVICE: u8 = 14;
 const TO_SET_DEVICES: u8 = 15;
 const TO_SET_MICROPHONE: u8 = 16;
+const TO_SCREEN_FRAMES: u8 = 17;
 
 // Tags of worker to core messages.
 const FROM_READY: u8 = 1;
@@ -1282,6 +1302,11 @@ impl ToWorker {
                     }
                 }
             }
+            Self::ScreenFrames { share, handle } => {
+                out.push(TO_SCREEN_FRAMES);
+                out.extend_from_slice(&share.to_be_bytes());
+                out.extend_from_slice(&handle.to_be_bytes());
+            }
             Self::SetDeafened { deafened } => {
                 out.push(TO_SET_DEAFENED);
                 out.push(u8::from(*deafened));
@@ -1429,6 +1454,14 @@ impl ToWorker {
                     _ => return Err(DecodeError::InvalidValue),
                 };
                 Self::SetScreen { target, share }
+            }
+            TO_SCREEN_FRAMES => {
+                let share = reader.u32()?;
+                let handle = reader.u32()?;
+                if handle == 0 {
+                    return Err(DecodeError::InvalidValue);
+                }
+                Self::ScreenFrames { share, handle }
             }
             TO_SET_DEAFENED => Self::SetDeafened {
                 deafened: reader.bool()?,
@@ -2149,6 +2182,14 @@ mod tests {
                 }),
                 share: 9,
             },
+            ToWorker::ScreenFrames {
+                share: 0,
+                handle: 1,
+            },
+            ToWorker::ScreenFrames {
+                share: u32::MAX,
+                handle: u32::MAX,
+            },
             ToWorker::SetDeafened { deafened: true },
             ToWorker::SetDeafened { deafened: false },
             ToWorker::SetVolume { percent: 0 },
@@ -2545,7 +2586,7 @@ mod tests {
             Err(DecodeError::UnknownTag)
         );
         assert_eq!(
-            ToWorker::decode(&[VERSION, 17]),
+            ToWorker::decode(&[VERSION, 18]),
             Err(DecodeError::UnknownTag)
         );
         assert_eq!(
@@ -3239,6 +3280,31 @@ mod tests {
         let body = vec![7; MAX_SCREEN_BYTES];
         write_video_frame(&mut wire, SCREEN_TILE, 0, 1280, 720, &body).unwrap();
         assert!(!wire.is_empty());
+    }
+
+    /// GIVEN a ScreenFrames message with handle 0, a cut body or extra bytes
+    /// WHEN it is decoded THEN each is rejected, and a good one is read.
+    #[test]
+    fn given_bad_screen_frames_when_decoded_then_it_is_rejected() {
+        assert_eq!(
+            ToWorker::decode(&[VERSION, TO_SCREEN_FRAMES, 0, 0, 0, 1, 0, 0, 0, 0]),
+            Err(DecodeError::InvalidValue)
+        );
+        assert_eq!(
+            ToWorker::decode(&[VERSION, TO_SCREEN_FRAMES, 0, 0, 0, 1, 0, 0, 1]),
+            Err(DecodeError::Truncated)
+        );
+        assert_eq!(
+            ToWorker::decode(&[VERSION, TO_SCREEN_FRAMES, 0, 0, 0, 1, 0, 0, 0, 4, 0]),
+            Err(DecodeError::TrailingBytes)
+        );
+        assert_eq!(
+            ToWorker::decode(&[VERSION, TO_SCREEN_FRAMES, 0, 0, 0, 1, 0, 0, 0, 4]),
+            Ok(ToWorker::ScreenFrames {
+                share: 1,
+                handle: 4
+            })
+        );
     }
 
     /// GIVEN bad values in a SetScreen
