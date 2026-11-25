@@ -1756,14 +1756,13 @@ async fn call_device_test_status(
 /// Opens the call window (ADR-0060), or brings it to the front. It shows
 /// the bundled call page only. A window that cannot be shown is an error,
 /// because the main window then shows the call's controls itself. Focus is
-/// only a request: the desktop may refuse it while the window shows.
+/// only a request, as is unminimise: the desktop may refuse either while the
+/// window shows.
 #[tauri::command]
 async fn open_call_window<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
     if let Some(window) = app.get_webview_window(CALL_WINDOW) {
-        window
-            .unminimize()
-            .and_then(|()| window.show())
-            .map_err(|_| UNAVAILABLE.to_string())?;
+        let _ = window.unminimize();
+        window.show().map_err(|_| UNAVAILABLE.to_string())?;
         let _ = window.set_focus();
         return Ok(());
     }

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { callGrid, SelfClose } from '../src/callWindow.ts';
+import { CallWindowOpener, callGrid, SelfClose } from '../src/callWindow.ts';
 import {
   DEVICE_CHANGE_TEXT,
   DEVICE_TEST_LABEL,
@@ -175,4 +175,93 @@ test('GIVEN a window whose first status is an ended call WHEN it reads it THEN i
   kept.status(false, true);
   context.mock.timers.tick(10000);
   assert.equal(closes, 1);
+});
+
+// Opens that the test settles by hand, in the order it chooses.
+function opener() {
+  const opens = [];
+  const reports = [];
+  const calls = new CallWindowOpener(
+    () =>
+      new Promise((resolve, reject) => {
+        opens.push({ resolve, reject });
+      }),
+    (failed) => reports.push(failed)
+  );
+  return { calls, opens, reports };
+}
+const settled = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+test('GIVEN a call window open WHEN it fails and a later open works THEN the main window shows the call, then stops', async () => {
+  const { calls, opens, reports } = opener();
+  calls.open();
+  opens[0].reject('unavailable');
+  await settled();
+  assert.deepEqual(reports, [true]);
+  calls.open();
+  opens[1].resolve();
+  await settled();
+  assert.deepEqual(reports, [true, false]);
+});
+
+test('GIVEN two opens WHEN the older one fails last THEN its failure counts for nothing', async () => {
+  const { calls, opens, reports } = opener();
+  calls.open();
+  calls.open();
+  opens[1].resolve();
+  await settled();
+  opens[0].reject('unavailable');
+  await settled();
+  assert.deepEqual(reports, [false]);
+});
+
+test('GIVEN two opens WHEN the newer one fails after the older one worked THEN the window counts as open', async () => {
+  const { calls, opens, reports } = opener();
+  calls.open();
+  calls.open();
+  opens[0].resolve();
+  await settled();
+  opens[1].reject('unavailable');
+  await settled();
+  assert.deepEqual(reports, [false]);
+});
+
+test('GIVEN two opens WHEN the newer one fails first and the older one works last THEN the window counts as open', async () => {
+  const { calls, opens, reports } = opener();
+  calls.open();
+  calls.open();
+  opens[1].reject('unavailable');
+  await settled();
+  opens[0].resolve();
+  await settled();
+  assert.deepEqual(reports, [true, false]);
+});
+
+test('GIVEN an open that waits WHEN the call ends THEN neither its failure nor its success counts', async () => {
+  const { calls, opens, reports } = opener();
+  calls.open();
+  calls.open();
+  calls.forget();
+  opens[0].resolve();
+  opens[1].reject('unavailable');
+  await settled();
+  assert.deepEqual(reports, []);
+  // The next call's open counts again.
+  calls.open();
+  opens[2].reject('unavailable');
+  await settled();
+  assert.deepEqual(reports, [true]);
+});
+
+test('GIVEN an open that throws at once WHEN it is asked THEN that is a failed open', async () => {
+  const reports = [];
+  const calls = new CallWindowOpener(
+    () => {
+      throw 'unavailable';
+    },
+    (failed) => reports.push(failed)
+  );
+  calls.open();
+  await settled();
+  assert.deepEqual(reports, [true]);
 });

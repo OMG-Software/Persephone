@@ -30,7 +30,7 @@
     VOLUME_SAVE_TEXT,
     type ShownRing
   } from './calls';
-  import { CALL_WINDOW_UNAVAILABLE_TEXT } from './callWindow';
+  import { CALL_WINDOW_UNAVAILABLE_TEXT, CallWindowOpener } from './callWindow';
   import { resettable, storeText, unlockable } from './storeText.ts';
   import RoomTools from './RoomTools.svelte';
   import ConnectionHealth from './ConnectionHealth.svelte';
@@ -779,31 +779,25 @@
   // the call's controls and video itself; otherwise only the call window
   // does. A later open that works hides them again.
   let callWindowFailed = $state(false);
-  // The newest open request. Only its reply counts, so a slow reply from an
-  // earlier request, or from before a session change, changes nothing.
-  let callWindowRequest = 0;
+  // Which open replies count is decided in callWindow.ts.
+  const callWindowOpener = new CallWindowOpener(
+    () => openCallWindow(),
+    (failed) => {
+      callWindowFailed = failed;
+      // A window that cannot open leaves the call here; say so, so no
+      // window is missed without a reason.
+      if (failed) error = CALL_WINDOW_UNAVAILABLE_TEXT;
+      else if (error === CALL_WINDOW_UNAVAILABLE_TEXT) error = null;
+    }
+  );
   function showCallWindow() {
-    const request = ++callWindowRequest;
-    openCallWindow().then(
-      () => {
-        if (request !== callWindowRequest) return;
-        callWindowFailed = false;
-        if (error === CALL_WINDOW_UNAVAILABLE_TEXT) error = null;
-      },
-      () => {
-        if (request !== callWindowRequest) return;
-        // A window that cannot open leaves the call here; say so, so no
-        // window is missed without a reason.
-        callWindowFailed = true;
-        error = CALL_WINDOW_UNAVAILABLE_TEXT;
-      }
-    );
+    callWindowOpener.open();
   }
   // Ends the call window state of a call that is over: no fallback, no
   // "could not open" message, and no reply from an open still waiting.
   function forgetCallWindow() {
+    callWindowOpener.forget();
     callWindowFailed = false;
-    callWindowRequest += 1;
     if (error === CALL_WINDOW_UNAVAILABLE_TEXT) error = null;
   }
   $effect(() => {

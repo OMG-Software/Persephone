@@ -69,6 +69,52 @@ export class SelfClose {
 /** Shown in the main window when the call window cannot open. */
 export const CALL_WINDOW_UNAVAILABLE_TEXT = 'The call window could not open. The call goes on in this window.';
 
+/**
+ * Opens the call window (ADR-0060) and reports whether the main window must
+ * show the call itself: `report(true)` after a failed open, `report(false)`
+ * after one that worked. Opens can overlap, as the automatic open and a
+ * "Call window" click do, and their replies can come in any order:
+ *
+ * - An open that worked always counts, because the window is then open.
+ * - A failure counts only for the newest open, and only when no open has
+ *   worked since it started.
+ * - `forget()` ends the call: no reply from before it counts.
+ */
+export class CallWindowOpener {
+  #request = 0;
+  #opened = 0;
+  #epoch = 0;
+  readonly #open: () => Promise<void>;
+  readonly #report: (failed: boolean) => void;
+
+  constructor(open: () => Promise<void>, report: (failed: boolean) => void) {
+    this.#open = open;
+    this.#report = report;
+  }
+
+  open() {
+    const request = ++this.#request;
+    const opened = this.#opened;
+    const epoch = this.#epoch;
+    // A synchronous throw is a failed open too.
+    new Promise<void>((resolve) => resolve(this.#open())).then(
+      () => {
+        if (epoch !== this.#epoch) return;
+        this.#opened += 1;
+        this.#report(false);
+      },
+      () => {
+        if (epoch !== this.#epoch || request !== this.#request || opened !== this.#opened) return;
+        this.#report(true);
+      }
+    );
+  }
+
+  forget() {
+    this.#epoch += 1;
+  }
+}
+
 export type CallCell = {
   // Unique in the grid.
   key: string;
