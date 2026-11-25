@@ -3457,14 +3457,6 @@ impl Call {
         false
     }
 
-    /// Applies one worker event. For a tile's `VideoStarted` or
-    /// `VideoStopped`, the store is told only after the new metadata is
-    /// applied and synced: the read thread counted the change, and the tile
-    /// keeps pictures again only once every counted change is applied here.
-    /// The new stream number is then published, also when the metadata did
-    /// not change, and the page asks for pictures of that stream only. So no
-    /// picture of a new stream shows under the old participant, even on a
-    /// page whose status is older.
     /// Called when the alone deadline fires. A join may wait unread then:
     /// `select!` picks among ready arms at random, and `members_changed` can
     /// hold the loop past the deadline. So the worker's waiting messages are
@@ -3483,6 +3475,14 @@ impl Call {
         Ok(self.alone.is_due(time::Instant::now()))
     }
 
+    /// Applies one worker event. For a tile's `VideoStarted` or
+    /// `VideoStopped`, the store is told only after the new metadata is
+    /// applied and synced: the read thread counted the change, and the tile
+    /// keeps pictures again only once every counted change is applied here.
+    /// The new stream number is then published, also when the metadata did
+    /// not change, and the page asks for pictures of that stream only. So no
+    /// picture of a new stream shows under the old participant, even on a
+    /// page whose status is older.
     fn worker_event(&mut self, inner: &Inner, event: &FromWorker) -> Result<(), EndReason> {
         self.alone.observe(event, time::Instant::now());
         if let FromWorker::Diagnostic {
