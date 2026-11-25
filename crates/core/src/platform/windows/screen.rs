@@ -1,27 +1,27 @@
 //! The Windows screen source (ADR-0053): the core's own window names each
 //! monitor, and the user shares one or cancels.
 //!
-//! The core names the monitor to the worker by its GDI device name
+//! The core names the monitor to the screen helper (ADR-0067; before it, to
+//! the worker) by its GDI device name
 //! (`MONITORINFOEXW::szDevice`, such as `\\.\DISPLAY1`), its size in pixels
 //! when the user saw it, and its rectangle in physical pixels (read with
-//! per-monitor DPI awareness, as the worker reads it). The worker copies
-//! exactly that rectangle, so it copies the part of the desktop the user
-//! approved even if a name moved. A device name names a display output, and
+//! per-monitor DPI awareness, as the helper reads it). The helper takes only
+//! the monitor with that name, size and rectangle, so it captures the part
+//! of the desktop the user approved even if a name moved. A device name names a display output, and
 //! Windows can give it to another output when the monitors change, so the
 //! core reads every monitor's name, rectangle and mode before the first
 //! question and again after a Share: any change voids the answer, and the
-//! share stays off. The worker takes only the monitor with that name, size
-//! and rectangle, and checks its place again before and after each copy, so
-//! a change after the answer gives "not found", ends the share, or copies
-//! only the approved rectangle. The question says where each monitor is: the
+//! share stays off. The helper takes only the monitor with that name, size
+//! and rectangle, and checks its place again on each loop, so a change after
+//! the answer gives "not found" or ends the share. The question says where each monitor is: the
 //! main screen, or its side of the main screen, with its order when two or
 //! more offered monitors are on one side, so monitors of the same size read
 //! apart. This module lists monitors with the same rules as
-//! `crates/call-worker/src/screen/wgc.rs` (the call protocol's
+//! `crates/screen-helper/src/wgc.rs` (the call protocol's
 //! `MAX_SCREEN_MONITORS` and `MAX_MONITOR_SIDE`, the size of the current
 //! display mode, in display order). A monitor whose name is not printable
-//! ASCII, or has a space, is not listed. It offers only the monitors that the worker's GDI
-//! capture takes (`screen_capture_size_ok`); another one is not asked, and
+//! ASCII, or has a space, is not listed. It offers only the monitors that the helper
+//! captures (`screen_capture_size_ok`); another one is not asked, and
 //! the question says how many were left out.
 //!
 //! The window is a message box: Yes shares the shown screen, No shows the
@@ -210,12 +210,13 @@ pub fn prompt_text(
         1 => "\n\nOne screen cannot be shared at its size and is not shown.".to_owned(),
         n => format!("\n\n{n} screens cannot be shared at their size and are not shown."),
     };
-    // A GDI copy was not measured against the display affinity that hides
-    // the main window (ADR-0045), so the question warns as on macOS.
+    // The helper's capture is documented to respect the display affinity
+    // that hides the main window (ADR-0045), but that was not measured for
+    // this share, so the question warns as on macOS. The call bar shows the
+    // share; the text promises no capture border.
     format!(
         "{what}\n\nEveryone in the call can see it. It can show Persephone's \
-         messages. Windows draws no border around a shared screen; the call bar \
-         shows that it is shared.{left_out}\n\n{buttons}"
+         messages. The call bar shows that it is shared.{left_out}\n\n{buttons}"
     )
 }
 
@@ -752,14 +753,15 @@ mod tests {
     }
 
     /// GIVEN the window text THEN it names the screen and its size, says that
-    /// everyone sees it and that there is no border, and the buttons match
+    /// everyone sees it and that the call bar shows it, and the buttons match
     /// the number of screens.
     #[test]
     fn given_the_prompt_then_it_names_the_screen_the_audience_and_the_buttons() {
         let one = prompt_text(0, 1, qhd(), Some("main screen"), 0);
         assert!(one.contains("Screen 1 (2560x1440, main screen)?"));
         assert!(one.contains("Everyone in the call"));
-        assert!(one.contains("no border"));
+        assert!(one.contains("The call bar shows that it is shared"));
+        assert!(!one.contains("border"));
         assert!(one.contains("No cancels"));
         assert!(one.contains("Persephone's messages"));
         assert!(!one.contains("not shown"));

@@ -71,6 +71,7 @@
 * [0062 - Set the microphone gain and the automatic level in calls](0062-set-the-microphone-gain-and-automatic-level-in-calls.md)
 * [0063 - Explain a refused call join, let moderators allow it, and leave a call after 30 seconds alone](0063-explain-a-refused-call-join-and-leave-a-call-after-30-seconds-alone.md)
 * [0064 - Share the screen in calls on macOS](0064-share-the-screen-in-calls-on-macos.md)
+* [0067 - Capture the Windows screen in a helper outside the call worker](0067-capture-the-windows-screen-in-a-helper-outside-the-call-worker.md)
 
 ## Superseded Records
 
