@@ -24,8 +24,9 @@ than a call needs?
 * Keep the web view keyless (ADR-0004), with explicit commands per window.
 * Keep the main window's navigation, new-window and capture rules for the
   new window.
-* Keep the call bar in the main window, so the call can be controlled when
-  the call window is closed.
+* Keep a call bar in the main window, so the call window can be opened again
+  when it is closed, and the call can be controlled when the call window
+  cannot open.
 
 ## Considered Options
 
@@ -52,6 +53,14 @@ commands.
   join, once for each call. The call bar has a "Call window" button that
   opens it again. It closes itself four seconds after the call ends. When the
   main window goes, the host closes it.
+* On 25 November 2026 the owner asked to show the call's controls, video,
+  volume, level meter and participants in the call window only. While the
+  call window opens, the main window's call bar shows only the phone icon,
+  the room, the phase and the "Call window" button. When the call window
+  cannot open for the call, the call bar shows all of its controls and the
+  video tiles, so the call can still be muted or left. A later open that
+  works makes the bar short again. An ended call still shows its reason and
+  "Dismiss".
 * The host keeps each window's session, sound level and level channels under
   the window's label. Room subscriptions belong to the main window only. A
   call window that closes or reloads drops only its own channels.

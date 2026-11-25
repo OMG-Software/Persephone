@@ -433,7 +433,8 @@ export function minimiseToTray(): Promise<void> {
 
 /**
  * Opens the call window (ADR-0060), or brings it to the front. It shows the
- * call's video grid and participants; the main window keeps its call bar.
+ * call's video grid, participants and controls. The main window keeps a
+ * short call bar, with the full controls only when this fails.
  */
 export function openCallWindow(): Promise<void> {
   return invoke<void>('open_call_window');

@@ -34,9 +34,15 @@
   // core's codes show as fixed texts from calls.ts. The live region stays in
   // the page so that a change in it is announced. Speaking changes are not
   // announced: each participant's mark is read in place only.
+  //
+  // The call window holds the call's controls (ADR-0060). While it can open,
+  // the bar shows only the room, the phase and a "Call window" button. When
+  // it could not open (`full`), the bar shows every control, so the call can
+  // still be muted or left here.
   let {
     status,
     dismissed,
+    full,
     roomName,
     names,
     busy,
@@ -55,6 +61,8 @@
   }: {
     status: CallStatus;
     dismissed: boolean;
+    // The call window could not open: show the controls here.
+    full: boolean;
     roomName: string;
     // Display names from the call room's members, by user ID.
     names: ReadonlyMap<string, string>;
@@ -101,6 +109,11 @@
       <span class="call-controls">
         {#if ended}
           <button type="button" class="secondary call-dismiss" onclick={ondismiss}>Dismiss</button>
+        {:else if !full}
+          <button type="button" class="secondary call-window-open" onclick={onwindow}>
+            <Icon name="video" />
+            Call window
+          </button>
         {:else}
           <button
             type="button"
@@ -154,7 +167,7 @@
     {#if !ended && status.ringDeclined}
       <p class="call-declined note" role="status">{RING_DECLINED_TEXT}</p>
     {/if}
-    {#if !ended}
+    {#if !ended && full}
       <span id="call-deafen-text" class="visually-hidden">{DEAFEN_TEXT}</span>
       <label class="call-volume">
         <Icon name="volume" />
@@ -185,18 +198,18 @@
         <span class="call-level-fill" style:transform="scaleX({soundLevel / SOUND_LEVEL_MAX})"></span>
       </div>
     {/if}
-    {#if !ended && cameraText !== ''}
+    {#if !ended && full && cameraText !== ''}
       <p class="call-camera-note note" role="status">{cameraText}</p>
     {/if}
-    {#if !ended && screenText !== ''}
+    {#if !ended && full && screenText !== ''}
       <p class="call-screen-note note" role="status">{screenText}</p>
     {/if}
-    {#if !ended && status.deviceChange}
+    {#if !ended && full && status.deviceChange}
       <p class="call-device-note note" role="status">{DEVICE_CHANGE_TEXT[status.deviceChange]}</p>
     {/if}
     {#if ended}
       <p class="call-end">{status.ended === null ? END_TEXT.internal : END_TEXT[status.ended]}</p>
-    {:else if status.participants.length > 0}
+    {:else if full && status.participants.length > 0}
       <ul class="call-people" aria-label="Call participants">
         {#each status.participants as person (person.userId + '/' + person.deviceId)}
           <li>

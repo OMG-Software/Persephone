@@ -238,7 +238,7 @@ test('GIVEN a room with a call and one without WHEN the room list renders THEN o
 test('GIVEN a call whose ring was declined WHEN the call bar renders THEN it says Declined and the call goes on', async () => {
   const { default: CallBar } = await vite.ssrLoadModule('/src/CallBar.svelte');
   const status = { phase: 'active', roomId: '!r:s', muted: false, participants: [], ended: null, joinError: null, camera: 'off', video: [], ringDeclined: true };
-  const props = { dismissed: false, roomName: 'Plans', names: new Map(), busy: false, cameraBusy: false, onmute() {}, oncamera() {}, onleave() {}, ondismiss() {} };
+  const props = { dismissed: false, full: true, roomName: 'Plans', names: new Map(), busy: false, cameraBusy: false, onmute() {}, oncamera() {}, onleave() {}, ondismiss() {} };
   const { body: declined } = render(CallBar, { props: { ...props, status } });
   assert.match(declined, />Declined</);
   assert.match(declined, />Leave</);
@@ -246,10 +246,31 @@ test('GIVEN a call whose ring was declined WHEN the call bar renders THEN it say
   assert.doesNotMatch(plain, /Declined/);
 });
 
+test('GIVEN a call window that opens WHEN the call bar renders THEN it shows the room, the phase and the call window button only', async () => {
+  const { default: CallBar } = await vite.ssrLoadModule('/src/CallBar.svelte');
+  const status = {
+    phase: 'active', roomId: '!r:s', muted: true, deafened: false, volume: 100, ended: null, joinError: null,
+    camera: 'not_found', screen: 'on', video: [], ringDeclined: true, deviceChange: null,
+    participants: [{ userId: '@a:s', deviceId: 'D', speaking: true, reachable: false, keyed: false, sharing: true, muted: true }]
+  };
+  const props = { dismissed: false, full: false, roomName: 'Plans', names: new Map(), busy: false, cameraBusy: false, screenBusy: false, volume: 100, soundLevel: 80, onmute() {}, ondeafen() {}, onvolume() {}, oncamera() {}, onscreen() {}, onleave() {}, ondismiss() {} };
+  const { body: short } = render(CallBar, { props: { ...props, status } });
+  assert.match(short, /<bdi>Plans<\/bdi>/);
+  assert.match(short, />In call</);
+  assert.match(short, /class="secondary call-window-open"/);
+  assert.match(short, />Declined</);
+  assert.doesNotMatch(short, /call-mute|call-deafen|call-camera|call-screen|call-leave|type="range"|role="meter"|call-people|@a:s/);
+  assert.doesNotMatch(short, /not connected|You are sharing/);
+  // An ended call still says why, and can be dismissed.
+  const { body: ended } = render(CallBar, { props: { ...props, status: { ...status, phase: 'ended', ended: 'internal' } } });
+  assert.match(ended, /call-dismiss/);
+  assert.doesNotMatch(ended, /call-window-open/);
+});
+
 test('GIVEN an active call and a sound level WHEN the call bar renders THEN a meter follows the volume slider, loud near full scale', async () => {
   const { default: CallBar } = await vite.ssrLoadModule('/src/CallBar.svelte');
   const status = { phase: 'active', roomId: '!r:s', muted: false, deafened: false, volume: 100, participants: [], ended: null, joinError: null, camera: 'off', screen: 'off', video: [], ringDeclined: false };
-  const props = { dismissed: false, roomName: 'Plans', names: new Map(), busy: false, cameraBusy: false, screenBusy: false, volume: 100, onmute() {}, ondeafen() {}, onvolume() {}, oncamera() {}, onscreen() {}, onleave() {}, ondismiss() {} };
+  const props = { dismissed: false, full: true, roomName: 'Plans', names: new Map(), busy: false, cameraBusy: false, screenBusy: false, volume: 100, onmute() {}, ondeafen() {}, onvolume() {}, oncamera() {}, onscreen() {}, onleave() {}, ondismiss() {} };
   const { body: quiet } = render(CallBar, { props: { ...props, status, soundLevel: 50 } });
   const slider = quiet.indexOf('type="range"');
   const meter = quiet.indexOf('role="meter"');

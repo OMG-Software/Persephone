@@ -775,11 +775,27 @@
   // once per call: closing it during the call keeps it closed until the call
   // bar's "Call window" button.
   let callWindowFor = false;
+  // The call window could not open for this call. The main window then shows
+  // the call's controls and video itself; otherwise only the call window
+  // does. A later open that works hides them again.
+  let callWindowFailed = $state(false);
+  function showCallWindow() {
+    openCallWindow().then(
+      () => (callWindowFailed = false),
+      () => {
+        // A window that cannot open leaves the call here; say so, so no
+        // window is missed without a reason.
+        callWindowFailed = true;
+        error = CALL_WINDOW_UNAVAILABLE_TEXT;
+      }
+    );
+  }
   $effect(() => {
     const joined = inCall(callState);
-    // A window that cannot open leaves the call here; say so, so no window
-    // is missed without a reason.
-    if (joined && !callWindowFor) void openCallWindow().catch(() => (error = CALL_WINDOW_UNAVAILABLE_TEXT));
+    if (joined && !callWindowFor) {
+      callWindowFailed = false;
+      showCallWindow();
+    }
     callWindowFor = joined;
   });
   let callJoinText = $state<string | null>(null);
@@ -1204,6 +1220,7 @@
     screenText = null;
     screenRequest += 1;
     callDismissed = false;
+    callWindowFailed = false;
     callNames = new Map();
     callNamesFor = null;
     callRefresher.request();
@@ -3177,6 +3194,7 @@
         <CallBar
           status={callState}
           dismissed={callDismissed}
+          full={callWindowFailed}
           roomName={callRoomName}
           names={callNames}
           busy={callBusy}
@@ -3191,7 +3209,7 @@
           onscreen={toggleScreen}
           onleave={leaveCall}
           ondismiss={dismissCall}
-          onwindow={() => void openCallWindow().catch(() => (error = CALL_WINDOW_UNAVAILABLE_TEXT))}
+          onwindow={showCallWindow}
         />
         {#if cameraText}
           <p class="call-notice camera-notice error" role="alert">
@@ -3211,7 +3229,7 @@
             <button type="button" class="secondary" onclick={() => (screenText = null)}>Dismiss</button>
           </p>
         {/if}
-        {#if hasVideo(callState)}
+        {#if callWindowFailed && hasVideo(callState)}
           <CallVideo tiles={callState.video} names={callNames} ticks={callVideoTicks} />
         {/if}
         {#if selectedRoom}
