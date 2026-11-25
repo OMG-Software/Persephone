@@ -35,15 +35,18 @@
   // the page so that a change in it is announced. Speaking changes are not
   // announced: each participant's mark is read in place only.
   //
-  // The call window holds the call's controls (ADR-0060). While it can open,
-  // the bar shows only the room, the phase, a "Call window" button and the
-  // "Declined" note, which the call window does not show. When it could not
-  // open (`full`), the bar shows every control, so the call can still be
-  // muted or left here.
+  // The call window holds the call's controls (ADR-0060). Unless it failed
+  // to open or its page did not say it is ready, the bar shows only the room, the phase, a "Call window" button, a "Leave"
+  // button, which works even when the call page stops working, the
+  // "Declined" note, which the call window does not show, and the camera,
+  // screen share and device change notes, which must be seen while the call
+  // window is closed. When it failed (`full`), the bar shows every control,
+  // so the call can still be muted or left here.
   let {
     status,
     dismissed,
     full,
+    opening = false,
     roomName,
     names,
     busy,
@@ -64,6 +67,8 @@
     dismissed: boolean;
     // The call window could not open: show the controls here.
     full: boolean;
+    // An open waits for the call page: the button is off meanwhile.
+    opening?: boolean;
     roomName: string;
     // Display names from the call room's members, by user ID.
     names: ReadonlyMap<string, string>;
@@ -98,6 +103,17 @@
   const screenText = $derived(SCREEN_TEXT[status.screen]);
 </script>
 
+{#snippet callWindowButton()}
+  <button type="button" class="secondary call-window-open" disabled={opening} onclick={onwindow}>
+    <Icon name="video" />
+    {opening ? 'Opening the call window…' : 'Call window'}
+  </button>
+{/snippet}
+
+{#snippet leaveButton()}
+  <button type="button" class="secondary call-leave" onclick={onleave}>Leave</button>
+{/snippet}
+
 <div class="visually-hidden" aria-live="polite" aria-atomic="true">
   {callAnnouncement(status, dismissed)}
 </div>
@@ -111,10 +127,8 @@
         {#if ended}
           <button type="button" class="secondary call-dismiss" onclick={ondismiss}>Dismiss</button>
         {:else if !full}
-          <button type="button" class="secondary call-window-open" onclick={onwindow}>
-            <Icon name="video" />
-            Call window
-          </button>
+          {@render callWindowButton()}
+          {@render leaveButton()}
         {:else}
           <button
             type="button"
@@ -157,11 +171,8 @@
             <Icon name="screen" />
             {screen.label}
           </button>
-          <button type="button" class="secondary call-window-open" onclick={onwindow}>
-            <Icon name="video" />
-            Call window
-          </button>
-          <button type="button" class="secondary call-leave" onclick={onleave}>Leave</button>
+          {@render callWindowButton()}
+          {@render leaveButton()}
         {/if}
       </span>
     </div>
@@ -199,13 +210,13 @@
         <span class="call-level-fill" style:transform="scaleX({soundLevel / SOUND_LEVEL_MAX})"></span>
       </div>
     {/if}
-    {#if !ended && full && cameraText !== ''}
+    {#if !ended && cameraText !== ''}
       <p class="call-camera-note note" role="status">{cameraText}</p>
     {/if}
-    {#if !ended && full && screenText !== ''}
+    {#if !ended && screenText !== ''}
       <p class="call-screen-note note" role="status">{screenText}</p>
     {/if}
-    {#if !ended && full && status.deviceChange}
+    {#if !ended && status.deviceChange}
       <p class="call-device-note note" role="status">{DEVICE_CHANGE_TEXT[status.deviceChange]}</p>
     {/if}
     {#if ended}

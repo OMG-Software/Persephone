@@ -246,7 +246,7 @@ test('GIVEN a call whose ring was declined WHEN the call bar renders THEN it say
   assert.doesNotMatch(plain, /Declined/);
 });
 
-test('GIVEN a call window that opens WHEN the call bar renders THEN it shows the room, the phase and the call window button only', async () => {
+test('GIVEN a call window that opens WHEN the call bar renders THEN it shows the room, the phase, the call window button and Leave only', async () => {
   const { default: CallBar } = await vite.ssrLoadModule('/src/CallBar.svelte');
   const status = {
     phase: 'active', roomId: '!r:s', muted: true, deafened: false, volume: 100, ended: null, joinError: null,
@@ -259,8 +259,24 @@ test('GIVEN a call window that opens WHEN the call bar renders THEN it shows the
   assert.match(short, />In call</);
   assert.match(short, /class="secondary call-window-open"/);
   assert.match(short, />Declined</);
-  assert.doesNotMatch(short, /call-mute|call-deafen|call-camera|call-screen|call-leave|type="range"|role="meter"|call-people|@a:s/);
-  assert.doesNotMatch(short, /not connected|You are sharing/);
+  // The camera and screen share notes still show: the call window may be closed.
+  assert.match(short, /class="call-camera-note note"[^>]*>The chosen camera is not connected</);
+  assert.match(short, /class="call-screen-note note"[^>]*>You are sharing your screen</);
+  // Leave stays, in case the call page stops working.
+  assert.match(short, /class="secondary call-leave"[^>]*>Leave</);
+  const controls = /call-mute|call-deafen|class="secondary call-camera"|class="secondary call-screen"|type="range"|role="meter"|call-people|@a:s/;
+  assert.doesNotMatch(short, controls);
+  assert.doesNotMatch(short, /call-device-note/);
+  // A device change still shows, and the bar stays short.
+  const { body: changed } = render(CallBar, { props: { ...props, status: { ...status, deviceChange: 'failed' } } });
+  assert.match(changed, /class="call-device-note note"/);
+  assert.match(changed, /rejoin/);
+  assert.doesNotMatch(changed, controls);
+  assert.doesNotMatch(short, /call-window-open"[^>]*disabled/);
+  // While an open waits for the call page, the button says so and is off.
+  const { body: opening } = render(CallBar, { props: { ...props, status, opening: true } });
+  assert.match(opening, /class="secondary call-window-open"[^>]*disabled[^>]*>[\s\S]*?Opening the call window…/);
+  assert.match(opening, /class="secondary call-leave"/);
   // An ended call still says why, and can be dismissed.
   const { body: ended } = render(CallBar, { props: { ...props, status: { ...status, phase: 'ended', ended: 'internal' } } });
   assert.match(ended, /call-dismiss/);

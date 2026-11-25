@@ -75,7 +75,8 @@ export const CALL_WINDOW_UNAVAILABLE_TEXT = 'The call window could not open. The
  * after one that worked. Opens can overlap, as the automatic open and a
  * "Call window" click do, and their replies can come in any order:
  *
- * - An open that worked always counts, because the window is then open.
+ * - An open that worked always counts, because the call page then works:
+ *   the host replies only when the page has said it is ready.
  * - A failure counts only for the newest open, and only when no open has
  *   worked since it started.
  * - `forget()` ends the call: no reply from before it counts.

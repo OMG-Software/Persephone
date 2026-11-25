@@ -147,6 +147,7 @@ fn main() {
             "call_device_test_status",
             "open_call_window",
             "close_call_window",
+            "call_window_ready",
         ]));
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         attributes = attributes

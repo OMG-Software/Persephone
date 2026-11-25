@@ -17,6 +17,7 @@
     callScreen,
     callStatus,
     callVolume,
+    callWindowReady,
     closeCallWindow,
     watchSession
   } from './bridge';
@@ -144,6 +145,16 @@
     }
   }
 
+  // The first status read: when it works, the page can show and run the
+  // call, so it tells the host it is ready (ADR-0060). A failure leaves it
+  // unready, and the main window then shows the call's controls itself.
+  async function start() {
+    const mine = ++request;
+    const next = await callStatus();
+    if (mine === request) take(next);
+    await callWindowReady();
+  }
+
   function takeLevels(next: CallParticipantLevel[]) {
     levels = status.phase === 'active' ? levelMap(next) : new Map();
   }
@@ -162,7 +173,7 @@
       (level) => (ownLevel = status.phase === 'active' ? level : 0),
       takeLevels
     )
-      .then(refresh)
+      .then(start)
       .catch(() => (failure = 'The call window could not reach Persephone.'));
   });
 

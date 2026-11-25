@@ -1160,7 +1160,8 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-set-call-devices",
             "allow-call-stats",
             "allow-call-stats-read",
-            "allow-close-call-window"
+            "allow-close-call-window",
+            "allow-call-window-ready"
         ])
     );
     assert!(call.get("remote").is_none(), "no remote origins");
@@ -1539,6 +1540,48 @@ fn given_call_statistics_then_only_the_call_window_may_open_them_and_only_while_
     // With no statistics channel a read is fine and does nothing.
     assert!(subscriptions.forget_stats(CALL_WINDOW));
     assert_eq!(read(page), Ok(serde_json::Value::Null));
+}
+
+/// GIVEN a call window WHEN the main window says its page is ready THEN it
+/// is refused; WHEN the call page says so THEN the main window's open
+/// returns without waiting.
+#[test]
+fn given_a_ready_call_page_then_the_open_returns() {
+    let app = app();
+    let main = create_main_window(&app).unwrap();
+    let call = create_call_window(&app).unwrap();
+    assert!(
+        invoke_on(
+            &main,
+            "call_window_ready",
+            app_origin(),
+            serde_json::json!({})
+        )
+        .is_err()
+    );
+    assert_eq!(
+        invoke_on(
+            &call,
+            "call_window_ready",
+            app_origin(),
+            serde_json::json!({})
+        ),
+        Ok(serde_json::Value::Null)
+    );
+    let started = std::time::Instant::now();
+    assert_eq!(
+        invoke_on(
+            &main,
+            "open_call_window",
+            app_origin(),
+            serde_json::json!({})
+        ),
+        Ok(serde_json::Value::Null)
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "no wait"
+    );
 }
 
 /// GIVEN device test commands THEN bounded IDs cross, a bad one never
