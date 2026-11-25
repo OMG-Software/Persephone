@@ -37,10 +37,10 @@
   //
   // The call window holds the call's controls (ADR-0060). While it can open,
   // the bar shows only the room, the phase, a "Call window" button, the
-  // "Declined" note, which the call window does not show, and the device
-  // change note, which must be seen while the call window is closed. When it
-  // could not open (`full`), the bar shows every control, so the call can
-  // still be muted or left here.
+  // "Declined" note, which the call window does not show, and the camera,
+  // screen share and device change notes, which must be seen while the call
+  // window is closed. When it could not open (`full`), the bar shows every
+  // control, so the call can still be muted or left here.
   let {
     status,
     dismissed,
@@ -201,10 +201,10 @@
         <span class="call-level-fill" style:transform="scaleX({soundLevel / SOUND_LEVEL_MAX})"></span>
       </div>
     {/if}
-    {#if !ended && full && cameraText !== ''}
+    {#if !ended && cameraText !== ''}
       <p class="call-camera-note note" role="status">{cameraText}</p>
     {/if}
-    {#if !ended && full && screenText !== ''}
+    {#if !ended && screenText !== ''}
       <p class="call-screen-note note" role="status">{screenText}</p>
     {/if}
     {#if !ended && status.deviceChange}

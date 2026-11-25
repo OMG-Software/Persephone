@@ -57,8 +57,10 @@ commands.
   call window opens, the main window's call bar shows only the phone icon,
   the room, the phase, the "Call window" button and, after a declined ring
   (ADR-0052), the "Declined" note, which the call window does not show. It
-  also shows the device change note, so a failed microphone or speaker is
-  seen while the call window is closed. When the call window cannot open for
+  also shows the camera, screen share and device change notes, so a camera
+  that did not start, a running or refused screen share and a failed
+  microphone or speaker are seen while the call window is closed. The
+  volume, the level meter and the participants show with the controls only. When the call window cannot open for
   the call, the call bar shows all of its controls and the main window shows
   the video tiles under it, so the call can still be muted or left. A later
   open that works makes the bar short again. An ended call still shows its

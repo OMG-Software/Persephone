@@ -259,13 +259,17 @@ test('GIVEN a call window that opens WHEN the call bar renders THEN it shows the
   assert.match(short, />In call</);
   assert.match(short, /class="secondary call-window-open"/);
   assert.match(short, />Declined</);
-  assert.doesNotMatch(short, /call-mute|call-deafen|call-camera|call-screen|call-leave|type="range"|role="meter"|call-people|@a:s/);
-  assert.doesNotMatch(short, /not connected|You are sharing|call-device-note/);
-  // A device change still shows: the call window may be closed.
+  // The camera and screen share notes still show: the call window may be closed.
+  assert.match(short, /class="call-camera-note note"[^>]*>The chosen camera is not connected</);
+  assert.match(short, /class="call-screen-note note"[^>]*>You are sharing your screen</);
+  const controls = /call-mute|call-deafen|class="secondary call-camera"|class="secondary call-screen"|call-leave|type="range"|role="meter"|call-people|@a:s/;
+  assert.doesNotMatch(short, controls);
+  assert.doesNotMatch(short, /call-device-note/);
+  // A device change still shows, and the bar stays short.
   const { body: changed } = render(CallBar, { props: { ...props, status: { ...status, deviceChange: 'failed' } } });
   assert.match(changed, /class="call-device-note note"/);
   assert.match(changed, /rejoin/);
-  assert.doesNotMatch(changed, /call-leave/);
+  assert.doesNotMatch(changed, controls);
   // An ended call still says why, and can be dismissed.
   const { body: ended } = render(CallBar, { props: { ...props, status: { ...status, phase: 'ended', ended: 'internal' } } });
   assert.match(ended, /call-dismiss/);
