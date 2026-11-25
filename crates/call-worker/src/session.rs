@@ -3528,11 +3528,14 @@ fn write_microphone_note(note: MicrophoneNote) {
             text(component.active)
         )
     };
+    // The setter answers for every live factory and the report is the
+    // oldest one's, so each part of the note names its scope: a factory
+    // with no module can refuse the gain while the reported one applies it.
     let (gain, echo, noise, agc) = match capture_processing::capture_processing() {
         Some(report) => (
             report.gain_percent.map_or_else(
-                || "not applied (no audio processing module)".to_owned(),
-                |percent| format!("{percent}% applied"),
+                || "the oldest factory applies none (no audio processing module)".to_owned(),
+                |percent| format!("the oldest factory applies {percent}%"),
             ),
             state(report.echo_cancellation),
             state(report.noise_suppression),
@@ -3541,7 +3544,7 @@ fn write_microphone_note(note: MicrophoneNote) {
         None => {
             let unknown = "unknown".to_owned();
             (
-                "applied unknown (no factory)".to_owned(),
+                "no factory applies it".to_owned(),
                 unknown.clone(),
                 unknown.clone(),
                 unknown,
@@ -3554,8 +3557,13 @@ fn write_microphone_note(note: MicrophoneNote) {
             "microphone: gain {}% asked ({}), {gain}; automatic level {} asked ({}); \
              echo cancellation {echo}; noise suppression {noise}; automatic gain control {agc}",
             microphone.gain_percent,
-            // Queued for the audio thread; `applied` is what it reports.
-            if gain_set { "queued" } else { "refused" },
+            // Queued for each factory's audio thread; what applies is what
+            // the oldest factory reports.
+            if gain_set {
+                "queued for every factory"
+            } else {
+                "not taken by every factory"
+            },
             if microphone.auto_level { "on" } else { "off" },
             if level_set { "set" } else { "refused" },
         ),

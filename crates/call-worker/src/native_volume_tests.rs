@@ -21,6 +21,7 @@ use livekit::webrtc::{
     stats::RtcStats,
 };
 use std::sync::mpsc::{Receiver, sync_channel};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 /// Volumes in and out of range, and NaN, which the binding makes silent.
@@ -220,15 +221,31 @@ fn platform_audio_offers_no_builtin_aec() {
     }
 }
 
+/// The microphone gain is one value for the whole process. Every test that
+/// sets it holds this lock for its whole run, so no other test changes the
+/// gain between a set and the read that checks it.
+static GAIN_TESTS: Mutex<()> = Mutex::new(());
+
+fn gain_tests() -> MutexGuard<'static, ()> {
+    // A test that failed while it held the lock leaves nothing to repair:
+    // the next one sets the gain it checks.
+    GAIN_TESTS.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// One round of the microphone gain workload (ADR-0062): a factory made
 /// while a gain is set, a gain change while it lives, the automatic gain
-/// control call on a track, and the factory dropped.
+/// control call on a track, and the factory dropped. The caller holds
+/// [`gain_tests`].
 ///
-/// The report is the oldest live factory's, which can be another test's
-/// factory. Each read is still exact: every live factory takes each gain
-/// that is set and a new factory takes the gain set before it, so all live
+/// The report is the oldest live factory's, which can be the factory of a
+/// test that runs at the same time; the binding offers no read of one
+/// chosen factory. Each read is still exact for the factory made here:
+/// every live factory takes each gain that is set and a new factory takes
+/// the gain set before it, so with the gain tests one at a time, all live
 /// factories hold the gain set last. A read runs on the factory's worker
-/// thread after the gain task posted before it.
+/// thread after the gain task posted before it. Only a live factory with no
+/// audio processing module (its build failed) would report no gain, and
+/// that fails this test as it should.
 fn gain_round() {
     let factory = PeerConnectionFactory::default();
     let report = capture_processing::capture_processing().expect("a live factory reports");
@@ -282,6 +299,7 @@ fn gain_round() {
 /// the only test that sets the gain: it is one value for the whole process.
 #[test]
 fn given_repeated_factories_when_the_gain_is_set_then_each_takes_it_and_resources_are_released() {
+    let _gain = gain_tests();
     assert!(capture_processing::set_capture_gain_percent(250));
     gain_round();
     gain_round();
@@ -339,6 +357,7 @@ fn given_a_device_track_when_automatic_level_changes_then_webrtc_takes_it() {
 #[ignore = "records from the microphone"]
 fn loopback_automatic_level_follows_the_request_while_the_track_is_sent() {
     use livekit::webrtc::peer_connection::{AnswerOptions, OfferOptions};
+    let _gain = gain_tests();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
