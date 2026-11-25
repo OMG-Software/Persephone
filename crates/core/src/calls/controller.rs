@@ -1474,11 +1474,19 @@ impl CallController {
 
     /// Turns the call's technical details on or off (ADR-0066): the worker
     /// reads its statistics only while they are on. Turning them on needs a
-    /// running or joining call (`NotInCall` otherwise); off always works.
-    /// They are off again when the call ends.
+    /// running call, or a joining call that the end of the session has not
+    /// stopped (`NotInCall` otherwise); off always works. They are off again
+    /// when the call or the session ends.
     pub fn set_stats(&self, on: bool) -> Result<(), CallError> {
         let slot = self.inner.slot();
-        if on && matches!(&*slot, Slot::Idle) {
+        let no_call = match &*slot {
+            Slot::Idle => true,
+            // A join that the end of the session stopped keeps its slot
+            // until its guard drops, but it is no call to read.
+            Slot::Joining(join) => join.flags.ended(),
+            Slot::Running(_) => false,
+        };
+        if on && no_call {
             return Err(CallError::NotInCall);
         }
         // Under the slot lock, so the end of a call cannot meet a late `on`.
@@ -2296,9 +2304,9 @@ impl CallController {
         // A device test ends too, with or without a call. The test lock is
         // taken and dropped before the call slot.
         self.stop_device_test();
-        let (room_id, kill, freed) = {
+        let (room_id, kill) = {
             let mut slot = self.inner.slot();
-            match std::mem::replace(&mut *slot, Slot::Idle) {
+            let stopped = match std::mem::replace(&mut *slot, Slot::Idle) {
                 Slot::Idle => return,
                 Slot::Joining(join) => {
                     // The flag is set under the lock a join takes to start
@@ -2307,23 +2315,29 @@ impl CallController {
                     let kill = plain(&join.kill).clone();
                     let room_id = join.room_id.clone();
                     *slot = Slot::Joining(join);
-                    (room_id, kill, false)
+                    (room_id, kill)
                 }
                 Slot::Running(run) => {
                     run.flags.ended.store(true, Ordering::SeqCst);
                     if let Some(stop) = run.stop {
                         let _ = stop.send(());
                     }
-                    // The slot is free now, so the task's own `release`
-                    // finds nothing to reset: the details stop here, under
-                    // the slot lock, and never carry over to the next call
-                    // (ADR-0066).
-                    self.inner.stats_on.send_replace(false);
-                    (run.room_id, Some(run.kill), true)
+                    (run.room_id, Some(run.kill))
                 }
-            }
+            };
+            // The details stop here, under the slot lock, for a joining call
+            // too (ADR-0066): a running call's slot is free now, so its
+            // task's own `release` finds nothing to reset, and a join's
+            // guard frees its slot only when the join unwinds. So they never
+            // carry over to the next call, and a stopped join cannot turn
+            // them on again.
+            self.inner.stats_on.send_replace(false);
+            stopped
         };
-        if freed && let Some(listener) = plain(&self.inner.stats_listener).clone() {
+        // The waiting reading goes before the end is published, so no
+        // reading reaches the page after the call ended. A join's `release`
+        // tells the listener again later, which drops nothing more.
+        if let Some(listener) = plain(&self.inner.stats_listener).clone() {
             listener(None);
         }
         if let Some(kill) = kill {
@@ -6864,6 +6878,16 @@ mod tests {
         });
     }
 
+    fn join_slot(calls: &CallController, id: u64) {
+        *calls.inner.slot() = Slot::Joining(Joining {
+            id,
+            room_id: room_id!("!r:example.org").to_owned(),
+            flags: Arc::new(Flags::default()),
+            kill: Arc::default(),
+            devices: watch::channel(None).0,
+        });
+    }
+
     fn stats_reading(identity: &str) -> persephone_call_protocol::CallStats {
         persephone_call_protocol::CallStats {
             remotes: vec![persephone_call_protocol::RemoteStats {
@@ -7000,6 +7024,46 @@ mod tests {
         assert!(!calls.inner.release(6), "the task's release finds nothing");
         assert_eq!(*plain(&heard), [None], "told once");
         run_slot(&calls, 7);
+        assert!(!*calls.inner.stats_on.borrow(), "the next call starts off");
+    }
+
+    /// GIVEN statistics on while a call joins WHEN the session ends (lock,
+    /// sign-out) THEN they are off in the same step and the waiting reading
+    /// is dropped before the end is published; the stopped join takes no new
+    /// start; and the join's own release later frees the slot with them off.
+    #[test]
+    fn given_statistics_on_while_joining_when_the_session_ends_then_they_are_off() {
+        let calls = controller(FakeHost::new(true, None));
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let taken = order.clone();
+        calls.set_stats_listener(Arc::new(move |stats| {
+            plain(&taken).push(if stats.is_none() {
+                "reading dropped"
+            } else {
+                "reading"
+            });
+        }));
+        let taken = order.clone();
+        calls.set_listener(Arc::new(move || plain(&taken).push("state")));
+        join_slot(&calls, 8);
+        assert!(
+            calls.set_stats(true).is_ok(),
+            "a joining call may turn them on"
+        );
+        plain(&order).clear();
+        calls.stop_for_session_end();
+        assert!(!*calls.inner.stats_on.borrow());
+        assert!(matches!(calls.state(), CallState::Ended { .. }));
+        assert_eq!(*plain(&order), ["reading dropped", "state"]);
+        assert!(
+            matches!(calls.set_stats(true), Err(CallError::NotInCall)),
+            "a stopped join takes no new start"
+        );
+        assert!(!*calls.inner.stats_on.borrow());
+        assert!(calls.set_stats(false).is_ok(), "off always works");
+        assert!(calls.inner.release(8), "the join's guard frees its slot");
+        assert!(!*calls.inner.stats_on.borrow());
+        run_slot(&calls, 9);
         assert!(!*calls.inner.stats_on.borrow(), "the next call starts off");
     }
 
