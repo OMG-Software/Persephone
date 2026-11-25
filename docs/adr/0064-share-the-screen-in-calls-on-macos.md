@@ -35,10 +35,12 @@ Facts from the research of 25 November 2026 (not measured on a Mac):
 
 ## Decision Drivers
 
-* The worker gets one grant for each share, and its code takes only that
-  display. It can still list the windows and applications on screen: the
-  `SCShareableContent` it reads lists them, and the profile does not stop
-  that (see "Containment"). The user picks every share.
+* The worker receives one display target for each share, and its code
+  captures only that display. This limit is in the worker's code, not in the
+  profile. The `SCShareableContent` that the worker reads also exposes the
+  windows and applications on screen. The profile does not block that
+  listing, and the worker does not use those entries (see "Containment").
+  The user picks every share.
 * Bound the pictures and the work before allocation, as in ADR-0048 and
   ADR-0053.
 * Fail closed where the permission, the display or the containment is not
@@ -131,7 +133,8 @@ worker, as on Linux.
   start and no Apple Events are added. The profile does not stop a window
   listing: the `SCShareableContent` that the worker reads to find its display
   also lists the windows and applications on screen. The worker reads only
-  its displays.
+  its displays, and its code captures only the display it receives. The
+  profile has no rule that limits the capture to that display.
 * The Screen Recording permission belongs to the app that the system holds
   responsible for the worker. Whether a sandboxed helper that has no bundle of
   its own is covered by the permission of Persephone is not known.
@@ -195,9 +198,11 @@ Seatbelt denials the system log shows.
 
 ### The core asks for the permission and picks the display; the worker captures it with ScreenCaptureKit
 
-* Good, because the worker gets one display, though the
-  `SCShareableContent` it reads also lists the windows and applications on
-  screen.
+* Good, because the worker receives one display target, and its code
+  captures only that display.
+* Bad, because the `SCShareableContent` that the worker reads also exposes
+  the windows and applications on screen. The profile does not block that
+  listing. The worker does not use those entries.
 * Good, because it reuses the Windows target and the Linux flow.
 * Bad, because the pick is a plain question for each display.
 
