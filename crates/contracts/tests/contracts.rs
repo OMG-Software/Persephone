@@ -1098,7 +1098,8 @@ fn call_stats_over_their_bounds_are_refused_whole() {
         CALL_DEVICE_ID_BYTES_MAX, CALL_PARTICIPANTS_MAX, CALL_STATS_CONNECTIONS_MAX,
         CALL_USER_ID_BYTES_MAX, CallStats,
     };
-    let edits: [(&str, Box<dyn Fn(&mut CallStats)>); 12] = [
+    type Edit = Box<dyn Fn(&mut CallStats)>;
+    let edits: [(&str, Edit); 12] = [
         (
             "level",
             Box::new(|s| s.microphone.as_mut().unwrap().level = 101),
