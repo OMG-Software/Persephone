@@ -2,7 +2,7 @@
   import { onDestroy, onMount } from 'svelte';
   import type { CallStats } from '../../crates/contracts/generated/contracts';
   import { startCallStats, stopCallStats } from './bridge';
-  import { STATS_FAILED_TEXT, STATS_LABEL, STATS_WAITING_TEXT, statsSections } from './callStats';
+  import { STATS_FAILED_TEXT, STATS_LABEL, statsNote, statsSections } from './callStats';
   import Icon from './Icon.svelte';
   import PersonName from './PersonName.svelte';
 
@@ -30,6 +30,7 @@
   });
 
   const sections = $derived(stats ? statsSections(stats) : []);
+  const note = $derived(statsNote(stats, sections));
 </script>
 
 <svelte:window
@@ -47,8 +48,8 @@
   </header>
   {#if failed}
     <p class="error" role="alert">{STATS_FAILED_TEXT}</p>
-  {:else if stats === null}
-    <p class="note">{STATS_WAITING_TEXT}</p>
+  {:else if note !== null}
+    <p class="note">{note}</p>
   {:else}
     {#each sections as section (section.key)}
       <table class="call-stats-table">

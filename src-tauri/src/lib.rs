@@ -372,6 +372,18 @@ struct Toasts {
     waiting: Option<(String, String, bool)>,
 }
 
+/// A page's statistics channel with its backlog. Tauri queues a channel
+/// message over 8 KiB on the host until the web view fetches it, so a stalled
+/// page would let readings pile up. The host sends one reading at a time:
+/// only the newest waits, until the page says it handled the last one.
+struct StatsChannel {
+    channel: Channel<CallStats>,
+    /// A reading went to the page and `call_stats_read` has not come yet.
+    unread: bool,
+    /// The newest reading that came while `unread`.
+    waiting: Option<CallStats>,
+}
+
 /// The page's channel for each room it subscribed to, and its one session
 /// channel. The core accepts at most `MAX_SUBSCRIPTIONS` rooms, and a room
 /// channel is kept only after the core accepted the room, so this map is
@@ -393,7 +405,7 @@ pub struct Subscriptions {
     /// Each page's channel for the call statistics (ADR-0066). A window has
     /// one only while its page has the technical details open, so a reading
     /// goes only to a page that asked for it.
-    stats: Mutex<HashMap<String, Channel<CallStats>>>,
+    stats: Mutex<HashMap<String, StatsChannel>>,
     /// How many pages each window has loaded (ADR-0066). A page gets its
     /// count from `watch_session` and sends it with each statistics request,
     /// so a request of a page that is gone changes nothing, and a start that a
@@ -433,7 +445,7 @@ impl Subscriptions {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn stats(&self) -> MutexGuard<'_, HashMap<String, Channel<CallStats>>> {
+    fn stats(&self) -> MutexGuard<'_, HashMap<String, StatsChannel>> {
         self.stats
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -474,7 +486,32 @@ impl Subscriptions {
         if pages.get(&label).copied().unwrap_or(0) != page {
             return false;
         }
-        self.stats().insert(label, channel);
+        self.stats().insert(
+            label,
+            StatsChannel {
+                channel,
+                unread: false,
+                waiting: None,
+            },
+        );
+        true
+    }
+
+    /// The page `page` of the window `label` handled its last reading. Sends
+    /// the waiting reading, if any, and keeps the page unread, or clears
+    /// `unread`. False when the window shows another page.
+    fn stats_read(&self, label: &str, page: u64) -> bool {
+        if self.page(label) != page {
+            return false;
+        }
+        if let Some(entry) = self.stats().get_mut(label) {
+            match entry.waiting.take() {
+                Some(stats) => {
+                    let _ = entry.channel.send(stats);
+                }
+                None => entry.unread = false,
+            }
+        }
         true
     }
 
@@ -569,8 +606,13 @@ impl Subscriptions {
                 if !stats.within_limits() {
                     return;
                 }
-                for channel in self.stats().values() {
-                    let _ = channel.send(stats.clone());
+                for entry in self.stats().values_mut() {
+                    if entry.unread {
+                        entry.waiting = Some(stats.clone());
+                    } else {
+                        let _ = entry.channel.send(stats.clone());
+                        entry.unread = true;
+                    }
                 }
             }
             Event::RingsChanged {} => self.tell_sessions("rings"),
@@ -714,6 +756,25 @@ async fn call_stats<R: Runtime>(
         let _ = relay::<()>(core.inner(), Call::CallStats { on: false }).await;
     }
     Ok(())
+}
+
+/// Says that the calling window's page handled its last statistics reading
+/// (ADR-0066), so the host sends the next one. Only the call window may call
+/// it, with the count its page got from `watch_session`. It never reaches the
+/// core. A request with another count comes from a page the window no longer
+/// shows, and it fails and changes nothing. With no statistics channel it
+/// does nothing.
+#[tauri::command]
+fn call_stats_read<R: Runtime>(
+    webview: Webview<R>,
+    subscriptions: State<'_, Arc<Subscriptions>>,
+    page: u64,
+) -> Result<(), String> {
+    if subscriptions.stats_read(webview.label(), page) {
+        Ok(())
+    } else {
+        Err(INVALID_ARGUMENT.to_owned())
+    }
 }
 
 /// Locks the core's session. Replies with the resulting state; `locking`
@@ -2341,6 +2402,7 @@ pub fn configure<R: Runtime>(
             call_camera,
             call_screen,
             call_stats,
+            call_stats_read,
             call_video_frame,
             call_status,
             call_rings,

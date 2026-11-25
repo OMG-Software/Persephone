@@ -138,7 +138,9 @@ candidate type, SSRC, codec or other text.
   is dropped.
 * The core keeps only the newest reading and sends it as `Event::CallStats`.
   The UI host reads the event with the same limits and sends it only to the
-  channel of a window that turned the details on.
+  channel of a window that turned the details on. The UI host sends each
+  page one reading at a time: the next waits until the page says, with
+  `call_stats_read`, that it handled the last one, and only the newest waits.
 * The UI host keeps a window's channel only after the core accepted the
   start. Its own stop on a reload or close is a request too, so the host
   lets one change of the core's switch run at a time, and each ends with the

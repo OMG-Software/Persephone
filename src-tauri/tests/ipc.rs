@@ -1159,6 +1159,7 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-call-devices",
             "allow-set-call-devices",
             "allow-call-stats",
+            "allow-call-stats-read",
             "allow-close-call-window"
         ])
     );
@@ -1323,6 +1324,32 @@ fn given_call_statistics_then_only_the_call_window_may_open_them_and_only_while_
             .filter(|(channel, body)| *channel == 9 && *body == text)
             .count()
     };
+    // Every delivery on the statistics channel, whatever it holds: a clamped
+    // or repaired reading would count here, but not in `sent`.
+    let total = || {
+        delivered
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(channel, _)| *channel == 9)
+            .count()
+    };
+    // A reading that the host refuses or that has no channel to go to must
+    // add no delivery at all.
+    let none_delivered = |stats: CallStats| {
+        let before = total();
+        subscriptions.dispatch(Event::CallStats { stats });
+        assert_eq!(total(), before, "no delivery");
+    };
+    // The page handled its last reading (ADR-0066).
+    let read = |from: u64| {
+        invoke_on(
+            &call,
+            "call_stats_read",
+            app_origin(),
+            serde_json::json!({"page": from}),
+        )
+    };
     // A stop of the host goes on a task of its own, so wait for it, but not
     // forever: the mock runtime sends no page or window events, so nothing
     // else would end the wait. A switch that never comes fails here, by name.
@@ -1353,8 +1380,7 @@ fn given_call_statistics_then_only_the_call_window_may_open_them_and_only_while_
     assert!(switches().is_empty());
 
     // Not asked for: no channel, nothing is delivered.
-    subscriptions.dispatch(Event::CallStats { stats: reading(1) });
-    assert_eq!(sent(1), 0);
+    none_delivered(reading(1));
 
     // A bad argument, or no page count, never reaches the core.
     for bad in [
@@ -1373,8 +1399,7 @@ fn given_call_statistics_then_only_the_call_window_may_open_them_and_only_while_
     assert!(invoke_on(&call, "call_stats", app_origin(), stats_on(true, page)).is_err());
     core.refuse_stats.store(false, Ordering::SeqCst);
     assert_eq!(switches(), [true], "the start was tried");
-    subscriptions.dispatch(Event::CallStats { stats: reading(1) });
-    assert_eq!(sent(1), 0);
+    none_delivered(reading(1));
     assert!(!subscriptions.forget_stats(CALL_WINDOW), "no channel kept");
     core.stats_switches.lock().unwrap().clear();
 
@@ -1387,11 +1412,10 @@ fn given_call_statistics_then_only_the_call_window_may_open_them_and_only_while_
     subscriptions.dispatch(Event::CallStats { stats: reading(2) });
     assert_eq!(sent(2), 1);
 
-    // A reading outside its limits is dropped whole.
-    subscriptions.dispatch(Event::CallStats {
-        stats: reading(101),
-    });
-    assert_eq!(sent(101), 0);
+    // A reading outside its limits is dropped whole. The page read the
+    // first reading, so a held-back delivery cannot hide a clamped one.
+    assert_eq!(read(page), Ok(serde_json::Value::Null));
+    none_delivered(reading(101));
 
     // Off: the channel goes and the core is told.
     assert_eq!(
@@ -1399,8 +1423,7 @@ fn given_call_statistics_then_only_the_call_window_may_open_them_and_only_while_
         Ok(serde_json::Value::Null)
     );
     assert_eq!(switches(), [true, false]);
-    subscriptions.dispatch(Event::CallStats { stats: reading(3) });
-    assert_eq!(sent(3), 0);
+    none_delivered(reading(3));
 
     // A window that is reloaded or closed drops its channel and tells the
     // core to stop, through the handler its page load and its close use.
@@ -1412,8 +1435,7 @@ fn given_call_statistics_then_only_the_call_window_may_open_them_and_only_while_
     assert_eq!(switches(), [true, false, true, false]);
     // The channel went with it, so another reset has nothing to stop.
     assert!(!subscriptions.forget_stats(CALL_WINDOW), "once");
-    subscriptions.dispatch(Event::CallStats { stats: reading(4) });
-    assert_eq!(sent(4), 0);
+    none_delivered(reading(4));
 
     // A request of a page that is gone carries its old count, so it fails
     // and changes nothing, however late Tauri starts its task: after the
@@ -1427,8 +1449,7 @@ fn given_call_statistics_then_only_the_call_window_may_open_them_and_only_while_
     let page = new_page();
     assert!(invoke_on(&call, "call_stats", app_origin(), stats_on(true, old)).is_err());
     assert!(switches().is_empty(), "a stale start reaches no core");
-    subscriptions.dispatch(Event::CallStats { stats: reading(5) });
-    assert_eq!(sent(5), 0);
+    none_delivered(reading(5));
     // The new page's own start stands, and a stale stop does not end it.
     invoke_on(&call, "call_stats", app_origin(), stats_on(true, page)).unwrap();
     assert!(invoke_on(&call, "call_stats", app_origin(), stats_on(false, old)).is_err());
@@ -1469,8 +1490,7 @@ fn given_call_statistics_then_only_the_call_window_may_open_them_and_only_while_
             [true, false],
             "reload by watch: {reload_by_watch}"
         );
-        subscriptions.dispatch(Event::CallStats { stats: reading(7) });
-        assert_eq!(sent(7), 0);
+        none_delivered(reading(7));
         core.stats_switches.lock().unwrap().clear();
     }
 
@@ -1481,8 +1501,44 @@ fn given_call_statistics_then_only_the_call_window_may_open_them_and_only_while_
     new_page();
     wait_for(2);
     assert_eq!(switches(), [true, false]);
-    subscriptions.dispatch(Event::CallStats { stats: reading(8) });
-    assert_eq!(sent(8), 0);
+    none_delivered(reading(8));
+
+    // One reading in flight per page, and only the newest waits.
+    let page = new_page();
+    invoke_on(&call, "call_stats", app_origin(), stats_on(true, page)).unwrap();
+    let base = total();
+    for level in [10, 11, 12] {
+        subscriptions.dispatch(Event::CallStats {
+            stats: reading(level),
+        });
+    }
+    assert_eq!((sent(10), sent(11), sent(12)), (1, 0, 0), "one in flight");
+    assert_eq!(total() - base, 1);
+    assert_eq!(read(page), Ok(serde_json::Value::Null));
+    assert_eq!((sent(11), sent(12)), (0, 1), "the newest waited");
+    assert_eq!(total() - base, 2);
+    // Nothing waits now, so a read only frees the page and the next reading
+    // goes at once.
+    assert_eq!(read(page), Ok(serde_json::Value::Null));
+    assert_eq!(total() - base, 2);
+    subscriptions.dispatch(Event::CallStats { stats: reading(13) });
+    assert_eq!(sent(13), 1);
+    // A read of a page that is gone, or from the main window, changes nothing.
+    assert_eq!(read(page - 1), Err(serde_json::json!("invalid_argument")));
+    assert!(
+        invoke_on(
+            &main,
+            "call_stats_read",
+            app_origin(),
+            serde_json::json!({"page": page})
+        )
+        .is_err()
+    );
+    subscriptions.dispatch(Event::CallStats { stats: reading(14) });
+    assert_eq!(sent(14), 0, "the stale read did not free the page");
+    // With no statistics channel a read is fine and does nothing.
+    assert!(subscriptions.forget_stats(CALL_WINDOW));
+    assert_eq!(read(page), Ok(serde_json::Value::Null));
 }
 
 /// GIVEN device test commands THEN bounded IDs cross, a bad one never

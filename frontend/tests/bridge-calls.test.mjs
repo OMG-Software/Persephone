@@ -23,7 +23,7 @@ before(async () => {
   // arguments the page sends, without Tauri's own State, Window and Channel.
   const host = await readFile(new URL('../../src-tauri/src/lib.rs', import.meta.url), 'utf8');
   hostArguments = new Map();
-  for (const [, name, parameters] of host.matchAll(/async fn ([a-z_]+)(?:<[^>]*>)?\(([^)]*)\)/g)) {
+  for (const [, name, parameters] of host.matchAll(/(?:async )?fn ([a-z_]+)(?:<[^>]*>)?\(([^)]*)\)/g)) {
     const names = [...parameters.matchAll(/([a-z_]+):\s*([A-Za-z]+)/g)]
       .filter(([, , type]) => !['State', 'Window', 'Webview', 'WebviewWindow', 'AppHandle'].includes(type))
       .map(([, parameter]) => camel(parameter));
@@ -530,15 +530,38 @@ test('GIVEN the technical details WHEN turned on and off THEN the host is asked 
     calls[0].args.onStats.onmessage(value);
   }
   assert.deepEqual(seen, [reading]);
+  // Each message, handled or dropped, tells the host to send the next.
+  const reads = calls.filter((call) => call.command === 'call_stats_read');
+  assert.equal(reads.length, 5);
+  assert.ok(reads.every((call) => call.args.page === 4 && Object.keys(call.args).length === 1));
+  assert.ok(registered.has('call_stats_read'));
+  assert.deepEqual(hostArguments.get('call_stats_read'), ['page']);
   await bridge.stopCallStats();
-  assert.equal(calls[1].command, 'call_stats');
-  assert.equal(calls[1].args.on, false);
-  assert.equal(calls[1].args.page, 4);
+  const stop = calls[calls.length - 1];
+  assert.equal(stop.command, 'call_stats');
+  assert.equal(stop.args.on, false);
+  assert.equal(stop.args.page, 4);
   // The host registers the command with exactly these arguments.
   assert.ok(registered.has('call_stats'));
   assert.deepEqual(hostArguments.get('call_stats'), ['on', 'onStats', 'page']);
   mockIPC(() => Promise.reject('unavailable'));
   await assert.rejects(bridge.startCallStats(() => {}), (reason) => reason === 'unavailable');
+});
+
+test('GIVEN a stale page count WHEN the host refuses the read of a reading THEN the page goes on and the reading still reaches it', async () => {
+  await watchAs(8);
+  const channels = [];
+  mockIPC((command, args) => {
+    if (command === 'call_stats_read') return Promise.reject('invalid_argument');
+    channels.push(args.onStats);
+    return null;
+  });
+  const seen = [];
+  await bridge.startCallStats((stats) => seen.push(stats));
+  const reading = { microphone: null, camera: null, screen: null, participants: [], connections: [] };
+  channels[0].onmessage(reading);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(seen, [reading]);
 });
 
 test('GIVEN no usable page count from the host WHEN the technical details are turned on THEN the start fails and asks nothing, and a stop asks nothing', async () => {

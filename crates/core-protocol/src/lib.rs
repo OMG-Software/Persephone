@@ -1128,8 +1128,8 @@ pub enum Event {
     /// [`Call::CallStats`] is on: numbers with units, and the validated IDs
     /// of the devices. Coalesced: only the newest waits. A reading that is
     /// out of bounds is refused whole.
+    #[serde(deserialize_with = "call_stats_content")]
     CallStats {
-        #[serde(deserialize_with = "bounded_stats")]
         stats: persephone_contracts::CallStats,
     },
     /// A device test started, changed or ended (ADR-0059): ask for
@@ -1176,6 +1176,84 @@ pub fn levels_within_limits(levels: &[persephone_contracts::CallParticipantLevel
         })
 }
 
+/// Reads the content of [`Event::CallStats`]. Only a JSON object with the one
+/// key `stats` is read: the derived reader would also take a positional
+/// array. A repeated or unknown key is an error.
+fn call_stats_content<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<persephone_contracts::CallStats, D::Error> {
+    struct Content;
+    impl<'de> serde::de::Visitor<'de> for Content {
+        type Value = persephone_contracts::CallStats;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("an object with the key `stats`")
+        }
+
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut map: A,
+        ) -> Result<Self::Value, A::Error> {
+            use serde::de::Error;
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            enum Field {
+                Stats,
+            }
+            let mut stats = None;
+            while let Some(Field::Stats) = map.next_key::<Field>()? {
+                if stats.replace(map.next_value::<WireStatsValue>()?).is_some() {
+                    return Err(A::Error::duplicate_field("stats"));
+                }
+            }
+            stats
+                .map(|stats| stats.0)
+                .ok_or_else(|| A::Error::missing_field("stats"))
+        }
+    }
+    deserializer.deserialize_map(Content)
+}
+
+/// A statistics reading, read by [`bounded_stats`].
+struct WireStatsValue(persephone_contracts::CallStats);
+
+impl<'de> Deserialize<'de> for WireStatsValue {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        bounded_stats(deserializer).map(WireStatsValue)
+    }
+}
+
+/// Wraps a deserializer so that a struct reads only from a JSON object. A
+/// derived struct reader also takes a positional array, which is not the
+/// contract.
+struct MapOnlyDeserializer<D>(D);
+
+impl<'de, D: serde::Deserializer<'de>> serde::Deserializer<'de> for MapOnlyDeserializer<D> {
+    type Error = D::Error;
+
+    fn deserialize_any<V: serde::de::Visitor<'de>>(
+        self,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        self.0.deserialize_map(visitor)
+    }
+
+    serde::forward_to_deserialize_any! {
+        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+        bytes byte_buf option unit unit_struct newtype_struct seq tuple
+        tuple_struct map struct enum identifier ignored_any
+    }
+}
+
+/// A value read through [`MapOnlyDeserializer`].
+struct MapOnly<T>(T);
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for MapOnly<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        T::deserialize(MapOnlyDeserializer(deserializer)).map(MapOnly)
+    }
+}
+
 /// Reads a statistics reading. Only a JSON object is read, each list stops
 /// at its limit before it builds one more entry, and each ID is bounded
 /// before it is copied. `CallStats::within_limits` then checks the numbers
@@ -1217,9 +1295,21 @@ impl<'de> serde::de::Visitor<'de> for WireStats {
         let (mut participants, mut connections) = (None, None);
         while let Some(field) = map.next_key::<Field>()? {
             let fresh = match field {
-                Field::Microphone => microphone.replace(map.next_value()?).is_none(),
-                Field::Camera => camera.replace(map.next_value()?).is_none(),
-                Field::Screen => screen.replace(map.next_value()?).is_none(),
+                Field::Microphone => microphone
+                    .replace(
+                        map.next_value::<Option<MapOnly<persephone_contracts::CallStatsAudioSent>>>()?,
+                    )
+                    .is_none(),
+                Field::Camera => camera
+                    .replace(
+                        map.next_value::<Option<MapOnly<persephone_contracts::CallStatsVideoSent>>>()?,
+                    )
+                    .is_none(),
+                Field::Screen => screen
+                    .replace(
+                        map.next_value::<Option<MapOnly<persephone_contracts::CallStatsVideoSent>>>()?,
+                    )
+                    .is_none(),
                 Field::Participants => participants
                     .replace(map.next_value::<BoundedList<
                         WireParticipant,
@@ -1228,7 +1318,7 @@ impl<'de> serde::de::Visitor<'de> for WireStats {
                     .is_none(),
                 Field::Connections => connections
                     .replace(map.next_value::<BoundedList<
-                        persephone_contracts::CallStatsConnection,
+                        MapOnly<persephone_contracts::CallStatsConnection>,
                         { persephone_contracts::CALL_STATS_CONNECTIONS_MAX },
                     >>()?)
                     .is_none(),
@@ -1239,22 +1329,31 @@ impl<'de> serde::de::Visitor<'de> for WireStats {
         }
         let participants = participants.ok_or_else(|| A::Error::missing_field("participants"))?;
         Ok(persephone_contracts::CallStats {
-            microphone: microphone.ok_or_else(|| A::Error::missing_field("microphone"))?,
-            camera: camera.ok_or_else(|| A::Error::missing_field("camera"))?,
-            screen: screen.ok_or_else(|| A::Error::missing_field("screen"))?,
+            microphone: microphone
+                .ok_or_else(|| A::Error::missing_field("microphone"))?
+                .map(|audio| audio.0),
+            camera: camera
+                .ok_or_else(|| A::Error::missing_field("camera"))?
+                .map(|video| video.0),
+            screen: screen
+                .ok_or_else(|| A::Error::missing_field("screen"))?
+                .map(|video| video.0),
             participants: participants
                 .0
                 .into_iter()
                 .map(|participant| persephone_contracts::CallStatsParticipant {
                     user_id: participant.user_id.0,
                     device_id: participant.device_id.0,
-                    audio: participant.audio,
-                    video: participant.video,
+                    audio: participant.audio.map(|audio| audio.0),
+                    video: participant.video.map(|video| video.0),
                 })
                 .collect(),
             connections: connections
                 .ok_or_else(|| A::Error::missing_field("connections"))?
-                .0,
+                .0
+                .into_iter()
+                .map(|connection| connection.0)
+                .collect(),
         })
     }
 }
@@ -1264,8 +1363,8 @@ impl<'de> serde::de::Visitor<'de> for WireStats {
 struct WireParticipant {
     user_id: BoundedText<MAX_USER_ID_BYTES>,
     device_id: BoundedText<MAX_DEVICE_ID_BYTES>,
-    audio: Option<persephone_contracts::CallStatsAudioReceived>,
-    video: Option<persephone_contracts::CallStatsVideoReceived>,
+    audio: Option<MapOnly<persephone_contracts::CallStatsAudioReceived>>,
+    video: Option<MapOnly<persephone_contracts::CallStatsVideoReceived>>,
 }
 
 impl<'de> Deserialize<'de> for WireParticipant {
@@ -4437,7 +4536,15 @@ mod timeline_events_wire_tests {
             .push(serde_json::json!({"anything": [1, 2, 3]}));
         let error = event(over).unwrap_err();
         assert!(error.to_string().contains("over its limit"), "{error}");
-        assert!(event(reading(0, full + 1)).is_err());
+        // The entry past the limit cannot be a connection, so only the early
+        // limit can refuse it.
+        let mut too_many = reading(0, full);
+        too_many["connections"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!("x"));
+        let error = event(too_many).unwrap_err();
+        assert!(error.to_string().contains("over its limit"), "{error}");
         assert!(event(serde_json::json!([null, null, null, [], []])).is_err());
         let mut positional = reading(0, 0);
         positional["participants"] = serde_json::json!([["@a:example.org", "D", null, null]]);
@@ -4445,6 +4552,52 @@ mod timeline_events_wire_tests {
         let twice = r#"{"event":{"call_stats":{"stats":{"microphone":null,"microphone":null,
             "camera":null,"screen":null,"participants":[],"connections":[]}}}}"#;
         assert!(serde_json::from_str::<CoreMessage>(twice).is_err());
+    }
+
+    /// GIVEN statistics events on the byte path WHEN the content or a part is
+    /// positional THEN it is refused, and an object with null parts is kept.
+    #[test]
+    fn given_call_stats_bytes_with_positional_parts_then_they_are_refused() {
+        let read = |json: &str| serde_json::from_slice::<CoreMessage>(json.as_bytes());
+        let content = |stats: &str| format!(r#"{{"event":{{"call_stats":{stats}}}}}"#);
+        let reading = |microphone: &str, participants: &str, connections: &str| {
+            format!(
+                r#"{{"microphone":{microphone},"camera":null,"screen":null,"participants":{participants},"connections":{connections}}}"#
+            )
+        };
+        let valid = reading("null", "[]", "[]");
+        assert!(read(&content(&format!(r#"{{"stats":{valid}}}"#))).is_ok());
+        // The content is an object with the key `stats`, and no other key.
+        assert!(read(&content(&format!("[{valid}]"))).is_err());
+        assert!(read(&content("{}")).is_err());
+        assert!(read(&content(&format!(r#"{{"stats":{valid},"stats":{valid}}}"#))).is_err());
+        assert!(read(&content(&format!(r#"{{"stats":{valid},"extra":1}}"#))).is_err());
+        // Each nested record is an object too.
+        let with = |microphone: &str, participants: &str, connections: &str| {
+            content(&format!(
+                r#"{{"stats":{}}}"#,
+                reading(microphone, participants, connections)
+            ))
+        };
+        assert!(read(&with("[1,null,null,null]", "[]", "[]")).is_err());
+        assert!(read(&with("null", "[]", "[[0,null,null,null,null]]")).is_err());
+        assert!(
+            read(&with(
+                "null",
+                r#"[{"userId":"@a:example.org","deviceId":"D","audio":[1,null,null,null,null],"video":null}]"#,
+                "[]"
+            ))
+            .is_err()
+        );
+        // GIVEN objects with null parts THEN they are kept.
+        assert!(
+            read(&with(
+                r#"{"level":1,"bitrateKbps":null,"packetsSent":0,"packetsLost":null,"jitterMs":null,"rttMs":null}"#,
+                r#"[{"userId":"@a:example.org","deviceId":"D","audio":null,"video":null}]"#,
+                r#"[{"connection":0,"outgoingKbps":null,"sendKbps":null,"receiveKbps":null,"rttMs":null}]"#
+            ))
+            .is_ok()
+        );
     }
 
     /// GIVEN call level events WHEN read THEN bounded ones are kept, and a

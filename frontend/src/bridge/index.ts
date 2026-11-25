@@ -555,12 +555,20 @@ export function callCamera(on: boolean): Promise<CallStatus> {
  * second. Only the call window may call it, after {@link watchSession}: the
  * request carries the page's count, and with none it fails with
  * `core_unavailable` and asks nothing. A reading that does not match the
- * contract is dropped whole. Turn them off with {@link stopCallStats}.
+ * contract is dropped whole. The host sends one reading at a time: after
+ * each one, handled or dropped, the bridge tells the host with
+ * `call_stats_read`, and only then comes the next. Turn them off with
+ * {@link stopCallStats}.
  */
 export async function startCallStats(onStats: (stats: CallStats) => void): Promise<void> {
+  const page = statsPage;
   const channel = new Channel<unknown>((value) => {
-    const stats = parseCallStats(value);
-    if (stats !== null) onStats(stats);
+    try {
+      const stats = parseCallStats(value);
+      if (stats !== null) onStats(stats);
+    } finally {
+      statsHandled(page);
+    }
   });
   await inStatsTurn(() =>
     statsPage === null
@@ -580,6 +588,18 @@ export async function stopCallStats(): Promise<void> {
       ? Promise.resolve(null)
       : invoke<null>('call_stats', { on: false, page: statsPage, onStats: new Channel<unknown>(() => {}) })
   );
+}
+
+// Tells the host that the page handled a statistics reading, so it sends the
+// next. Nothing waits for the answer: a reload makes the count stale, and the
+// host refuses it, which is expected.
+function statsHandled(page: number | null): void {
+  if (page === null) return;
+  try {
+    invoke<null>('call_stats_read', { page }).catch(() => undefined);
+  } catch {
+    // The bridge is gone with the page.
+  }
 }
 
 // The page's count from `watch_session` (ADR-0066). The host takes a

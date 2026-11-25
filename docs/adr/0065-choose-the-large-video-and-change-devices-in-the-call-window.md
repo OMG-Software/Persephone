@@ -82,14 +82,16 @@ already has.
 * The capability `call` gets two more commands: `call_devices` and
   `set_call_devices`. It still has no device tests, no call start, no rooms
   and no files. The host test of the call window's command set checks this.
-* The panel shows what happened: switched; the chosen device is not connected
+* The panel shows what happened: saved; the chosen device is not connected
   (`not_found`); the microphone could not be opened and the old one is kept
   (`kept`); this system cannot switch during a call (`unsupported`, Linux
   today); or the sound may have stopped and a lost speaker needs a rejoin
   (`failed`). A call that ends because of its audio device shows its end
   reason as before (`AudioDevice`).
 * The call status has no mark for a change that worked. The panel therefore
-  says "switched" when it saved the choice and the status shows no failure.
+  says only "saved" when it saved the choice and the status shows no
+  failure, and adds that a failure shows on the same line. It cannot tell
+  "worked" from "not answered yet", so it never says "switched".
   A failure that the status shows is shown whether or not the panel saved
   anything, so a failure from before the panel opened (or from the main
   window's settings) is in view when the panel opens to fix it.

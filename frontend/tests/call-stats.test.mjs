@@ -10,6 +10,9 @@ import {
   parseCallStats,
   percent,
   resolution,
+  STATS_EMPTY_TEXT,
+  STATS_WAITING_TEXT,
+  statsNote,
   statsSections,
   UNKNOWN_VALUE
 } from '../src/callStats.ts';
@@ -110,7 +113,7 @@ test('GIVEN no camera, no screen and a device without media WHEN the sections ar
     sections.map((section) => section.key).filter((key) => key === 'camera' || key === 'screen'),
     []
   );
-  assert.deepEqual(sections[1].rows, [{ label: 'Receiving', value: 'No audio or video' }]);
+  assert.deepEqual(sections[1].rows, [{ label: 'Receiving', value: 'No audio or video statistics available' }]);
 });
 
 test('GIVEN a reading inside the contract WHEN it is parsed THEN it is kept', () => {
@@ -173,4 +176,12 @@ test('GIVEN a hostile user ID WHEN the sections are made THEN it is only text fo
   const device = sections.find((section) => section.userId !== null);
   assert.equal(device.userId, hostile);
   assert.ok(device.rows.every((row) => !row.value.includes('<')));
+});
+
+test('GIVEN no reading, an empty reading and a reading with measurements WHEN the note is chosen THEN each gets its own text or none', () => {
+  const empty = { microphone: null, camera: null, screen: null, participants: [], connections: [] };
+  assert.equal(statsNote(null, []), STATS_WAITING_TEXT);
+  assert.equal(statsNote(empty, statsSections(empty)), STATS_EMPTY_TEXT);
+  assert.equal(STATS_EMPTY_TEXT, 'No statistics available yet');
+  assert.equal(statsNote(reading(), statsSections(reading())), null);
 });

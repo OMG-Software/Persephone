@@ -12,7 +12,7 @@ import {
 } from '../src/callView.ts';
 import {
   DEVICE_SWITCH_TEXT,
-  DEVICE_SWITCHED_TEXT,
+  DEVICE_SAVED_TEXT,
   DEVICE_SWITCHING_TEXT,
   deviceSwitchText,
   feedLabel,
@@ -130,7 +130,8 @@ test('GIVEN no large feed WHEN the cells are split THEN all stay in order', () =
 test('GIVEN the device panel WHEN a change is read THEN each result has its own text', () => {
   assert.equal(deviceSwitchText(false, false, null), '');
   assert.equal(deviceSwitchText(true, true, null), DEVICE_SWITCHING_TEXT);
-  assert.equal(deviceSwitchText(true, false, null), DEVICE_SWITCHED_TEXT);
+  assert.equal(deviceSwitchText(true, false, null), DEVICE_SAVED_TEXT);
+  assert.ok(!/switched/i.test(DEVICE_SAVED_TEXT), 'no claim before the worker answers');
   for (const change of ['not_found', 'unsupported', 'kept', 'failed']) {
     assert.equal(deviceSwitchText(true, false, change), DEVICE_SWITCH_TEXT[change]);
     // A failure from before the panel opened shows too.

@@ -761,8 +761,9 @@ export const DEVICE_SAVE_FAILURE_TEXT = 'The call devices could not be saved.';
 /**
  * What the device panel of the call window says about a change during a
  * call (ADR-0065). A failure is the call status's `deviceChange` (ADR-0059).
- * The status has no mark for a change that worked, so `null` after a save
- * reads as switched. A speaker that is lost needs a rejoin (`failed`).
+ * The status has no mark for a change that worked, so `null` cannot tell
+ * "worked" from "not answered yet". After a save the panel says only that
+ * the choice is saved, and a failure shows when the worker answers. A speaker that is lost needs a rejoin (`failed`).
  */
 export const DEVICE_SWITCH_TEXT: Record<CallDeviceChange, string> = {
   not_found: 'The chosen microphone or speaker is not connected. The call keeps the one it had.',
@@ -770,7 +771,8 @@ export const DEVICE_SWITCH_TEXT: Record<CallDeviceChange, string> = {
   kept: 'The chosen microphone could not be opened. The call keeps the one it had.',
   failed: 'The microphone or speaker could not be changed, and the sound may have stopped. A lost speaker needs a rejoin: leave the call and join it again.'
 };
-export const DEVICE_SWITCHED_TEXT = 'Switched. A camera change applies the next time you turn the camera on.';
+export const DEVICE_SAVED_TEXT =
+  'Saved. If the call cannot use it, this line tells you. A camera change applies the next time you turn the camera on.';
 export const DEVICE_SWITCHING_TEXT = 'Switching…';
 export const DEVICES_BUTTON_LABEL = 'Device settings';
 export const DEVICES_PANEL_LABEL = 'Call devices';
@@ -778,12 +780,12 @@ export const DEVICES_PANEL_LABEL = 'Call devices';
 /**
  * The line under the device menus: "switching" while a save runs, the
  * failure the call status shows (also one from before the panel opened, or
- * from the main window's settings), "switched" after a save, else nothing.
+ * from the main window's settings), "saved" after a save, else nothing.
  */
 export function deviceSwitchText(saved: boolean, saving: boolean, change: CallDeviceChange | null): string {
   if (saving) return DEVICE_SWITCHING_TEXT;
   if (change !== null) return DEVICE_SWITCH_TEXT[change];
-  return saved ? DEVICE_SWITCHED_TEXT : '';
+  return saved ? DEVICE_SAVED_TEXT : '';
 }
 
 /** The call window's view buttons (ADR-0065). */

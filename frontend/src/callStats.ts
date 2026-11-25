@@ -293,7 +293,7 @@ function videoReceivedRows(video: CallStatsVideoReceived): StatsRow[] {
 
 function receivedRows(entry: CallStatsParticipant): StatsRow[] {
   const rows = [...(entry.audio ? audioReceivedRows(entry.audio) : []), ...(entry.video ? videoReceivedRows(entry.video) : [])];
-  return rows.length > 0 ? rows : [{ label: 'Receiving', value: 'No audio or video' }];
+  return rows.length > 0 ? rows : [{ label: 'Receiving', value: 'No audio or video statistics available' }];
 }
 
 /**
@@ -341,6 +341,17 @@ export function statsSections(stats: CallStats): StatsSection[] {
 
 /** Said while no reading has arrived. */
 export const STATS_WAITING_TEXT = 'Waiting for the first reading.';
+/** Said when a reading has arrived but holds no measurements. */
+export const STATS_EMPTY_TEXT = 'No statistics available yet';
+/**
+ * The note that stands in for the tables: the waiting text before the first
+ * reading, the empty text for a reading with no sections, and nothing when
+ * there is something to show.
+ */
+export function statsNote(stats: CallStats | null, sections: readonly StatsSection[]): string | null {
+  if (stats === null) return STATS_WAITING_TEXT;
+  return sections.length === 0 ? STATS_EMPTY_TEXT : null;
+}
 /** Said when the details cannot be turned on. */
 export const STATS_FAILED_TEXT = 'The technical details could not be started.';
 /** The button that opens the panel, and the panel's name. */

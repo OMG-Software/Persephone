@@ -62,7 +62,7 @@ test('GIVEN the core refuses WHEN the panel loads THEN it shows the failure and 
   }
 });
 
-test('GIVEN a save WHEN the core accepts it THEN the panel says switched and sends the menus as choices', async () => {
+test('GIVEN a save WHEN the core accepts it THEN the panel says saved and sends the menus as choices', async () => {
   const sent = [];
   const { panel: made, seen, last } = panel({
     list: async () => DEVICES,
@@ -74,7 +74,7 @@ test('GIVEN a save WHEN the core accepts it THEN the panel says switched and sen
   assert.deepEqual(last(), { devices: null, loading: false, saving: false, saved: true, failure: null });
 });
 
-test('GIVEN a save WHEN the core refuses it THEN the panel shows the failure and does not say switched', async () => {
+test('GIVEN a save WHEN the core refuses it THEN the panel shows the failure and does not say saved', async () => {
   for (const [reason, text] of [
     ['invalid_argument', DEVICE_FAILURE_TEXT.invalid_argument],
     ['unknown', DEVICE_SAVE_FAILURE_TEXT]

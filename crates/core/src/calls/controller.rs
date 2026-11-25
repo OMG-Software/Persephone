@@ -2962,6 +2962,14 @@ fn take_newer_choice(
     }
 }
 
+/// Replaces a kept statistics switch with a newer one that waits unread in
+/// `switch`, so a retry never sends an older value.
+fn take_newer_switch(switch: &mut watch::Receiver<bool>, pending: &mut Option<(Instant, bool)>) {
+    if switch.has_changed().unwrap_or(false) {
+        *pending = Some((Instant::now(), *switch.borrow_and_update()));
+    }
+}
+
 /// Gives the call a microphone and speaker choice. The same choice as the
 /// last one changes nothing, so saving only the camera does not restart the
 /// sound of a running call; with `again` (the last change failed) it is
@@ -4265,7 +4273,13 @@ impl Call {
                         Some(at) => time::sleep_until(at.into()).await,
                         None => std::future::pending().await,
                     }
-                } => self.apply_stats(&mut pending_stats, &mut stats_sent)?,
+                } => {
+                    // `select!` picks a ready arm at random: a newer switch
+                    // that waits unread replaces the kept one first, so the
+                    // worker never gets an older value.
+                    take_newer_switch(&mut stats_switch, &mut pending_stats);
+                    self.apply_stats(&mut pending_stats, &mut stats_sent)?;
+                }
                 remote = portal_done(&mut self.portal) => self.portal_finished(inner, remote)?,
                 (picked, cancelled) = screen_pick_done(&mut self.screen_pick) => {
                     if cancelled {
@@ -6569,6 +6583,22 @@ mod tests {
             Some(choice("mic-2"))
         );
         assert!(!devices.has_changed().unwrap(), "the newer choice is read");
+    }
+
+    /// GIVEN a statistics switch kept for a retry and a newer value not read
+    /// yet WHEN the retry is due THEN the newer value replaces the kept one;
+    /// with no newer value the kept one stays.
+    #[test]
+    fn given_the_statistics_switch_with_a_newer_value_then_a_retry_sends_the_newer() {
+        let sender = watch::channel(false).0;
+        let mut switch = sender.subscribe();
+        let mut pending = Some((Instant::now(), true));
+        take_newer_switch(&mut switch, &mut pending);
+        assert_eq!(pending.map(|(_, on)| on), Some(true), "nothing newer");
+        sender.send_replace(false);
+        take_newer_switch(&mut switch, &mut pending);
+        assert_eq!(pending.map(|(_, on)| on), Some(false), "the newer wins");
+        assert!(!switch.has_changed().unwrap(), "the newer value is read");
     }
 
     /// GIVEN two members with a sound level WHEN one leaves the call THEN
