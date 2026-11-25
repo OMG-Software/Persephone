@@ -77,8 +77,10 @@ Proposed option: "A small patch in `webrtc-sys` and `libwebrtc`".
   automatic level evens out the result, so the gain mostly moves the
   starting point of the automatic level. Above 100 percent the sound may
   clip.
-* The own level meter shows the effect: it reads the `media-source` level
-  of the microphone track, which is measured after the audio processing.
+* The own level meter reads the `media-source` level of the microphone
+  track. Whether that level is measured after the gain was not measured
+  (see the verification below), so the settings page does not promise that
+  the meter shows the gain.
 * The device tests (ADR-0059, `sound_test.rs`) do not use the gain or the
   automatic level. They open the device with WASAPI, Core Audio or
   PulseAudio on their own. The settings page says so.

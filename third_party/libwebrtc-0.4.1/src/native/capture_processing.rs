@@ -11,6 +11,9 @@ pub const MAX_CAPTURE_GAIN_PERCENT: u16 = 400;
 /// captured sound before any processing. 100 is no change. A gain over
 /// [`MAX_CAPTURE_GAIN_PERCENT`] changes nothing and returns `false`.
 pub fn set_capture_gain_percent(percent: u16) -> bool {
+    if percent > MAX_CAPTURE_GAIN_PERCENT {
+        return false;
+    }
     sys_pcf::set_capture_gain_percent(percent)
 }
 

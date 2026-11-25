@@ -460,7 +460,7 @@ export const AUTO_LEVEL_HELP =
   'Keeps your voice at an even level. It applies at once, also in a call that runs.';
 export const MIC_GAIN_LABEL = 'Microphone gain';
 export const MIC_GAIN_HELP =
-  'Makes your voice louder or quieter before the call cleans it up. It applies at once, also in a call that runs, and your level meter in the call shows it. With the automatic level on, the automatic level then evens out the result. The microphone test below uses neither the gain nor the automatic level.';
+  'Makes your voice louder or quieter before the call cleans it up. It applies at once, also in a call that runs. With the automatic level on, the automatic level then evens out the result. The microphone test below uses neither the gain nor the automatic level.';
 export const MIC_SAVE_TEXT = 'The microphone settings could not be saved.';
 
 /**

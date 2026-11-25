@@ -38,7 +38,9 @@ impl RtcAudioTrack {
 
     // PERSEPHONE PATCH (ADR-0062): automatic gain control of a local track.
     pub fn set_auto_gain_control(&self, enabled: bool) -> bool {
-        // 0 applied, 1 stored; anything else is a refusal.
+        // webrtc::AudioProcessingOptionsResultCode
+        // (api/audio/audio_processing_options_result.h): 0 kApplied,
+        // 1 kStored, both `ok()`; 2 to 5 are refusals; -1 no track.
         matches!(self.sys_handle.set_auto_gain_control(enabled), 0 | 1)
     }
 }

@@ -94,7 +94,9 @@ Each change is marked `PERSEPHONE PATCH (ADR-0043)`.
   `AudioTrack::set_auto_gain_control(bool)` calls `SetAudioProcessingOptions`
   with echo cancellation and noise suppression on (the options that
   `create_device_audio_track` sets) and automatic gain control as asked. It
-  returns the result code (0 applied, 1 stored).
+  returns the `AudioProcessingOptionsResultCode` (pinned
+  `api/audio/audio_processing_options_result.h`: 0 applied, 1 stored, 2 to
+  5 refused), not an `RTCErrorType`.
 - No native thread, callback or observer is added. The only new strong edge
   is the factory's reference to its APM, which the voice engine also holds.
 - Lifecycle checks, in `crates/call-worker/src/native_volume_tests.rs`:

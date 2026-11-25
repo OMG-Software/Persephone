@@ -491,6 +491,8 @@ test('GIVEN slider values WHEN read as a microphone gain THEN they are whole per
 test('GIVEN the microphone help texts WHEN read THEN they say the setting applies at once and that the device test does not use the settings', () => {
   assert.match(AUTO_LEVEL_HELP, /at once/);
   assert.match(MIC_GAIN_HELP, /at once/);
+  // The level meter with a changed gain was not measured (ADR-0062).
+  assert.doesNotMatch(MIC_GAIN_HELP, /meter/);
   assert.match(MIC_GAIN_HELP, /microphone test below uses neither the gain nor the automatic level/);
 });
 

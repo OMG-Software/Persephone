@@ -32,8 +32,10 @@ Each change is marked `PERSEPHONE PATCH (ADR-0055)`.
   level of the published track.
 - `src/native/capture_processing.rs` (new, exported as
   `native::capture_processing`): `set_capture_gain_percent(u16) -> bool` (false
-  over 400) and `capture_processing() -> Option<CaptureProcessing>` call the
-  free functions of `webrtc-sys`. The call worker uses them for the manual
+  over `MAX_CAPTURE_GAIN_PERCENT`, 400, checked here and again in C++) and
+  `capture_processing() -> Option<CaptureProcessing>` (the oldest live
+  factory; it waits for the worker thread) call the free functions of
+  `webrtc-sys`. The call worker uses them for the manual
   microphone gain and for its diagnostic notes.
 
 Each change is marked `PERSEPHONE PATCH (ADR-0062)`.
