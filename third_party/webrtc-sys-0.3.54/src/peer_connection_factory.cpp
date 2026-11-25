@@ -404,25 +404,34 @@ CaptureProcessing unknown_capture_processing() {
 }  // namespace
 
 // The gain is read on the worker thread, after any gain task posted before
-// this call (see apply_capture_gain).
+// this call (see apply_capture_gain). A factory with no module of its own
+// (its build failed) is still found: only its gain is unknown, and the
+// device and the voice engine's report are still read, because that is the
+// case the log must explain.
 CaptureProcessing PeerConnectionFactory::capture_processing() const {
   CaptureProcessing state = unknown_capture_processing();
-  if (!audio_processing_ || !peer_factory_) {
+  if (!peer_factory_) {
     return state;
   }
   state.found = true;
-  rtc_runtime_->worker_thread()->BlockingCall([this, &state] {
-    const webrtc::AudioProcessing::Config config = audio_processing_->GetConfig();
-    if (config.capture_level_adjustment.enabled) {
-      state.gain_percent = static_cast<uint32_t>(
-          std::lround(config.capture_level_adjustment.pre_gain_factor * 100.0f));
-    }
-  });
+  if (audio_processing_) {
+    state.module = true;
+    rtc_runtime_->worker_thread()->BlockingCall([this, &state] {
+      const webrtc::AudioProcessing::Config config =
+          audio_processing_->GetConfig();
+      if (config.capture_level_adjustment.enabled) {
+        state.gain_percent = static_cast<uint32_t>(std::lround(
+            config.capture_level_adjustment.pre_gain_factor * 100.0f));
+      }
+    });
+  }
   // The audio device module's own state, read outside the lambda above: the
   // proxy marshals each call to the worker thread itself.
-  state.playout_initialized = adm_proxy_->PlayoutIsInitialized();
-  state.playing = adm_proxy_->Playing();
-  state.recording = adm_proxy_->Recording();
+  if (adm_proxy_) {
+    state.playout_initialized = adm_proxy_->PlayoutIsInitialized();
+    state.playing = adm_proxy_->Playing();
+    state.recording = adm_proxy_->Recording();
+  }
   const webrtc::AudioProcessingState reported =
       peer_factory_->GetAudioProcessingState();
   state.echo_requested = tri_state(reported.echo_cancellation.requested_enabled);

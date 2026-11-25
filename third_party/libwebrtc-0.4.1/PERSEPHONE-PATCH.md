@@ -35,7 +35,9 @@ Each change is marked `PERSEPHONE PATCH (ADR-0055)`.
   over `MAX_CAPTURE_GAIN_PERCENT`, 400, checked here and again in C++, and
   false when a live factory has no audio processing module to take it) and
   `capture_processing() -> Option<CaptureProcessing>` (the oldest live
-  factory; it waits for the worker thread) call the free functions of
+  factory, `None` only when there is none; its `gain_percent` is `None` when
+  that factory has no audio processing module of its own; it waits for the
+  worker thread) call the free functions of
   `webrtc-sys`. The call worker uses them for the manual
   microphone gain and for its diagnostic notes.
 

@@ -84,17 +84,24 @@ class PeerConnectionFactory {
   std::shared_ptr<AudioDeviceController> audio_device() const;
   bool zero_playout_delay_enabled() const;
 
-  // PERSEPHONE PATCH (ADR-0062): sets the capture level adjustment (the
-  // microphone gain, applied before any processing) of this factory's audio
-  // processing module. Runs on the worker thread, as the voice engine does
-  // when it reads and writes the same configuration. False when the factory
-  // has no module to take it.
+ private:
+  // PERSEPHONE PATCH (ADR-0062): the gain and the state read are safe only
+  // through the registry: a gain change holds the registry's mutex, so a
+  // factory that left it gets none, and a state read records the factory, so
+  // its destructor waits for the read. So only the two registry functions
+  // below may call these.
+  friend bool set_capture_gain_percent(uint16_t percent);
+  friend CaptureProcessing capture_processing_state();
+  // Sets the capture level adjustment (the microphone gain, applied before
+  // any processing) of this factory's audio processing module. Runs on the
+  // worker thread, as the voice engine does when it reads and writes the
+  // same configuration. False when the factory has no module to take it.
   bool apply_capture_gain(uint16_t percent) const;
-  // PERSEPHONE PATCH (ADR-0062): what this factory's audio processing module
-  // does now.
+  // What this factory does now: the gain of its audio processing module
+  // (`module` is false when it has none), what the voice engine reports for
+  // its processing, and what the audio device module does.
   CaptureProcessing capture_processing() const;
 
- private:
   // Declaration order matters: rtc_runtime_ must be declared before
   // adm_proxy_/audio_device_ so it is destroyed last. Releasing the proxy
   // does a BlockingCall onto the runtime's worker thread, which must still
@@ -121,8 +128,10 @@ class PeerConnectionFactory {
 // factories).
 bool set_capture_gain_percent(uint16_t percent);
 // PERSEPHONE PATCH (ADR-0062): the audio processing state of the oldest live
-// factory, or `found == false` when there is none. In the call worker that is
-// LiveKit's one runtime factory, which every room shares.
+// factory, or `found == false` only when there is none. A factory with no
+// audio processing module of its own is found, with `module == false`. In
+// the call worker that is LiveKit's one runtime factory, which every room
+// shares.
 CaptureProcessing capture_processing_state();
 
 std::shared_ptr<PeerConnectionFactory> create_peer_connection_factory();

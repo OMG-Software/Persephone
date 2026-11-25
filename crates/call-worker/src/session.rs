@@ -3530,20 +3530,28 @@ fn write_microphone_note(note: MicrophoneNote) {
     };
     let (gain, echo, noise, agc) = match capture_processing::capture_processing() {
         Some(report) => (
-            report.gain_percent.to_string(),
+            report.gain_percent.map_or_else(
+                || "not applied (no audio processing module)".to_owned(),
+                |percent| format!("{percent}% applied"),
+            ),
             state(report.echo_cancellation),
             state(report.noise_suppression),
             state(report.auto_gain_control),
         ),
         None => {
             let unknown = "unknown".to_owned();
-            (unknown.clone(), unknown.clone(), unknown.clone(), unknown)
+            (
+                "applied unknown (no factory)".to_owned(),
+                unknown.clone(),
+                unknown.clone(),
+                unknown,
+            )
         }
     };
     note_audio(
         crate::diagnostics::INFO,
         format_args!(
-            "microphone: gain {}% asked ({}), {gain}% applied; automatic level {} asked ({}); \
+            "microphone: gain {}% asked ({}), {gain}; automatic level {} asked ({}); \
              echo cancellation {echo}; noise suppression {noise}; automatic gain control {agc}",
             microphone.gain_percent,
             // Queued for the audio thread; `applied` is what it reports.

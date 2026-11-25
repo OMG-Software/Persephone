@@ -83,7 +83,12 @@ Each change is marked `PERSEPHONE PATCH (ADR-0043)`.
   the APM applies and, for echo cancellation, noise suppression and
   automatic gain control, what was requested and what runs, from
   `GetAudioProcessingState()`, and whether the audio device module has
-  playout prepared, playout running and capture running). A factory joins
+  playout prepared, playout running and capture running). `found` is false
+  only with no live factory. A factory with no APM of its own is found with
+  `module` false: its gain is unknown, and the rest is still read. The two
+  per-factory members, `apply_capture_gain` and `capture_processing`, are
+  private, with these two functions as their only friends, so no caller can
+  skip the registry's mutex or its read record. A factory joins
   the registry at the end of its constructor, takes the stored gain, and
   leaves it first in its destructor, so a gain change never reaches a
   factory that is going away. The mutex guards the registry's fields only:

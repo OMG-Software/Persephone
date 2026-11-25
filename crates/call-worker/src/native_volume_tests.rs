@@ -233,7 +233,8 @@ fn gain_round() {
     let factory = PeerConnectionFactory::default();
     let report = capture_processing::capture_processing().expect("a live factory reports");
     assert_eq!(
-        report.gain_percent, 250,
+        report.gain_percent,
+        Some(250),
         "a factory made after the gain was set takes it"
     );
     // The gain moves while the factory lives, also under 100 percent, which
@@ -255,7 +256,11 @@ fn gain_round() {
             expected = u32::from(percent);
         }
         let read = capture_processing::capture_processing().expect("the factory is alive");
-        assert_eq!(read.gain_percent, expected, "after a gain of {percent}");
+        assert_eq!(
+            read.gain_percent,
+            Some(expected),
+            "after a gain of {percent}"
+        );
     }
     // A track that no device feeds may refuse the options. The call must be
     // safe either way, also after the factory's other tracks are dropped.
@@ -449,7 +454,7 @@ fn loopback_automatic_level_follows_the_request_while_the_track_is_sent() {
         assert!(capture_processing::set_capture_gain_percent(250));
         tokio::time::sleep(Duration::from_millis(300)).await;
         let loud = report("gain 250");
-        assert_eq!(loud.gain_percent, 250);
+        assert_eq!(loud.gain_percent, Some(250));
         assert_eq!(
             loud.auto_gain_control.active,
             Some(true),
@@ -460,7 +465,7 @@ fn loopback_automatic_level_follows_the_request_while_the_track_is_sent() {
         assert!(track.set_auto_gain_control(false));
         tokio::time::sleep(Duration::from_millis(300)).await;
         let kept = report("gain 250, automatic level off");
-        assert_eq!(kept.gain_percent, 250, "{kept:?}");
+        assert_eq!(kept.gain_percent, Some(250), "{kept:?}");
         assert_eq!(kept.auto_gain_control.active, Some(false), "{kept:?}");
         assert!(capture_processing::set_capture_gain_percent(100));
         sender.close();

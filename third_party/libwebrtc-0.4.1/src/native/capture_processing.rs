@@ -33,8 +33,9 @@ pub struct Component {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CaptureProcessing {
     /// The microphone gain in percent that the module applies. 100 when the
-    /// adjustment is off.
-    pub gain_percent: u32,
+    /// adjustment is off; `None` when the factory has no audio processing
+    /// module of its own (its build failed), so no gain reaches the sound.
+    pub gain_percent: Option<u32>,
     pub echo_cancellation: Component,
     pub noise_suppression: Component,
     pub auto_gain_control: Component,
@@ -53,13 +54,14 @@ fn tri(value: i8) -> Option<bool> {
     }
 }
 
-/// The state of the oldest live factory, or `None` when there is none. It
-/// reads the factory's worker thread and waits for it: call it off an async
-/// runtime.
+/// The state of the oldest live factory, or `None` only when there is none.
+/// A factory with no audio processing module of its own still reports, with
+/// no gain. It reads the factory's worker thread and waits for it: call it
+/// off an async runtime.
 pub fn capture_processing() -> Option<CaptureProcessing> {
     let state = sys_pcf::capture_processing_state();
     state.found.then(|| CaptureProcessing {
-        gain_percent: state.gain_percent,
+        gain_percent: state.module.then_some(state.gain_percent),
         echo_cancellation: Component {
             requested: tri(state.echo_requested),
             active: tri(state.echo_active),

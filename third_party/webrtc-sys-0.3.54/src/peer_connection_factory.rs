@@ -32,7 +32,11 @@ pub mod ffi {
     /// PERSEPHONE PATCH (ADR-0062): the audio processing state of a factory.
     /// The `i8` fields are -1 for unknown, 0 for off and 1 for on.
     pub struct CaptureProcessing {
+        /// False only when there is no live factory.
         pub found: bool,
+        /// Whether the factory has its own audio processing module, which
+        /// the gain reaches. When false, `gain_percent` means nothing.
+        pub module: bool,
         /// The microphone gain in percent that the module applies now: 100
         /// when the adjustment is off.
         pub gain_percent: u32,

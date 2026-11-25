@@ -197,9 +197,10 @@ ID or name, a key or a token (see the amendment to ADR-0058):
 * when the call opens its devices: how many microphones and speakers
   libwebrtc lists, how each was chosen (by the user, the system default
   selected, or left to libwebrtc) and whether the system default was read;
-* at each microphone setting: the gain asked and applied, the automatic
-  level, and for echo cancellation, noise suppression and automatic gain
-  control what was asked and what runs;
+* at each microphone setting: the gain asked and applied (or that no gain
+  applies, because the factory has no audio processing module of its own),
+  the automatic level, and for echo cancellation, noise suppression and
+  automatic gain control what was asked and what runs;
 * every 5 seconds, while the log is on: the own level, whether the call's
   playout is on and its volume, whether the audio device module has playout
   prepared and running and capture running, and for each remote audio track
