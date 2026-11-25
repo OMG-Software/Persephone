@@ -713,8 +713,9 @@ fn given_call_commands_then_room_ids_are_checked_and_synthetic_data_has_no_call(
 }
 
 /// GIVEN a profile WHEN it is locked THEN every call command is refused as
-/// `locked`; WHEN it is open and has no account THEN status, leave and mute
-/// answer idle, and readiness has no homeserver to ask.
+/// `locked`, but turning the statistics off still works; WHEN it is open and
+/// has no account THEN status, leave and mute answer idle, and readiness has
+/// no homeserver to ask.
 #[test]
 fn given_a_profile_then_call_commands_follow_the_session() {
     use persephone_contracts::{CallReadiness, CallStatus};
@@ -776,6 +777,7 @@ fn given_a_profile_then_call_commands_follow_the_session() {
             video: false,
         },
         Call::CallCamera { on: true },
+        Call::CallStats { on: true },
     ] {
         assert_eq!(
             answer::<serde_json::Value>(&core, call.clone()),
@@ -783,6 +785,12 @@ fn given_a_profile_then_call_commands_follow_the_session() {
             "{call:?}"
         );
     }
+    // Turning the statistics off always works, so a closed panel or window
+    // never leaves them reading.
+    assert_eq!(
+        answer::<serde_json::Value>(&core, Call::CallStats { on: false }),
+        Ok(serde_json::Value::Null)
+    );
 }
 
 /// GIVEN no call WHEN the page turns the camera on or off THEN the core

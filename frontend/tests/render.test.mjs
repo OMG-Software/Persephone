@@ -319,7 +319,7 @@ test('GIVEN a call with a camera on and one off WHEN the call window renders THE
 
   // One icon button opens the technical details; the panel is closed.
   assert.equal((html.match(/aria-label="Technical details"/g) ?? []).length, 1);
-  assert.match(html, /class="secondary call-stats-button"[^>]*aria-pressed="false"/);
+  assert.match(html, /class="secondary call-stats-button"[^>]*aria-expanded="false"[^>]*aria-controls="call-window-stats"/);
   assert.doesNotMatch(html, /class="call-stats"/);
 
   const { body: idle } = render(CallWindow, { props: {} });
@@ -330,7 +330,7 @@ test('GIVEN a call with a camera on and one off WHEN the call window renders THE
 test('GIVEN the technical details panel WHEN it renders before a reading THEN it waits, has a close button and shows no table', async () => {
   const { default: CallStats } = await vite.ssrLoadModule('/src/CallStats.svelte');
   const { body } = render(CallStats, { props: { onclose() {} } });
-  assert.match(body, /role="dialog" aria-label="Technical details"/);
+  assert.match(body, /id="call-window-stats" class="call-stats" role="dialog" aria-label="Technical details"/);
   assert.match(body, /aria-label="Close technical details"/);
   assert.match(body, /Waiting for the first reading\./);
   assert.doesNotMatch(body, /<table/);

@@ -6,7 +6,7 @@ use persephone_desktop::{
     BAND_PREFIX_BYTES, CALL_WINDOW, MAIN_WINDOW, Subscriptions, VIDEO_PREFIX_BYTES, configure,
     context,
     core_link::{Band, CoreError, CoreLink, CoreTransport, Video},
-    create_call_window, create_main_window,
+    create_call_window, create_main_window, reset_subscriptions,
 };
 use std::sync::{
     Arc, Mutex,
@@ -1320,9 +1320,21 @@ fn given_call_statistics_then_only_the_call_window_may_open_them_and_only_while_
     assert_eq!(sent(3), 0);
 
     // A window that is reloaded or closed drops its channel and tells the
-    // core to stop.
+    // core to stop, through the handler its page load and its close use.
     invoke_on(&call, "call_stats", app_origin(), stats_on(true)).unwrap();
-    assert!(subscriptions.forget_stats(CALL_WINDOW));
+    assert_eq!(*core.stats_switches.lock().unwrap(), [true, false, true]);
+    let link: CoreLink = core.clone();
+    reset_subscriptions(&link, &subscriptions, CALL_WINDOW);
+    // The stop goes on a blocking task, so wait for it, but not forever.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while core.stats_switches.lock().unwrap().len() < 4 && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(
+        *core.stats_switches.lock().unwrap(),
+        [true, false, true, false]
+    );
+    // The channel went with it, so another reset has nothing to stop.
     assert!(!subscriptions.forget_stats(CALL_WINDOW), "once");
     subscriptions.dispatch(Event::CallStats { stats: reading(4) });
     assert_eq!(sent(4), 0);

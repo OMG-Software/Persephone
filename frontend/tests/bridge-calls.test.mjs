@@ -528,6 +528,37 @@ test('GIVEN the technical details WHEN turned on and off THEN the host is asked 
   await assert.rejects(bridge.startCallStats(() => {}), (reason) => reason === 'unavailable');
 });
 
+test('GIVEN a statistics start still at the host WHEN the panel closes and opens again THEN the host gets start, stop, start in that order', async () => {
+  const sent = [];
+  let release;
+  const first = new Promise((resolve) => (release = resolve));
+  mockIPC((command, args) => {
+    sent.push(args.on);
+    return sent.length === 1 ? first.then(() => null) : null;
+  });
+  const startA = bridge.startCallStats(() => {});
+  const stopA = bridge.stopCallStats();
+  const startB = bridge.startCallStats(() => {});
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(sent, [true], 'nothing else goes while the first start runs');
+  release();
+  await Promise.all([startA, stopA, startB]);
+  // The late stop of the closed panel comes before the new start, so the
+  // readings stay on for the panel that is open.
+  assert.deepEqual(sent, [true, false, true]);
+});
+
+test('GIVEN a statistics start that fails WHEN a stop follows THEN the stop is still sent', async () => {
+  const sent = [];
+  mockIPC((command, args) => {
+    sent.push(args.on);
+    return args.on ? Promise.reject('locked') : null;
+  });
+  await assert.rejects(bridge.startCallStats(() => {}), (reason) => reason === 'locked');
+  await bridge.stopCallStats();
+  assert.deepEqual(sent, [true, false]);
+});
+
 test('GIVEN the video frame call WHEN the host answers THEN an empty body is no picture, a whole picture is parsed and anything else is refused', async () => {
   const body = new Uint8Array(20 + 8);
   const prefix = new DataView(body.buffer);

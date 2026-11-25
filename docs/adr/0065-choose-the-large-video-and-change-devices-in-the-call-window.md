@@ -61,7 +61,10 @@ already has.
   by CSS with its aspect ratio kept, so a camera is enlarged beyond its
   640 by 360 pixels and looks soft. A feed that moves between the grid, the
   large view and the row gets a new canvas; the page draws the newest picture
-  again at once from a copy it keeps for each tile.
+  again at once from a copy it keeps for each tile. The copy is kept with the
+  feed (the device and stream) it belongs to, and is drawn only while that
+  feed is still on the tile, so a tile that another person takes next never
+  shows the last picture of the one before.
 
 ### Devices in the call window
 
@@ -70,6 +73,12 @@ already has.
   opens. The button, or Escape, closes it and the focus returns to the button.
 * A choice is saved with `set_call_devices` and applies to the running call
   through the switch of ADR-0059. The core checks the IDs again.
+* Saves go one at a time, in the order the menus changed, and each sends all
+  three menus as they were then. A menu changed while a save runs is
+  therefore sent after it and never dropped, and only the newest save sets
+  the line under the menus. The menus stay usable while a save runs; they
+  wait only while the lists load. The order rules are in
+  `frontend/src/callDevicePanel.ts`, with Node tests.
 * The capability `call` gets two more commands: `call_devices` and
   `set_call_devices`. It still has no device tests, no call start, no rooms
   and no files. The host test of the call window's command set checks this.
@@ -81,6 +90,9 @@ already has.
   reason as before (`AudioDevice`).
 * The call status has no mark for a change that worked. The panel therefore
   says "switched" when it saved the choice and the status shows no failure.
+  A failure that the status shows is shown whether or not the panel saved
+  anything, so a failure from before the panel opened (or from the main
+  window's settings) is in view when the panel opens to fix it.
   The worker's answer can arrive after the save, and a failure from an earlier
   change stays until the worker answers the new one. A camera change applies
   at the next camera start (ADR-0059).

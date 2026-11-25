@@ -557,12 +557,24 @@ export async function startCallStats(onStats: (stats: CallStats) => void): Promi
     const stats = parseCallStats(value);
     if (stats !== null) onStats(stats);
   });
-  await invoke<null>('call_stats', { on: true, onStats: channel });
+  await inStatsTurn(() => invoke<null>('call_stats', { on: true, onStats: channel }));
 }
 
 /** Turns the call's technical details off (ADR-0066). Safe to call when they are off. */
 export async function stopCallStats(): Promise<void> {
-  await invoke<null>('call_stats', { on: false, onStats: new Channel<unknown>(() => {}) });
+  await inStatsTurn(() => invoke<null>('call_stats', { on: false, onStats: new Channel<unknown>(() => {}) }));
+}
+
+// The host keeps one statistics channel per window, and the last start or
+// stop it gets wins. So starts and stops go one at a time, in the order the
+// page asked: the late stop of a closed panel can never turn off the panel
+// opened after it. A failed one does not hold up the next.
+let statsTurn: Promise<unknown> = Promise.resolve();
+
+function inStatsTurn<T>(task: () => Promise<T>): Promise<T> {
+  const turn = statsTurn.then(task, task);
+  statsTurn = turn.catch(() => undefined);
+  return turn;
 }
 
 /**

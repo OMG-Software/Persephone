@@ -8,7 +8,7 @@
 
 <script lang="ts">
   import { onDestroy, onMount, tick, untrack } from 'svelte';
-  import type { CallParticipantLevel, CallStatus } from '../../crates/contracts/generated/contracts';
+  import type { CallParticipantLevel, CallStatus, CallVideoTile } from '../../crates/contracts/generated/contracts';
   import {
     callCamera,
     callDeafen,
@@ -27,6 +27,7 @@
     DEVICE_CHANGE_TEXT,
     DEVICES_BUTTON_LABEL,
     END_TEXT,
+    feedLabel,
     IDLE_CALL,
     inCall,
     levelMap,
@@ -39,6 +40,7 @@
     SCREEN_TILE_LABEL,
     screenButton,
     SHARING_TEXT,
+    SHOW_ALL_LABEL,
     SOUND_LEVEL_LABEL,
     SOUND_LEVEL_LOUD,
     SOUND_LEVEL_MAX,
@@ -169,12 +171,24 @@
   const canvases: Record<number, HTMLCanvasElement | undefined> = {};
   let shapes = $state<Record<number, Shape | undefined>>({});
 
-  // The newest picture of each tile. A feed that moves between the large
-  // view, the row and the grid gets a new canvas; it shows this at once.
-  const latest: Record<number, VideoPicture | undefined> = {};
+  // The newest picture of each tile, with the feed it belongs to. A feed
+  // that moves between the large view, the row and the grid gets a new
+  // canvas; it shows this at once. A tile that another feed took next shows
+  // nothing until that feed's own picture comes.
+  const latest: Record<number, { feed: string; picture: VideoPicture } | undefined> = {};
+  // The feed each tile was last asked for, so a picture is kept with it.
+  const asked: Record<number, string | undefined> = {};
+  const tileKey = (tile: CallVideoTile) =>
+    tile.own ? 'own' : tile.participant ? deviceKey(tile.participant.userId, tile.participant.deviceId) : 'none';
+  const tileFeed = (tile: CallVideoTile) => `${tileKey(tile)} ${tile.stream}`;
 
   function show(tile: number, picture: VideoPicture) {
-    latest[tile] = picture;
+    const feed = asked[tile];
+    latest[tile] = feed === undefined ? undefined : { feed, picture };
+    draw(tile, picture);
+  }
+
+  function draw(tile: number, picture: VideoPicture) {
     const canvas = canvases[tile];
     const context = canvas?.getContext('2d');
     if (!canvas || !context) return;
@@ -224,8 +238,6 @@
     }
   }
 
-  const feedLabel = (cell: CallCell, isLarge: boolean) => (isLarge ? 'Show all' : 'Show large');
-
   function closeDevices() {
     devicesOpen = false;
     void tick().then(() => devicesButton?.focus());
@@ -251,12 +263,12 @@
   }
 
   $effect(() => {
-    const next: TileRef[] = status.video.map((tile) => ({
-      tile: tile.tile,
-      key: tile.own ? 'own' : tile.participant ? deviceKey(tile.participant.userId, tile.participant.deviceId) : 'none',
-      stream: tile.stream
-    }));
-    untrack(() => fetcher.setTiles(next));
+    const next: TileRef[] = status.video.map((tile) => ({ tile: tile.tile, key: tileKey(tile), stream: tile.stream }));
+    untrack(() => {
+      for (const key of Object.keys(asked)) delete asked[Number(key)];
+      for (const tile of status.video) asked[tile.tile] ??= tileFeed(tile);
+      fetcher.setTiles(next);
+    });
   });
 
   $effect(() => {
@@ -267,9 +279,11 @@
   // A kept cell can move to another tile, so the canvas follows its tile.
   const canvasRef = (node: HTMLCanvasElement, tile: number) => {
     const registration = tileCanvas(canvases, node, tile);
+    // Only a picture of the feed now on the tile.
     const repaint = (at: number) => {
-      const picture = latest[at];
-      if (picture) show(at, picture);
+      const kept = latest[at];
+      const now = untrack(() => status.video.find((tile) => tile.tile === at));
+      if (kept && now && kept.feed === tileFeed(now)) draw(at, kept.picture);
     };
     repaint(tile);
     return {
@@ -291,7 +305,7 @@
   {@const shape = cell.tile === null ? undefined : shapes[cell.tile]}
   {@const layout = shape && cell.tile !== null ? tileLayout(shape.width, shape.height, shape.rotation, cell.own) : null}
   <div class="video-tile call-cell" class:screen={cell.screen} class:speaking={cell.speaking} class:large={isLarge} style:--ratio={layout ? String(layout.ratio) : '1.7778'}>
-    <button type="button" class="call-feed" data-feed={cell.key} aria-pressed={isLarge} title={feedLabel(cell, isLarge)} onclick={() => void choose(selectFeed(pick, cell.key, keys), cell.key)}>
+    <button type="button" class="call-feed" data-feed={cell.key} aria-pressed={isLarge} title={feedLabel(isLarge)} onclick={() => void choose(selectFeed(pick, cell.key, keys), cell.key)}>
       <span class="video-frame" style:aspect-ratio={layout ? String(layout.ratio) : '16 / 9'}>
         {#if cell.tile !== null}
           <canvas
@@ -338,7 +352,7 @@
     </button>
     {#if joined && view.large}
       <button type="button" class="secondary call-show-all" onclick={() => void choose(showAll(), view.large?.key ?? null)}>
-        Show all
+        {SHOW_ALL_LABEL}
       </button>
     {/if}
   </header>
@@ -466,7 +480,8 @@
       <button
         type="button"
         class="secondary call-stats-button"
-        aria-pressed={statsOpen}
+        aria-expanded={statsOpen}
+        aria-controls="call-window-stats"
         aria-label={STATS_LABEL}
         title={STATS_LABEL}
         bind:this={statsButton}

@@ -203,8 +203,13 @@ fn put_video_receive(out: &mut Vec<u8>, video: &VideoReceiveStats) {
     out.extend_from_slice(&video.packets_lost.to_be_bytes());
 }
 
-/// Writes `stats` after the message tag. Entries past the limits are left
-/// out, so the message always fits.
+/// Writes `stats` after the message tag. The lists are cut to their limits,
+/// so each count fits its byte. Like the other writers of this protocol, it
+/// writes every entry as given: the reader refuses the whole message for an
+/// entry out of bounds (an identity that is too long or has a control
+/// character, a connection past `MAX_OTHER_CONNECTIONS`, a repeated entry, a
+/// number past its maximum). The caller (`mapping::stats` in the worker)
+/// leaves such entries out and clamps the numbers first.
 pub(super) fn put_stats(out: &mut Vec<u8>, stats: &CallStats) {
     let present = u8::from(stats.microphone.is_some())
         | u8::from(stats.camera.is_some()) << 1

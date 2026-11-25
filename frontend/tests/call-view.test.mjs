@@ -9,7 +9,15 @@ import {
   showAll,
   splitFeeds
 } from '../src/callView.ts';
-import { DEVICE_SWITCH_TEXT, DEVICE_SWITCHED_TEXT, DEVICE_SWITCHING_TEXT, deviceSwitchText } from '../src/calls.ts';
+import {
+  DEVICE_SWITCH_TEXT,
+  DEVICE_SWITCHED_TEXT,
+  DEVICE_SWITCHING_TEXT,
+  deviceSwitchText,
+  feedLabel,
+  SHOW_ALL_LABEL,
+  SHOW_LARGE_LABEL
+} from '../src/calls.ts';
 
 const cameras = ['own', 'a', 'b'];
 const withScreen = [...cameras, 'screen'];
@@ -78,6 +86,12 @@ test('GIVEN a key that is not in the call WHEN it is selected THEN nothing chang
   assert.equal(largeKey(selectFeed(AUTO_PICK, 'zzz', cameras), cameras), null);
 });
 
+test('GIVEN a feed button WHEN it is labelled THEN a large feed goes back to all and the others show large', () => {
+  assert.equal(feedLabel(true), SHOW_ALL_LABEL);
+  assert.equal(feedLabel(false), SHOW_LARGE_LABEL);
+  assert.notEqual(SHOW_ALL_LABEL, SHOW_LARGE_LABEL);
+});
+
 test('GIVEN no large feed WHEN the cells are split THEN all stay in order', () => {
   const cells = cameras.map((key) => ({ key }));
   const split = splitFeeds(cells, null);
@@ -91,6 +105,9 @@ test('GIVEN the device panel WHEN a change is read THEN each result has its own 
   assert.equal(deviceSwitchText(true, false, null), DEVICE_SWITCHED_TEXT);
   for (const change of ['not_found', 'unsupported', 'kept', 'failed']) {
     assert.equal(deviceSwitchText(true, false, change), DEVICE_SWITCH_TEXT[change]);
+    // A failure from before the panel opened shows too.
+    assert.equal(deviceSwitchText(false, false, change), DEVICE_SWITCH_TEXT[change]);
+    assert.equal(deviceSwitchText(false, true, change), DEVICE_SWITCHING_TEXT);
   }
   assert.match(DEVICE_SWITCH_TEXT.not_found, /not connected/);
   assert.match(DEVICE_SWITCH_TEXT.unsupported, /Linux/);

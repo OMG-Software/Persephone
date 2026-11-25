@@ -15,18 +15,18 @@
   let stats = $state<CallStats | null>(null);
   let failed = $state(false);
   let closeButton = $state<HTMLButtonElement>();
-  // The stop waits for the start, so a quick close never leaves them on.
-  let starting: Promise<void> = Promise.resolve();
-
+  // The bridge sends starts and stops in the order asked, so the stop of a
+  // quick close follows its start, and a panel opened again right after is
+  // never turned off by the stop of the one before.
   onMount(() => {
     closeButton?.focus();
-    starting = startCallStats((next) => (stats = next)).catch(() => {
+    startCallStats((next) => (stats = next)).catch(() => {
       failed = true;
     });
   });
 
   onDestroy(() => {
-    void starting.then(() => stopCallStats()).catch(() => {});
+    stopCallStats().catch(() => {});
   });
 
   const sections = $derived(stats ? statsSections(stats) : []);
@@ -38,7 +38,7 @@
   }}
 />
 
-<div class="call-stats" role="dialog" aria-label={STATS_LABEL}>
+<div id="call-window-stats" class="call-stats" role="dialog" aria-label={STATS_LABEL}>
   <header class="call-stats-head">
     <h2>{STATS_LABEL}</h2>
     <button type="button" class="secondary" aria-label="Close {STATS_LABEL.toLowerCase()}" bind:this={closeButton} onclick={onclose}>

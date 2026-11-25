@@ -133,10 +133,11 @@ pub struct RawOwnVideo {
     pub packets_lost: Option<i64>,
 }
 
-/// The audio of one remote participant, summed over its audio tracks.
+/// The audio of one remote participant: its microphone track (one per
+/// participant; the smallest track id when it has more).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RawRemoteAudio {
-    /// Linear, 0.0 to 1.0; the loudest track.
+    /// Linear, 0.0 to 1.0.
     pub level: f64,
     pub bytes_received: u64,
     pub packets_received: u64,

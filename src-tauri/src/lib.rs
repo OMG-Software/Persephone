@@ -2154,8 +2154,10 @@ fn restore_from_tray<R: Runtime>(app: &AppHandle<R>) {
 
 /// Drops a window's subscriptions when its page (re)loads or the window
 /// goes: the new page holds none of the old channels, and the core's slots
-/// would otherwise stay taken. Rooms belong to the main window only.
-fn reset_subscriptions(core: &CoreLink, subscriptions: &Subscriptions, label: &str) {
+/// would otherwise stay taken. Rooms belong to the main window only. The
+/// page-load and window-destroyed handlers call it; it is public for the
+/// IPC tests, because the mock runtime sends neither event.
+pub fn reset_subscriptions(core: &CoreLink, subscriptions: &Subscriptions, label: &str) {
     let rooms = subscriptions.forget_window(label);
     // A window that goes or reloads stops the call statistics it asked for
     // (ADR-0066).

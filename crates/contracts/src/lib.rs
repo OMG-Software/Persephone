@@ -2624,7 +2624,7 @@ impl CallStats {
             })
             && self.connections.len() <= CALL_STATS_CONNECTIONS_MAX
             && self.connections.iter().enumerate().all(|(index, link)| {
-                link.connection < 4
+                usize::from(link.connection) < CALL_STATS_CONNECTIONS_MAX
                     && kbps(link.outgoing_kbps)
                     && kbps(link.send_kbps)
                     && kbps(link.receive_kbps)

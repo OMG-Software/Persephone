@@ -2608,6 +2608,7 @@ impl Call<'_> {
         } = self;
         stats.tick(Instant::now(), || {
             let mut sources = Sources {
+                one_connection: room.is_single_peer_connection_active(),
                 microphone: match publication.track() {
                     Some(LocalTrack::Audio(track)) => Some(track),
                     _ => None,
@@ -2636,28 +2637,38 @@ impl Call<'_> {
                         continue;
                     }
                     participants += 1;
-                    // The microphone, and the camera before a screen share.
-                    let mut video: Option<(bool, RemoteVideoTrack)> = None;
+                    // One microphone, and the camera before a screen share.
+                    // The smallest track id breaks a tie, so every read
+                    // follows the same track and its counters never jump.
+                    let mut audio: Option<(TrackSid, RemoteAudioTrack)> = None;
+                    let mut video: Option<(bool, TrackSid, RemoteVideoTrack)> = None;
                     for publication in participant.track_publications().values() {
+                        let sid = publication.sid();
                         match (publication.track(), publication.source()) {
                             (Some(RemoteTrack::Audio(track)), TrackSource::Microphone) => {
-                                sources
-                                    .remote_audio
-                                    .push((connection, identity.clone(), track));
+                                if audio.as_ref().is_none_or(|(have, _)| sid < *have) {
+                                    audio = Some((sid, track));
+                                }
                             }
                             (Some(RemoteTrack::Video(track)), source) => {
                                 let camera = source == TrackSource::Camera;
-                                if video
-                                    .as_ref()
-                                    .is_none_or(|(have_camera, _)| camera && !have_camera)
-                                {
-                                    video = Some((camera, track));
+                                let better = video.as_ref().is_none_or(|(have_camera, have, _)| {
+                                    (camera, std::cmp::Reverse(&sid))
+                                        > (*have_camera, std::cmp::Reverse(have))
+                                });
+                                if better {
+                                    video = Some((camera, sid, track));
                                 }
                             }
                             _ => {}
                         }
                     }
-                    if let Some((_, track)) = video {
+                    if let Some((_, track)) = audio {
+                        sources
+                            .remote_audio
+                            .push((connection, identity.clone(), track));
+                    }
+                    if let Some((_, _, track)) = video {
                         sources.remote_video.push((connection, identity, track));
                     }
                 }

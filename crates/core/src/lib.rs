@@ -2776,7 +2776,9 @@ impl Core {
     /// read and sent only while on, which needs a call; turning them off
     /// also drops a reading that waits.
     fn call_stats(&self, on: bool) -> Outcome {
-        if let Err(code) = self.calls_open() {
+        // Turning them off always works (ADR-0066), also while the session
+        // is locked or busy, so a closed panel never leaves them reading.
+        if on && let Err(code) = self.calls_open() {
             return Outcome::Error(code);
         }
         match self.calls.set_stats(on) {

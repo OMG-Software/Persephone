@@ -59,7 +59,9 @@ for the answer, and a reading is old when the page asks for it.
 
 * The call window sends `call_stats { on }` with a channel. The core
   command is `Call::CallStats { on }`. Turning the details on needs a running
-  or joining call (`unavailable` otherwise); turning them off always works.
+  or joining call (`unavailable` otherwise); turning them off always works,
+  also while the session is locked or busy, so a closed panel or window never
+  leaves them reading.
 * The core turns them off when the call ends (in the same step that frees the
   call slot, so a late "on" cannot reach the next call), when the UI
   connection closes, and when the call window that asked reloads or closes.
@@ -78,7 +80,13 @@ for the answer, and a reading is old when the page asks for it.
   call ends. A report of an older on-off series is dropped by its number.
 * A read asks for the statistics of the own microphone, camera and screen
   tracks, and of one audio and one video track of each remote participant
-  (at most 32 participants, so at most 64 remote reads). The connection
+  (at most 32 participants, so at most 64 remote reads): the microphone, and
+  the camera before a screen share, with the smallest track ID when there
+  are more, so each read follows the same track and its counters never jump.
+  libwebrtc gives each track only its own streams and the transport they
+  use. The own room uses LiveKit's single peer connection when the server
+  offers it; its own and remote tracks then read one transport, which counts
+  once. With a publisher and a subscriber connection, both add. The connection
   numbers come from the transport and the selected candidate pair that those
   reports already include. A connection with no track has no entry.
 * `mapping/stats.rs` is pure. `StatsBook` keeps the last counters and makes
@@ -128,7 +136,11 @@ candidate type, SSRC, codec or other text.
 * A button "Technical details" (an icon button) in the call window controls
   opens a panel. The panel turns the details on when it opens and off when
   it closes, so closing, a closed window and an ended call all stop them.
-  Escape closes it.
+  Escape closes it. The bridge sends the starts and stops one at a time, in
+  the order asked: the host keeps one channel per window, so the late stop of
+  a closed panel must never reach it after the start of the panel opened
+  next. The button is a disclosure (`aria-expanded`, `aria-controls`), like
+  the device button.
 * The panel shows a table per source with units: kbit/s, fps, ms, %,
   packets. Participants show as in the call window. All text is inert. The
   page checks each reading against the contract again and drops a bad one.

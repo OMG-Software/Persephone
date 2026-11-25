@@ -43,6 +43,10 @@ const _: () = assert!(STATS_TIMEOUT.as_millis() < STATS_INTERVAL.as_millis());
 /// `2 * MAX_PARTICIPANTS` remote reads and three own ones.
 #[derive(Default)]
 pub struct Sources {
+    /// The own room sends and receives on one peer connection (LiveKit's
+    /// single peer connection), so its own and remote tracks read the same
+    /// transport, which is counted once.
+    pub one_connection: bool,
     pub microphone: Option<LocalAudioTrack>,
     pub camera: Option<LocalVideoTrack>,
     pub screen: Option<LocalVideoTrack>,
@@ -170,6 +174,7 @@ impl StatsProbe {
 /// Reads every track at once, each under one deadline.
 async fn read(sources: Sources, base: std::time::Instant) -> RawStats {
     let deadline = Instant::now() + STATS_READ_BUDGET;
+    let one_connection = sources.one_connection;
     let mut jobs: Vec<Job> = Vec::new();
     if let Some(track) = sources.microphone {
         jobs.push(Box::pin(async move {
@@ -206,18 +211,20 @@ async fn read(sources: Sources, base: std::time::Instant) -> RawStats {
     }
     let reads = read_all(deadline, jobs).await.into_iter().flatten();
     let at_ms = u64::try_from(base.elapsed().as_millis()).unwrap_or(u64::MAX);
-    assemble(at_ms, reads)
+    assemble(at_ms, one_connection, reads)
 }
 
 /// Makes the raw reading from what the reads gave. A track whose read did
-/// not finish is left out.
-fn assemble(at_ms: u64, reads: impl Iterator<Item = Read>) -> RawStats {
+/// not finish is left out. `one_connection` says that the own room's tracks
+/// all use one transport (see [`Sources::one_connection`]).
+fn assemble(at_ms: u64, one_connection: bool, reads: impl Iterator<Item = Read>) -> RawStats {
     let mut raw = RawStats {
         at_ms,
         ..RawStats::default()
     };
     // The first transport of the own tracks (the publisher) and of the
-    // remote tracks of each connection (the subscriber).
+    // remote tracks of each connection (the subscriber). Each track's
+    // statistics hold only its own streams and the transport they use.
     let mut publisher: Option<Link> = None;
     let mut subscribers: HashMap<u8, Link> = HashMap::new();
     let mut remotes: HashMap<(u8, String), RawRemote> = HashMap::new();
@@ -254,12 +261,14 @@ fn assemble(at_ms: u64, reads: impl Iterator<Item = Read>) -> RawStats {
         .sort_by(|a, b| (a.connection, &a.identity).cmp(&(b.connection, &b.identity)));
     raw.connections = (0..=MAX_OTHER_CONNECTIONS)
         .filter_map(|connection| {
-            let own = if connection == 0 {
-                publisher.as_ref()
-            } else {
-                None
+            let subscriber = subscribers.get(&connection);
+            let (own, subscriber) = match connection {
+                // One peer connection: both reads saw the same transport.
+                0 if one_connection => (publisher.as_ref().or(subscriber), None),
+                0 => (publisher.as_ref(), subscriber),
+                _ => (None, subscriber),
             };
-            connection_stats(connection, own, subscribers.get(&connection))
+            connection_stats(connection, own, subscriber)
         })
         .collect();
     raw
@@ -588,11 +597,12 @@ mod tests {
     /// up.
     #[test]
     fn given_a_connection_without_transports_when_assembled_then_it_has_no_entry() {
-        let raw = assemble(5, std::iter::empty());
+        let raw = assemble(5, false, std::iter::empty());
         assert_eq!(raw.at_ms, 5);
         assert!(raw.connections.is_empty() && raw.remotes.is_empty());
         let raw = assemble(
             6,
+            false,
             [
                 Read::Microphone(Vec::new()),
                 Read::RemoteAudio(1, "x".into(), Vec::new()),
@@ -603,5 +613,59 @@ mod tests {
         assert_eq!(raw.remotes.len(), 1);
         assert!(raw.remotes[0].audio.is_none());
         assert!(raw.connections.is_empty());
+    }
+
+    /// The statistics of a track whose transport sent and received the
+    /// given bytes.
+    fn on_transport(bytes_sent: u64, bytes_received: u64) -> Vec<RtcStats> {
+        let mut transport = livekit::webrtc::stats::TransportStats::default();
+        transport.transport.bytes_sent = bytes_sent;
+        transport.transport.bytes_received = bytes_received;
+        vec![RtcStats::Transport(transport)]
+    }
+
+    fn reads() -> impl Iterator<Item = Read> {
+        [
+            Read::Microphone(on_transport(100, 40)),
+            Read::RemoteAudio(0, "a".into(), on_transport(101, 41)),
+            Read::RemoteVideo(1, "b".into(), on_transport(7, 9)),
+        ]
+        .into_iter()
+    }
+
+    /// GIVEN the own room uses one peer connection WHEN the reading is
+    /// assembled THEN its transport is counted once, from the own tracks,
+    /// and another connection keeps its own numbers.
+    #[test]
+    fn given_one_peer_connection_when_assembled_then_its_transport_counts_once() {
+        let raw = assemble(1, true, reads());
+        let bytes: Vec<_> = raw
+            .connections
+            .iter()
+            .map(|c| (c.connection, c.bytes_sent, c.bytes_received))
+            .collect();
+        assert_eq!(bytes, [(0, Some(100), Some(40)), (1, Some(7), Some(9))]);
+    }
+
+    /// GIVEN the own room uses a publisher and a subscriber connection WHEN
+    /// the reading is assembled THEN both transports are added.
+    #[test]
+    fn given_two_peer_connections_when_assembled_then_both_transports_add() {
+        let raw = assemble(1, false, reads());
+        assert_eq!(raw.connections[0].bytes_sent, Some(201));
+        assert_eq!(raw.connections[0].bytes_received, Some(81));
+    }
+
+    /// GIVEN one peer connection and no own track WHEN the reading is
+    /// assembled THEN the remote tracks' transport still gives the numbers.
+    #[test]
+    fn given_one_peer_connection_without_own_tracks_then_the_remote_transport_counts() {
+        let raw = assemble(
+            1,
+            true,
+            [Read::RemoteAudio(0, "a".into(), on_transport(3, 5))].into_iter(),
+        );
+        assert_eq!(raw.connections[0].bytes_sent, Some(3));
+        assert_eq!(raw.connections[0].bytes_received, Some(5));
     }
 }

@@ -756,6 +756,7 @@ export const DEVICE_FAILURE_TEXT: Record<string, string> = {
   core_unavailable: 'The call devices could not be listed.',
   invalid_argument: 'That device cannot be saved.'
 };
+export const DEVICE_SAVE_FAILURE_TEXT = 'The call devices could not be saved.';
 
 /**
  * What the device panel of the call window says about a change during a
@@ -775,13 +776,23 @@ export const DEVICES_BUTTON_LABEL = 'Device settings';
 export const DEVICES_PANEL_LABEL = 'Call devices';
 
 /**
- * The line under the device menus after a save: nothing before a save,
- * "switching" while it runs, the failure the status shows, or "switched".
+ * The line under the device menus: "switching" while a save runs, the
+ * failure the call status shows (also one from before the panel opened, or
+ * from the main window's settings), "switched" after a save, else nothing.
  */
 export function deviceSwitchText(saved: boolean, saving: boolean, change: CallDeviceChange | null): string {
   if (saving) return DEVICE_SWITCHING_TEXT;
-  if (!saved) return '';
-  return change === null ? DEVICE_SWITCHED_TEXT : DEVICE_SWITCH_TEXT[change];
+  if (change !== null) return DEVICE_SWITCH_TEXT[change];
+  return saved ? DEVICE_SWITCHED_TEXT : '';
+}
+
+/** The call window's view buttons (ADR-0065). */
+export const SHOW_ALL_LABEL = 'Show all';
+export const SHOW_LARGE_LABEL = 'Show large';
+
+/** The label of a feed's button: a large feed goes back to all. */
+export function feedLabel(isLarge: boolean): string {
+  return isLarge ? SHOW_ALL_LABEL : SHOW_LARGE_LABEL;
 }
 
 /** The buttons that start each device test. */
