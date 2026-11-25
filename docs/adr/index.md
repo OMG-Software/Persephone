@@ -71,6 +71,7 @@
 * [0062 - Set the microphone gain and the automatic level in calls](0062-set-the-microphone-gain-and-automatic-level-in-calls.md)
 * [0063 - Explain a refused call join, let moderators allow it, and leave a call after 30 seconds alone](0063-explain-a-refused-call-join-and-leave-a-call-after-30-seconds-alone.md)
 * [0065 - Choose the large video and change devices in the call window](0065-choose-the-large-video-and-change-devices-in-the-call-window.md)
+* [0066 - Show call statistics on request](0066-show-call-statistics-on-request.md)
 
 ## Superseded Records
 

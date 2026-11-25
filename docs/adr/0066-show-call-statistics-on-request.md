@@ -1,0 +1,181 @@
+# Show call statistics on request
+
+* Status: proposed
+* Deciders: project owner
+* Date: 2026-11-25
+
+Technical Story: on 25 November 2026 the owner asked for a "Technical
+details" button in the call window. It shows the numbers behind a call: for
+the own microphone, camera and screen share, for each other participant, and
+for the connection to each call server. The owner wants to see why a call is
+silent, choppy or slow.
+
+## Context and Problem Statement
+
+The call worker runs the call inside its containment (ADR-0043). Only the
+worker can read WebRTC's statistics, and the web view has no connection to
+the call at all. ADR-0059 already reads the sound levels of each track from
+`get_stats` every 100 ms for the meters. The new details need many more
+numbers from more tracks. How does Persephone show them without a new way for
+the worker's or the SFU's data to reach the page, and without any cost while
+nobody looks?
+
+Facts from the source on 25 November 2026:
+
+* LiveKit 0.11.0 gives `get_stats` for each local and remote track, as typed
+  values (`RtcStats`). The report of a track includes its transport and the
+  selected candidate pair. `Room::get_stats` also exists, but a `Room` is
+  not clonable into a task.
+* The statistics hold addresses, ports, candidate types, SSRCs and codec
+  names. The details need none of them.
+* Counters (bytes, packets) only grow. A rate is the change between two
+  readings. A counter falls when WebRTC restarts a stream.
+
+## Decision Drivers
+
+* No work, and no new message, while the panel is closed.
+* The worker sends numbers only, with bounds that the receiver checks
+  (ADR-0043). No free text, address or identifier beyond those that other
+  messages already carry.
+* Statistics never delay a control message or a picture, and never run in
+  the worker's event loop.
+* The call window gets one new command and nothing else (ADR-0060).
+
+## Considered Options
+
+* On request: the page turns the details on and off, and the worker reads
+  once a second only while they are on
+* Always on: the worker reads every second during every call and the core
+  keeps the newest reading
+* The page asks for each reading (a pull command)
+
+## Decision Outcome
+
+Chosen option: "On request", because it costs nothing while closed, and one
+switch is the smallest command surface. A pull command needs a second command
+for the answer, and a reading is old when the page asks for it.
+
+### Switch
+
+* The call window sends `call_stats { on }` with a channel. The core
+  command is `Call::CallStats { on }`. Turning the details on needs a running
+  or joining call (`unavailable` otherwise); turning them off always works.
+* The core turns them off when the call ends (in the same step that frees the
+  call slot, so a late "on" cannot reach the next call), when the UI
+  connection closes, and when the call window that asked reloads or closes.
+  The host keeps the channel only while they are on, and tells the core to
+  stop when it drops one.
+* The core sends `ToWorker::SetStats { on }` to the worker on each change.
+  The worker starts with them off. A full worker queue keeps the newest value
+  for a retry, like the diagnostic switch (ADR-0058).
+
+### Worker
+
+* `StatsProbe` (`session/stats_probe.rs`) reads while the switch is on, at
+  most once a second, one read at a time, on its own task with a deadline of
+  900 ms. It is the same design as `SoundProbe` (ADR-0055, ADR-0059): the
+  event loop only starts it and takes its report. It is aborted when the
+  call ends. A report of an older on-off series is dropped by its number.
+* A read asks for the statistics of the own microphone, camera and screen
+  tracks, and of one audio and one video track of each remote participant
+  (at most 32 participants, so at most 64 remote reads). The connection
+  numbers come from the transport and the selected candidate pair that those
+  reports already include. A connection with no track has no entry.
+* `mapping/stats.rs` is pure. `StatsBook` keeps the last counters and makes
+  each rate from the change since the reading before. A counter that fell, a
+  counter with no earlier value, and a zero or negative interval give no rate
+  (`null`), never a wrong one. A 32-bit counter that wrapped counts across
+  the wrap. Every number is clamped to its bound, and an entry whose identity
+  or connection the protocol would refuse is left out.
+* The reading goes to `Output::offer_stats`. It never waits, it replaces a
+  reading that has not gone out, and the writer writes it after the control
+  messages and the waiting picture of its round. So at most one reading
+  waits, and it delays no control message.
+
+### Message
+
+`FromWorker::Stats` (tag 23, protocol version 11) holds integers only:
+
+| Part | Content | Bound |
+| --- | --- | --- |
+| Own microphone | level, bitrate, packets sent, packets lost by the far end, jitter, round-trip time | level 0 to 100, bitrate 0 to 1,000,000 kbit/s, times 0 to 60,000 ms |
+| Own camera and screen share | frame rate, size, bitrate, quality limit (none, processor, bandwidth, other), packets lost by the far end | 0 to 120 fps, sides 0 to 16,384 |
+| Each remote participant | audio: level, bitrate, packets received and lost, jitter, concealed share. Video: frame rate, size, bitrate, frames dropped each second, packets lost | at most 32; each (connection, identity) once; concealed 0 to 100 |
+| Each connection | estimated upload bandwidth, total send rate, total receive rate, round-trip time | at most 4; numbers 0 to 3, each once |
+
+A value that is not known yet (a rate before the second reading, a
+round-trip time before the first report) is absent, not zero. The message is
+about 18 KiB at most and the protocol limit is 64 KiB. The reader checks every
+count before it allocates, refuses a repeated participant or connection, and
+the writer leaves out entries past the limits. There is no address, port,
+candidate type, SSRC, codec or other text.
+
+### Core and host
+
+* While the details are on, the core names each remote entry by the member
+  that the worker identity stands for (`View::level_member`: a current member
+  whose connection speaks for it), leaves out any other, and checks the
+  result against `CallStats::within_limits`. While they are off, a reading
+  is dropped.
+* The core keeps only the newest reading and sends it as `Event::CallStats`.
+  The UI host reads the event with the same limits and sends it only to the
+  channel of a window that turned the details on.
+* The capability `call` gains `allow-call-stats`, and nothing else. The
+  main window does not have it.
+
+### Page
+
+* A button "Technical details" (an icon button) in the call window controls
+  opens a panel. The panel turns the details on when it opens and off when
+  it closes, so closing, a closed window and an ended call all stop them.
+  Escape closes it.
+* The panel shows a table per source with units: kbit/s, fps, ms, %,
+  packets. Participants show as in the call window. All text is inert. The
+  page checks each reading against the contract again and drops a bad one.
+
+### Positive Consequences
+
+* No cost while the panel is closed: no read, no message, no timer work.
+* The numbers cannot carry anything but numbers, and the page never sees an
+  address.
+* Control messages and pictures are not delayed.
+
+### Negative Consequences
+
+* The reading takes up to a second to appear, and rates show as unknown
+  until the second reading.
+* An entry whose track has no statistics (a slow or failed read) is missing
+  for that second.
+* A connection that has no track shows no numbers, because the worker reads
+  transports through tracks.
+* The numbers are WebRTC's own and were not compared with another tool. They
+  were tested with synthetic readings only; no live call was measured for
+  this record.
+
+## Pros and Cons of the Options
+
+### On request
+
+* Good, because it costs nothing while closed.
+* Good, because one command and one event are all it adds.
+* Bad, because the first reading takes a second.
+
+### Always on
+
+* Good, because the first view is immediate.
+* Bad, because every call pays for reads that nobody looks at, on up to
+  70 tracks a second.
+
+### Pull command
+
+* Good, because the page paces itself.
+* Bad, because it needs a second command in the call window, and the worker
+  has to read for each request or keep the newest reading always.
+
+## Links
+
+* Refines [ADR-0060](0060-show-calls-in-a-separate-call-window.md): the call
+  window's capability gains `call_stats`.
+* Follows the probe design of [ADR-0055](0055-add-deafen-and-a-call-volume-to-calls.md)
+  and [ADR-0059](0059-test-call-devices-show-each-participants-level-and-switch-devices-during-a-call.md).
+* Follows the switch design of [ADR-0058](0058-write-a-diagnostic-log-only-when-the-user-turns-it-on.md).

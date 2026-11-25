@@ -8,6 +8,8 @@ This crate defines small Rust view types and exports their TypeScript representa
 - Inspect `frontend/src/bridge/index.ts`, core view production, and Tauri consumers for compatibility. Static TypeScript types do not validate untrusted runtime data.
 - Keep sample data synthetic, including hostile text that must remain inert when rendered.
 
+- Call statistics (ADR-0066): `CallStats` and its parts hold integers with bounds (`CALL_STATS_*`). `CallStats::within_limits` is the check that the core, the UI host and the page's `parseCallStats` all repeat; change them together.
+
 ## Checks
 
 - `cargo test --locked -p persephone-contracts`
