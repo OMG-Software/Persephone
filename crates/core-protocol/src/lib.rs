@@ -759,6 +759,15 @@ pub enum Call {
     CallVolume {
         percent: u8,
     },
+    /// Set the automatic microphone level and the manual microphone gain
+    /// (ADR-0062). `gain` is a whole percent, 0 to
+    /// [`MAX_CALL_MIC_GAIN_PERCENT`] in steps of [`CALL_MIC_GAIN_STEP_PERCENT`].
+    /// Both are saved for later calls and apply at once to a running call.
+    /// Replies `CallStatus`.
+    CallMicrophone {
+        auto_level: bool,
+        gain: u16,
+    },
     /// Turn the camera on or off during a call. Replies `CallStatus`, with the
     /// camera `starting` when turned on; the worker's answer arrives as
     /// [`Event::CallChanged`]. Refused when no call is connected.
@@ -1003,6 +1012,10 @@ pub const MAX_CALL_DEVICE_ID_BYTES: usize = 512;
 pub const CALL_VIDEO_TILES: u8 = 6;
 /// The highest call playout volume, in percent (ADR-0055).
 pub const MAX_CALL_VOLUME_PERCENT: u8 = 100;
+/// The highest microphone gain, in percent (ADR-0062).
+pub const MAX_CALL_MIC_GAIN_PERCENT: u16 = 400;
+/// The microphone gain moves in steps of this many percent (ADR-0062).
+pub const CALL_MIC_GAIN_STEP_PERCENT: u16 = 5;
 
 /// The tile of the remote screen share.
 pub const CALL_SCREEN_TILE: u8 = 5;
@@ -1487,7 +1500,9 @@ pub struct VideoPicture {
 /// and a JavaScript-safe `after` and `stream`; a camera ID in [`Call::SetCallDevices`]
 /// must be non-empty, at most [`MAX_CALL_DEVICE_ID_BYTES`] and free of
 /// control characters; [`Call::CallVolume`] is at most
-/// [`MAX_CALL_VOLUME_PERCENT`]. Any other call is not constrained here and
+/// [`MAX_CALL_VOLUME_PERCENT`]; [`Call::CallMicrophone`] has a gain of at most
+/// [`MAX_CALL_MIC_GAIN_PERCENT`] on a step of [`CALL_MIC_GAIN_STEP_PERCENT`].
+/// Any other call is not constrained here and
 /// gives `true`.
 pub fn call_video_within_limits(call: &Call) -> bool {
     match call {
@@ -1511,6 +1526,9 @@ pub fn call_video_within_limits(call: &Call) -> bool {
                 && !id.chars().any(char::is_control)
         }),
         Call::CallVolume { percent } => *percent <= MAX_CALL_VOLUME_PERCENT,
+        Call::CallMicrophone { gain, .. } => {
+            *gain <= MAX_CALL_MIC_GAIN_PERCENT && gain.is_multiple_of(CALL_MIC_GAIN_STEP_PERCENT)
+        }
         _ => true,
     }
 }
@@ -2356,6 +2374,13 @@ mod tests {
                 r#"{"id":1,"call":{"command":"call_volume","percent":35}}"#,
             ),
             (
+                Call::CallMicrophone {
+                    auto_level: false,
+                    gain: 250,
+                },
+                r#"{"id":1,"call":{"command":"call_microphone","auto_level":false,"gain":250}}"#,
+            ),
+            (
                 Call::CallStatus {},
                 r#"{"id":1,"call":{"command":"call_status"}}"#,
             ),
@@ -2829,6 +2854,15 @@ mod tests {
             br#"{"id":1,"call":{"command":"call_volume","percent":-1}}"#,
             br#"{"id":1,"call":{"command":"call_volume","percent":50.5}}"#,
             br#"{"id":1,"call":{"command":"call_volume","percent":"50"}}"#,
+            br#"{"id":1,"call":{"command":"call_microphone"}}"#,
+            br#"{"id":1,"call":{"command":"call_microphone","auto_level":true}}"#,
+            br#"{"id":1,"call":{"command":"call_microphone","gain":100}}"#,
+            br#"{"id":1,"call":{"command":"call_microphone","auto_level":1,"gain":100}}"#,
+            br#"{"id":1,"call":{"command":"call_microphone","auto_level":true,"gain":-5}}"#,
+            br#"{"id":1,"call":{"command":"call_microphone","auto_level":true,"gain":65536}}"#,
+            br#"{"id":1,"call":{"command":"call_microphone","auto_level":true,"gain":50.5}}"#,
+            br#"{"id":1,"call":{"command":"call_microphone","auto_level":true,"gain":"100"}}"#,
+            br#"{"id":1,"call":{"command":"call_microphone","auto_level":true,"gain":100,"x":1}}"#,
             br#"{"id":1,"call":{"command":"call_status","room_id":"!r:s"}}"#,
             br#"{"id":1,"call":{"command":"call_rings","room_id":"!r:s"}}"#,
             br#"{"id":1,"call":{"command":"call_decline_ring"}}"#,
@@ -3593,6 +3627,17 @@ mod tests {
         assert!(!call_video_within_limits(&Call::CallVolume {
             percent: 255
         }));
+        // The microphone gain is 0 to 400 percent in steps of 5.
+        let gain = |gain| Call::CallMicrophone {
+            auto_level: true,
+            gain,
+        };
+        for accepted in [0, 5, 100, 395, MAX_CALL_MIC_GAIN_PERCENT] {
+            assert!(call_video_within_limits(&gain(accepted)), "{accepted}");
+        }
+        for refused in [1, 99, 401, 405, 1000, u16::MAX] {
+            assert!(!call_video_within_limits(&gain(refused)), "{refused}");
+        }
     }
 
     /// GIVEN video replies of many sizes on camera tiles and the screen tile

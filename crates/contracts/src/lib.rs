@@ -49,6 +49,22 @@ fn safe_u64<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error>
 /// (ADR-0055).
 pub const CALL_VOLUME_MAX: u8 = 100;
 
+/// The highest call microphone gain, in percent (ADR-0062).
+pub const CALL_MIC_GAIN_MAX: u16 = 400;
+/// The microphone gain moves in steps of this many percent (ADR-0062).
+pub const CALL_MIC_GAIN_STEP: u16 = 5;
+
+fn call_mic_gain<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u16, D::Error> {
+    let value = u16::deserialize(deserializer)?;
+    if value <= CALL_MIC_GAIN_MAX && value.is_multiple_of(CALL_MIC_GAIN_STEP) {
+        Ok(value)
+    } else {
+        Err(D::Error::custom(
+            "call microphone gain over 400 percent or off the 5 percent step",
+        ))
+    }
+}
+
 fn call_volume<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u8, D::Error> {
     let value = u8::deserialize(deserializer)?;
     if value <= CALL_VOLUME_MAX {
@@ -2552,7 +2568,10 @@ pub struct CallDevice {
 /// that is not connected now. `unreadable` is true when the saved record
 /// could not be read; all choices are then null and the volume is 100.
 /// `volume` is the saved playout volume, 0 to [`CALL_VOLUME_MAX`]
-/// (ADR-0055).
+/// (ADR-0055). `auto_level` is the saved automatic microphone level (on when
+/// nothing is saved) and `mic_gain` the saved manual microphone gain in
+/// percent, 0 to [`CALL_MIC_GAIN_MAX`] in steps of [`CALL_MIC_GAIN_STEP`]
+/// (100 when nothing is saved; ADR-0062).
 #[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct CallDevices {
@@ -2566,6 +2585,9 @@ pub struct CallDevices {
     pub selected_camera: Option<String>,
     #[serde(deserialize_with = "call_volume")]
     pub volume: u8,
+    pub auto_level: bool,
+    #[serde(deserialize_with = "call_mic_gain")]
+    pub mic_gain: u16,
     pub unreadable: bool,
 }
 
@@ -3150,9 +3172,33 @@ mod personal_contract_tests {
         }
         let devices = |volume: &str| {
             format!(
-                r#"{{"supported":true,"recording":[],"playout":[],"cameras":[],"selectedRecording":null,"selectedPlayout":null,"selectedCamera":null,"volume":{volume},"unreadable":false}}"#
+                r#"{{"supported":true,"recording":[],"playout":[],"cameras":[],"selectedRecording":null,"selectedPlayout":null,"selectedCamera":null,"volume":{volume},"autoLevel":true,"micGain":100,"unreadable":false}}"#
             )
         };
+        // The microphone gain is 0 to 400 in steps of 5; the flag is required.
+        let gain = |gain: &str, level: &str| {
+            format!(
+                r#"{{"supported":true,"recording":[],"playout":[],"cameras":[],"selectedRecording":null,"selectedPlayout":null,"selectedCamera":null,"volume":100,"autoLevel":{level},"micGain":{gain},"unreadable":false}}"#
+            )
+        };
+        for accepted in ["0", "5", "250", "395", "400"] {
+            assert!(
+                serde_json::from_str::<CallDevices>(&gain(accepted, "false")).is_ok(),
+                "{accepted}"
+            );
+        }
+        for refused in ["401", "405", "7", "-5", "65536", "100.5", "null", "\"100\""] {
+            assert!(
+                serde_json::from_str::<CallDevices>(&gain(refused, "true")).is_err(),
+                "{refused}"
+            );
+        }
+        for level in ["null", "1", "\"on\""] {
+            assert!(
+                serde_json::from_str::<CallDevices>(&gain("100", level)).is_err(),
+                "{level}"
+            );
+        }
         assert!(serde_json::from_str::<CallDevices>(&devices("0")).is_ok());
         assert!(serde_json::from_str::<CallDevices>(&devices("100")).is_ok());
         for volume in ["101", "-1", "255", "50.5", "null", "\"50\""] {

@@ -178,6 +178,9 @@ impl CoreTransport for FakeCore {
             Call::CallVolume { percent } => Ok(
                 serde_json::json!({"phase": "active", "roomId": "!r:example.invalid", "muted": false, "deafened": false, "volume": percent, "participants": [{"userId": "@bob:example.invalid", "deviceId": "DEV", "speaking": false, "reachable": true, "keyed": true, "sharing": false}], "ended": null, "joinError": null, "camera": "off", "screen": "off", "video": []}),
             ),
+            Call::CallMicrophone { .. } => Ok(
+                serde_json::json!({"phase": "active", "roomId": "!r:example.invalid", "muted": false, "deafened": false, "volume": 100, "participants": [], "ended": null, "joinError": null, "camera": "off", "screen": "off", "video": []}),
+            ),
             Call::VerifyThisDevice {} => Ok(serde_json::json!({
                 "identity": "unverified", "recovery": "enabled", "operation": "idle", "error": null, "verification": null, "canSetUpRecovery": false, "canStartNewBackup": false, "profilePassphrase": false,
                 "verification": {"flowId": "f1", "phase": "waiting", "emoji": [], "otherDevice": null}
@@ -519,7 +522,9 @@ impl CoreTransport for FakeCore {
                 "selectedPlayout": null,
                 "selectedCamera": null,
                 "unreadable": false,
-                "volume": 100
+                "volume": 100,
+                "autoLevel": true,
+                "micGain": 100
             })),
             Call::SetCallDevices {
                 recording,
@@ -1006,6 +1011,7 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-call-mute",
             "allow-call-deafen",
             "allow-call-volume",
+            "allow-call-microphone",
             "allow-call-camera",
             "allow-call-screen",
             "allow-call-video-frame",
@@ -1138,6 +1144,10 @@ fn given_the_call_window_then_only_call_commands_are_allowed() {
         ("minimise_to_tray", serde_json::json!({})),
         ("exit_app", serde_json::json!({})),
         ("call_devices", serde_json::json!({})),
+        (
+            "call_microphone",
+            serde_json::json!({"autoLevel": true, "gain": 100}),
+        ),
         (
             "call_device_test",
             serde_json::json!({"test": "microphone", "device": null}),
@@ -1821,7 +1831,58 @@ fn given_call_commands_then_bounded_arguments_cross_and_replies_are_checked() {
         invoke("call_volume", serde_json::json!({"percent": 101})).unwrap_err(),
         "invalid_argument"
     );
-    assert_eq!(core.calls.load(Ordering::SeqCst), before);
+    // The microphone settings: a flag and a gain of 0 to 400 percent in
+    // steps of 5. A wrong type never reaches the core; a gain of the right
+    // type but off the range or the step is refused by the host (ADR-0062).
+    let before_microphone = core.calls.load(Ordering::SeqCst);
+    for gain in [0, 5, 100, 395, 400] {
+        assert_eq!(
+            invoke(
+                "call_microphone",
+                serde_json::json!({"autoLevel": false, "gain": gain})
+            )
+            .unwrap()["phase"],
+            "active",
+            "{gain}"
+        );
+    }
+    assert_eq!(
+        core.calls.load(Ordering::SeqCst),
+        before_microphone + 5,
+        "each valid change reached the core"
+    );
+    for args in [
+        serde_json::json!({"autoLevel": "yes", "gain": 100}),
+        serde_json::json!({"autoLevel": 1, "gain": 100}),
+        serde_json::json!({"autoLevel": true, "gain": "100"}),
+        serde_json::json!({"autoLevel": true, "gain": -5}),
+        serde_json::json!({"autoLevel": true, "gain": 65536}),
+        serde_json::json!({"autoLevel": true, "gain": 100.5}),
+        serde_json::json!({"autoLevel": true}),
+        serde_json::json!({"gain": 100}),
+        serde_json::json!({}),
+    ] {
+        assert!(invoke("call_microphone", args.clone()).is_err(), "{args}");
+    }
+    for gain in [1, 99, 401, 405, 1000, 65535] {
+        assert_eq!(
+            invoke(
+                "call_microphone",
+                serde_json::json!({"autoLevel": true, "gain": gain})
+            )
+            .unwrap_err(),
+            "invalid_argument",
+            "{gain}"
+        );
+    }
+    assert_eq!(
+        core.calls.load(Ordering::SeqCst),
+        before_microphone + 5,
+        "a refused change never reached the core"
+    );
+    // The five valid microphone changes above are the only calls since the
+    // start of this check.
+    assert_eq!(core.calls.load(Ordering::SeqCst), before + 5);
 }
 
 /// Sending relays the room and body only; oversized input never reaches the

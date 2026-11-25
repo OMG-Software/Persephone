@@ -25,7 +25,7 @@ use livekit::{
     },
     rtc_engine::EngineError,
     webrtc::{
-        native::yuv_helper,
+        native::{capture_processing, yuv_helper},
         peer_connection_factory::{IceServer, IceTransportsType, RtcConfiguration},
         stats::RtcStats,
         video_frame::{
@@ -52,8 +52,8 @@ use zeroize::Zeroizing;
 use crate::camera::{self, CapturedFrame, Format};
 use crate::containment;
 use crate::mapping::{
-    ConnectFault, LevelMeters, Levels, Playout, RoomChange, Slot, Slots, SoundPath,
-    SpeakingTracker, apply, bounded_device_list, choose_device, failure_for_connect,
+    ConnectFault, LevelMeters, Levels, Microphone, Playout, RoomChange, Slot, Slots, SoundPath,
+    SpeakingTracker, apply, bounded_device_list, choose_device, failure_for_connect, sound_level,
     system_default, valid_identity,
 };
 #[cfg(target_os = "linux")]
@@ -112,9 +112,16 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
         camera_device,
         camera_on,
         volume,
+        auto_level,
+        mic_gain,
     } = first
     else {
         return fail(output, FailureCode::Protocol).await;
+    };
+    // Checked again here, where the value is used (ADR-0062).
+    let microphone = match Microphone::new(auto_level, mic_gain) {
+        Ok(microphone) => microphone,
+        Err(code) => return fail(output, code).await,
     };
 
     let provider = KeyProvider::new(KeyProviderOptions {
@@ -166,6 +173,9 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
         Ok(audio) => audio,
         Err(code) => return fail(output, code).await,
     };
+    // The manual gain goes to the audio processing module before the first
+    // sound is captured (ADR-0062).
+    let gain_set = capture_processing::set_capture_gain_percent(microphone.gain_percent);
     // Read once, before the event loop: a change during the call reuses it.
     let media_defaults = MediaDefaults::read();
     let sound_devices = match select_devices(
@@ -175,8 +185,20 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
         listed(playout_device.as_deref(), paths[1]),
     ) {
         Ok(devices) => devices,
-        Err(code) => return fail(output, code).await,
+        Err(code) => {
+            note_audio(
+                crate::diagnostics::WARN,
+                format_args!("opening the devices failed: {code:?}"),
+            );
+            return fail(output, code).await;
+        }
     };
+    note_devices(
+        &audio,
+        &media_defaults,
+        &sound_devices,
+        (recording_device.is_some(), playout_device.is_some()),
+    );
     // Linux stage 2 (ADR-0049): after the sound server connection and before
     // anything goes to the SFU. A failure ends the call.
     if !containment::apply_stage2() && !cfg!(feature = "dev-uncontained") {
@@ -199,6 +221,11 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
             return fail(output, code).await;
         }
     };
+    // The automatic level is a property of the published track, so it is set
+    // now (ADR-0062). A new track has it on, so this only changes a choice
+    // of off.
+    let level_set = apply_auto_level(&publication, microphone);
+    note_microphone(microphone, gain_set, level_set);
     // The sender's frame cryptor exists once `publish_track` returns.
     let own_sids = vec![publication.sid()];
     use_own_key_index(room.e2ee_manager(), &own_sids, own_index);
@@ -266,6 +293,7 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
         connect_tx,
         others: Others::default(),
         playout: Playout::new(volume),
+        microphone,
         sound: SoundProbe::new(sound_tx),
     };
     // Tracks subscribed during the connect get the volume now; later ones
@@ -1032,6 +1060,9 @@ struct Call<'a> {
     /// The volume and deafen state of every remote audio track, on every
     /// connection (ADR-0055).
     playout: Playout,
+    /// The automatic level and the manual gain of the microphone
+    /// (ADR-0062).
+    microphone: Microphone,
     /// The level meters' measurement of the own and received sound
     /// (ADR-0055, ADR-0059).
     sound: SoundProbe,
@@ -1126,6 +1157,7 @@ async fn measure_levels(
     own: Option<LocalAudioTrack>,
     remote: Vec<(u8, String, RemoteAudioTrack)>,
     deadline: tokio::time::Instant,
+    playout: Playout,
 ) -> Levels {
     let mut levels = Levels {
         own: Some(0.0),
@@ -1145,6 +1177,10 @@ async fn measure_levels(
                 .fold(0.0_f64, f64::max)
         });
     }
+    let enabled: Vec<bool> = remote
+        .iter()
+        .map(|(_, _, track)| track.is_enabled())
+        .collect();
     let (sources, reads): (Vec<_>, Vec<_>) = remote
         .into_iter()
         .map(|(connection, identity, track)| {
@@ -1154,21 +1190,154 @@ async fn measure_levels(
             )
         })
         .unzip();
+    let mut inbound = Vec::new();
     for ((connection, identity), stats) in sources.into_iter().zip(read_all(deadline, reads).await)
     {
-        let loudest = stats.map(|stats| {
-            stats
-                .into_iter()
-                .flatten()
-                .filter_map(|stat| match stat {
-                    RtcStats::InboundRtp(inbound) => Some(inbound.inbound.audio_level),
-                    _ => None,
-                })
-                .fold(0.0_f64, f64::max)
+        let summary = stats.map(|stats| {
+            let mut summary = InboundAudio::default();
+            for stat in stats.into_iter().flatten() {
+                if let RtcStats::InboundRtp(stream) = stat {
+                    summary.add(&stream);
+                }
+            }
+            summary
         });
-        levels.remote.push((connection, identity, loudest));
+        levels
+            .remote
+            .push((connection, identity, summary.as_ref().map(|s| s.level)));
+        inbound.push((connection, summary));
+    }
+    if crate::diagnostics::global().is_on() && stats_note_due() {
+        // Blocking calls into libwebrtc's worker thread: not on the runtime.
+        let device = tokio::task::spawn_blocking(audio_device_state)
+            .await
+            .unwrap_or_else(|_| "device state unknown".to_owned());
+        note_inbound_audio(levels.own, &inbound, &enabled, playout, &device);
     }
     levels
+}
+
+/// How often the log gets a note about the audio that arrives (ADR-0062).
+const AUDIO_NOTE_EVERY: Duration = Duration::from_secs(5);
+/// The most tracks one such note names; the rest are counted.
+const AUDIO_NOTE_TRACKS: usize = 8;
+
+/// Whether the next audio statistics note is due; it takes the slot when it
+/// is. One note in [`AUDIO_NOTE_EVERY`], so a long call writes a handful of
+/// records a minute.
+fn stats_note_due() -> bool {
+    static LAST: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+    let now = std::time::Instant::now();
+    let mut last = LAST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if last.is_some_and(|at| now.duration_since(at) < AUDIO_NOTE_EVERY) {
+        return false;
+    }
+    *last = Some(now);
+    true
+}
+
+/// What the audio device module does now, for the log (ADR-0062): playout
+/// prepared and running, and capture running. A playout that never runs while
+/// remote tracks play is a speaker that did not start.
+fn audio_device_state() -> String {
+    capture_processing::capture_processing().map_or_else(
+        || "device state unknown".to_owned(),
+        |state| {
+            format!(
+                "device: playout prepared {}, running {}; capture running {}",
+                state.playout_initialized, state.playing, state.recording
+            )
+        },
+    )
+}
+
+/// What the inbound streams of one remote audio track report (ADR-0062).
+#[derive(Default)]
+struct InboundAudio {
+    /// The loudest `audioLevel`, 0.0 to 1.0.
+    level: f64,
+    /// RTP packets received. Packets with no decoded samples mean the audio
+    /// arrives and does not decode, for example under a wrong frame key.
+    packets: u64,
+    packets_lost: i64,
+    /// Samples the decoder gave to playout, and how many of them were made
+    /// up to cover a gap.
+    samples: u64,
+    concealed: u64,
+}
+
+impl InboundAudio {
+    fn add(&mut self, stream: &livekit::webrtc::stats::InboundRtpStats) {
+        self.level = self.level.max(stream.inbound.audio_level);
+        self.packets = self
+            .packets
+            .saturating_add(stream.received.packets_received);
+        self.packets_lost = self
+            .packets_lost
+            .saturating_add(stream.received.packets_lost);
+        self.samples = self
+            .samples
+            .saturating_add(stream.inbound.total_samples_received);
+        self.concealed = self
+            .concealed
+            .saturating_add(stream.inbound.concealed_samples);
+    }
+}
+
+/// Notes the own level, the playout state and each remote audio track's
+/// packets, samples and level (ADR-0062). Counts and levels only: no
+/// identity, no ID, no key. A live test reads from it whether the audio
+/// arrives (packets), decodes (samples), is played (level, enabled, volume)
+/// or is muted by the call (deafened).
+fn note_inbound_audio(
+    own: Option<f64>,
+    inbound: &[(u8, Option<InboundAudio>)],
+    enabled: &[bool],
+    playout: Playout,
+    device: &str,
+) {
+    let mut tracks = String::new();
+    for (index, (connection, summary)) in inbound.iter().take(AUDIO_NOTE_TRACKS).enumerate() {
+        let on = enabled.get(index).copied().unwrap_or(false);
+        let text = match summary {
+            Some(summary) => format!(
+                " [connection {connection}, {}, packets {}, lost {}, samples {}, concealed {}, level {}]",
+                if on { "enabled" } else { "disabled" },
+                summary.packets,
+                summary.packets_lost,
+                summary.samples,
+                summary.concealed,
+                sound_level(summary.level),
+            ),
+            None => format!(" [connection {connection}, statistics not read]"),
+        };
+        tracks.push_str(&text);
+    }
+    let more = inbound.len().saturating_sub(AUDIO_NOTE_TRACKS);
+    note_audio(
+        crate::diagnostics::INFO,
+        format_args!(
+            "audio: own level {}; playout {}, volume {}%; {device}; {} remote audio tracks{tracks}{}",
+            own.map_or_else(
+                || "unread".to_owned(),
+                |level| sound_level(level).to_string()
+            ),
+            if playout.enabled() {
+                "on"
+            } else {
+                "off (deafened)"
+            },
+            playout.volume,
+            inbound.len(),
+            if more > 0 {
+                format!(" and {more} more")
+            } else {
+                String::new()
+            },
+        ),
+    );
 }
 
 /// Runs every read at once, each bounded by `deadline` (`read_by`), and
@@ -2300,8 +2469,10 @@ impl Call<'_> {
         };
         let remote = self.remote_audio_by_participant();
         let deadline = tokio::time::Instant::now() + SOUND_READ_BUDGET;
-        self.sound
-            .start(measure_levels(own, remote, deadline), SOUND_MEASURE_TIMEOUT);
+        self.sound.start(
+            measure_levels(own, remote, deadline, self.playout),
+            SOUND_MEASURE_TIMEOUT,
+        );
     }
 
     /// Tells the core whether a remote participant's microphone is muted.
@@ -2321,6 +2492,17 @@ impl Call<'_> {
                 muted,
             })
             .await
+    }
+
+    /// Applies the microphone settings to the audio processing module and
+    /// the published track: the gain, then the automatic level (ADR-0062).
+    /// Both are set again after anything that may have reconfigured the
+    /// module (a device change). A refusal is noted, never fatal: the call
+    /// goes on with the settings it had.
+    fn apply_microphone(&self) {
+        let gain_set = capture_processing::set_capture_gain_percent(self.microphone.gain_percent);
+        let level_set = apply_auto_level(self.publication, self.microphone);
+        note_microphone(self.microphone, gain_set, level_set);
     }
 
     /// Gives every subscribed remote audio track the call's playout.
@@ -2539,6 +2721,14 @@ impl Call<'_> {
                 self.apply_playout();
                 Ok(Vec::new())
             }
+            ToWorker::SetMicrophone {
+                auto_level,
+                mic_gain,
+            } => {
+                self.microphone = Microphone::new(auto_level, mic_gain)?;
+                self.apply_microphone();
+                Ok(Vec::new())
+            }
             ToWorker::SetDiagnostics { on } => {
                 crate::diagnostics::global().set_on(on);
                 Ok(Vec::new())
@@ -2615,6 +2805,9 @@ impl Call<'_> {
                     )
                     .err()
                 };
+                // A device change may reconfigure the capture path, so the
+                // microphone settings are applied again (ADR-0062).
+                self.apply_microphone();
                 Ok(vec![FromWorker::DevicesSet { failure }])
             }
             ToWorker::Join { .. }
@@ -3114,6 +3307,116 @@ async fn read_pictures(mut stream: NativeVideoStream, tile: u8, pictures: Pictur
             pictures.put(tile, rotation, width, height, rgba);
         }
     }
+}
+
+/// Turns the automatic level (automatic gain control) of the published
+/// microphone on or off while the track plays (ADR-0062). `true` when WebRTC
+/// applied or stored it.
+fn apply_auto_level(publication: &LocalTrackPublication, microphone: Microphone) -> bool {
+    match publication.track() {
+        Some(LocalTrack::Audio(track)) => track
+            .rtc_track()
+            .set_auto_gain_control(microphone.auto_level),
+        _ => false,
+    }
+}
+
+/// One diagnostic note about the audio, while the log is on (ADR-0058). It
+/// holds counts, flags and levels only: never a device ID or name, a key or
+/// a token.
+fn note_audio(level: u8, args: std::fmt::Arguments<'_>) {
+    let diagnostics = crate::diagnostics::global();
+    if !diagnostics.admit(crate::diagnostics::Source::Note) {
+        return;
+    }
+    diagnostics.push_admitted(
+        crate::diagnostics::Source::Note,
+        level,
+        "persephone::call_worker::audio",
+        &bounded_text(args),
+    );
+}
+
+/// How a device was chosen, for the log: by the user, by the system default
+/// (read and listed), or left to libwebrtc.
+fn device_choice(chosen: bool, selected: bool) -> &'static str {
+    match (chosen, selected) {
+        (true, _) => "chosen by the user",
+        (false, true) => "the system default, selected",
+        (false, false) => "left to libwebrtc",
+    }
+}
+
+/// Notes the devices a call opened (ADR-0062): how many libwebrtc lists and
+/// how each one was chosen. The sound goes to the speaker it names here, so
+/// this tells a live test whether the Windows default was read and selected.
+fn note_devices(
+    audio: &PlatformAudio,
+    defaults: &MediaDefaults,
+    devices: &SoundDevices,
+    chosen: (bool, bool),
+) {
+    if !crate::diagnostics::global().is_on() {
+        return;
+    }
+    note_audio(
+        crate::diagnostics::INFO,
+        format_args!(
+            "devices: {} microphones and {} speakers listed; microphone {} (default read: {}); \
+             speaker {} (default read: {})",
+            audio.recording_devices().count(),
+            audio.playout_devices().count(),
+            device_choice(chosen.0, devices.recording.is_some()),
+            defaults.recording.is_some(),
+            device_choice(chosen.1, devices.playout.is_some()),
+            defaults.playout.is_some(),
+        ),
+    );
+}
+
+/// Notes the microphone settings and what the audio processing module
+/// reports for them (ADR-0062): the gain it applies, and for echo
+/// cancellation, noise suppression and automatic gain control what was
+/// requested and what runs.
+fn note_microphone(microphone: Microphone, gain_set: bool, level_set: bool) {
+    if !crate::diagnostics::global().is_on() {
+        return;
+    }
+    let state = |component: capture_processing::Component| {
+        let text = |value: Option<bool>| match value {
+            Some(true) => "on",
+            Some(false) => "off",
+            None => "unknown",
+        };
+        format!(
+            "asked {}, running {}",
+            text(component.requested),
+            text(component.active)
+        )
+    };
+    let (gain, echo, noise, agc) = match capture_processing::capture_processing() {
+        Some(report) => (
+            report.gain_percent.to_string(),
+            state(report.echo_cancellation),
+            state(report.noise_suppression),
+            state(report.auto_gain_control),
+        ),
+        None => {
+            let unknown = "unknown".to_owned();
+            (unknown.clone(), unknown.clone(), unknown.clone(), unknown)
+        }
+    };
+    note_audio(
+        crate::diagnostics::INFO,
+        format_args!(
+            "microphone: gain {}% asked ({}), {gain}% applied; automatic level {} asked ({}); \
+             echo cancellation {echo}; noise suppression {noise}; automatic gain control {agc}",
+            microphone.gain_percent,
+            if gain_set { "set" } else { "refused" },
+            if microphone.auto_level { "on" } else { "off" },
+            if level_set { "set" } else { "refused" },
+        ),
+    );
 }
 
 pub(crate) fn start_audio() -> Result<PlatformAudio, FailureCode> {

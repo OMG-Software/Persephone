@@ -821,6 +821,8 @@ fn call_devices_use_camel_case_and_reject_unknown_fields() {
         selected_playout: None,
         selected_camera: Some("usb#cam".into()),
         volume: 40,
+        auto_level: false,
+        mic_gain: 250,
         unreadable: false,
     };
     let json = serde_json::to_value(&devices).unwrap();
@@ -835,6 +837,8 @@ fn call_devices_use_camel_case_and_reject_unknown_fields() {
             "selectedPlayout": null,
             "selectedCamera": "usb#cam",
             "volume": 40,
+            "autoLevel": false,
+            "micGain": 250,
             "unreadable": false
         })
     );
