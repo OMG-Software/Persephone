@@ -1302,7 +1302,18 @@ fn given_call_statistics_then_only_the_call_window_may_open_them_and_only_while_
         }),
         ..CallStats::default()
     };
-    let stats_on = |on: bool| serde_json::json!({"on": on, "onStats": "__CHANNEL__:9"});
+    let stats_on = |on: bool, page: u64| serde_json::json!({"on": on, "page": page, "onStats": "__CHANNEL__:9"});
+    let watch = serde_json::json!({"onChange": "__CHANNEL__:3", "onSoundLevel": "__CHANNEL__:4",
+                                   "onLevels": "__CHANNEL__:5"});
+    // A page's first request: it counts a new page and gives the page its
+    // count, which each statistics request carries.
+    let new_page = || {
+        invoke_on(&call, "watch_session", app_origin(), watch.clone())
+            .unwrap()
+            .as_u64()
+            .expect("watch_session gives the page count")
+    };
+    let switches = || core.stats_switches.lock().unwrap().clone();
     let sent = |level: u8| {
         let text = serde_json::to_string(&reading(level)).unwrap();
         delivered
@@ -1312,36 +1323,50 @@ fn given_call_statistics_then_only_the_call_window_may_open_them_and_only_while_
             .filter(|(channel, body)| *channel == 9 && *body == text)
             .count()
     };
+    // A stop of the host goes on a task of its own, so wait for it, but not
+    // forever: the mock runtime sends no page or window events, so nothing
+    // else would end the wait.
+    let wait_for = |count: usize| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while core.stats_switches.lock().unwrap().len() < count
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    };
+    // A start held at the core until `release` sends.
+    let hold_start = || {
+        let (arrived, at_core) = std::sync::mpsc::channel();
+        let (release, held) = std::sync::mpsc::channel();
+        *core.stats_gate.lock().unwrap() = Some((arrived, held));
+        (at_core, release)
+    };
 
     // The main window has no permission, so nothing reaches the core.
-    assert!(invoke_on(&main, "call_stats", app_origin(), stats_on(true)).is_err());
-    assert!(core.stats_switches.lock().unwrap().is_empty());
+    assert!(invoke_on(&main, "call_stats", app_origin(), stats_on(true, 0)).is_err());
+    assert!(switches().is_empty());
 
     // Not asked for: no channel, nothing is delivered.
     subscriptions.dispatch(Event::CallStats { stats: reading(1) });
     assert_eq!(sent(1), 0);
 
-    // A bad argument never reaches the core.
-    assert!(
-        invoke_on(
-            &call,
-            "call_stats",
-            app_origin(),
-            serde_json::json!({"on": "yes", "onStats": "__CHANNEL__:9"})
-        )
-        .is_err()
-    );
-    assert!(core.stats_switches.lock().unwrap().is_empty());
+    // A bad argument, or no page count, never reaches the core.
+    for bad in [
+        serde_json::json!({"on": "yes", "page": 0, "onStats": "__CHANNEL__:9"}),
+        serde_json::json!({"on": true, "onStats": "__CHANNEL__:9"}),
+        serde_json::json!({"on": true, "page": -1, "onStats": "__CHANNEL__:9"}),
+    ] {
+        assert!(invoke_on(&call, "call_stats", app_origin(), bad).is_err());
+    }
+    assert!(switches().is_empty());
+
+    let page = new_page();
 
     // A start that the core refuses keeps no channel.
     core.refuse_stats.store(true, Ordering::SeqCst);
-    assert!(invoke_on(&call, "call_stats", app_origin(), stats_on(true)).is_err());
+    assert!(invoke_on(&call, "call_stats", app_origin(), stats_on(true, page)).is_err());
     core.refuse_stats.store(false, Ordering::SeqCst);
-    assert_eq!(
-        *core.stats_switches.lock().unwrap(),
-        [true],
-        "the start was tried"
-    );
+    assert_eq!(switches(), [true], "the start was tried");
     subscriptions.dispatch(Event::CallStats { stats: reading(1) });
     assert_eq!(sent(1), 0);
     assert!(!subscriptions.forget_stats(CALL_WINDOW), "no channel kept");
@@ -1349,10 +1374,10 @@ fn given_call_statistics_then_only_the_call_window_may_open_them_and_only_while_
 
     // On: the core is told, and a reading in its limits is delivered.
     assert_eq!(
-        invoke_on(&call, "call_stats", app_origin(), stats_on(true)),
+        invoke_on(&call, "call_stats", app_origin(), stats_on(true, page)),
         Ok(serde_json::Value::Null)
     );
-    assert_eq!(*core.stats_switches.lock().unwrap(), [true]);
+    assert_eq!(switches(), [true]);
     subscriptions.dispatch(Event::CallStats { stats: reading(2) });
     assert_eq!(sent(2), 1);
 
@@ -1364,114 +1389,92 @@ fn given_call_statistics_then_only_the_call_window_may_open_them_and_only_while_
 
     // Off: the channel goes and the core is told.
     assert_eq!(
-        invoke_on(&call, "call_stats", app_origin(), stats_on(false)),
+        invoke_on(&call, "call_stats", app_origin(), stats_on(false, page)),
         Ok(serde_json::Value::Null)
     );
-    assert_eq!(*core.stats_switches.lock().unwrap(), [true, false]);
+    assert_eq!(switches(), [true, false]);
     subscriptions.dispatch(Event::CallStats { stats: reading(3) });
     assert_eq!(sent(3), 0);
 
     // A window that is reloaded or closed drops its channel and tells the
     // core to stop, through the handler its page load and its close use.
-    invoke_on(&call, "call_stats", app_origin(), stats_on(true)).unwrap();
-    assert_eq!(*core.stats_switches.lock().unwrap(), [true, false, true]);
+    invoke_on(&call, "call_stats", app_origin(), stats_on(true, page)).unwrap();
+    assert_eq!(switches(), [true, false, true]);
     let link: CoreLink = core.clone();
     reset_subscriptions(&link, &subscriptions, CALL_WINDOW);
-    // The stop goes on a task of its own, so wait for it, but not forever:
-    // the mock runtime sends no page or window events, so nothing else
-    // would end the wait.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while core.stats_switches.lock().unwrap().len() < 4 && std::time::Instant::now() < deadline {
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    assert_eq!(
-        *core.stats_switches.lock().unwrap(),
-        [true, false, true, false]
-    );
+    wait_for(4);
+    assert_eq!(switches(), [true, false, true, false]);
     // The channel went with it, so another reset has nothing to stop.
     assert!(!subscriptions.forget_stats(CALL_WINDOW), "once");
     subscriptions.dispatch(Event::CallStats { stats: reading(4) });
     assert_eq!(sent(4), 0);
 
-    // A reload while a start is on its way to the core: the start keeps no
-    // channel and turns the numbers off again, so nothing reads for a page
-    // that is gone.
-    let (arrived, at_core) = std::sync::mpsc::channel();
-    let (release, held) = std::sync::mpsc::channel();
-    *core.stats_gate.lock().unwrap() = Some((arrived, held));
-    let window = call.clone();
-    let start = std::thread::spawn(move || {
-        invoke_on(
-            &window,
-            "call_stats",
-            app_origin(),
-            serde_json::json!({"on": true, "onStats": "__CHANNEL__:9"}),
-        )
-    });
-    at_core
-        .recv_timeout(std::time::Duration::from_secs(10))
-        .expect("the start reached the core");
-    reset_subscriptions(&link, &subscriptions, CALL_WINDOW);
-    release.send(()).unwrap();
-    assert_eq!(start.join().unwrap(), Ok(serde_json::Value::Null));
+    // A request of a page that is gone carries its old count, so it fails
+    // and changes nothing, however late Tauri starts its task: after the
+    // reload or close, and after the new page's `watch_session`.
+    core.stats_switches.lock().unwrap().clear();
+    let old = page;
     assert_eq!(
-        *core.stats_switches.lock().unwrap(),
-        [true, false, true, false, true, false]
+        invoke_on(&call, "call_stats", app_origin(), stats_on(true, old)),
+        Err(serde_json::json!("invalid_argument"))
     );
+    let page = new_page();
+    assert!(invoke_on(&call, "call_stats", app_origin(), stats_on(true, old)).is_err());
+    assert!(switches().is_empty(), "a stale start reaches no core");
     subscriptions.dispatch(Event::CallStats { stats: reading(5) });
     assert_eq!(sent(5), 0);
-
-    // The new page starts them again, and that start stands.
-    invoke_on(&call, "call_stats", app_origin(), stats_on(true)).unwrap();
+    // The new page's own start stands, and a stale stop does not end it.
+    invoke_on(&call, "call_stats", app_origin(), stats_on(true, page)).unwrap();
+    assert!(invoke_on(&call, "call_stats", app_origin(), stats_on(false, old)).is_err());
+    assert_eq!(switches(), [true]);
     subscriptions.dispatch(Event::CallStats { stats: reading(6) });
     assert_eq!(sent(6), 1);
 
-    // A start of the old page whose task begins only after the reload's
-    // reset looks like the new page's. The new page's `watch_session`, its
-    // first request, counts the page again: a start still on its way undoes
-    // itself, and a channel one kept goes, and the core is told to stop.
-    let watch = serde_json::json!({"onChange": "__CHANNEL__:3", "onSoundLevel": "__CHANNEL__:4",
-                                   "onLevels": "__CHANNEL__:5"});
-    let wait_for = |count: usize| {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while core.stats_switches.lock().unwrap().len() < count
-            && std::time::Instant::now() < deadline
-        {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-    };
+    // A start already at the core when the window reloads, or when the new
+    // page's `watch_session` runs: it keeps no channel and turns the numbers
+    // off again, so nothing reads for a page that is gone.
     reset_subscriptions(&link, &subscriptions, CALL_WINDOW);
-    wait_for(8);
+    wait_for(2);
     core.stats_switches.lock().unwrap().clear();
-    let (arrived, at_core) = std::sync::mpsc::channel();
-    let (release, held) = std::sync::mpsc::channel();
-    *core.stats_gate.lock().unwrap() = Some((arrived, held));
-    let window = call.clone();
-    let late = std::thread::spawn(move || {
-        invoke_on(
-            &window,
-            "call_stats",
-            app_origin(),
-            serde_json::json!({"on": true, "onStats": "__CHANNEL__:9"}),
-        )
-    });
-    at_core
-        .recv_timeout(std::time::Duration::from_secs(10))
-        .expect("the late start reached the core");
-    invoke_on(&call, "watch_session", app_origin(), watch.clone()).unwrap();
-    release.send(()).unwrap();
-    assert_eq!(late.join().unwrap(), Ok(serde_json::Value::Null));
-    assert_eq!(*core.stats_switches.lock().unwrap(), [true, false]);
-    subscriptions.dispatch(Event::CallStats { stats: reading(7) });
-    assert_eq!(sent(7), 0);
-    // A late start that already kept its channel when the new page starts.
-    invoke_on(&call, "call_stats", app_origin(), stats_on(true)).unwrap();
-    invoke_on(&call, "watch_session", app_origin(), watch).unwrap();
-    wait_for(4);
-    assert_eq!(
-        *core.stats_switches.lock().unwrap(),
-        [true, false, true, false]
-    );
+    for reload_by_watch in [false, true] {
+        let page = new_page();
+        let (at_core, release) = hold_start();
+        let window = call.clone();
+        let start = std::thread::spawn(move || {
+            invoke_on(
+                &window,
+                "call_stats",
+                app_origin(),
+                serde_json::json!({"on": true, "page": page, "onStats": "__CHANNEL__:9"}),
+            )
+        });
+        at_core
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the start reached the core");
+        if reload_by_watch {
+            new_page();
+        } else {
+            reset_subscriptions(&link, &subscriptions, CALL_WINDOW);
+        }
+        release.send(()).unwrap();
+        assert_eq!(start.join().unwrap(), Ok(serde_json::Value::Null));
+        assert_eq!(
+            switches(),
+            [true, false],
+            "reload by watch: {reload_by_watch}"
+        );
+        subscriptions.dispatch(Event::CallStats { stats: reading(7) });
+        assert_eq!(sent(7), 0);
+        core.stats_switches.lock().unwrap().clear();
+    }
+
+    // A channel that a page kept goes when a new page starts, also when no
+    // load event came first, and the core is told to stop.
+    let page = new_page();
+    invoke_on(&call, "call_stats", app_origin(), stats_on(true, page)).unwrap();
+    new_page();
+    wait_for(2);
+    assert_eq!(switches(), [true, false]);
     subscriptions.dispatch(Event::CallStats { stats: reading(8) });
     assert_eq!(sent(8), 0);
 }

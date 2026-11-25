@@ -503,7 +503,18 @@ test('GIVEN the diagnostic log WHEN it is on THEN host calls are noted by name a
   assert.deepEqual(records, []);
 });
 
-test('GIVEN the technical details WHEN turned on and off THEN the host is asked with a channel, readings in the contract reach the page and any other is dropped', async () => {
+// The page as `watch_session` left it: `page` is the host's reply.
+async function watchAs(page) {
+  mockIPC((command) => {
+    if (command === 'diagnostics_status') return { on: false, full: false, failed: false, available: true, path: null };
+    return command === 'watch_session' ? page : null;
+  });
+  const nothing = () => {};
+  await bridge.watchSession(nothing, nothing, nothing, nothing, nothing, nothing, nothing, nothing);
+}
+
+test('GIVEN the technical details WHEN turned on and off THEN the host is asked with a channel and the page count, readings in the contract reach the page and any other is dropped', async () => {
+  await watchAs(4);
   const calls = [];
   mockIPC((command, args) => {
     calls.push({ command, args });
@@ -513,6 +524,7 @@ test('GIVEN the technical details WHEN turned on and off THEN the host is asked 
   await bridge.startCallStats((stats) => seen.push(stats));
   assert.equal(calls[0].command, 'call_stats');
   assert.equal(calls[0].args.on, true);
+  assert.equal(calls[0].args.page, 4);
   const reading = { microphone: null, camera: null, screen: null, participants: [], connections: [] };
   for (const value of [reading, { ...reading, extra: 1 }, null, 'x', { ...reading, connections: [{ connection: 9 }] }]) {
     calls[0].args.onStats.onmessage(value);
@@ -521,14 +533,30 @@ test('GIVEN the technical details WHEN turned on and off THEN the host is asked 
   await bridge.stopCallStats();
   assert.equal(calls[1].command, 'call_stats');
   assert.equal(calls[1].args.on, false);
+  assert.equal(calls[1].args.page, 4);
   // The host registers the command with exactly these arguments.
   assert.ok(registered.has('call_stats'));
-  assert.deepEqual(hostArguments.get('call_stats'), ['on', 'onStats']);
+  assert.deepEqual(hostArguments.get('call_stats'), ['on', 'onStats', 'page']);
   mockIPC(() => Promise.reject('unavailable'));
   await assert.rejects(bridge.startCallStats(() => {}), (reason) => reason === 'unavailable');
 });
 
+test('GIVEN no usable page count from the host WHEN the technical details are turned on THEN the start fails and asks nothing, and a stop asks nothing', async () => {
+  for (const reply of [null, -1, 1.5, '3', Number.MAX_SAFE_INTEGER + 2]) {
+    await watchAs(reply);
+    const asked = [];
+    mockIPC((command) => {
+      asked.push(command);
+      return null;
+    });
+    await assert.rejects(bridge.startCallStats(() => {}), (reason) => reason === 'core_unavailable');
+    await bridge.stopCallStats();
+    assert.deepEqual(asked, [], String(reply));
+  }
+});
+
 test('GIVEN a statistics start still at the host WHEN the panel closes and opens again THEN the host gets start, stop, start in that order', async () => {
+  await watchAs(5);
   const sent = [];
   let release;
   const first = new Promise((resolve) => (release = resolve));
@@ -549,6 +577,7 @@ test('GIVEN a statistics start still at the host WHEN the panel closes and opens
 });
 
 test('GIVEN a statistics start that fails WHEN a stop follows THEN the stop is still sent', async () => {
+  await watchAs(6);
   const sent = [];
   mockIPC((command, args) => {
     sent.push(args.on);

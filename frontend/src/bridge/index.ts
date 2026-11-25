@@ -344,7 +344,9 @@ export async function subscribeRoom(
  * ADR-0059): a whole number from 0 to 100; anything else is dropped.
  * `onLevels` gets the other devices' levels on a third channel: every device
  * that is not silent now; a bad list is dropped. `onDeviceTest` runs when a
- * device test changed (ask `callDeviceTestStatus`; it clears nothing).
+ * device test changed (ask `callDeviceTestStatus`; it clears nothing). The
+ * host also gives the page its count, which each statistics request carries
+ * (ADR-0066).
  */
 export async function watchSession(
   onSession: () => void,
@@ -391,7 +393,8 @@ export async function watchSession(
     const parsed = parseLevels(value);
     if (parsed !== null) onLevels(parsed);
   });
-  await invoke<null>('watch_session', { onChange: channel, onSoundLevel: soundLevel, onLevels: levels });
+  const page = await invoke<unknown>('watch_session', { onChange: channel, onSoundLevel: soundLevel, onLevels: levels });
+  statsPage = typeof page === 'number' && Number.isSafeInteger(page) && page >= 0 ? page : null;
   // The log may already be on (a reloaded page): follow it from now.
   await followDiagnostics();
 }
@@ -549,7 +552,9 @@ export function callCamera(on: boolean): Promise<CallStatus> {
 /**
  * Turns the call's technical details on (ADR-0066): the host asks the core
  * to read the numbers, and each reading reaches `onStats` about once a
- * second. Only the call window may call it. A reading that does not match the
+ * second. Only the call window may call it, after {@link watchSession}: the
+ * request carries the page's count, and with none it fails with
+ * `core_unavailable` and asks nothing. A reading that does not match the
  * contract is dropped whole. Turn them off with {@link stopCallStats}.
  */
 export async function startCallStats(onStats: (stats: CallStats) => void): Promise<void> {
@@ -557,13 +562,30 @@ export async function startCallStats(onStats: (stats: CallStats) => void): Promi
     const stats = parseCallStats(value);
     if (stats !== null) onStats(stats);
   });
-  await inStatsTurn(() => invoke<null>('call_stats', { on: true, onStats: channel }));
+  await inStatsTurn(() =>
+    statsPage === null
+      ? Promise.reject('core_unavailable')
+      : invoke<null>('call_stats', { on: true, page: statsPage, onStats: channel })
+  );
 }
 
-/** Turns the call's technical details off (ADR-0066). Safe to call when they are off. */
+/**
+ * Turns the call's technical details off (ADR-0066). Safe to call when they
+ * are off. With no count from {@link watchSession} nothing can have started,
+ * so it asks nothing.
+ */
 export async function stopCallStats(): Promise<void> {
-  await inStatsTurn(() => invoke<null>('call_stats', { on: false, onStats: new Channel<unknown>(() => {}) }));
+  await inStatsTurn(() =>
+    statsPage === null
+      ? Promise.resolve(null)
+      : invoke<null>('call_stats', { on: false, page: statsPage, onStats: new Channel<unknown>(() => {}) })
+  );
 }
+
+// The page's count from `watch_session` (ADR-0066). The host takes a
+// statistics request only with the count of the page its window shows now,
+// so a request that reaches it after a reload or close changes nothing.
+let statsPage: number | null = null;
 
 // The host keeps one statistics channel per window, and the last start or
 // stop it gets wins. So starts and stops go one at a time, in the order the

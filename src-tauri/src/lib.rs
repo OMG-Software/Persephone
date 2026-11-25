@@ -394,7 +394,9 @@ pub struct Subscriptions {
     /// one only while its page has the technical details open, so a reading
     /// goes only to a page that asked for it.
     stats: Mutex<HashMap<String, Channel<CallStats>>>,
-    /// How many pages each window has loaded, so a statistics start that a
+    /// How many pages each window has loaded (ADR-0066). A page gets its
+    /// count from `watch_session` and sends it with each statistics request,
+    /// so a request of a page that is gone changes nothing, and a start that a
     /// reload or close overtook keeps no channel.
     pages: Mutex<HashMap<String, u64>>,
     /// Lets one change of the core's statistics switch run at a time. Each
@@ -455,11 +457,13 @@ impl Subscriptions {
     }
 
     /// Counts a new page for the window `label` and drops its statistics
-    /// channel. True when it had one.
-    fn new_page(&self, label: &str) -> bool {
+    /// channel. Gives the new count, and whether a channel was dropped.
+    fn new_page(&self, label: &str) -> (u64, bool) {
         let mut pages = self.pages();
-        *pages.entry(label.to_owned()).or_default() += 1;
-        self.stats().remove(label).is_some()
+        let count = pages.entry(label.to_owned()).or_default();
+        *count += 1;
+        let page = *count;
+        (page, self.stats().remove(label).is_some())
     }
 
     /// Keeps `channel` for the window `label` only while it still shows the
@@ -640,11 +644,12 @@ async fn unsubscribe_room(
 
 /// Registers the page's session channel, its call sound level channel and
 /// its channel for the other devices' levels, replacing the earlier ones of
-/// the same window. A page calls it once, when it starts, before it can turn
-/// the call statistics on; so it also counts a new page for them, as
-/// `reset_subscriptions` does at the page load (ADR-0066). A start of the
-/// old page that the host began only after that reset sees the count change
-/// again and undoes itself, and a channel such a start kept is dropped.
+/// the same window. A page calls it once, when it starts. It counts a new
+/// page, as `reset_subscriptions` does at the page load, and gives the page
+/// that count (ADR-0066): the page sends it with each `call_stats`, so the
+/// host takes a statistics request only from the page the window shows now.
+/// Counting here too gives each page a count of its own, also when a load
+/// event is missed.
 #[tauri::command]
 fn watch_session<R: Runtime>(
     webview: Webview<R>,
@@ -653,40 +658,45 @@ fn watch_session<R: Runtime>(
     on_change: Channel<&'static str>,
     on_sound_level: Channel<u8>,
     on_levels: Channel<Vec<CallParticipantLevel>>,
-) {
+) -> u64 {
     let label = webview.label().to_owned();
-    new_stats_page(core.inner(), subscriptions.inner(), &label);
+    let page = new_stats_page(core.inner(), subscriptions.inner(), &label);
     subscriptions.session().insert(label.clone(), on_change);
     subscriptions
         .sound_level()
         .insert(label.clone(), on_sound_level);
     subscriptions.levels().insert(label, on_levels);
+    page
 }
 
 /// Turns the call's technical details on or off for the calling window
-/// (ADR-0066). Only the call window may call it. The channel is kept only
-/// after the core accepted the start, and only while the window shows the
-/// page that asked. The core reads the numbers only while they are on, and
-/// the host drops a reading outside its limits.
+/// (ADR-0066). Only the call window may call it, with the count its page got
+/// from `watch_session`. The channel is kept only after the core accepted
+/// the start, and only while the window shows that page. The core reads the
+/// numbers only while they are on, and the host drops a reading outside its
+/// limits.
 ///
+/// Tauri reads a command's arguments only in its task, which may start after
+/// the window reloaded or closed. So the page's count comes with the
+/// request: a request with any other count comes from a page the window no
+/// longer shows, and it fails and changes nothing, whenever its task starts.
 /// Each change of the core's switch takes `stats_order`, and so does the
-/// stop of `new_stats_page`. A start that a reload or close overtook keeps
-/// no channel and turns the switch off again. Tauri reads a command's
-/// arguments in its task, so the host cannot tell which page sent a start
-/// whose task begins after the reset; the new page's `watch_session` counts
-/// the page again before the new page can start them, so such a start is
-/// undone too.
+/// stop of `new_stats_page`. A start that a reload or close overtook while
+/// it was at the core keeps no channel and turns the switch off again.
 #[tauri::command]
 async fn call_stats<R: Runtime>(
     webview: Webview<R>,
     core: State<'_, CoreLink>,
     subscriptions: State<'_, Arc<Subscriptions>>,
     on: bool,
+    page: u64,
     on_stats: Channel<CallStats>,
 ) -> Result<(), String> {
     let label = webview.label().to_owned();
-    let page = subscriptions.page(&label);
     let _order = subscriptions.stats_order.lock().await;
+    if subscriptions.page(&label) != page {
+        return Err(INVALID_ARGUMENT.to_owned());
+    }
     if !on {
         subscriptions.forget_stats(&label);
         return relay(
@@ -2238,23 +2248,25 @@ pub fn reset_subscriptions(core: &CoreLink, subscriptions: &Arc<Subscriptions>, 
     }
 }
 
-/// Counts a new page for the window `label` (ADR-0066) and drops the
-/// statistics channel it had. A start of an older page still on its way
-/// sees the new count and undoes itself. When a channel was dropped, the
-/// core is told to stop, in turn with the starts: when a later page has
-/// started them again first, the switch is already as it should be.
-fn new_stats_page(core: &CoreLink, subscriptions: &Arc<Subscriptions>, label: &str) {
-    if !subscriptions.new_page(label) {
-        return;
+/// Counts a new page for the window `label` (ADR-0066), drops the
+/// statistics channel it had, and gives the new count. A request of an older
+/// page carries an older count and changes nothing; a start of one that is
+/// already at the core undoes itself. When a channel was dropped, the core
+/// is told to stop, in turn with the starts: when a later page has started
+/// them again first, the switch is already as it should be.
+fn new_stats_page(core: &CoreLink, subscriptions: &Arc<Subscriptions>, label: &str) -> u64 {
+    let (page, dropped) = subscriptions.new_page(label);
+    if dropped {
+        let core = core.clone();
+        let subscriptions = subscriptions.clone();
+        tauri::async_runtime::spawn(async move {
+            let _order = subscriptions.stats_order.lock().await;
+            if !subscriptions.wants_stats() {
+                let _ = relay::<()>(&core, Call::CallStats { on: false }).await;
+            }
+        });
     }
-    let core = core.clone();
-    let subscriptions = subscriptions.clone();
-    tauri::async_runtime::spawn(async move {
-        let _order = subscriptions.stats_order.lock().await;
-        if !subscriptions.wants_stats() {
-            let _ = relay::<()>(&core, Call::CallStats { on: false }).await;
-        }
-    });
+    page
 }
 
 /// True only for the bundled app's own origin. Tauri serves embedded assets

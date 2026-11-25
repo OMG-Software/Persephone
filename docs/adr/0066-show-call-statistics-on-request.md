@@ -57,7 +57,7 @@ for the answer, and a reading is old when the page asks for it.
 
 ### Switch
 
-* The call window sends `call_stats { on }` with a channel. The core
+* The call window sends `call_stats { on, page }` with a channel. The core
   command is `Call::CallStats { on }`. Turning the details on needs a running
   or joining call (`unavailable` otherwise); turning them off always works,
   also while the session is locked or busy, so a closed panel or window never
@@ -98,9 +98,13 @@ for the answer, and a reading is old when the page asks for it.
   the connection's transport). Each rate is the change since that sample,
   over the time between the two reads, so a slow read of another track
   never changes it, and a new track never compares with an old one. A
-  counter that fell, a counter with no earlier value, and a zero or
-  negative interval give no rate (`null`), never a wrong one. A 32-bit counter that wrapped counts across
-  the wrap. Every number is clamped to its bound, and an entry whose identity
+  counter with no earlier value, and a zero or negative interval, give no
+  rate (`null`), never a wrong one. A counter that fell was restarted and
+  gives no rate, with one exception: a 32-bit counter that fell by more than
+  half its range wrapped, and counts across the wrap (`counter_delta`). A
+  64-bit counter (bytes) never wraps. A restart of a 32-bit counter from
+  above half its range reads as a wrap; its rate is still clamped. Every
+  number is clamped to its bound, and an entry whose identity
   or connection the protocol would refuse is left out.
 * The reading goes to `Output::offer_stats`. It never waits, it replaces a
   reading that has not gone out, and the writer writes it after the control
@@ -140,10 +144,14 @@ candidate type, SSRC, codec or other text.
   lets one change of the core's switch run at a time, and each ends with the
   switch as the kept channels want. A start that a reload or close overtook
   keeps no channel and turns the switch off again; a late stop does not
-  undo the start of the page that came next. The host cannot tell which
-  page sent a start whose task begins after the reset, so the new page's
-  first request (`watch_session`) counts the page again before it can start
-  the details.
+  undo the start of the page that came next. Tauri reads a command's
+  arguments only in its task, which may start after the reload or close, so
+  the host cannot tell from the time which page sent it. So each window
+  counts its pages: the page load and `watch_session` (a page's first
+  request) each count a new page, and `watch_session` gives the page its
+  count. The page sends the count with each `call_stats`, and the host takes
+  a start or stop only with the count of the page the window shows now. A
+  request of a page that is gone fails and changes nothing.
 * The capability `call` gains `allow-call-stats`, and nothing else. The
   main window does not have it.
 
@@ -152,8 +160,10 @@ candidate type, SSRC, codec or other text.
 * A button "Technical details" (an icon button) in the call window controls
   opens a panel. The panel turns the details on when it opens and off when
   it closes, so closing, a closed window and an ended call all stop them.
-  Escape closes it. The bridge sends the starts and stops one at a time, in
-  the order asked: the host keeps one channel per window, so the late stop of
+  Escape closes it. The bridge keeps the page's count from `watch_session`
+  and sends it with each start and stop; with none, a start fails and a stop
+  asks nothing. It sends the starts and stops one at a time, in the order
+  asked: the host keeps one channel per window, so the late stop of
   a closed panel must never reach it after the start of the panel opened
   next. The button is a disclosure (`aria-expanded`, `aria-controls`), like
   the device button.
