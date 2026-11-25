@@ -56,9 +56,10 @@ commands.
 * On 25 November 2026 the owner asked to show the call's controls, video,
   volume, level meter and participants in the call window only. While the
   call window opens, the main window's call bar shows only the phone icon,
-  the room, the phase and the "Call window" button. When the call window
-  cannot open for the call, the call bar shows all of its controls and the
-  video tiles, so the call can still be muted or left. A later open that
+  the room, the phase, the "Call window" button and, after a declined ring
+  (ADR-0052), the "Declined" note, which the call window does not show.
+  When the call window cannot open for the call, the call bar shows all of
+  its controls and the video tiles, so the call can still be muted or left. A later open that
   works makes the bar short again. An ended call still shows its reason and
   "Dismiss".
 * The host keeps each window's session, sound level and level channels under

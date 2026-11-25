@@ -36,9 +36,10 @@
   // announced: each participant's mark is read in place only.
   //
   // The call window holds the call's controls (ADR-0060). While it can open,
-  // the bar shows only the room, the phase and a "Call window" button. When
-  // it could not open (`full`), the bar shows every control, so the call can
-  // still be muted or left here.
+  // the bar shows only the room, the phase, a "Call window" button and the
+  // "Declined" note, which the call window does not show. When it could not
+  // open (`full`), the bar shows every control, so the call can still be
+  // muted or left here.
   let {
     status,
     dismissed,
