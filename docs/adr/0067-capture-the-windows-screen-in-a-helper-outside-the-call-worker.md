@@ -66,7 +66,7 @@ trust and in code?
 
 ## Decision Outcome
 
-Chosen option: "a helper process outside the AppContainer", because it is
+Proposed option: "a helper process outside the AppContainer", because it is
 the only option that uses WGC and keeps capture code out of the core. This
 record is proposed. It needs the owner's approval before the project treats
 it as accepted.
@@ -100,7 +100,7 @@ it as accepted.
   a memory limit of 512 MiB, and UI limits (no clipboard, no system
   parameter or display setting change, no global atoms, no desktop switch,
   no log-off, no USER handles of other processes). The peak measured on
-  25 November 2026 was 85 MiB for one 2560x1440 monitor.
+  25 November 2026 was 87 MiB for one 2560x1440 monitor.
 * It gets the creation-time mitigations of the call worker that WGC and
   Direct3D allow: DEP, heap termination, bottom-up and high-entropy ASLR,
   strict handle checks, extension points disabled, font loading disabled,
