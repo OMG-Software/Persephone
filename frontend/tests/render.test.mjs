@@ -272,6 +272,11 @@ test('GIVEN a call window that opens WHEN the call bar renders THEN it shows the
   assert.match(changed, /class="call-device-note note"/);
   assert.match(changed, /rejoin/);
   assert.doesNotMatch(changed, controls);
+  assert.doesNotMatch(short, /call-window-open"[^>]*disabled/);
+  // While an open waits for the call page, the button says so and is off.
+  const { body: opening } = render(CallBar, { props: { ...props, status, opening: true } });
+  assert.match(opening, /class="secondary call-window-open"[^>]*disabled[^>]*>[\s\S]*?Opening the call window…/);
+  assert.match(opening, /class="secondary call-leave"/);
   // An ended call still says why, and can be dismissed.
   const { body: ended } = render(CallBar, { props: { ...props, status: { ...status, phase: 'ended', ended: 'internal' } } });
   assert.match(ended, /call-dismiss/);

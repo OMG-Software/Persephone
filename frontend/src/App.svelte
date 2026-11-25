@@ -784,6 +784,7 @@
   const callWindowOpener = new CallWindowOpener(
     () => openCallWindow(),
     (failed) => {
+      callWindowOpening = false;
       callWindowFailed = failed;
       // A window that cannot open leaves the call here; say so, so no
       // window is missed without a reason.
@@ -791,13 +792,18 @@
       else if (error === CALL_WINDOW_UNAVAILABLE_TEXT) error = null;
     }
   );
+  // An open waits for the call page, up to ten seconds; the button says so
+  // and takes no more clicks meanwhile.
+  let callWindowOpening = $state(false);
   function showCallWindow() {
+    callWindowOpening = true;
     callWindowOpener.open();
   }
   // Ends the call window state of a call that is over: no fallback, no
   // "could not open" message, and no reply from an open still waiting.
   function forgetCallWindow() {
     callWindowOpener.forget();
+    callWindowOpening = false;
     callWindowFailed = false;
     if (error === CALL_WINDOW_UNAVAILABLE_TEXT) error = null;
   }
@@ -3208,6 +3214,7 @@
           status={callState}
           dismissed={callDismissed}
           full={callWindowFailed}
+          opening={callWindowOpening}
           roomName={callRoomName}
           names={callNames}
           busy={callBusy}

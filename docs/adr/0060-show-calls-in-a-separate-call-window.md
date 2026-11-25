@@ -76,8 +76,9 @@ commands.
   `open_call_window` returns only when the page is ready. When the page
   does not say so within 10 seconds, the open fails with `unavailable`, and
   the main window shows the call's controls. At most four opens wait at
-  once; another one fails at once. "Leave" in the short bar covers the
-  wait, and a call page that stops working later.
+  once; another one fails at once. While an open waits, the "Call window"
+  button reads "Opening the call window…" and takes no clicks. "Leave" in
+  the short bar covers the wait, and a call page that stops working later.
 * The host keeps each window's session, sound level and level channels under
   the window's label. Room subscriptions belong to the main window only. A
   call window that closes or reloads drops only its own channels.
@@ -122,5 +123,7 @@ commands.
 * Names and the chosen theme are not shown in the call window.
 * The page code for the grid repeats some of `CallVideo.svelte`.
 * A call page that stops working after it said it is ready leaves the main
-  window with "Leave" only, not mute, until the call window is opened again
-  and fails its ready wait.
+  window with "Leave" only, not mute. The "Call window" button only shows the
+  same window, which still counts as ready, so it does not bring the full bar
+  back. That needs the call window closed and opened again, or its page
+  loaded again.

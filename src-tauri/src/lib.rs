@@ -1861,8 +1861,14 @@ async fn call_window_ready<R: Runtime>(
     webview: Webview<R>,
     ready: State<'_, Arc<CallWindowReady>>,
 ) -> Result<(), String> {
-    if webview.label() != CALL_WINDOW {
-        return Err(UNAVAILABLE.to_string());
+    take_ready(webview.label(), &ready)
+}
+
+/// Marks the call page ready when the call window said so. The capability
+/// already limits the command to that window; this checks again.
+fn take_ready(label: &str, ready: &CallWindowReady) -> Result<(), String> {
+    if label != CALL_WINDOW {
+        return Err(INVALID_ARGUMENT.to_string());
     }
     ready.set(true);
     Ok(())
@@ -2603,6 +2609,21 @@ mod tests {
         assert!(ready.wait());
         ready.set(false);
         assert!(!ready.wait());
+    }
+
+    /// GIVEN a ready signal WHEN it comes from a window other than the call
+    /// window THEN it is refused and the page stays unready; WHEN it comes
+    /// from the call window THEN the page is ready.
+    #[test]
+    fn given_a_ready_signal_then_only_the_call_window_counts() {
+        let ready = CallWindowReady::waiting_for(Duration::from_millis(20));
+        assert_eq!(
+            take_ready(MAIN_WINDOW, &ready),
+            Err(INVALID_ARGUMENT.to_string())
+        );
+        assert!(!ready.wait());
+        assert_eq!(take_ready(CALL_WINDOW, &ready), Ok(()));
+        assert!(ready.wait());
     }
 
     /// GIVEN `MAX_CALL_WINDOW_WAITS` opens that wait WHEN another starts

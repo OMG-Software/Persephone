@@ -46,6 +46,7 @@
     status,
     dismissed,
     full,
+    opening = false,
     roomName,
     names,
     busy,
@@ -66,6 +67,8 @@
     dismissed: boolean;
     // The call window could not open: show the controls here.
     full: boolean;
+    // An open waits for the call page: the button is off meanwhile.
+    opening?: boolean;
     roomName: string;
     // Display names from the call room's members, by user ID.
     names: ReadonlyMap<string, string>;
@@ -101,9 +104,9 @@
 </script>
 
 {#snippet callWindowButton()}
-  <button type="button" class="secondary call-window-open" onclick={onwindow}>
+  <button type="button" class="secondary call-window-open" disabled={opening} onclick={onwindow}>
     <Icon name="video" />
-    Call window
+    {opening ? 'Opening the call window…' : 'Call window'}
   </button>
 {/snippet}
 
