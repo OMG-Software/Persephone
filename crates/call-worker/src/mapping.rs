@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use persephone_call_protocol::{
     FailureCode, FromWorker, MAX_DEVICES, MAX_IDENTITY_BYTES, MAX_OTHER_CONNECTIONS,
     MAX_PARTICIPANTS, MAX_SOUND_LEVEL, MAX_VOLUME_PERCENT, MediaDevice, ToWorker, pulse_id,
-    pulse_name,
+    pulse_name, valid_mic_gain,
 };
 
 /// The most `Speaking` messages sent in any one second.
@@ -427,6 +427,32 @@ impl Playout {
     }
 }
 
+/// The microphone settings of a call (ADR-0062): the automatic level
+/// (automatic gain control) and the manual gain, a linear factor on the
+/// captured sound before any processing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Microphone {
+    pub auto_level: bool,
+    /// 0 to 400 percent in steps of 5, checked by [`Microphone::new`].
+    pub gain_percent: u16,
+}
+
+impl Microphone {
+    /// The settings, or `Protocol` for a gain over 400 percent or off the
+    /// 5 percent step. The protocol reader refuses such a value too; this is
+    /// the second check, where the value is used.
+    pub fn new(auto_level: bool, gain_percent: u16) -> Result<Self, FailureCode> {
+        if valid_mic_gain(gain_percent) {
+            Ok(Self {
+                auto_level,
+                gain_percent,
+            })
+        } else {
+            Err(FailureCode::Protocol)
+        }
+    }
+}
+
 /// The quietest sound the level meter shows, in dBFS (ADR-0055). Each of
 /// the [`MAX_SOUND_LEVEL`] steps above it is 0.6 dB.
 const SOUND_FLOOR_DB: f64 = -60.0;
@@ -625,6 +651,8 @@ mod tests {
             camera_device: None,
             camera_on: false,
             volume: 100,
+            auto_level: true,
+            mic_gain: 100,
         };
         assert!(is_first_message_allowed(&join));
     }
@@ -1205,6 +1233,27 @@ mod tests {
             failure_for_connect(Transport, "received fatal alert: ProtocolVersion"),
             FailureCode::Tls
         );
+    }
+
+    /// GIVEN microphone gains inside and outside 0 to 400 percent and off the
+    /// 5 percent step
+    /// WHEN the settings are made
+    /// THEN a valid gain is kept with the automatic level flag, and any other
+    /// gain is refused as a protocol fault.
+    #[test]
+    fn given_microphone_gain_when_made_then_only_valid_steps_pass() {
+        for gain in [0, 5, 100, 395, 400] {
+            assert_eq!(
+                Microphone::new(true, gain),
+                Ok(Microphone {
+                    auto_level: true,
+                    gain_percent: gain
+                })
+            );
+        }
+        for gain in [1, 99, 401, 405, 1000, u16::MAX] {
+            assert_eq!(Microphone::new(false, gain), Err(FailureCode::Protocol));
+        }
     }
 
     /// GIVEN a call's playout at 0, 50, 100 and an over-limit volume

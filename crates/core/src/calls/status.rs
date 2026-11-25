@@ -68,7 +68,11 @@ pub fn join_error(error: CallError) -> Option<CallJoinError> {
         CallError::NotPermitted => CallJoinError::NotPermitted,
         CallError::OpenId | CallError::Sfu(_) => CallJoinError::CallServer,
         CallError::Keys => CallJoinError::Keys,
-        CallError::NotInCall | CallError::Busy | CallError::Cancelled | CallError::SessionEnded => {
+        CallError::NotInCall
+        | CallError::Busy
+        | CallError::Cancelled
+        | CallError::SessionEnded
+        | CallError::InvalidValue => {
             return None;
         }
     })
@@ -459,6 +463,7 @@ mod tests {
             CallError::Busy,
             CallError::Cancelled,
             CallError::SessionEnded,
+            CallError::InvalidValue,
         ] {
             assert_eq!(join_error(error), None, "{error:?}");
         }

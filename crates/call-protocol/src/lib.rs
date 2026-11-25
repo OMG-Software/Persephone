@@ -12,7 +12,7 @@ use persephone_media_protocol::{
 };
 use zeroize::Zeroizing;
 
-pub const VERSION: u8 = 10;
+pub const VERSION: u8 = 11;
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 /// Longest diagnostic record target (ADR-0058).
 pub const MAX_DIAGNOSTIC_TARGET_BYTES: usize = 64;
@@ -119,6 +119,19 @@ pub fn picture_fits(tile: u8, width: u32, height: u32) -> bool {
 pub const MAX_VIDEO_ROTATION: u8 = 3;
 /// The highest playout volume, in percent: the sound as received (ADR-0055).
 pub const MAX_VOLUME_PERCENT: u8 = 100;
+/// The highest microphone gain, in percent: four times the captured sound
+/// (ADR-0062).
+pub const MAX_MIC_GAIN_PERCENT: u16 = 400;
+/// The microphone gain moves in steps of this many percent (ADR-0062).
+pub const MIC_GAIN_STEP_PERCENT: u16 = 5;
+/// The microphone gain when the user chose none: the sound as captured.
+pub const DEFAULT_MIC_GAIN_PERCENT: u16 = 100;
+
+/// Whether `percent` is a microphone gain: 0 to [`MAX_MIC_GAIN_PERCENT`] in
+/// whole steps of [`MIC_GAIN_STEP_PERCENT`] (ADR-0062).
+pub const fn valid_mic_gain(percent: u16) -> bool {
+    percent <= MAX_MIC_GAIN_PERCENT && percent.is_multiple_of(MIC_GAIN_STEP_PERCENT)
+}
 /// The highest received sound level (ADR-0055): 0 dBFS. 0 is -60 dBFS or
 /// quieter, and each step is 0.6 dB.
 pub const MAX_SOUND_LEVEL: u8 = 100;
@@ -259,6 +272,13 @@ pub enum ToWorker {
         /// The playout volume of every remote audio track, 0 to
         /// [`MAX_VOLUME_PERCENT`].
         volume: u8,
+        /// Whether the automatic microphone level (automatic gain control)
+        /// is on (ADR-0062).
+        auto_level: bool,
+        /// The manual microphone gain in percent, applied before any
+        /// processing: 0 to [`MAX_MIC_GAIN_PERCENT`] in steps of
+        /// [`MIC_GAIN_STEP_PERCENT`] (ADR-0062).
+        mic_gain: u16,
     },
     /// Only as the first message: report the devices, then exit.
     ListDevices,
@@ -316,6 +336,14 @@ pub enum ToWorker {
     /// subscribed later: 0 to [`MAX_VOLUME_PERCENT`]. No answer.
     SetVolume {
         percent: u8,
+    },
+    /// Set the automatic microphone level and the manual microphone gain of
+    /// the running call (ADR-0062). The gain applies at once. A gain over
+    /// the limit or off the step is refused with the whole message. No
+    /// answer.
+    SetMicrophone {
+        auto_level: bool,
+        mic_gain: u16,
     },
     /// Start or stop sending [`FromWorker::Diagnostic`] records (ADR-0058).
     /// Off when the worker starts. No answer.
@@ -380,6 +408,8 @@ impl std::fmt::Debug for ToWorker {
                 camera_device,
                 camera_on,
                 volume,
+                auto_level,
+                mic_gain,
             } => f
                 .debug_struct("Join")
                 .field("sfu_url", sfu_url)
@@ -393,6 +423,8 @@ impl std::fmt::Debug for ToWorker {
                 .field("camera_device", camera_device)
                 .field("camera_on", camera_on)
                 .field("volume", volume)
+                .field("auto_level", auto_level)
+                .field("mic_gain", mic_gain)
                 .finish(),
             Self::ListDevices => f.write_str("ListDevices"),
             Self::SetKey { identity, key } => f
@@ -426,6 +458,14 @@ impl std::fmt::Debug for ToWorker {
             Self::SetDeafened { deafened } => f
                 .debug_struct("SetDeafened")
                 .field("deafened", deafened)
+                .finish(),
+            Self::SetMicrophone {
+                auto_level,
+                mic_gain,
+            } => f
+                .debug_struct("SetMicrophone")
+                .field("auto_level", auto_level)
+                .field("mic_gain", mic_gain)
                 .finish(),
             Self::SetVolume { percent } => f
                 .debug_struct("SetVolume")
@@ -713,6 +753,7 @@ const TO_SET_VOLUME: u8 = 12;
 const TO_SET_DIAGNOSTICS: u8 = 13;
 const TO_TEST_DEVICE: u8 = 14;
 const TO_SET_DEVICES: u8 = 15;
+const TO_SET_MICROPHONE: u8 = 16;
 
 // Tags of worker to core messages.
 const FROM_READY: u8 = 1;
@@ -767,6 +808,21 @@ impl<'a> Reader<'a> {
     fn u32(&mut self) -> Result<u32, DecodeError> {
         let bytes = self.take(4)?;
         Ok(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    }
+
+    fn u16(&mut self) -> Result<u16, DecodeError> {
+        let bytes = self.take(2)?;
+        Ok(u16::from_be_bytes([bytes[0], bytes[1]]))
+    }
+
+    /// A microphone gain: see [`valid_mic_gain`].
+    fn mic_gain(&mut self) -> Result<u16, DecodeError> {
+        let percent = self.u16()?;
+        if valid_mic_gain(percent) {
+            Ok(percent)
+        } else {
+            Err(DecodeError::InvalidValue)
+        }
     }
 
     fn bool(&mut self) -> Result<bool, DecodeError> {
@@ -983,6 +1039,8 @@ impl ToWorker {
                 camera_device,
                 camera_on,
                 volume,
+                auto_level,
+                mic_gain,
             } => {
                 out.push(TO_JOIN);
                 put_str(&mut out, sfu_url);
@@ -1001,6 +1059,8 @@ impl ToWorker {
                 put_str(&mut out, camera_device.as_deref().unwrap_or(""));
                 out.push(u8::from(*camera_on));
                 out.push(*volume);
+                out.push(u8::from(*auto_level));
+                out.extend_from_slice(&mic_gain.to_be_bytes());
             }
             Self::ListDevices => out.push(TO_LIST_DEVICES),
             Self::SetKey { identity, key } => {
@@ -1060,6 +1120,14 @@ impl ToWorker {
             Self::SetVolume { percent } => {
                 out.push(TO_SET_VOLUME);
                 out.push(*percent);
+            }
+            Self::SetMicrophone {
+                auto_level,
+                mic_gain,
+            } => {
+                out.push(TO_SET_MICROPHONE);
+                out.push(u8::from(*auto_level));
+                out.extend_from_slice(&mic_gain.to_be_bytes());
             }
             Self::SetDiagnostics { on } => {
                 out.push(TO_SET_DIAGNOSTICS);
@@ -1121,6 +1189,8 @@ impl ToWorker {
                     camera_device: reader.device_choice()?,
                     camera_on: reader.bool()?,
                     volume: reader.volume()?,
+                    auto_level: reader.bool()?,
+                    mic_gain: reader.mic_gain()?,
                 }
             }
             TO_LIST_DEVICES => Self::ListDevices,
@@ -1188,6 +1258,10 @@ impl ToWorker {
             },
             TO_SET_VOLUME => Self::SetVolume {
                 percent: reader.volume()?,
+            },
+            TO_SET_MICROPHONE => Self::SetMicrophone {
+                auto_level: reader.bool()?,
+                mic_gain: reader.mic_gain()?,
             },
             TO_SET_DIAGNOSTICS => Self::SetDiagnostics { on: reader.bool()? },
             TO_TEST_DEVICE => Self::TestDevice {
@@ -1782,6 +1856,8 @@ mod tests {
             camera_device: Some("usb#vid_046d&pid_0825#cam".to_owned()),
             camera_on: true,
             volume: 65,
+            auto_level: false,
+            mic_gain: 250,
         }
     }
 
@@ -1805,6 +1881,8 @@ mod tests {
             camera_device: None,
             camera_on: false,
             volume: MAX_VOLUME_PERCENT,
+            auto_level: true,
+            mic_gain: DEFAULT_MIC_GAIN_PERCENT,
         }
         .encode()
         .to_vec()
@@ -2121,7 +2199,7 @@ mod tests {
             width: 0,
             height: 0,
         };
-        write_frame(&mut wire, header, &[11, 1]).unwrap();
+        write_frame(&mut wire, header, &[99, 1]).unwrap();
         let result: Result<FromWorker, _> =
             read_message(&mut Cursor::new(wire), &ResourceBudgets::default());
         assert_eq!(result, Err(ReadError::Decode(DecodeError::UnknownVersion)));
@@ -2260,7 +2338,7 @@ mod tests {
             Err(DecodeError::UnknownTag)
         );
         assert_eq!(
-            ToWorker::decode(&[VERSION, 16]),
+            ToWorker::decode(&[VERSION, 17]),
             Err(DecodeError::UnknownTag)
         );
         assert_eq!(
@@ -2435,6 +2513,8 @@ mod tests {
             camera_device: None,
             camera_on: false,
             volume: MAX_VOLUME_PERCENT,
+            auto_level: true,
+            mic_gain: DEFAULT_MIC_GAIN_PERCENT,
         }
     }
 
@@ -2880,7 +2960,7 @@ mod tests {
     /// 640x360 at 15 per second.
     #[test]
     fn given_tiles_when_limits_asked_then_screen_differs_from_camera() {
-        assert_eq!((VIDEO_TILES, SCREEN_TILE, VERSION), (6, 5, 10));
+        assert_eq!((VIDEO_TILES, SCREEN_TILE, VERSION), (6, 5, 11));
         assert_eq!(MAX_SCREEN_BYTES, 3_686_400);
         assert_eq!(MAX_SCREEN_PIXELS, 921_600);
         for tile in 0..SCREEN_TILE {
@@ -3088,6 +3168,8 @@ mod tests {
                 camera_device: Some(camera.to_owned()),
                 camera_on: true,
                 volume: 0,
+                auto_level: true,
+                mic_gain: DEFAULT_MIC_GAIN_PERCENT,
             }
             .encode()
         };
@@ -3255,8 +3337,8 @@ mod tests {
     /// THEN the version is refused.
     #[test]
     fn given_older_wire_versions_when_decoded_then_they_are_refused() {
-        assert_eq!(VERSION, 10);
-        for old in [6, 7, 8, 9] {
+        assert_eq!(VERSION, 11);
+        for old in [6, 7, 8, 9, 10] {
             assert_eq!(
                 ToWorker::decode(&[old, TO_LEAVE]),
                 Err(DecodeError::UnknownVersion)
@@ -3304,7 +3386,7 @@ mod tests {
         );
     }
 
-    /// GIVEN a Join whose last byte, the volume, is over 100 percent
+    /// GIVEN a Join whose volume byte is over 100 percent
     /// WHEN it is decoded
     /// THEN it is rejected; the encoded volume round-trips.
     #[test]
@@ -3314,8 +3396,69 @@ mod tests {
             panic!("join decodes");
         };
         assert_eq!(volume, 65);
-        *body.last_mut().expect("volume byte") = MAX_VOLUME_PERCENT + 1;
+        // The volume, the automatic level flag and the two gain bytes end it.
+        let at = body.len() - 4;
+        body[at] = MAX_VOLUME_PERCENT + 1;
         assert_eq!(ToWorker::decode(&body), Err(DecodeError::InvalidValue));
+    }
+
+    /// GIVEN a Join and a SetMicrophone with each gain and flag value
+    /// WHEN each is encoded and decoded
+    /// THEN the values round-trip; a gain over 400 percent, off the 5 percent
+    /// step, a bad flag or a short or long message is refused.
+    #[test]
+    fn given_microphone_settings_when_decoded_then_they_are_bounded() {
+        let invalid = Err(DecodeError::InvalidValue);
+        for gain in [0, 5, 100, 395, MAX_MIC_GAIN_PERCENT] {
+            let message = ToWorker::SetMicrophone {
+                auto_level: gain % 2 == 0,
+                mic_gain: gain,
+            };
+            assert_eq!(ToWorker::decode(&message.encode()), Ok(message));
+        }
+        let [high, low] = 250_u16.to_be_bytes();
+        assert_eq!(
+            ToWorker::decode(&[VERSION, TO_SET_MICROPHONE, 1, high, low]),
+            Ok(ToWorker::SetMicrophone {
+                auto_level: true,
+                mic_gain: 250
+            })
+        );
+        for gain in [401_u16, 405, 7, 101, 1000, u16::MAX] {
+            let [high, low] = gain.to_be_bytes();
+            assert_eq!(
+                ToWorker::decode(&[VERSION, TO_SET_MICROPHONE, 1, high, low]),
+                invalid,
+                "{gain}"
+            );
+        }
+        assert_eq!(
+            ToWorker::decode(&[VERSION, TO_SET_MICROPHONE, 2, 0, 100]),
+            invalid
+        );
+        assert_eq!(
+            ToWorker::decode(&[VERSION, TO_SET_MICROPHONE, 1, 0]),
+            Err(DecodeError::Truncated)
+        );
+        assert_eq!(
+            ToWorker::decode(&[VERSION, TO_SET_MICROPHONE, 1, 0, 100, 0]),
+            Err(DecodeError::TrailingBytes)
+        );
+        // A Join with a gain over the limit is refused as a whole.
+        let mut body = join().encode().to_vec();
+        let end = body.len();
+        body[end - 2..].copy_from_slice(&405_u16.to_be_bytes());
+        assert_eq!(ToWorker::decode(&body), invalid);
+        body[end - 2..].copy_from_slice(&MAX_MIC_GAIN_PERCENT.to_be_bytes());
+        assert!(matches!(
+            ToWorker::decode(&body),
+            Ok(ToWorker::Join {
+                mic_gain: MAX_MIC_GAIN_PERCENT,
+                ..
+            })
+        ));
+        assert!(valid_mic_gain(0) && valid_mic_gain(400));
+        assert!(!valid_mic_gain(2) && !valid_mic_gain(405));
     }
 
     /// GIVEN a sound level over the top, or without its byte

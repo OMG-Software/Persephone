@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include "api/audio/audio_processing.h"
 #include "api/environment/environment_factory.h"
 #include "api/peer_connection_interface.h"
 #include "api/scoped_refptr.h"
@@ -84,6 +85,23 @@ class PeerConnectionFactory {
   bool zero_playout_delay_enabled() const;
 
  private:
+  // PERSEPHONE PATCH (ADR-0062): the gain and the state read are safe only
+  // through the registry: a gain change holds the registry's mutex, so a
+  // factory that left it gets none, and a state read records the factory, so
+  // its destructor waits for the read. So only the two registry functions
+  // below may call these.
+  friend bool set_capture_gain_percent(uint16_t percent);
+  friend CaptureProcessing capture_processing_state();
+  // Sets the capture level adjustment (the microphone gain, applied before
+  // any processing) of this factory's audio processing module. Runs on the
+  // worker thread, as the voice engine does when it reads and writes the
+  // same configuration. False when the factory has no module to take it.
+  bool apply_capture_gain(uint16_t percent) const;
+  // What this factory does now: the gain of its audio processing module
+  // (`module` is false when it has none), what the voice engine reports for
+  // its processing, and what the audio device module does.
+  CaptureProcessing capture_processing() const;
+
   // Declaration order matters: rtc_runtime_ must be declared before
   // adm_proxy_/audio_device_ so it is destroyed last. Releasing the proxy
   // does a BlockingCall onto the runtime's worker thread, which must still
@@ -92,11 +110,29 @@ class PeerConnectionFactory {
   webrtc::scoped_refptr<AdmProxy> adm_proxy_;
   std::shared_ptr<AudioDeviceController> audio_device_;
   webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> peer_factory_;
+  // PERSEPHONE PATCH (ADR-0062): the audio processing module that
+  // peer_factory_'s voice engine uses. Built here, and handed to the engine
+  // through CustomAudioProcessing, so the gain can reach it. Ref counted: the
+  // engine holds its own reference.
+  webrtc::scoped_refptr<webrtc::AudioProcessing> audio_processing_;
   // Not owned: the media engine inside peer_factory_ owns it, so it lives as
   // long as peer_factory_ does.
   const VideoEncoderFactory* video_encoder_factory_ = nullptr;
   webrtc::Environment env_;
 };
+
+// PERSEPHONE PATCH (ADR-0062): sets the microphone gain, in percent, for
+// every live factory and for factories made later. False for a gain over
+// 400 percent, which changes nothing, and false when a live factory has no
+// audio processing module to take it (the gain is still kept for later
+// factories).
+bool set_capture_gain_percent(uint16_t percent);
+// PERSEPHONE PATCH (ADR-0062): the audio processing state of the oldest live
+// factory, or `found == false` only when there is none. A factory with no
+// audio processing module of its own is found, with `module == false`. In
+// the call worker that is LiveKit's one runtime factory, which every room
+// shares.
+CaptureProcessing capture_processing_state();
 
 std::shared_ptr<PeerConnectionFactory> create_peer_connection_factory();
 std::shared_ptr<PeerConnectionFactory>

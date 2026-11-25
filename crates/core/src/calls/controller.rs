@@ -50,7 +50,7 @@ use matrix_sdk::{
 };
 use persephone_call_protocol::{
     CameraState, FailureCode, FrameKeyMsg, FromWorker, MAX_VOLUME_PERCENT, ScreenState, ToWorker,
-    TurnServer, VIDEO_TILES,
+    TurnServer, VIDEO_TILES, valid_mic_gain,
 };
 use persephone_contracts::{
     CALL_PARTICIPANTS_MAX, CallCamera, CallDeviceChange, CallDeviceTestKind, CallDeviceTestState,
@@ -141,6 +141,8 @@ pub enum CallError {
     Cancelled,
     /// The session stopped admitting work during the join.
     SessionEnded,
+    /// A call setting outside its range (ADR-0062). Nothing changed.
+    InvalidValue,
 }
 
 /// Why a call ended.
@@ -1097,6 +1099,10 @@ struct Joining {
     /// (ADR-0059). The call task gets the same channel and sends the
     /// newest choice once the worker is connected.
     devices: watch::Sender<Option<DeviceChoice>>,
+    /// The microphone level and gain set while the call joins (ADR-0062).
+    /// `None` until one is set: the join sends the saved settings. The call
+    /// task gets the same channel, like `devices`.
+    microphone: watch::Sender<Option<MicSettings>>,
 }
 
 struct RunHandle {
@@ -1115,10 +1121,23 @@ struct RunHandle {
     /// The latest playout volume. A watch keeps only the newest value, so a
     /// fast slider never fills the command queue.
     volume: watch::Sender<u8>,
+    /// The latest microphone settings (ADR-0062) set since the join
+    /// started, kept like the volume. `None` until one is set.
+    microphone: watch::Sender<Option<MicSettings>>,
     /// The latest microphone and speaker choice made during the call
     /// (ADR-0059). `None` until one is made.
     devices: watch::Sender<Option<DeviceChoice>>,
     task: Option<JoinHandle<()>>,
+}
+
+/// The automatic microphone level and the manual microphone gain of a
+/// joining or running call (ADR-0062). The gain is a whole percent, 0 to 400 in steps of
+/// 5; `set_microphone` refuses any other value, so a value in a channel is
+/// always valid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MicSettings {
+    auto_level: bool,
+    gain: u16,
 }
 
 /// A microphone, speaker and camera choice; `None` is the system default.
@@ -1343,6 +1362,7 @@ struct JoinGuard {
     flags: Arc<Flags>,
     kill: Arc<Mutex<Option<Arc<dyn WorkerProcess>>>>,
     devices: watch::Sender<Option<DeviceChoice>>,
+    microphone: watch::Sender<Option<MicSettings>>,
     armed: bool,
 }
 
@@ -1556,12 +1576,14 @@ impl CallController {
         let flags = Arc::new(Flags::default());
         let kill = Arc::new(Mutex::new(None));
         let devices = watch::channel(None).0;
+        let microphone = watch::channel(None).0;
         *slot = Slot::Joining(Joining {
             id,
             room_id: room_id.to_owned(),
             flags: flags.clone(),
             kill: kill.clone(),
             devices: devices.clone(),
+            microphone: microphone.clone(),
         });
         drop(slot);
         // The call needs the devices: a device test ends.
@@ -1576,6 +1598,7 @@ impl CallController {
             flags,
             kill,
             devices,
+            microphone,
             armed: true,
         })
     }
@@ -1628,6 +1651,7 @@ impl CallController {
         let camera_wanted = call.camera_wanted.clone();
         let screen_control = call.screen_control.clone();
         let volume = call.volume.clone();
+        let microphone = call.microphone.clone();
         let devices = call.devices.clone();
         let mut call = Some(call);
         let halted = {
@@ -1655,6 +1679,7 @@ impl CallController {
                         camera_wanted,
                         screen_control,
                         volume,
+                        microphone,
                         devices,
                         task: Some(task),
                     });
@@ -1886,6 +1911,8 @@ impl CallController {
             camera_device: scope.devices.camera.clone(),
             camera_on: scope.video && !portal_camera,
             volume: scope.devices.volume(),
+            auto_level: scope.devices.auto_level(),
+            mic_gain: scope.devices.mic_gain(),
         };
         // Before the join, so the worker's connection records are kept
         // (ADR-0058). The call task sends the switch again when it starts.
@@ -1921,6 +1948,7 @@ impl CallController {
             camera_wanted: Arc::new(AtomicBool::new(scope.video)),
             audio: AudioWants::default(),
             volume: watch::channel(scope.devices.volume()).0,
+            microphone: guard.microphone.clone(),
             devices: guard.devices.clone(),
             levels: BTreeMap::new(),
             portal: None,
@@ -2007,6 +2035,30 @@ impl CallController {
                 Ok(())
             }
             _ => Err(CallError::NotInCall),
+        }
+    }
+
+    /// Sets the automatic microphone level and the manual microphone gain of
+    /// the running or joining call (ADR-0062). A gain over 400 percent or off
+    /// the 5 percent step is refused. Only the newest value is applied. The
+    /// caller saves it for later calls. The value is kept even before the
+    /// call task watches it, which then applies it when it starts, so a value
+    /// set during the join replaces the saved one that the join sent.
+    pub fn set_microphone(&self, auto_level: bool, gain: u16) -> Result<(), CallError> {
+        if !valid_mic_gain(gain) {
+            return Err(CallError::InvalidValue);
+        }
+        let settings = Some(MicSettings { auto_level, gain });
+        match &*self.inner.slot() {
+            Slot::Running(run) => {
+                run.microphone.send_replace(settings);
+                Ok(())
+            }
+            Slot::Joining(join) => {
+                join.microphone.send_replace(settings);
+                Ok(())
+            }
+            Slot::Idle => Err(CallError::NotInCall),
         }
     }
 
@@ -2488,6 +2540,10 @@ struct Call {
     audio: AudioWants,
     /// The playout volume. The controller sends; the task subscribes.
     volume: watch::Sender<u8>,
+    /// The microphone level and gain (ADR-0062) set since the join started;
+    /// `None` until one is set, as the Join carried the saved ones. The
+    /// controller sends; the task subscribes.
+    microphone: watch::Sender<Option<MicSettings>>,
     /// A device change during the call (ADR-0059). The controller sends;
     /// the task subscribes.
     devices: watch::Sender<Option<DeviceChoice>>,
@@ -3868,6 +3924,20 @@ impl Call {
         Ok(())
     }
 
+    /// The user changed the microphone level or gain: the worker applies it
+    /// to the audio processing at once and does not answer. The values were
+    /// checked when they were set; the check here keeps a bad one from ever
+    /// reaching the wire.
+    fn microphone_changed(&mut self, settings: MicSettings) -> Result<(), EndReason> {
+        if !valid_mic_gain(settings.gain) {
+            return Ok(());
+        }
+        self.send_worker(ToWorker::SetMicrophone {
+            auto_level: settings.auto_level,
+            mic_gain: settings.gain,
+        })
+    }
+
     /// Publishes the view. The check for an unread screen command and the
     /// page write are one step under the lock that `set_screen` holds while
     /// it shows a command and counts it. While the handle has a screen
@@ -3984,6 +4054,10 @@ impl Call {
         // there was none, the worker gets the Join's volume again.
         let mut volume = self.volume.subscribe();
         volume.mark_changed();
+        // The same for the microphone settings (ADR-0062), but with none set
+        // since the join started, the Join's settings stand.
+        let mut microphone = self.microphone.subscribe();
+        microphone.mark_changed();
         // A device choice made since the join started; the join used the
         // saved one. A choice made before this point is sent at once.
         let mut devices = self.devices.subscribe();
@@ -4029,6 +4103,12 @@ impl Call {
                 Ok(()) = volume.changed() => {
                     let percent = *volume.borrow_and_update();
                     self.volume_changed(inner, percent)?;
+                }
+                Ok(()) = microphone.changed() => {
+                    let settings = *microphone.borrow_and_update();
+                    if let Some(settings) = settings {
+                        self.microphone_changed(settings)?;
+                    }
                 }
                 Ok(()) = devices.changed() => {
                     let choice = devices.borrow_and_update().clone();
@@ -5317,6 +5397,107 @@ mod tests {
         assert_eq!(*watched.borrow(), 70, "only the newest value is kept");
     }
 
+    /// GIVEN a running call task WHEN the microphone level and gain change
+    /// THEN the worker gets them as one message, and a gain that is off the
+    /// range or the step never reaches the wire.
+    #[test]
+    fn given_a_running_call_when_the_microphone_changes_then_the_worker_gets_it() {
+        let fixture = test_call(
+            no_admission(),
+            Arc::new(Flags::default()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let (mut call, mut to_worker) = (fixture.call, fixture.to_worker);
+        let settings = |auto_level, gain| MicSettings { auto_level, gain };
+        call.microphone_changed(settings(false, 250)).unwrap();
+        assert_eq!(
+            to_worker.try_recv().unwrap(),
+            ToWorker::SetMicrophone {
+                auto_level: false,
+                mic_gain: 250
+            }
+        );
+        call.microphone_changed(settings(true, 0)).unwrap();
+        assert_eq!(
+            to_worker.try_recv().unwrap(),
+            ToWorker::SetMicrophone {
+                auto_level: true,
+                mic_gain: 0
+            }
+        );
+        for gain in [1, 99, 401, 405, u16::MAX] {
+            call.microphone_changed(settings(true, gain)).unwrap();
+            assert!(to_worker.try_recv().is_err(), "{gain} was sent");
+        }
+    }
+
+    /// GIVEN no call and a running call WHEN the microphone settings are set
+    /// THEN no call is `NotInCall`, a gain off the range or the step is
+    /// `InvalidValue` and changes nothing, and a running call keeps only the
+    /// newest valid value.
+    #[test]
+    fn given_the_microphone_settings_when_set_then_only_valid_ones_are_kept() {
+        let calls = controller(FakeHost::new(true, None));
+        assert_eq!(calls.set_microphone(true, 100), Err(CallError::NotInCall));
+        assert_eq!(
+            calls.set_microphone(true, 405),
+            Err(CallError::InvalidValue)
+        );
+        let (_store, _commands, _killed) = running_call(&calls, active_state());
+        assert_eq!(calls.set_microphone(false, 150), Ok(()));
+        assert_eq!(calls.set_microphone(true, 250), Ok(()));
+        for gain in [1, 401, 405, u16::MAX] {
+            assert_eq!(
+                calls.set_microphone(false, gain),
+                Err(CallError::InvalidValue),
+                "{gain}"
+            );
+        }
+        let Slot::Running(run) = &*calls.inner.slot() else {
+            panic!("running");
+        };
+        let watched = run.microphone.subscribe();
+        assert_eq!(
+            *watched.borrow(),
+            Some(MicSettings {
+                auto_level: true,
+                gain: 250
+            }),
+            "only the newest valid value is kept"
+        );
+    }
+
+    /// GIVEN a call that is still joining WHEN the microphone settings are
+    /// set THEN they wait on the join's channel and a call task that
+    /// subscribes later still gets the newest valid value; a refused gain
+    /// changes nothing.
+    #[test]
+    fn given_a_joining_call_when_the_microphone_changes_then_the_task_gets_it() {
+        let calls = controller(FakeHost::new(true, None));
+        let guard = calls.claim(room_id!("!r:example.org")).unwrap();
+        assert_eq!(
+            *guard.microphone.borrow(),
+            None,
+            "the join sends the saved one"
+        );
+        assert_eq!(calls.set_microphone(false, 150), Ok(()));
+        assert_eq!(
+            calls.set_microphone(true, 405),
+            Err(CallError::InvalidValue)
+        );
+        // The call task subscribes after the worker connects, as `run` does.
+        let mut task = guard.microphone.subscribe();
+        task.mark_changed();
+        assert!(task.has_changed().unwrap(), "an earlier value is sent");
+        assert_eq!(
+            *task.borrow_and_update(),
+            Some(MicSettings {
+                auto_level: false,
+                gain: 150
+            })
+        );
+    }
+
     /// GIVEN a call that is still joining WHEN the microphone and speaker
     /// change THEN the choice waits on the join's channel, and a task that
     /// subscribes later still sees it; WHEN no call runs THEN it is
@@ -5754,6 +5935,7 @@ mod tests {
             camera_wanted: Arc::new(AtomicBool::new(false)),
             screen_control: Arc::default(),
             volume: watch::channel(MAX_VOLUME_PERCENT).0,
+            microphone: watch::channel(None).0,
             devices: watch::channel(None).0,
             task: None,
         });
@@ -5930,6 +6112,7 @@ mod tests {
             camera_wanted: Arc::new(AtomicBool::new(false)),
             audio: AudioWants::default(),
             volume: watch::channel(MAX_VOLUME_PERCENT).0,
+            microphone: watch::channel(None).0,
             devices: watch::channel(None).0,
             levels: BTreeMap::new(),
             portal: None,
@@ -6851,6 +7034,7 @@ mod tests {
             camera_wanted: call.camera_wanted.clone(),
             screen_control: call.screen_control.clone(),
             volume: call.volume.clone(),
+            microphone: call.microphone.clone(),
             devices: call.devices.clone(),
             task: None,
         });
@@ -7084,6 +7268,7 @@ mod tests {
             camera_wanted: Arc::new(AtomicBool::new(false)),
             screen_control: Arc::default(),
             volume: watch::channel(MAX_VOLUME_PERCENT).0,
+            microphone: watch::channel(None).0,
             devices: watch::channel(None).0,
             task: None,
         });
