@@ -25,7 +25,7 @@ use windows_sys::Win32::Graphics::Gdi::{
     HDC, HMONITOR, MONITORINFO, MONITORINFOEXW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    IDNO, IDYES, MB_DEFBUTTON1, MB_ICONWARNING, MB_SETFOREGROUND, MB_TOPMOST, MB_YESNO,
+    IDNO, IDYES, MB_DEFBUTTON2, MB_ICONWARNING, MB_SETFOREGROUND, MB_TOPMOST, MB_YESNO,
     MB_YESNOCANCEL, MessageBoxW,
 };
 
@@ -142,7 +142,8 @@ fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(Some(0)).collect()
 }
 
-/// One message box. Yes (the first button) is the default.
+/// One message box. No (the second button) is the default, like the core's
+/// other questions, so an Enter press never shares a screen.
 fn ask(text: &str, several: bool) -> Answer {
     let text = wide(text);
     let caption = wide("Persephone: share your screen");
@@ -154,7 +155,7 @@ fn ask(text: &str, several: bool) -> Answer {
             null_mut(),
             text.as_ptr(),
             caption.as_ptr(),
-            kind | MB_DEFBUTTON1 | MB_ICONWARNING | MB_SETFOREGROUND | MB_TOPMOST,
+            kind | MB_DEFBUTTON2 | MB_ICONWARNING | MB_SETFOREGROUND | MB_TOPMOST,
         )
     };
     match answer {
