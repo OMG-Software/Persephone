@@ -23,6 +23,7 @@ import type {
   CallReadiness,
   CallRing,
   CallRings,
+  CallStats,
   CallStatus,
   CallUnavailable,
   CallVideoTile,
@@ -99,6 +100,7 @@ import type {
   JoinedRoom
 } from '../../../crates/contracts/generated/contracts';
 import { parseLevels, parseSoundLevel } from '../calls.ts';
+import { parseCallStats } from '../callStats.ts';
 import { MAX_PASTED_IMAGE_BYTES, parseBand, type Band } from '../image.ts';
 import { parseVideoPicture, type VideoPicture } from '../video.ts';
 
@@ -542,6 +544,25 @@ export function callJoin(roomId: string, video: boolean): Promise<CallStatus> {
  */
 export function callCamera(on: boolean): Promise<CallStatus> {
   return invoke<CallStatus>('call_camera', { on });
+}
+
+/**
+ * Turns the call's technical details on (ADR-0066): the host asks the core
+ * to read the numbers, and each reading reaches `onStats` about once a
+ * second. Only the call window may call it. A reading that does not match the
+ * contract is dropped whole. Turn them off with {@link stopCallStats}.
+ */
+export async function startCallStats(onStats: (stats: CallStats) => void): Promise<void> {
+  const channel = new Channel<unknown>((value) => {
+    const stats = parseCallStats(value);
+    if (stats !== null) onStats(stats);
+  });
+  await invoke<null>('call_stats', { on: true, onStats: channel });
+}
+
+/** Turns the call's technical details off (ADR-0066). Safe to call when they are off. */
+export async function stopCallStats(): Promise<void> {
+  await invoke<null>('call_stats', { on: false, onStats: new Channel<unknown>(() => {}) });
 }
 
 /**

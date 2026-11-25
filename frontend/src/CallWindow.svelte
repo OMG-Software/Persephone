@@ -53,6 +53,8 @@
   import { callGrid, ROSTER_LABEL, SelfClose, type CallCell } from './callWindow';
   import { AUTO_PICK, keepPick, largeKey, selectFeed, showAll, splitFeeds, type ViewPick } from './callView';
   import CallWindowDevices from './CallWindowDevices.svelte';
+  import CallStatsPanel from './CallStats.svelte';
+  import { STATS_LABEL } from './callStats';
   import Icon from './Icon.svelte';
   import PersonName from './PersonName.svelte';
   import { tileCanvas, tileLayout, type TileRef, type VideoPicture } from './video';
@@ -78,6 +80,9 @@
   let pick = $state.raw<ViewPick>(AUTO_PICK);
   let devicesOpen = $state(false);
   let devicesButton = $state<HTMLButtonElement | undefined>();
+  // The technical details panel (ADR-0066); it closes when the call ends.
+  let statsOpen = $state(false);
+  let statsButton = $state<HTMLButtonElement>();
   // Numbers the status reads, so an older answer never replaces a newer one.
   let request = 0;
   // The window closes itself after a call it saw ends, unless it is
@@ -87,6 +92,7 @@
   function take(next: CallStatus) {
     status = next;
     selfClose.status(inCall(next), next.phase === 'ended');
+    if (!inCall(next)) statsOpen = false;
     if (next.phase !== 'active') {
       ownLevel = 0;
       levels = new Map();
@@ -223,6 +229,18 @@
   function closeDevices() {
     devicesOpen = false;
     void tick().then(() => devicesButton?.focus());
+  }
+
+  // One panel at a time: the technical details lie over the window's side,
+  // so they would hide part of the device panel, and Escape closes either.
+  function openDevices() {
+    statsOpen = false;
+    devicesOpen = true;
+  }
+
+  function openStats() {
+    devicesOpen = false;
+    statsOpen = true;
   }
 
   function onKeydown(event: KeyboardEvent) {
@@ -441,9 +459,20 @@
         aria-controls="call-window-devices"
         aria-label={DEVICES_BUTTON_LABEL}
         title={DEVICES_BUTTON_LABEL}
-        onclick={() => (devicesOpen ? closeDevices() : (devicesOpen = true))}
+        onclick={() => (devicesOpen ? closeDevices() : openDevices())}
       >
         <Icon name="settings" />
+      </button>
+      <button
+        type="button"
+        class="secondary call-stats-button"
+        aria-pressed={statsOpen}
+        aria-label={STATS_LABEL}
+        title={STATS_LABEL}
+        bind:this={statsButton}
+        onclick={() => (statsOpen ? (statsOpen = false) : openStats())}
+      >
+        <Icon name="activity" />
       </button>
       <button type="button" class="call-leave danger" disabled={busy} onclick={() => command(callLeave, 'The call could not be left. Try again.')}>Leave</button>
     </footer>
@@ -459,5 +488,13 @@
   {/if}
   {#if failure}
     <p class="error call-window-note" role="alert">{failure}</p>
+  {/if}
+  {#if joined && statsOpen}
+    <CallStatsPanel
+      onclose={() => {
+        statsOpen = false;
+        void tick().then(() => statsButton?.focus());
+      }}
+    />
   {/if}
 </main>

@@ -503,6 +503,31 @@ test('GIVEN the diagnostic log WHEN it is on THEN host calls are noted by name a
   assert.deepEqual(records, []);
 });
 
+test('GIVEN the technical details WHEN turned on and off THEN the host is asked with a channel, readings in the contract reach the page and any other is dropped', async () => {
+  const calls = [];
+  mockIPC((command, args) => {
+    calls.push({ command, args });
+    return null;
+  });
+  const seen = [];
+  await bridge.startCallStats((stats) => seen.push(stats));
+  assert.equal(calls[0].command, 'call_stats');
+  assert.equal(calls[0].args.on, true);
+  const reading = { microphone: null, camera: null, screen: null, participants: [], connections: [] };
+  for (const value of [reading, { ...reading, extra: 1 }, null, 'x', { ...reading, connections: [{ connection: 9 }] }]) {
+    calls[0].args.onStats.onmessage(value);
+  }
+  assert.deepEqual(seen, [reading]);
+  await bridge.stopCallStats();
+  assert.equal(calls[1].command, 'call_stats');
+  assert.equal(calls[1].args.on, false);
+  // The host registers the command with exactly these arguments.
+  assert.ok(registered.has('call_stats'));
+  assert.deepEqual(hostArguments.get('call_stats'), ['on', 'onStats']);
+  mockIPC(() => Promise.reject('unavailable'));
+  await assert.rejects(bridge.startCallStats(() => {}), (reason) => reason === 'unavailable');
+});
+
 test('GIVEN the video frame call WHEN the host answers THEN an empty body is no picture, a whole picture is parsed and anything else is refused', async () => {
   const body = new Uint8Array(20 + 8);
   const prefix = new DataView(body.buffer);
