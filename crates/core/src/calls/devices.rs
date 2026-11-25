@@ -14,8 +14,8 @@ use super::worker::{CallHost, StartError, WorkerAudio};
 use crate::{store::Stores, views::project_name};
 use matrix_sdk_crypto::store::CryptoStore;
 use persephone_call_protocol::{
-    FromWorker, MAX_DEVICE_ID_BYTES, MAX_DEVICE_NAME_BYTES, MAX_DEVICES, MAX_VOLUME_PERCENT,
-    MediaDevice, ToWorker,
+    DEFAULT_MIC_GAIN_PERCENT, FromWorker, MAX_DEVICE_ID_BYTES, MAX_DEVICE_NAME_BYTES, MAX_DEVICES,
+    MAX_VOLUME_PERCENT, MediaDevice, ToWorker, valid_mic_gain,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,8 +24,9 @@ use std::time::{Duration, Instant};
 pub const DEVICES_KEY: &str = "persephone.call_devices.v1";
 /// The largest saved record: three IDs at the limit, each one escaped to
 /// at most two bytes a byte (`"` and `\`) plus its quotes, the field names
-/// and the volume. Every valid selection serializes under it.
-const MAX_RECORD_BYTES: usize = 3 * (2 * MAX_DEVICE_ID_BYTES + 2) + 80;
+/// the volume and the microphone settings. Every valid selection serializes
+/// under it.
+const MAX_RECORD_BYTES: usize = 3 * (2 * MAX_DEVICE_ID_BYTES + 2) + 160;
 /// How long the worker has to answer `ListDevices`.
 pub const LIST_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long the worker has to exit after the list.
@@ -47,6 +48,14 @@ pub struct Selection {
     /// The playout volume of remote call audio, 0 to 100 percent (ADR-0055).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub volume: Option<u8>,
+    /// The automatic microphone level (automatic gain control, ADR-0062).
+    /// `None` is on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_level: Option<bool>,
+    /// The manual microphone gain in percent, 0 to 400 in steps of 5
+    /// (ADR-0062). `None` is 100 percent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mic_gain: Option<u16>,
 }
 
 /// Whether `id` can be a device ID: not empty, bounded, no control character.
@@ -55,7 +64,7 @@ pub fn valid_id(id: &str) -> bool {
 }
 
 impl Selection {
-    /// Whether every set ID and the volume are valid.
+    /// Whether every set ID, the volume and the microphone gain are valid.
     pub fn is_valid(&self) -> bool {
         [&self.recording, &self.playout, &self.camera]
             .into_iter()
@@ -64,6 +73,21 @@ impl Selection {
             && self
                 .volume
                 .is_none_or(|volume| volume <= MAX_VOLUME_PERCENT)
+            && self.mic_gain.is_none_or(valid_mic_gain)
+    }
+
+    /// The automatic microphone level to use: the saved one, else on.
+    pub fn auto_level(&self) -> bool {
+        self.auto_level.unwrap_or(true)
+    }
+
+    /// The manual microphone gain to use: the saved one, else 100 percent.
+    /// A gain that is not valid reads as 100 percent; `is_valid` refuses the
+    /// record before this is used.
+    pub fn mic_gain(&self) -> u16 {
+        self.mic_gain
+            .filter(|gain| valid_mic_gain(*gain))
+            .unwrap_or(DEFAULT_MIC_GAIN_PERCENT)
     }
 
     /// The playout volume to use: the saved one, else 100 percent.
@@ -229,6 +253,7 @@ fn clean(devices: Vec<MediaDevice>) -> Vec<MediaDevice> {
 mod tests {
     use super::*;
     use crate::calls::worker::{CallWorkerLink, WorkerProcess};
+    use persephone_call_protocol::MAX_MIC_GAIN_PERCENT;
     use std::sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -326,7 +351,7 @@ mod tests {
                 recording: Some("a".into()),
                 playout: None,
                 camera: None,
-                volume: None,
+                ..Selection::default()
             })
         );
         assert_eq!(parse(b"{}"), Ok(Selection::default()));
@@ -377,6 +402,8 @@ mod tests {
                 playout: Some(id.clone()),
                 camera: Some(id),
                 volume: Some(MAX_VOLUME_PERCENT),
+                auto_level: Some(false),
+                mic_gain: Some(MAX_MIC_GAIN_PERCENT),
             };
             assert!(selection.is_valid());
             let bytes = serde_json::to_vec(&selection).unwrap();
@@ -417,6 +444,66 @@ mod tests {
         assert!(!String::from_utf8(none).unwrap().contains("volume"));
     }
 
+    /// GIVEN records with and without the microphone settings WHEN read THEN
+    /// a missing level is on and a missing gain is 100 percent, saved values
+    /// are kept, an older record still reads, and a gain over 400 percent,
+    /// off the 5 percent step or of the wrong type is refused.
+    #[test]
+    fn given_saved_microphone_settings_then_they_are_read_or_default() {
+        let old = parse(br#"{"recording":"a","playout":null,"volume":40}"#).unwrap();
+        assert_eq!(
+            (
+                old.auto_level,
+                old.mic_gain,
+                old.auto_level(),
+                old.mic_gain()
+            ),
+            (None, None, true, DEFAULT_MIC_GAIN_PERCENT)
+        );
+        let set = parse(br#"{"recording":null,"playout":null,"auto_level":false,"mic_gain":250}"#)
+            .unwrap();
+        assert_eq!((set.auto_level(), set.mic_gain()), (false, 250));
+        for gain in [0, 5, 395, MAX_MIC_GAIN_PERCENT] {
+            let selection = Selection {
+                mic_gain: Some(gain),
+                ..Selection::default()
+            };
+            assert!(selection.is_valid(), "{gain}");
+            assert_eq!(
+                parse(&serde_json::to_vec(&selection).unwrap()),
+                Ok(selection)
+            );
+        }
+        for bad in [
+            &br#"{"recording":null,"playout":null,"mic_gain":401}"#[..],
+            br#"{"recording":null,"playout":null,"mic_gain":405}"#,
+            br#"{"recording":null,"playout":null,"mic_gain":7}"#,
+            br#"{"recording":null,"playout":null,"mic_gain":-5}"#,
+            br#"{"recording":null,"playout":null,"mic_gain":65536}"#,
+            br#"{"recording":null,"playout":null,"mic_gain":100.5}"#,
+            br#"{"recording":null,"playout":null,"mic_gain":"100"}"#,
+            br#"{"recording":null,"playout":null,"auto_level":1}"#,
+            br#"{"recording":null,"playout":null,"auto_level":"on"}"#,
+        ] {
+            assert_eq!(
+                parse(bad),
+                Err(Unreadable),
+                "{:?}",
+                String::from_utf8_lossy(bad)
+            );
+        }
+        assert!(
+            !Selection {
+                mic_gain: Some(MAX_MIC_GAIN_PERCENT + 5),
+                ..Selection::default()
+            }
+            .is_valid()
+        );
+        // Nothing set is not written, so an older build still reads it.
+        let none = String::from_utf8(serde_json::to_vec(&Selection::default()).unwrap()).unwrap();
+        assert!(!none.contains("auto_level") && !none.contains("mic_gain"));
+    }
+
     /// GIVEN device IDs WHEN checked THEN empty, long and control IDs fail.
     #[test]
     fn given_device_ids_then_empty_long_and_control_ones_are_invalid() {
@@ -428,7 +515,7 @@ mod tests {
             recording: Some("ok".into()),
             playout: Some(String::new()),
             camera: None,
-            volume: None,
+            ..Selection::default()
         };
         assert!(!selection.is_valid());
         let selection = Selection {

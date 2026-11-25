@@ -51,7 +51,14 @@ import {
   shownSoundLevel,
   soundLevelText,
   volumeText,
-  volumeValue
+  volumeValue,
+  AUTO_LEVEL_HELP,
+  MIC_GAIN_DEFAULT,
+  MIC_GAIN_HELP,
+  MIC_GAIN_MAX,
+  MIC_GAIN_STEP,
+  micGainText,
+  micGainValue
 } from '../src/calls.ts';
 
 const status = (over) => ({ ...IDLE_CALL, ...over });
@@ -474,6 +481,32 @@ test('GIVEN slider values WHEN read as a volume THEN they are whole numbers from
   assert.equal(volumeText(35), '35%');
   assert.equal(IDLE_CALL.volume, 100);
   assert.equal(IDLE_CALL.deafened, false);
+});
+
+test('GIVEN slider values WHEN read as a microphone gain THEN they are whole percents from 0 to 400 in steps of 5, and a bad value is 100', () => {
+  assert.equal(MIC_GAIN_MAX, 400);
+  assert.equal(MIC_GAIN_STEP, 5);
+  assert.equal(MIC_GAIN_DEFAULT, 100);
+  assert.equal(micGainValue(0), 0);
+  assert.equal(micGainValue(100), 100);
+  assert.equal(micGainValue(102), 100);
+  assert.equal(micGainValue(103), 105);
+  assert.equal(micGainValue(400), 400);
+  assert.equal(micGainValue(401), 400);
+  assert.equal(micGainValue(1000), 400);
+  assert.equal(micGainValue(-5), 0);
+  assert.equal(micGainValue(Number.NaN), 100);
+  assert.equal(micGainValue(Number.POSITIVE_INFINITY), 100);
+  assert.equal(micGainText(250), '250%');
+  assert.equal(micGainText(Number.NaN), '100%');
+});
+
+test('GIVEN the microphone help texts WHEN read THEN they say the setting applies at once and that the device test does not use the settings', () => {
+  assert.match(AUTO_LEVEL_HELP, /at once/);
+  assert.match(MIC_GAIN_HELP, /at once/);
+  // The level meter with a changed gain was not measured (ADR-0062).
+  assert.doesNotMatch(MIC_GAIN_HELP, /meter/);
+  assert.match(MIC_GAIN_HELP, /microphone test below uses neither the gain nor the automatic level/);
 });
 
 test('GIVEN a send that waits WHEN values arrive meanwhile THEN only the newest goes next, and settled runs once at the end', async () => {

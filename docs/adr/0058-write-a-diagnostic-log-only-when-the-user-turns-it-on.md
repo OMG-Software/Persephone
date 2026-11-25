@@ -236,6 +236,20 @@ so.
   steady stream of pictures does not stop them. A record that the full
   queue refuses does not use the second's budget. The call protocol
   version is 8.
+* Amendment, 2026-11-25: the call worker also notes the audio, as `Note`
+  records of the target `persephone::call_worker::audio`, with counts, flags
+  and levels only: no device ID or name, no key and no token. At the join:
+  how many microphones and speakers libwebrtc lists, how each was chosen and
+  whether the system default was read. At each microphone setting
+  (ADR-0062): the gain and the automatic level asked, and what the audio
+  processing module reports for echo cancellation, noise suppression and
+  automatic gain control. Every 5 seconds: the own level, the playout state
+  and volume, the audio device module's state (playout prepared and running,
+  capture running), and for each remote audio track (at most 8) whether it is
+  enabled, the packets received and lost, the samples decoded and concealed
+  and the level. A call with no sound is then told apart by these counts:
+  packets that do not arrive, packets that arrive and do not decode, and
+  sound that plays at level 0.
 
 ### Positive Consequences
 

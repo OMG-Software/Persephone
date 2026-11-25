@@ -462,6 +462,36 @@ export function volumeText(percent: number): string {
   return `${volumeValue(percent)}%`;
 }
 
+/** The highest microphone gain: four times the captured sound (ADR-0062). */
+export const MIC_GAIN_MAX = 400;
+/** The gain moves in steps of this many percent. */
+export const MIC_GAIN_STEP = 5;
+/** The gain when none is saved: the sound as captured. */
+export const MIC_GAIN_DEFAULT = 100;
+export const AUTO_LEVEL_LABEL = 'Automatic microphone level';
+export const AUTO_LEVEL_HELP =
+  'Keeps your voice at an even level. It applies at once, also in a call that runs.';
+export const MIC_GAIN_LABEL = 'Microphone gain';
+export const MIC_GAIN_HELP =
+  'Makes your voice louder or quieter before the call cleans it up. It applies at once, also in a call that runs. With the automatic level on, the automatic level then evens out the result. The microphone test below uses neither the gain nor the automatic level.';
+export const MIC_SAVE_TEXT = 'The microphone settings could not be saved.';
+
+/**
+ * A slider value as a microphone gain: a whole percent from 0 to 400 in steps
+ * of 5. Anything that is not a finite number is 100 percent, so a bad value
+ * never silences or boosts the microphone.
+ */
+export function micGainValue(value: number): number {
+  if (!Number.isFinite(value)) return MIC_GAIN_DEFAULT;
+  const clamped = Math.min(MIC_GAIN_MAX, Math.max(0, value));
+  return Math.round(clamped / MIC_GAIN_STEP) * MIC_GAIN_STEP;
+}
+
+/** The text a microphone gain is read and shown as. */
+export function micGainText(percent: number): string {
+  return `${micGainValue(percent)}%`;
+}
+
 /**
  * The label of the own microphone's level meter (ADR-0055, ADR-0059): it
  * shows what the microphone picks up, so a silent meter means the call does

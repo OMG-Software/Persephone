@@ -230,6 +230,7 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
     [() => bridge.callDeafen(true), 'call_deafen', { deafened: true }],
     [() => bridge.callDeafen(false), 'call_deafen', { deafened: false }],
     [() => bridge.callVolume(35), 'call_volume', { percent: 35 }],
+    [() => bridge.callMicrophone(false, 250), 'call_microphone', { autoLevel: false, gain: 250 }],
     [() => bridge.callStatus(), 'call_status', {}],
     [() => bridge.callRings(), 'call_rings', {}],
     [() => bridge.callDeclineRing('!r:s'), 'call_decline_ring', { roomId: '!r:s' }],

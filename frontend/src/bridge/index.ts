@@ -616,6 +616,15 @@ export function callVolume(percent: number): Promise<CallStatus> {
 }
 
 /**
+ * Sets the automatic microphone level and the manual microphone gain, a whole
+ * number from 0 to 400 percent in steps of 5 (ADR-0062). Both apply at once
+ * to a running call and are saved for later calls.
+ */
+export function callMicrophone(autoLevel: boolean, gain: number): Promise<CallStatus> {
+  return invoke<CallStatus>('call_microphone', { autoLevel, gain });
+}
+
+/**
  * The call microphones and speakers now connected, and the saved choice
  * (ADR-0043). The core lists them through a contained worker, so it can take
  * a few seconds. Names are untrusted text: render them as plain text only.
