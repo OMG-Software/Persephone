@@ -1116,6 +1116,8 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-call-volume",
             "allow-call-camera",
             "allow-call-screen",
+            "allow-call-devices",
+            "allow-set-call-devices",
             "allow-close-call-window"
         ])
     );
@@ -1143,7 +1145,6 @@ fn given_the_call_window_then_only_call_commands_are_allowed() {
         ("open_call_window", serde_json::json!({})),
         ("minimise_to_tray", serde_json::json!({})),
         ("exit_app", serde_json::json!({})),
-        ("call_devices", serde_json::json!({})),
         (
             "call_microphone",
             serde_json::json!({"autoLevel": true, "gain": 100}),
@@ -1172,6 +1173,49 @@ fn given_the_call_window_then_only_call_commands_are_allowed() {
         )
         .is_err()
     );
+}
+
+/// GIVEN the call window WHEN it lists the call devices and changes them
+/// THEN both are relayed (ADR-0065); WHEN an ID is empty or too long THEN it
+/// is refused before the core, and the device test commands stay refused.
+#[test]
+fn given_the_call_window_then_it_lists_and_changes_call_devices() {
+    let core = FakeCore::new(true);
+    let app = app_with(core.clone());
+    let _main = create_main_window(&app).unwrap();
+    let window = create_call_window(&app).unwrap();
+    let invoke = |cmd: &str, args| invoke_on(&window, cmd, app_origin(), args);
+    assert_eq!(
+        invoke("call_devices", serde_json::json!({})).unwrap()["recording"][0]["id"],
+        "mic-1"
+    );
+    assert_eq!(
+        invoke(
+            "set_call_devices",
+            serde_json::json!({"recording": "mic-1", "playout": null, "camera": "cam-1"})
+        ),
+        Ok(serde_json::Value::Null)
+    );
+    let relayed = core.calls.load(Ordering::SeqCst);
+    for args in [
+        serde_json::json!({"recording": "", "playout": null}),
+        serde_json::json!({"playout": "s".repeat(513)}),
+        serde_json::json!({"camera": "cam
+1"}),
+    ] {
+        assert_eq!(
+            invoke("set_call_devices", args).unwrap_err(),
+            "invalid_argument"
+        );
+    }
+    assert_eq!(
+        core.calls.load(Ordering::SeqCst),
+        relayed,
+        "nothing relayed"
+    );
+    for cmd in ["call_device_test_stop", "call_device_test_status"] {
+        assert!(invoke(cmd, serde_json::json!({})).is_err(), "{cmd} refused");
+    }
 }
 
 /// GIVEN device test commands THEN bounded IDs cross, a bad one never
