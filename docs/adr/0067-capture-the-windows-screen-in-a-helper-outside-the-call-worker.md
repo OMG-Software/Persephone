@@ -35,7 +35,7 @@ GDI works, but it has these weaknesses:
   Windows documents that flag for the capture APIs. Nobody measured it for a
   GDI copy of the desktop.
 * The call worker has no Win32k lockdown, because its audio stack needs
-  Win32k ([ADR-0043](0043-run-calls-in-a-contained-worker.md)). So the
+  Win32k ([ADR-0043](0043-make-audio-calls-through-matrixrtc-in-a-contained-call-worker.md)). So the
   worker can copy any monitor with GDI at any time, with or without a
   share. The core only decides which monitor the worker is told about; it
   cannot stop the worker from copying another one.
@@ -90,7 +90,11 @@ it as accepted.
   changed or went away ends the share.
 * A picture is BGRA, at most 3840x2160 pixels and 7680 on a side (the
   limits that the worker had). The helper copies at most 5 pictures a
-  second and drops other frames before the copy.
+  second. Windows gives a frame only when the screen changed, so a frame
+  that comes too soon is not copied but kept, in place of an older kept
+  one, and copied when its time comes: the last change of a burst always
+  reaches the call. The worker does the same with the pictures it reads,
+  a little slower than its own limit, so its limiter never drops one.
 
 ### How the helper starts
 
@@ -174,9 +178,14 @@ it as accepted.
   2 seconds), so a helper that it started is stopped and joined too. Then
   they wait until no helper that an earlier stop left to its reaper is
   active (at most 5 seconds). A pick looks at the cancel again just before
-  it starts the helper.
-  A stop from the page drops the share's helper: the control pipe closes at
-  once, and a reaper thread does the wait, the terminate and the join. The
+  it starts the helper, and from that look until the helper counts as
+  active the launch counts as active too, so the end of the call also
+  waits for a launch that passed the look.
+  A stop from the page closes the helper's control pipe at once, before
+  the page shows "off", also when the worker's command queue is full and
+  the call task is busy; the exit that follows is not taken as the
+  helper's own end. The call task then drops the share's helper, and a
+  reaper thread does the wait, the terminate and the join. The
   next share starts its helper only after no earlier helper is active. A
   helper counts as active until its exit is seen. One that the terminate
   did not end keeps the next share from starting, and that share is
@@ -288,7 +297,7 @@ it as accepted.
 * Replaces, if accepted, the Windows capture parts of the amendment of
   25 November 2026 in [ADR-0053](0053-share-the-screen-in-calls-on-linux-and-windows.md)
 * Relies on [ADR-0004](0004-separate-the-key-holding-core-from-the-web-view-process.md),
-  [ADR-0043](0043-run-calls-in-a-contained-worker.md) and
+  [ADR-0043](0043-make-audio-calls-through-matrixrtc-in-a-contained-call-worker.md) and
   [ADR-0045](0045-exclude-the-main-window-from-screen-capture-by-default.md)
 * [Evidence](../evidence/screen-share-windows.md), including the helper
   measurement of 25 November 2026

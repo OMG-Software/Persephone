@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use windows::Foundation::TypedEventHandler;
 use windows::Graphics::Capture::{
-    Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession,
+    Direct3D11CaptureFrame, Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession,
 };
 use windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
 use windows::Graphics::DirectX::DirectXPixelFormat;
@@ -274,6 +274,34 @@ pub struct Capture {
     size: SizeInt32,
     closed: Arc<AtomicBool>,
     staging: Option<(ID3D11Texture2D, u32, u32)>,
+    /// The newest frame that `admit` refused ([`take_next`]). It holds one
+    /// of the pool's buffers until it is copied or a newer frame replaces
+    /// it.
+    held: Option<Direct3D11CaptureFrame>,
+}
+
+/// What to copy now: a frame that just came when `admit` lets it through,
+/// otherwise the kept one once `admit` does. A frame that `admit` refuses
+/// is kept in place of an older one: it is the newest picture of the
+/// screen, and the capture gives a frame only when the screen changed, so
+/// it must still go when its time comes.
+fn take_next<T>(
+    kept: &mut Option<T>,
+    arrived: Option<T>,
+    admit: &mut dyn FnMut() -> bool,
+) -> Option<T> {
+    match arrived {
+        Some(frame) if admit() => {
+            *kept = None;
+            Some(frame)
+        }
+        Some(frame) => {
+            *kept = Some(frame);
+            None
+        }
+        None if kept.is_some() && admit() => kept.take(),
+        None => None,
+    }
 }
 
 /// Starts capturing the monitor at `index` of [`monitors`]. When `expected`
@@ -368,6 +396,7 @@ pub fn open_monitor(monitor: &Monitor) -> Result<Capture, Stage> {
         size,
         closed,
         staging: None,
+        held: None,
     })
 }
 
@@ -377,8 +406,10 @@ impl Capture {
         self.closed.load(Ordering::Acquire)
     }
 
-    /// Takes the next frame, if one waits. `Ok(false)`: no frame waits.
-    /// A frame that `admit` refuses is dropped before any copy. Otherwise
+    /// Takes the next frame, if one waits. `Ok(false)`: nothing came and
+    /// nothing was copied. A frame that `admit` refuses is not copied but
+    /// kept as the newest picture of the screen; it is copied once `admit`
+    /// lets it through, unless a newer frame came first ([`take_next`]).
     /// `deliver` gets the BGRA bytes as `(width, height, stride, bytes)`;
     /// they are valid only during the call.
     pub fn poll(
@@ -386,31 +417,37 @@ impl Capture {
         admit: &mut dyn FnMut() -> bool,
         deliver: &mut Deliver<'_>,
     ) -> Result<bool, Stage> {
-        let Ok(frame) = self.pool.TryGetNextFrame() else {
-            return Ok(false);
+        let arrived = self.pool.TryGetNextFrame().ok();
+        let came = arrived.is_some();
+        if let Some(frame) = &arrived {
+            let content = frame
+                .ContentSize()
+                .map_err(|error| note(Stage::Texture, error))?;
+            if content.Width != self.size.Width || content.Height != self.size.Height {
+                // The monitor changed size: the next frames use the new size,
+                // and a kept frame of the old size goes.
+                if content.Width < 2 || content.Height < 2 {
+                    return Err(Stage::BadSize);
+                }
+                self.held = None;
+                self.pool
+                    .Recreate(
+                        &self.winrt_device,
+                        DirectXPixelFormat::B8G8R8A8UIntNormalized,
+                        POOL_BUFFERS,
+                        content,
+                    )
+                    .map_err(|error| note(Stage::Pool, error))?;
+                self.size = content;
+                return Ok(true);
+            }
+        }
+        let Some(frame) = take_next(&mut self.held, arrived, admit) else {
+            return Ok(came);
         };
         let content = frame
             .ContentSize()
             .map_err(|error| note(Stage::Texture, error))?;
-        if content.Width != self.size.Width || content.Height != self.size.Height {
-            // The monitor changed size: the next frames use the new size.
-            if content.Width < 2 || content.Height < 2 {
-                return Err(Stage::BadSize);
-            }
-            self.pool
-                .Recreate(
-                    &self.winrt_device,
-                    DirectXPixelFormat::B8G8R8A8UIntNormalized,
-                    POOL_BUFFERS,
-                    content,
-                )
-                .map_err(|error| note(Stage::Pool, error))?;
-            self.size = content;
-            return Ok(true);
-        }
-        if !admit() {
-            return Ok(true);
-        }
         let surface = frame
             .Surface()
             .map_err(|error| note(Stage::Texture, error))?;
@@ -481,9 +518,37 @@ impl Capture {
 impl Drop for Capture {
     fn drop(&mut self) {
         // Closing ends the capture and releases the screen. A failure here
-        // leaves nothing more to do.
+        // leaves nothing more to do. A kept frame goes back first.
+        if let Some(frame) = self.held.take() {
+            let _ = frame.Close();
+        }
         let _ = self.session.Close();
         let _ = self.pool.Close();
         let _ = &self.item;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::take_next;
+
+    /// GIVEN frames that the gate refuses WHEN no newer one comes THEN the
+    /// newest refused one is taken once the gate opens, and only once; an
+    /// older refused one never is; and a frame that the gate lets through
+    /// goes at once and drops the kept one.
+    #[test]
+    fn given_refused_frames_when_the_gate_opens_then_the_newest_goes() {
+        let mut kept = None;
+        let mut open = || true;
+        let mut shut = || false;
+        assert_eq!(take_next(&mut kept, Some(1), &mut open), Some(1));
+        assert_eq!(take_next(&mut kept, Some(2), &mut shut), None);
+        assert_eq!(take_next(&mut kept, Some(3), &mut shut), None);
+        assert_eq!(take_next(&mut kept, None, &mut shut), None, "not yet");
+        assert_eq!(take_next(&mut kept, None, &mut open), Some(3));
+        assert_eq!(take_next(&mut kept, None, &mut open), None, "taken once");
+        assert_eq!(take_next(&mut kept, Some(4), &mut shut), None);
+        assert_eq!(take_next(&mut kept, Some(5), &mut open), Some(5));
+        assert_eq!(kept, None, "the newer frame replaced the kept one");
     }
 }

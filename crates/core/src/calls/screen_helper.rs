@@ -16,7 +16,7 @@
 //! The code is plain `std` and runs on every OS, so its tests do too. Only
 //! Windows has a helper process to put in it.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -37,10 +37,41 @@ const WATCH_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Helpers that were started and whose stop-and-join is not finished.
 static ACTIVE: AtomicUsize = AtomicUsize::new(0);
+/// Launches under way ([`LaunchGuard`]): from the last cancel check before a
+/// launch until its helper counts in [`ACTIVE`] or the launch failed.
+static LAUNCHING: AtomicUsize = AtomicUsize::new(0);
 
-/// The number of helpers that still run or are being stopped.
+/// The number of helpers that are being launched, still run or are being
+/// stopped.
 pub fn helpers_active() -> usize {
-    ACTIVE.load(Ordering::Acquire)
+    ACTIVE.load(Ordering::SeqCst) + LAUNCHING.load(Ordering::SeqCst)
+}
+
+/// A launch under way. The pick takes it for its last cancel check and
+/// holds it until its helper counts as active, so the end of a call, which
+/// sets the cancel first and then waits until no helper is active, also
+/// waits for a launch that passed the check. Either that end sees the launch
+/// or the launch sees the cancel: both sides use sequentially consistent
+/// order, and the count goes up before the cancel is read.
+pub struct LaunchGuard(());
+
+impl LaunchGuard {
+    /// Counts a launch, then reads `cancel`. `None` when it is set: nothing
+    /// may be launched then.
+    pub fn begin(cancel: &AtomicBool) -> Option<Self> {
+        LAUNCHING.fetch_add(1, Ordering::SeqCst);
+        let guard = Self(());
+        if cancel.load(Ordering::SeqCst) {
+            return None;
+        }
+        Some(guard)
+    }
+}
+
+impl Drop for LaunchGuard {
+    fn drop(&mut self) {
+        LAUNCHING.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 /// Waits up to `timeout` until no helper is active. A new share starts its
@@ -135,6 +166,27 @@ pub struct HelperShare {
     share: u32,
     running: Option<Running>,
     exited: Option<oneshot::Receiver<u32>>,
+    /// Set by a [`HelperStop`]: the end was asked for, so the exit is not
+    /// the helper's own.
+    stopping: Arc<AtomicBool>,
+}
+
+/// Asks a share's helper to end without owning it: the handle's stop uses
+/// it, so the capture ends before `Off` shows, also while the call task
+/// that owns the [`HelperShare`] is busy. The owner still stops and joins
+/// the helper. Idempotent.
+pub struct HelperStop {
+    process: Arc<dyn HelperProcess>,
+    stopping: Arc<AtomicBool>,
+}
+
+impl HelperStop {
+    /// Closes the helper's control pipe. The exit that follows is not
+    /// reported by [`HelperShare::exited`].
+    pub fn stop(&self) {
+        self.stopping.store(true, Ordering::SeqCst);
+        self.process.close_control();
+    }
 }
 
 impl HelperShare {
@@ -188,6 +240,7 @@ impl HelperShare {
                 waiter,
             }),
             exited: Some(exited),
+            stopping: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -196,9 +249,19 @@ impl HelperShare {
         self.share
     }
 
+    /// A handle that asks this helper to end; `None` once it is stopped.
+    pub fn stopper(&self) -> Option<HelperStop> {
+        let running = self.running.as_ref()?;
+        Some(HelperStop {
+            process: running.process.clone(),
+            stopping: self.stopping.clone(),
+        })
+    }
+
     /// Waits for the helper to exit by itself and gives the share state its
     /// exit code means (`state_for_exit`). Never ends while the helper runs,
-    /// and never ends after it was reported once.
+    /// never ends after it was reported once, and never ends for an exit
+    /// that a [`HelperStop`] asked for.
     pub async fn exited(&mut self) -> ScreenState {
         let Some(receiver) = self.exited.as_mut() else {
             return std::future::pending().await;
@@ -209,6 +272,9 @@ impl HelperShare {
             Err(_) => ScreenState::Unavailable,
         };
         self.exited = None;
+        if self.stopping.load(Ordering::SeqCst) {
+            return std::future::pending().await;
+        }
         state
     }
 
@@ -298,9 +364,15 @@ pub(crate) mod fake {
     }
 
     impl HelperProcess for Arc<FakeHelper> {
+        /// Idempotent, as the broker's pipe in an `Option` is: only the first
+        /// close counts. A drop closes the pipe and its reaper closes it
+        /// again, in any order.
         fn close_control(&self) {
-            self.controls_closed.fetch_add(1, Ordering::SeqCst);
-            if self.exits_on_close {
+            let first = self
+                .controls_closed
+                .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok();
+            if first && self.exits_on_close {
                 self.exit();
             }
         }
@@ -472,5 +544,49 @@ mod tests {
         assert!(wait_until_idle(STOP_WAIT + Duration::from_secs(3)));
         assert!(stubborn.terminated.load(Ordering::SeqCst));
         assert!(wait_until_idle(Duration::from_secs(5)));
+    }
+
+    /// GIVEN a running share WHEN its stop handle asks for the end THEN the
+    /// control pipe closes at once, the exit that follows is not reported as
+    /// the helper's own, and the owner's stop-and-join still ends it; a
+    /// stopped share gives no handle.
+    #[tokio::test]
+    async fn given_a_stop_handle_when_it_stops_the_helper_then_the_exit_is_not_its_own() {
+        let helper = FakeHelper::new(true, EXIT_NOT_FOUND);
+        let mut share = start(&helper, 8);
+        let stop = share.stopper().expect("a running share has a handle");
+        stop.stop();
+        stop.stop();
+        assert_eq!(helper.controls_closed.load(Ordering::SeqCst), 1);
+        assert!(helper.wait_exit_for_test(Duration::from_secs(5)));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), share.exited())
+                .await
+                .is_err(),
+            "an end that was asked for is not the helper's own"
+        );
+        assert_eq!(share.stop_and_join(), Some(EXIT_NOT_FOUND));
+
+        let mut stopped = start(&FakeHelper::new(true, EXIT_STOPPED), 9);
+        stopped.running.take().expect("running").stop_and_join();
+        assert!(stopped.stopper().is_none());
+    }
+
+    /// GIVEN a set cancel WHEN a launch begins THEN it is refused; GIVEN a
+    /// launch under way THEN the helpers count as active until it ends, so
+    /// the end of a call waits for it.
+    #[test]
+    fn given_a_cancel_or_a_launch_under_way_then_the_launch_guard_says_so() {
+        let cancel = AtomicBool::new(true);
+        assert!(LaunchGuard::begin(&cancel).is_none());
+        cancel.store(false, Ordering::SeqCst);
+        let launching = LaunchGuard::begin(&cancel).expect("a launch may begin");
+        assert!(helpers_active() >= 1);
+        assert!(
+            !wait_until_idle(Duration::from_millis(100)),
+            "a launch under way is waited for"
+        );
+        drop(launching);
+        assert!(wait_until_idle(Duration::from_secs(10)));
     }
 }

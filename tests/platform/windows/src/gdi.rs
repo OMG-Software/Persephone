@@ -346,7 +346,7 @@ mod tests {
     /// The changes are made to the recorded place, not to the real display
     /// layout. Ignored: it copies the real screen (into memory only). Run it
     /// on Windows after a change to `poll` or the place checks:
-    /// `cargo test -p persephone-call-worker -- --ignored real_monitor`.
+    /// `cargo test -p persephone-test-windows -- --ignored real_monitor`.
     #[test]
     #[ignore = "copies the real screen"]
     fn given_a_real_monitor_when_its_place_changes_then_no_frame_is_delivered() {

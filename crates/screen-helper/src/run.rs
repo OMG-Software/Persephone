@@ -70,7 +70,8 @@ const fn size_rule_matches() -> bool {
 }
 
 /// The shortest time between two copied pictures: 5 a second at most.
-/// Frames in between are dropped before any copy.
+/// A frame in between is not copied; the newest one is kept and copied when
+/// its time comes (`wgc::Capture::poll`).
 const MIN_COPY_GAP: Duration = Duration::from_millis(200);
 /// How long the loop sleeps when no picture waits.
 const POLL_SLEEP: Duration = Duration::from_millis(20);

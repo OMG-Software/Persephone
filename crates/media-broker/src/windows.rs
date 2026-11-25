@@ -915,7 +915,7 @@ impl ScreenHelperProcess {
     /// The peak committed memory of the process, from its Job. Zero when the
     /// OS does not say.
     pub fn peak_memory(&self) -> usize {
-        job_stats(&self.0.job, &self.0.process, Duration::ZERO).peak_process_memory
+        job_peak_memory(&self.0.job)
     }
 }
 
@@ -1128,19 +1128,33 @@ impl LongLivedWorker {
     }
 }
 
-fn job_stats(job: &OwnedHandle, process: &OwnedHandle, elapsed: Duration) -> WorkerStats {
+/// The peak committed memory of the Job's process in bytes, from the Job's
+/// extended limit information. Zero when the OS does not say.
+fn job_peak_memory(job: &OwnedHandle) -> usize {
     let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-    let mut accounting = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
-    let mut exit_code = u32::MAX;
-    // SAFETY: each buffer is the documented structure for its class.
-    unsafe {
+    // SAFETY: `limits` is the documented structure for this class.
+    let ok = unsafe {
         QueryInformationJobObject(
             raw(job),
             JobObjectExtendedLimitInformation,
             (&mut limits as *mut JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
             size_of_val(&limits) as u32,
             null_mut(),
-        );
+        )
+    };
+    if ok == 0 {
+        0
+    } else {
+        limits.PeakProcessMemoryUsed
+    }
+}
+
+fn job_stats(job: &OwnedHandle, process: &OwnedHandle, elapsed: Duration) -> WorkerStats {
+    let mut accounting = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
+    let mut exit_code = u32::MAX;
+    let peak_process_memory = job_peak_memory(job);
+    // SAFETY: each buffer is the documented structure for its class.
+    unsafe {
         QueryInformationJobObject(
             raw(job),
             JobObjectBasicAccountingInformation,
@@ -1152,7 +1166,7 @@ fn job_stats(job: &OwnedHandle, process: &OwnedHandle, elapsed: Duration) -> Wor
     }
     WorkerStats {
         elapsed,
-        peak_process_memory: limits.PeakProcessMemoryUsed,
+        peak_process_memory,
         user_cpu: Duration::from_nanos(u64::try_from(accounting.TotalUserTime).unwrap_or(0) * 100),
         exit_code,
     }
@@ -1370,9 +1384,10 @@ mod tests {
         assert_eq!(list.len(), 2);
         assert_eq!(list[0], raw(&pipes.control_for_helper));
         assert_eq!(list[1], raw(&pipes.frames_for_helper));
-        assert_eq!(pipes.control_value(), list[0] as usize as u32);
-        assert_eq!(pipes.frames_value(), list[1] as usize as u32);
-        assert_ne!(pipes.control_value(), pipes.frames_value());
+        assert_ne!(list[0], list[1]);
+        // That the values on the command line name the handles the helper
+        // inherits is seen in the child: `helper_probe_child` calls
+        // `GetFileType` on them.
         let flags = |handle: &OwnedHandle| {
             let mut flags = 0u32;
             // SAFETY: reads the flags of a handle this test owns.

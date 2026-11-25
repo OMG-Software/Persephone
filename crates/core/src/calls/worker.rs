@@ -267,8 +267,6 @@ impl CallWorkerLink {
         persephone_media_broker::send_screen_fd(channel, fd).map_err(|_| WorkerGone)
     }
 
-    /// Uses `video` as the link's picture store: the one the host's read
-    /// thread writes to.
     /// Windows (ADR-0067): gives the worker the read end of the capture
     /// helper's frame pipe for share `share`. The pipe is duplicated into
     /// the worker process, and `ScreenFrames` names it there, in `slot`; the
@@ -289,6 +287,8 @@ impl CallWorkerLink {
         Ok(())
     }
 
+    /// Uses `video` as the link's picture store: the one the host's read
+    /// thread writes to.
     pub fn with_video(mut self, video: VideoStore) -> Self {
         self.video = video;
         self

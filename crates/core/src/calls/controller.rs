@@ -28,7 +28,7 @@ use super::other_sfu::{Home, MAX_OTHER_SFUS, OtherSfus, Plan, home, is_other_hos
 use super::readiness::{Discovery, Flow, TurnServers, sfu_transport, turn_servers};
 use super::rings::{self, Plan as RingPlan, Watch};
 use super::screen::{ScreenGrant, ScreenRefusal, ScreenSource};
-use super::screen_helper::HelperShare;
+use super::screen_helper::{HelperShare, HelperStop};
 use super::sfu::{self, OpenIdToken, SfuError, SfuGrant};
 use super::status::can_send_member_state;
 use super::video::{Notifier, Picture, VideoStore};
@@ -977,7 +977,10 @@ async fn finish_worker(link: CallWorkerLink) {
 /// [`PICK_END_WAIT`], because it may start a helper: that helper is stopped
 /// and joined with the running share's one. Then the wait goes on until no
 /// helper is active, at most [`REAPED_HELPER_WAIT`], so a helper that an
-/// earlier stop left to its reaper has ended too.
+/// earlier stop left to its reaper has ended too. A launch under way counts
+/// as active (`LaunchGuard`): a pick that outlived [`PICK_END_WAIT`] after
+/// its last cancel check is waited for here, and it stops its helper
+/// itself when it sees the cancel.
 async fn end_screen_helpers(pick: Option<ScreenPick>, helper: Option<HelperShare>) {
     let mut helpers: Vec<HelperShare> = helper.into_iter().collect();
     if let Some(mut pick) = pick {
@@ -2785,14 +2788,23 @@ fn close_session(control: &mut ScreenControl) {
 /// nothing once `settled` is set (the share ended, or its stop went). A full
 /// queue leaves `settled` unset: the call task then sends the stop when it
 /// reads the command, through its pending stop.
+///
+/// On Windows it also asks the share's capture helper to end (ADR-0067):
+/// the helper stops capturing and closes the frame pipe, so the screen is
+/// no longer copied even while the stop waits for queue room. The call task
+/// still stops and joins the helper, and still sends the worker's stop.
 struct WorkerStop {
     commands: mpsc::Sender<ToWorker>,
     share: u32,
     settled: Arc<AtomicBool>,
+    helper: Option<HelperStop>,
 }
 
 impl Drop for WorkerStop {
     fn drop(&mut self) {
+        if let Some(helper) = &self.helper {
+            helper.stop();
+        }
         if self.settled.load(Ordering::SeqCst) {
             return;
         }
@@ -3447,6 +3459,7 @@ impl Call {
         }
         accepted.session = session;
         self.screen_closed = closed;
+        let helper_stop = helper.as_ref().and_then(HelperShare::stopper);
         self.screen_helper = helper;
         self.screen_sent = true;
         self.screen_share = share;
@@ -3464,6 +3477,7 @@ impl Call {
                 commands: self.link.command_sender(),
                 share: self.screen_share,
                 settled: settled.clone(),
+                helper: helper_stop,
             }));
             self.screen_stop_settled = Some(settled);
         }
@@ -9442,6 +9456,45 @@ mod tests {
         assert!(fixture.call.screen_helper.is_none());
         assert_eq!(closed(&helper), 1, "its control pipe closed");
         assert!(is_stop_of(fixture.to_worker.try_recv(), 1));
+        assert!(fixture.to_worker.try_recv().is_err(), "one stop only");
+        assert_eq!(fixture.call.view.screen, CallScreen::Off);
+    }
+
+    /// GIVEN a share with a helper and a full worker queue WHEN the handle
+    /// accepts a stop THEN the helper's control pipe closes at once, before
+    /// the call task reads the stop, so the screen is no longer copied while
+    /// the worker's stop waits; WHEN the queue has room THEN that stop still
+    /// goes, once, and the share is off.
+    #[tokio::test]
+    async fn given_a_full_queue_when_the_handle_stops_a_helper_share_then_the_helper_stops_at_once()
+    {
+        let (mut fixture, inner, _) = call_with_source(true);
+        let helper = FakeHelper::new(true, 0);
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        fixture
+            .call
+            .screen_picked(&inner, Ok(helper_grant(&helper, 1)))
+            .unwrap();
+        assert!(is_monitor_start(fixture.to_worker.try_recv().ok()));
+        let share = fixture.call.screen_share;
+        fill_queue(&fixture.call, &mut fixture.to_worker, 0);
+        handle_stop(&fixture.call);
+        assert_eq!(
+            closed(&helper),
+            1,
+            "the capture ends before the task reads the stop"
+        );
+        assert!(
+            fixture.call.screen_helper.is_some(),
+            "the task still owns it"
+        );
+        fixture.call.screen_command(&inner, false, 1).unwrap();
+        assert!(fixture.call.screen_helper.is_none());
+        assert_eq!(fixture.call.screen_stop_pending, Some(share));
+        while fixture.to_worker.try_recv().is_ok() {}
+        let permit = screen_stop_room(Some(fixture.call.link.command_sender())).await;
+        fixture.call.screen_stop_room_ready(permit).unwrap();
+        assert!(is_stop_of(fixture.to_worker.try_recv(), share));
         assert!(fixture.to_worker.try_recv().is_err(), "one stop only");
         assert_eq!(fixture.call.view.screen, CallScreen::Off);
     }

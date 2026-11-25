@@ -215,14 +215,12 @@ mod tests {
         let Ok(ScreenItem::Frame(frame)) = item else {
             panic!("a picture expected, got {item:?}");
         };
-        let ScreenTarget::Monitor { rect, .. } = monitors else {
+        // The picture has the monitor's mode size, in physical pixels: the
+        // size the user approved. The rectangle is only its place.
+        let ScreenTarget::Monitor { width, height, .. } = monitors else {
             unreachable!("a monitor target");
         };
-        let (left, top, right, bottom) = rect.edges();
-        assert_eq!(
-            (frame.width as i32, frame.height as i32),
-            (right - left, bottom - top)
-        );
+        assert_eq!((frame.width, frame.height), (width, height));
         let (pixels, _) = frame.data.as_chunks::<4>();
         let lit = pixels
             .iter()

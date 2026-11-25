@@ -55,7 +55,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::calls::screen::{ScreenGrant, ScreenRefusal, ScreenSource};
-use crate::calls::screen_helper::{HelperShare, wait_until_idle};
+use crate::calls::screen_helper::{HelperShare, LaunchGuard, wait_until_idle};
 
 use super::screen_helper::{BrokerHelper, HelperLaunch};
 
@@ -147,7 +147,8 @@ impl ScreenSource for MonitorScreen {
     ) -> Result<ScreenGrant, ScreenRefusal> {
         // The wait for the last helper can take seconds; a call that ends
         // meanwhile starts no helper. The call's end also waits for this
-        // pick, so a cancel that comes after the last check still stops and
+        // pick, and for a launch that passed the last check (the launch
+        // guard), so a cancel that comes after that check still stops and
         // joins the helper.
         let waited = std::time::Instant::now();
         loop {
@@ -161,12 +162,13 @@ impl ScreenSource for MonitorScreen {
                 return Err(ScreenRefusal::Unavailable);
             }
         }
-        if cancel.load(Ordering::SeqCst) {
-            return Err(ScreenRefusal::Cancelled);
-        }
+        // From the last check until the helper counts as active, the launch
+        // counts as one: the call's end waits for it.
+        let launching = LaunchGuard::begin(cancel).ok_or(ScreenRefusal::Cancelled)?;
         let launched = self.launcher.launch(share, &grant.target)?;
         let helper =
             HelperShare::start(share, launched.process).ok_or(ScreenRefusal::Unavailable)?;
+        drop(launching);
         if cancel.load(Ordering::SeqCst) {
             // Dropping the helper stops it.
             return Err(ScreenRefusal::Cancelled);

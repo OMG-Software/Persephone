@@ -122,9 +122,42 @@ fn be32(bytes: &[u8], at: usize) -> u32 {
     u32::from_be_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
 }
 
+/// What one item says when its picture went into the caller's buffer
+/// ([`read_item_into`]).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScreenRead {
+    /// The buffer holds the picture: BGRA, `width * 4` bytes a row.
+    Frame {
+        width: u32,
+        height: u32,
+    },
+    End(ScreenEnd),
+}
+
 /// Reads the next item of share `share`. Nothing is allocated for a body
 /// before every field that names its size has passed.
 pub fn read_item<R: Read>(reader: &mut R, share: u32) -> Result<ScreenItem, ScreenFrameError> {
+    let mut data = Vec::new();
+    Ok(match read_item_into(reader, share, &mut data)? {
+        ScreenRead::Frame { width, height } => ScreenItem::Frame(ScreenFrame {
+            width,
+            height,
+            data,
+        }),
+        ScreenRead::End(end) => ScreenItem::End(end),
+    })
+}
+
+/// Reads the next item of share `share`, a picture into `data`. A buffer
+/// that a share keeps from picture to picture is neither allocated nor
+/// cleared again: it grows only for a larger picture, and only after every
+/// field that names the size has passed. After an error its bytes mean
+/// nothing.
+pub fn read_item_into<R: Read>(
+    reader: &mut R,
+    share: u32,
+    data: &mut Vec<u8>,
+) -> Result<ScreenRead, ScreenFrameError> {
     let mut wire = [0_u8; HEADER_LEN];
     reader.read_exact(&mut wire).map_err(|e| read_error(&e))?;
     let header = FrameHeader::decode(wire).map_err(|_| ScreenFrameError::BadHeader)?;
@@ -150,10 +183,10 @@ pub fn read_item<R: Read>(reader: &mut R, share: u32) -> Result<ScreenItem, Scre
                 return Err(ScreenFrameError::WrongShare);
             }
             ScreenEnd::from_byte(message[6])
-                .map(ScreenItem::End)
+                .map(ScreenRead::End)
                 .ok_or(ScreenFrameError::UnknownReason)
         }
-        (TAG_FRAME, FRAME_MESSAGE_LEN) => read_picture(reader, share, &message),
+        (TAG_FRAME, FRAME_MESSAGE_LEN) => read_picture(reader, share, &message, data),
         (TAG_END | TAG_FRAME, _) => Err(ScreenFrameError::BadHeader),
         _ => Err(ScreenFrameError::UnknownTag),
     }
@@ -163,7 +196,8 @@ fn read_picture<R: Read>(
     reader: &mut R,
     share: u32,
     message: &[u8; FRAME_MESSAGE_LEN],
-) -> Result<ScreenItem, ScreenFrameError> {
+    data: &mut Vec<u8>,
+) -> Result<ScreenRead, ScreenFrameError> {
     if be32(message, 2) != share {
         return Err(ScreenFrameError::WrongShare);
     }
@@ -195,16 +229,15 @@ fn read_picture<R: Read>(
         return Err(ScreenFrameError::LengthMismatch);
     }
     let length = length as usize;
-    let mut data = Vec::new();
-    data.try_reserve_exact(length)
-        .map_err(|_| ScreenFrameError::AllocationFailure)?;
-    data.resize(length, 0);
-    reader.read_exact(&mut data).map_err(|e| read_error(&e))?;
-    Ok(ScreenItem::Frame(ScreenFrame {
-        width,
-        height,
-        data,
-    }))
+    if data.len() < length {
+        data.try_reserve_exact(length - data.len())
+            .map_err(|_| ScreenFrameError::AllocationFailure)?;
+        data.resize(length, 0);
+    } else {
+        data.truncate(length);
+    }
+    reader.read_exact(data).map_err(|e| read_error(&e))?;
+    Ok(ScreenRead::Frame { width, height })
 }
 
 fn message_header(length: usize) -> FrameHeader {
@@ -287,6 +320,53 @@ mod tests {
 
     fn read(wire: &[u8], share: u32) -> Result<ScreenItem, ScreenFrameError> {
         read_item(&mut &wire[..], share)
+    }
+
+    /// GIVEN one buffer for a share WHEN pictures of one size, a smaller one
+    /// and an end are read into it THEN each picture comes whole, the buffer
+    /// is not allocated again for a picture that fits, and an end leaves it
+    /// as it was.
+    #[test]
+    fn given_a_kept_buffer_when_pictures_are_read_into_it_then_it_is_reused() {
+        let mut wire = Vec::new();
+        for (fill, width, height) in [(1_u8, 4, 2), (2, 4, 2), (3, 2, 2)] {
+            let body = vec![fill; width as usize * height as usize * 4];
+            write_picture(&mut wire, 5, width, height, &body).expect("a picture");
+        }
+        write_end(&mut wire, 5, ScreenEnd::Stopped).expect("an end");
+        let mut reader = &wire[..];
+        let mut buffer = Vec::new();
+        assert_eq!(
+            read_item_into(&mut reader, 5, &mut buffer),
+            Ok(ScreenRead::Frame {
+                width: 4,
+                height: 2
+            })
+        );
+        assert_eq!(buffer, vec![1; 32]);
+        let kept = buffer.as_ptr();
+        assert_eq!(
+            read_item_into(&mut reader, 5, &mut buffer),
+            Ok(ScreenRead::Frame {
+                width: 4,
+                height: 2
+            })
+        );
+        assert_eq!(buffer, vec![2; 32]);
+        assert_eq!(
+            read_item_into(&mut reader, 5, &mut buffer),
+            Ok(ScreenRead::Frame {
+                width: 2,
+                height: 2
+            })
+        );
+        assert_eq!(buffer, vec![3; 16]);
+        assert_eq!(buffer.as_ptr(), kept, "no new allocation");
+        assert_eq!(
+            read_item_into(&mut reader, 5, &mut buffer),
+            Ok(ScreenRead::End(ScreenEnd::Stopped))
+        );
+        assert_eq!(buffer, vec![3; 16]);
     }
 
     /// GIVEN a picture and an end item written WHEN they are read THEN both
