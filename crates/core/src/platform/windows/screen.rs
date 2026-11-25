@@ -2,8 +2,11 @@
 //! monitor, and the user shares one or cancels.
 //!
 //! The core names the monitor to the worker by its GDI device name
-//! (`MONITORINFOEXW::szDevice`, such as `\\.\DISPLAY1`) and its size in
-//! pixels when the user saw it. A device name names a display output, and
+//! (`MONITORINFOEXW::szDevice`, such as `\\.\DISPLAY1`), its size in pixels
+//! when the user saw it, and its rectangle in physical pixels (read with
+//! per-monitor DPI awareness, as the worker reads it). The worker copies
+//! exactly that rectangle, so it copies the part of the desktop the user
+//! approved even if a name moved. A device name names a display output, and
 //! Windows can give it to another output when the monitors change, so the
 //! core reads every monitor's name, rectangle and mode before the first
 //! question and again after a Share: any change voids the answer, and the
@@ -31,12 +34,16 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use persephone_call_protocol::{
-    MAX_MONITOR_SIDE, MAX_SCREEN_MONITORS, MonitorName, ScreenTarget, screen_capture_size_ok,
+    DesktopRect, MAX_MONITOR_SIDE, MAX_SCREEN_MONITORS, MonitorName, ScreenTarget,
+    screen_capture_size_ok,
 };
 use windows_sys::Win32::Foundation::{HWND, LPARAM, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
     DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDisplayMonitors, EnumDisplaySettingsW, GetMonitorInfoW,
     HDC, HMONITOR, MONITORINFO, MONITORINFOEXW,
+};
+use windows_sys::Win32::UI::HiDpi::{
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetThreadDpiAwarenessContext,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     IDNO, IDYES, KillTimer, MB_DEFBUTTON2, MB_ICONWARNING, MB_SETFOREGROUND, MB_TOPMOST, MB_YESNO,
@@ -51,13 +58,14 @@ const MAX_MONITORS: usize = MAX_SCREEN_MONITORS as usize;
 /// How often an open question looks at the cancel flag, in milliseconds.
 const CANCEL_CHECK_MS: u32 = 100;
 
-/// One monitor, as the user sees it, with the device name the worker finds
-/// it by.
+/// One monitor, as the user sees it, with the device name and the rectangle
+/// (physical pixels) the worker finds it by.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Screen {
     pub name: MonitorName,
     pub width: u32,
     pub height: u32,
+    pub rect: DesktopRect,
 }
 
 /// The user's answer to one screen.
@@ -162,6 +170,7 @@ pub fn pick(
                     name: screen.name,
                     width: screen.width,
                     height: screen.height,
+                    rect: screen.rect,
                 });
             }
             Answer::Next => at = (at + 1) % offered.len(),
@@ -378,10 +387,13 @@ fn read_monitor(monitor: HMONITOR) -> Option<Seen> {
     }
 }
 
-/// A monitor's device name and its size in pixels: its current display
-/// mode, else its rectangle. A name that is not printable ASCII is `None`.
+/// A monitor's device name, its size in pixels (its current display mode,
+/// else its rectangle) and its rectangle. A name that is not printable ASCII,
+/// or a rectangle the call protocol does not carry, is `None`.
 fn screen_of(seen: &Seen) -> Option<Screen> {
     let name = MonitorName::from_wide(&seen.device)?;
+    let (left, top, right, bottom) = seen.rect;
+    let rect = DesktopRect::new(left, top, right, bottom)?;
     let (width, height) = match seen.mode {
         (width, height) if width > 0 && height > 0 => (width, height),
         _ => {
@@ -396,12 +408,20 @@ fn screen_of(seen: &Seen) -> Option<Screen> {
         name,
         width,
         height,
+        rect,
     })
 }
 
-/// The monitors in display order, with the layout they were read from.
+/// The monitors in display order, with the layout they were read from. The
+/// read runs with per-monitor DPI awareness, so the rectangles are physical
+/// pixels like the call worker's; the thread's own awareness is put back
+/// after it (the question boxes keep theirs).
 fn monitors() -> Monitors {
     let mut found = Monitors::default();
+    // SAFETY: changes only the calling thread's DPI awareness; a null result
+    // means it did not change.
+    let before =
+        unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
     // SAFETY: the callback only uses `found` during the call.
     unsafe {
         EnumDisplayMonitors(
@@ -411,6 +431,10 @@ fn monitors() -> Monitors {
             (&raw mut found) as LPARAM,
         );
     }
+    if !before.is_null() {
+        // SAFETY: puts back the awareness this thread had.
+        unsafe { SetThreadDpiAwarenessContext(before) };
+    }
     found
 }
 
@@ -419,13 +443,23 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
 
-    fn screen(number: u8, width: u32, height: u32) -> Screen {
+    /// Screen `number`, of this size, with this rectangle.
+    fn placed(number: u8, width: u32, height: u32, rect: (i32, i32, i32, i32)) -> Screen {
         let name = format!(r"\\.\DISPLAY{number}");
+        let (left, top, right, bottom) = rect;
         Screen {
             name: MonitorName::new(name.as_bytes()).expect("a name"),
             width,
             height,
+            rect: DesktopRect::new(left, top, right, bottom).expect("a rectangle"),
         }
+    }
+
+    /// Screen `number`, of this size, with a rectangle of its own: the
+    /// screens stand side by side.
+    fn screen(number: u8, width: u32, height: u32) -> Screen {
+        let left = (i32::from(number) - 1) * 8000;
+        placed(number, width, height, (left, 0, left + 1000, 1000))
     }
 
     fn target(screen: Screen) -> ScreenTarget {
@@ -433,6 +467,7 @@ mod tests {
             name: screen.name,
             width: screen.width,
             height: screen.height,
+            rect: screen.rect,
         }
     }
 
@@ -628,21 +663,28 @@ mod tests {
     }
 
     /// GIVEN what Windows reports for a monitor WHEN it becomes a screen THEN
-    /// its size is the display mode, else its rectangle; a name that is not
-    /// printable ASCII, or a reversed rectangle with no mode, is not a screen.
+    /// its size is the display mode, else its rectangle, and it keeps its
+    /// rectangle; a name that is not printable ASCII, or a rectangle the
+    /// call protocol does not carry (reversed, too large), is not a screen.
     #[test]
     fn given_a_reported_monitor_when_read_then_its_size_is_the_mode_else_the_rectangle() {
-        let first = screen(1, 2560, 1440);
         let scaled = seen(r"\\.\DISPLAY1", (0, 0, 1280, 720), (2560, 1440));
-        assert_eq!(screen_of(&scaled), Some(first));
-        let no_mode = seen(r"\\.\DISPLAY1", (-2560, 0, 0, 1440), (0, 0));
-        assert_eq!(screen_of(&no_mode), Some(first));
-        let one_side = seen(r"\\.\DISPLAY1", (-2560, 0, 0, 1440), (2560, 0));
-        assert_eq!(screen_of(&one_side), Some(first));
+        assert_eq!(
+            screen_of(&scaled),
+            Some(placed(1, 2560, 1440, (0, 0, 1280, 720)))
+        );
+        let left_of_main = (-2560, 0, 0, 1440);
+        let expected = Some(placed(1, 2560, 1440, left_of_main));
+        let no_mode = seen(r"\\.\DISPLAY1", left_of_main, (0, 0));
+        assert_eq!(screen_of(&no_mode), expected);
+        let one_side = seen(r"\\.\DISPLAY1", left_of_main, (2560, 0));
+        assert_eq!(screen_of(&one_side), expected);
         assert_eq!(screen_of(&seen("DISPLAY 1", (0, 0, 10, 10), (0, 0))), None);
         assert_eq!(screen_of(&seen("", (0, 0, 10, 10), (0, 0))), None);
-        let reversed = seen(r"\\.\DISPLAY1", (10, 0, 0, 10), (0, 0));
+        let reversed = seen(r"\\.\DISPLAY1", (10, 0, 0, 10), (1920, 1080));
         assert_eq!(screen_of(&reversed), None);
+        let huge = seen(r"\\.\DISPLAY1", (0, 0, 20_000, 10), (1920, 1080));
+        assert_eq!(screen_of(&huge), None);
     }
 
     /// GIVEN a cancel timer that cannot start WHEN a question would be asked

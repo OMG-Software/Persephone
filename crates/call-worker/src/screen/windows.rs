@@ -67,6 +67,7 @@ pub fn capture<F, E>(
         name,
         width,
         height,
+        rect,
     } = target
     else {
         let _ = open_result.send(Err(ScreenState::Unavailable));
@@ -77,6 +78,7 @@ pub fn capture<F, E>(
         device: &device,
         width,
         height,
+        rect: rect.edges(),
     };
     let mut capture = match gdi::open(choice) {
         Ok(capture) => capture,
@@ -146,6 +148,10 @@ mod tests {
         persephone_call_protocol::MonitorName::new(name).expect("a monitor name")
     }
 
+    fn at(width: i32, height: i32) -> persephone_call_protocol::DesktopRect {
+        persephone_call_protocol::DesktopRect::new(0, 0, width, height).expect("a rectangle")
+    }
+
     /// GIVEN a portal or macOS display target WHEN the backend is asked THEN
     /// it does not accept it: Windows shares a monitor only.
     #[test]
@@ -154,6 +160,7 @@ mod tests {
             name: named(br"\\.\DISPLAY1"),
             width: 2,
             height: 2,
+            rect: at(2, 2),
         }));
         assert!(!accepts(&ScreenTarget::Portal { node: 7 }));
         assert!(!accepts(&ScreenTarget::Display {
@@ -174,6 +181,7 @@ mod tests {
                 name: named(br"\\.\PERSEPHONE-NO-SUCH-DISPLAY"),
                 width: 1920,
                 height: 1080,
+                rect: at(1920, 1080),
             },
             Grant::default(),
             &stop,

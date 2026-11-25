@@ -7248,6 +7248,8 @@ mod tests {
             name: persephone_call_protocol::MonitorName::new(br"\\.\DISPLAY2").expect("a name"),
             width: 1920,
             height: 1080,
+            rect: persephone_call_protocol::DesktopRect::new(1920, 0, 3840, 1080)
+                .expect("a rectangle"),
         }
     }
 

@@ -240,20 +240,26 @@ Decision:
   opens and the pick is cancelled: a box that the end of the call cannot
   close is never shown.
 * The target is no longer the index in display order. It is
-  `ScreenTarget::Monitor { name, width, height }`: the monitor's GDI device
+  `ScreenTarget::Monitor { name, width, height, rect }`: the monitor's GDI device
   name (`MONITORINFOEXW::szDevice`, such as `\\.\DISPLAY1`, printable ASCII,
-  at most 32 characters) and its size in pixels when the user said Yes (call
-  protocol version 12). The worker takes only the listed monitor with that
-  name and size; none, or another size, is "not found". An index could name
+  at most 32 characters), its size in pixels when the user said Yes, and its
+  rectangle on the virtual screen in physical pixels (call protocol version
+  12). The worker takes only the listed monitor with that name, size and
+  rectangle; none, another size or another rectangle is "not found". An index could name
   another monitor of the same size after a monitor was removed or the order
   changed while the question was open.
 * Windows documents `szDevice` only as the monitor's device name, not as
   stable across display changes; after a change it can give a name to
   another output. So the core reads every monitor's device name, rectangle
   and display mode before the first question and again after a Yes. Any
-  change voids the Yes, and the share stays off (cancelled). A name can then
-  only move in the moment between that second read and the worker's open,
-  and the worker's own checks below still apply.
+  change voids the Yes, and the share stays off (cancelled). For the moment
+  between that second read and the worker's open, the target carries the
+  rectangle from the second read: the core and the worker both read it with
+  `GetMonitorInfoW` on a thread set to per-monitor DPI awareness, and the
+  worker copies exactly that rectangle. If a name moved to another output
+  in that moment, the worker still copies only the part of the desktop the
+  user approved, or finds no monitor with both the name and the rectangle
+  and shares nothing.
 * The GDI copy reads a rectangle of the whole desktop. Before and after each
   copy the worker reads the monitor's name and rectangle again
   (`GetMonitorInfoW`, the same reading as the list's); a monitor that

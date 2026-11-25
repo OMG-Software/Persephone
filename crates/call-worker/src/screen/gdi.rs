@@ -83,12 +83,14 @@ pub enum Choice<'a> {
     /// probe only. A share always names its monitor.
     #[allow(dead_code)]
     First,
-    /// The monitor with this GDI device name (UTF-16 code units, no NUL)
-    /// and this size in pixels.
+    /// The monitor with this GDI device name (UTF-16 code units, no NUL),
+    /// this size in pixels and this rectangle (left, top, right, bottom) on
+    /// the virtual screen in physical pixels.
     Named {
         device: &'a [u16],
         width: u32,
         height: u32,
+        rect: (i32, i32, i32, i32),
     },
 }
 
@@ -99,8 +101,10 @@ pub fn device_name(raw: &[u16]) -> &[u16] {
 }
 
 /// The monitor of `list` that `choice` names. A name that no listed monitor
-/// has is [`Stage::NoMonitor`] and another size is [`Stage::SizeChanged`]:
-/// the share asked for one screen, and it never takes another.
+/// has is [`Stage::NoMonitor`], another size is [`Stage::SizeChanged`], and
+/// another rectangle is [`Stage::NoMonitor`]: Windows can give a name to
+/// another output, but the rectangle is the part of the desktop the user
+/// approved. The share asked for one screen, and it never takes another.
 pub fn choose(list: &[wgc::Monitor], choice: Choice<'_>) -> Result<wgc::Monitor, Stage> {
     match choice {
         Choice::First => list.first().copied().ok_or(Stage::NoMonitor),
@@ -108,19 +112,31 @@ pub fn choose(list: &[wgc::Monitor], choice: Choice<'_>) -> Result<wgc::Monitor,
             device,
             width,
             height,
+            rect,
         } => {
             let monitor = list
                 .iter()
                 .find(|monitor| device_name(&monitor.device) == device)
                 .copied()
                 .ok_or(Stage::NoMonitor)?;
-            if (monitor.width, monitor.height) == (width, height) {
-                Ok(monitor)
-            } else {
+            if (monitor.width, monitor.height) != (width, height) {
                 Err(Stage::SizeChanged)
+            } else if monitor.rect != rect {
+                Err(Stage::NoMonitor)
+            } else {
+                Ok(monitor)
             }
         }
     }
+}
+
+/// The monitor list in physical pixels: the calling thread is set to
+/// per-monitor DPI awareness first (for this thread only), as the core is
+/// when it reads the rectangle it sends.
+pub fn physical_monitors() -> Vec<wgc::Monitor> {
+    // SAFETY: changes only the DPI awareness of the calling thread.
+    unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+    wgc::monitors()
 }
 
 /// The monitor's place now, or `None` when Windows no longer knows the
@@ -168,10 +184,8 @@ pub struct Capture {
 pub fn open(choice: Choice<'_>) -> Result<Capture, Stage> {
     // The coordinates of the monitor list and of the screen DC must be
     // physical pixels, whatever the process manifest says. The setting is
-    // for this thread only.
-    // SAFETY: changes only the DPI awareness of the calling thread.
-    unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
-    let monitor = choose(&wgc::monitors(), choice)?;
+    // for this thread only, and stays for the copies.
+    let monitor = choose(&physical_monitors(), choice)?;
     if !size_ok(monitor.width, monitor.height) {
         return Err(Stage::BadSize);
     }
@@ -386,9 +400,10 @@ mod tests {
     }
 
     /// GIVEN two monitors of the same size that changed places WHEN the
-    /// share names one by its device name THEN that monitor is taken, not
-    /// the one that is now first; a name nobody has is not found, and
-    /// another size is a changed size.
+    /// share names one by its device name and rectangle THEN that monitor is
+    /// taken, not the one that is now first; a name nobody has is not found,
+    /// another size is a changed size, and the right name with another
+    /// rectangle (the name now on another output) is not found.
     #[test]
     fn given_monitors_when_one_is_named_then_only_that_one_is_taken() {
         let list = [
@@ -396,23 +411,31 @@ mod tests {
             listed(r"\\.\DISPLAY1", 1920, 1920, 1080),
         ];
         let device = wide(r"\\.\DISPLAY1");
-        let named = |width, height| Choice::Named {
+        let right = (1920, 0, 3840, 1080);
+        let named = |width, height, rect| Choice::Named {
             device: &device,
             width,
             height,
+            rect,
         };
-        let taken = choose(&list, named(1920, 1080)).expect("the named monitor");
-        assert_eq!(taken.rect.0, 1920);
+        let taken = choose(&list, named(1920, 1080, right)).expect("the named monitor");
+        assert_eq!(taken.rect, right);
         assert_eq!(device_name(&taken.device), device.as_slice());
         assert_eq!(
-            choose(&list, named(2560, 1440)).err(),
+            choose(&list, named(2560, 1440, right)).err(),
             Some(Stage::SizeChanged)
+        );
+        // DISPLAY1 was approved on the left; the name is now on the right.
+        assert_eq!(
+            choose(&list, named(1920, 1080, (0, 0, 1920, 1080))).err(),
+            Some(Stage::NoMonitor)
         );
         let other = wide(r"\\.\DISPLAY9");
         let missing = Choice::Named {
             device: &other,
             width: 1920,
             height: 1080,
+            rect: right,
         };
         assert_eq!(choose(&list, missing).err(), Some(Stage::NoMonitor));
         // A prefix of a listed name is another name.
@@ -421,6 +444,7 @@ mod tests {
             device: &prefix,
             width: 1920,
             height: 1080,
+            rect: right,
         };
         assert_eq!(choose(&list, short).err(), Some(Stage::NoMonitor));
         assert_eq!(choose(&[], Choice::First).err(), Some(Stage::NoMonitor));
@@ -478,7 +502,7 @@ mod tests {
     #[test]
     #[ignore = "copies the real screen"]
     fn given_a_real_monitor_when_its_place_changes_then_no_frame_is_delivered() {
-        let list = wgc::monitors();
+        let list = physical_monitors();
         let monitor = list
             .iter()
             .find(|monitor| size_ok(monitor.width, monitor.height))
@@ -488,6 +512,7 @@ mod tests {
             device: &device,
             width: monitor.width,
             height: monitor.height,
+            rect: monitor.rect,
         })
         .expect("the named monitor opens");
         let frames = std::cell::RefCell::new(Vec::new());
