@@ -19,7 +19,7 @@ pub use stats::{
     VideoReceiveStats, VideoSendStats,
 };
 
-pub const VERSION: u8 = 11;
+pub const VERSION: u8 = 12;
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 /// Longest diagnostic record target (ADR-0058).
 pub const MAX_DIAGNOSTIC_TARGET_BYTES: usize = 64;
@@ -2371,7 +2371,7 @@ mod tests {
             Err(DecodeError::UnknownTag)
         );
         assert_eq!(
-            ToWorker::decode(&[VERSION, 17]),
+            ToWorker::decode(&[VERSION, 18]),
             Err(DecodeError::UnknownTag)
         );
         assert_eq!(
@@ -2993,7 +2993,7 @@ mod tests {
     /// 640x360 at 15 per second.
     #[test]
     fn given_tiles_when_limits_asked_then_screen_differs_from_camera() {
-        assert_eq!((VIDEO_TILES, SCREEN_TILE, VERSION), (6, 5, 11));
+        assert_eq!((VIDEO_TILES, SCREEN_TILE, VERSION), (6, 5, 12));
         assert_eq!(MAX_SCREEN_BYTES, 3_686_400);
         assert_eq!(MAX_SCREEN_PIXELS, 921_600);
         for tile in 0..SCREEN_TILE {
@@ -3365,13 +3365,13 @@ mod tests {
         );
     }
 
-    /// GIVEN a message of the previous wire versions (6 to 10)
+    /// GIVEN a message of the previous wire versions (6 to 11)
     /// WHEN it is decoded in either direction
     /// THEN the version is refused.
     #[test]
     fn given_older_wire_versions_when_decoded_then_they_are_refused() {
-        assert_eq!(VERSION, 11);
-        for old in [6, 7, 8, 9, 10] {
+        assert_eq!(VERSION, 12);
+        for old in [6, 7, 8, 9, 10, 11] {
             assert_eq!(
                 ToWorker::decode(&[old, TO_LEAVE]),
                 Err(DecodeError::UnknownVersion)

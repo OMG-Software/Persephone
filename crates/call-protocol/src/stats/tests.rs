@@ -1,5 +1,7 @@
 use super::*;
-use crate::{FROM_STATS, FromWorker, MAX_IDENTITY_BYTES, MAX_MESSAGE_BYTES, ToWorker, VERSION};
+use crate::{
+    FROM_STATS, FromWorker, MAX_IDENTITY_BYTES, MAX_MESSAGE_BYTES, TO_SET_STATS, ToWorker, VERSION,
+};
 
 pub(crate) fn full_stats() -> CallStats {
     let audio = AudioReceiveStats {
@@ -286,11 +288,11 @@ fn given_the_stats_switch_when_decoded_then_only_a_bool_is_accepted() {
         assert_eq!(ToWorker::decode(&message.encode()), Ok(message));
     }
     assert_eq!(
-        ToWorker::decode(&[VERSION, 16, 2]),
+        ToWorker::decode(&[VERSION, TO_SET_STATS, 2]),
         Err(DecodeError::InvalidValue)
     );
     assert_eq!(
-        ToWorker::decode(&[VERSION, 16]),
+        ToWorker::decode(&[VERSION, TO_SET_STATS]),
         Err(DecodeError::Truncated)
     );
 }

@@ -94,7 +94,7 @@ for the answer, and a reading is old when the page asks for it.
 
 ### Message
 
-`FromWorker::Stats` (tag 23, protocol version 11) holds integers only:
+`FromWorker::Stats` (tag 23, protocol version 12) holds integers only:
 
 | Part | Content | Bound |
 | --- | --- | --- |
