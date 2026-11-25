@@ -241,7 +241,7 @@ Decision:
   `windows 0.62.2` (no new crate, no `Cargo.lock` change).
 * Why this is not a containment loosening: a process in this AppContainer
   could already copy the screen with GDI before this change. The worker does
-  not use Win32k lockdown (ADR-0049, audio needs it). Screen sharing only
+  not use Win32k lockdown (`LaunchSpec::call()` turns it off, because the audio stack needs it). Screen sharing only
   uses an existing ability, and the core still grants one monitor for each
   share. Turning on the Win32k lockdown for the call worker would stop this
   capture and also close that ability; it needs its own decision.

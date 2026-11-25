@@ -8,6 +8,11 @@ session. Source: branch `claude/call-screen-share`, worktree
 first run did not record its source revision or lockfile hash. A later run
 from an identified commit gave the same results; see
 [Rerun from an identified commit](#rerun-from-an-identified-commit).
+**Update of 25 November 2026: this result is superseded for the product. GDI
+`BitBlt` does capture in the same AppContainer; see
+[Measurement of 25 November 2026](#measurement-of-25-november-2026-dxgi-and-gdi).
+The sections below are the history of the first measurement.**
+
 **Result: Windows.Graphics.Capture does not run in the call worker's
 AppContainer. `CreateForMonitor` fails with `E_ACCESSDENIED` (`0x80070005`)
 with the worker's current capabilities and with each candidate capability.
@@ -121,3 +126,83 @@ the first run's raw output was no longer in that folder at the rerun).
   that makes this probe capture a frame, add it to the call launcher and to the
   probe's sets, set `CAPTURE_IN_CONTAINER`, and add the chooser from the ADR.
   That needs a new decision if it relaxes any mitigation.
+
+## Measurement of 25 November 2026: DXGI and GDI
+
+Question: does any capture method other than Windows.Graphics.Capture run in
+the call worker's AppContainer without a new capability or a weaker
+mitigation?
+
+* Date and machine: 25 November 2026, Windows 11 Pro x64 (build 26300),
+  release build of the gate, rustc 1.99.1, one 2560x1440 monitor, one
+  interactive session.
+* Source: commit `fb911374ab6c7c8f83d9b081ef8a61c09e0adb05` on branch
+  `claude/call-screen-share-all`, checked out with no local changes.
+* `Cargo.lock` SHA-256:
+  `cd6f78ba4e2b5e67d47009c6c1fef8e24e444e008ed808126d26ba9f13eec525`.
+* Command: `python tools/dev.py sandbox --offline`. Raw output (not
+  committed): `.local/screen-sandbox-run-2026-11-25-final.txt` in that
+  worktree. Wrapper exit status: **1**, from the existing gate failure
+  (`probe error: one or more sandbox assertions failed`,
+  `network_denial[appcontainer]: NOT_ESTABLISHED`, also `lpac` and
+  `restricted_token`). That failure is not part of this measurement and is not
+  a pass. `--screen-probe` itself printed all results below and deleted its
+  AppContainer profile.
+
+### What the probe applies
+
+The probe launches the container as the call launcher does
+(`LaunchSpec::call()` in `crates/media-broker/src/windows.rs`): capabilities
+`internetClient`, `microphone`, `webcam` plus the webcam device capability
+SID, a Job (one process, 512 MiB, kill on close), and these process
+mitigations: DEP, heap terminate, bottom-up and high-entropy ASLR, strict
+handle checks, extension points disabled, font loading disabled, no remote
+and no low-label images, system32 images first. The real call worker uses the
+same set: `LaunchSpec::call()` turns off exactly two mitigations of the media
+worker, prohibit-dynamic-code and Win32k system call disable
+(`prohibit_dynamic_code: false`, `disable_win32k: false`; the audio stack
+needs them), and the probe omits those two as well. So the probe has no
+Win32k lockdown and no dynamic-code prohibition **because the real worker has
+none**. The probe does not compare itself with the launcher in code (the two
+can drift; a unit test in the media broker pins the launcher side).
+
+### Results
+
+| Method | Control (no container) | AppContainer, worker's three capabilities |
+| --- | --- | --- |
+| WGC `CreateForMonitor` | captured a frame | fails, `0x80070005` (`E_ACCESSDENIED`); same with `graphicsCaptureProgrammatic`, `graphicsCapture` and both |
+| DXGI `DuplicateOutput` then `AcquireNextFrame` and CPU copy | `DuplicateOutput` worked; `AcquireNextFrame` timed out for 5 s, `0x887a0027` (`DXGI_ERROR_WAIT_TIMEOUT`): no frame, so the control did not capture | `DuplicateOutput` fails, `0x80070005` (`E_ACCESSDENIED`) |
+| GDI `GetDC(NULL)` and `BitBlt` into a 32-bit DIB section (`CAPTUREBLT`) | captured a frame; not black, not uniform; mean colour `0x151515` | **captured a frame; not black, not uniform; mean colour `0x151515`** |
+
+Notes:
+
+* The pixel check counts pixels with a non-zero colour channel and pixels that
+  differ from the first pixel. All-black and one-colour copies are failures
+  (`BLACK`, `UNIFORM` in `screen_alt.rs`). The control and the container copy
+  gave the same mean colour on the same desktop, so the container copy is the
+  desktop and not a blank or partial buffer. The mean is a coarse check; the
+  picture itself was not compared or looked at.
+* The GDI run in the container is the worker's own code (`screen/gdi.rs`,
+  compiled into the gate), on a thread set to per-monitor DPI awareness.
+* The DXGI control did not capture on this static desktop: the first
+  `AcquireNextFrame` returns only when the screen changes. The container run
+  stopped earlier, at `DuplicateOutput`, so its result does not depend on the
+  control. A DXGI frame in the container was never seen, and it is not shown
+  that DXGI could not copy a frame if `DuplicateOutput` were allowed.
+* One monitor only. Multi-monitor, other DPI scales, protected content, and
+  a locked or secure desktop were not measured.
+
+### Consequence
+
+* GDI works in the container with no new capability and no relaxed
+  mitigation. The worker's Windows backend is `screen/gdi.rs`;
+  `CAPTURE_IN_CONTAINER` is `true`. The core gained a monitor chooser
+  (`crates/core/src/platform/windows/screen.rs`).
+* The same result means a process in this AppContainer can copy the screen
+  with GDI whether or not a share is on. The worker has no Win32k lockdown.
+  The share grant (one monitor, named by the core) does not stop a
+  compromised worker from reading any monitor. ADR-0053 states this.
+* GDI draws no capture border and no cursor.
+* Not verified: a live call in which another member sees the share, and
+  that ADR-0045's display affinity (main window excluded from capture) also
+  hides the main window from a GDI copy.
