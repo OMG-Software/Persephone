@@ -214,6 +214,15 @@ ADR-0053 says that when the call ends while the core's screen question is
 open, a thread timer closes the message box within about 100 ms. This
 measures that path on a real desktop.
 
+The test (`given_an_open_question_when_the_call_ends_then_it_closes` in
+`crates/core/src/platform/windows/screen.rs`) opens a real box, sets the
+cancel flag after 300 ms, and measures from the flag to the box's return. It
+requires a cancel within 500 ms. It then opens a second box on the same
+thread with the flag already set and requires that it stays open for at
+least 50 ms, so a quit message left from the first box did not end it.
+
+### First runs (not reproducible from one revision)
+
 * Host: Windows 11 Pro, version 10.0.26300, two 2560x1440 monitors. The
   workstation was locked (`LogonUI.exe` running); the box still opened and
   closed.
@@ -221,15 +230,34 @@ measures that path on a real desktop.
   `claude/call-screen-share-all` (the test's bound, not `ask`, changed).
 * Command, run three times:
   `cargo test --locked --offline -p persephone-core --lib -- --ignored open_question --nocapture`
-* The test (`given_an_open_question_when_the_call_ends_then_it_closes` in
-  `crates/core/src/platform/windows/screen.rs`) opens a real box, sets the
-  cancel flag after 300 ms, and measures from the flag to the box's return.
-  It requires a cancel within 500 ms. It then opens a second box on the same
-  thread with the flag already set and requires that it stays open for at
-  least 50 ms, so a quit message left from the first box did not end it.
 
 Results: all three runs passed. The box closed 41.2 ms, 32.4 ms and 37.6 ms
 after the flag was set; each run took 0.44 to 0.46 s in all.
+
+Correction: this record gives no `Cargo.lock` hash or tool versions, and its
+source was a commit plus uncommitted edits, so no single revision reproduces
+it. The rerun below replaces it as the support for ADR-0053.
+
+### Rerun at one revision
+
+* Host: Windows 11 Pro x64, version 10.0.26300.9974, two 2560x1440
+  monitors, one interactive session. The workstation was locked
+  (`LogonUI.exe` running); the box still opened and closed.
+* Source: commit `d271de051ef5e3a399a1eef24c50b485cbc1d7f2` on branch
+  `claude/call-screen-share-all`, with no local changes before or after the
+  runs (`git status --porcelain` empty).
+* `Cargo.lock` SHA-256:
+  `f90e3714eb4bc6476f8bbebfb7d59c8e60d4979b870ccd73dcc2b6e260346832`.
+* Tools and build: rustc 1.99.1 (58cf8f9c3 2026-10-13), cargo 1.99.1
+  (5f94df478 2026-08-27); the `test` profile (debug, unoptimized), with
+  `CARGO_TARGET_DIR` set to `.local/build/rust` in the worktree.
+* Command, run three times, each with exit status 0:
+  `cargo test --locked --offline -p persephone-core --lib -- --ignored open_question --nocapture`
+* Raw output (not committed): `.local/box-cancel-run-2026-11-25-d271de0.txt`
+  in that worktree.
+
+Results: all three runs passed. The box closed 51.1 ms, 28.9 ms and 45.0 ms
+after the flag was set; each run took 0.44 to 0.47 s in all.
 
 Limits: one machine and one DPI scale. The timer looks every 100 ms, so a
 close can take up to about 100 ms plus the time the box needs to end; these

@@ -241,8 +241,8 @@ Decision:
   close is never shown.
 * The target is no longer the index in display order. It is
   `ScreenTarget::Monitor { name, width, height, rect }`: the monitor's GDI device
-  name (`MONITORINFOEXW::szDevice`, such as `\\.\DISPLAY1`, printable ASCII,
-  at most 32 characters), its size in pixels when the user said Yes, and its
+  name (`MONITORINFOEXW::szDevice`, such as `\\.\DISPLAY1`, printable ASCII
+  other than space, at most 32 characters), its size in pixels when the user said Yes, and its
   rectangle on the virtual screen in physical pixels (call protocol version
   12). The worker takes only the listed monitor with that name, size and
   rectangle; none, another size or another rectangle is "not found". An index could name
@@ -274,8 +274,8 @@ Decision:
 * The core lists monitors with the worker's list rule, but it asks only about
   a monitor that the GDI capture takes (`screen_capture_size_ok` in the call
   protocol, which the worker also uses: at least 2x2, at most 7680 on a side
-  and 3840x2160 pixels). A monitor whose device name is not printable ASCII
-  is not listed. The question numbers the offered monitors ("Screen 2 of 2")
+  and 3840x2160 pixels). A monitor whose device name is not printable ASCII,
+  or has a space, is not listed. The question numbers the offered monitors ("Screen 2 of 2")
   and says how many it left out. It also says where each monitor is, so two
   monitors of the same size read apart: "main screen" (the Windows primary
   monitor), or its side of the main screen from the rectangles ("left of the

@@ -565,7 +565,8 @@ impl TryFrom<u8> for FailureCode {
 
 /// A Windows monitor's GDI device name (`MONITORINFOEXW::szDevice`, for
 /// example `\\.\DISPLAY1`): 1 to [`MAX_MONITOR_NAME`] printable ASCII
-/// characters. It names a display output. Windows does not promise that a
+/// characters other than space (`u8::is_ascii_graphic`, 0x21 to 0x7E). It
+/// names a display output. Windows does not promise that a
 /// name stays with one output when the monitors change, so a target also
 /// carries the monitor's [`DesktopRect`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -576,7 +577,7 @@ pub struct MonitorName {
 
 impl MonitorName {
     /// `None` for an empty or too long name, or one with a character that
-    /// is not printable ASCII.
+    /// is not printable ASCII or is a space (only 0x21 to 0x7E are taken).
     pub fn new(name: &[u8]) -> Option<Self> {
         if name.is_empty()
             || name.len() > MAX_MONITOR_NAME
@@ -3358,9 +3359,10 @@ mod tests {
         );
     }
 
-    /// GIVEN monitor names as Windows reports them WHEN read THEN a printable
-    /// ASCII name of 1 to 32 characters is taken up to its NUL, and an empty,
-    /// longer or non-ASCII one is refused.
+    /// GIVEN monitor names as Windows reports them WHEN read THEN a name of
+    /// 1 to 32 printable ASCII characters other than space is taken up to its
+    /// NUL, and an empty, longer or non-ASCII one, or one with a space, is
+    /// refused.
     #[test]
     fn given_windows_device_names_when_read_then_only_printable_ascii_is_taken() {
         let text = r"\\.\DISPLAY3";

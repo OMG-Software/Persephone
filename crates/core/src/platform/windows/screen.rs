@@ -20,7 +20,7 @@
 //! `crates/call-worker/src/screen/wgc.rs` (the call protocol's
 //! `MAX_SCREEN_MONITORS` and `MAX_MONITOR_SIDE`, the size of the current
 //! display mode, in display order). A monitor whose name is not printable
-//! ASCII is not listed. It offers only the monitors that the worker's GDI
+//! ASCII, or has a space, is not listed. It offers only the monitors that the worker's GDI
 //! capture takes (`screen_capture_size_ok`); another one is not asked, and
 //! the question says how many were left out.
 //!
@@ -516,8 +516,9 @@ fn read_monitor(monitor: HMONITOR) -> Option<Seen> {
 }
 
 /// A monitor's device name, its size in pixels (its current display mode,
-/// else its rectangle) and its rectangle. A name that is not printable ASCII,
-/// or a rectangle the call protocol does not carry, is `None`.
+/// else its rectangle) and its rectangle. A name that is not printable ASCII
+/// other than space ([`MonitorName`]), or a rectangle the call protocol does
+/// not carry, is `None`.
 fn screen_of(seen: &Seen) -> Option<Screen> {
     let name = MonitorName::from_wide(&seen.device)?;
     let (left, top, right, bottom) = seen.rect;
@@ -939,8 +940,9 @@ mod tests {
 
     /// GIVEN what Windows reports for a monitor WHEN it becomes a screen THEN
     /// its size is the display mode, else its rectangle, and it keeps its
-    /// rectangle; a name that is not printable ASCII, or a rectangle the
-    /// call protocol does not carry (reversed, too large), is not a screen.
+    /// rectangle; a name that is not printable ASCII or has a space, or a
+    /// rectangle the call protocol does not carry (reversed, too large), is
+    /// not a screen.
     #[test]
     fn given_a_reported_monitor_when_read_then_its_size_is_the_mode_else_the_rectangle() {
         let scaled = seen(r"\\.\DISPLAY1", (0, 0, 1280, 720), (2560, 1440));
