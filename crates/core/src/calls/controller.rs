@@ -2296,7 +2296,7 @@ impl CallController {
         // A device test ends too, with or without a call. The test lock is
         // taken and dropped before the call slot.
         self.stop_device_test();
-        let (room_id, kill) = {
+        let (room_id, kill, freed) = {
             let mut slot = self.inner.slot();
             match std::mem::replace(&mut *slot, Slot::Idle) {
                 Slot::Idle => return,
@@ -2307,17 +2307,25 @@ impl CallController {
                     let kill = plain(&join.kill).clone();
                     let room_id = join.room_id.clone();
                     *slot = Slot::Joining(join);
-                    (room_id, kill)
+                    (room_id, kill, false)
                 }
                 Slot::Running(run) => {
                     run.flags.ended.store(true, Ordering::SeqCst);
                     if let Some(stop) = run.stop {
                         let _ = stop.send(());
                     }
-                    (run.room_id, Some(run.kill))
+                    // The slot is free now, so the task's own `release`
+                    // finds nothing to reset: the details stop here, under
+                    // the slot lock, and never carry over to the next call
+                    // (ADR-0066).
+                    self.inner.stats_on.send_replace(false);
+                    (run.room_id, Some(run.kill), true)
                 }
             }
         };
+        if freed && let Some(listener) = plain(&self.inner.stats_listener).clone() {
+            listener(None);
+        }
         if let Some(kill) = kill {
             kill.kill();
         }
@@ -6972,6 +6980,27 @@ mod tests {
         assert!(!*calls.inner.stats_on.borrow());
         assert_eq!(*plain(&heard), [None]);
         assert!(matches!(calls.set_stats(true), Err(CallError::NotInCall)));
+    }
+
+    /// GIVEN statistics on in a running call WHEN the session ends (lock,
+    /// sign-out) THEN they are off in the same step and the listener drops
+    /// the last reading, although the task's own release then finds nothing,
+    /// so the next call starts with them off.
+    #[test]
+    fn given_statistics_on_when_the_session_ends_then_they_are_off() {
+        let calls = controller(FakeHost::new(true, None));
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let taken = heard.clone();
+        calls.set_stats_listener(Arc::new(move |stats| plain(&taken).push(stats)));
+        run_slot(&calls, 6);
+        assert!(calls.set_stats(true).is_ok());
+        calls.stop_for_session_end();
+        assert!(!*calls.inner.stats_on.borrow());
+        assert_eq!(*plain(&heard), [None]);
+        assert!(!calls.inner.release(6), "the task's release finds nothing");
+        assert_eq!(*plain(&heard), [None], "told once");
+        run_slot(&calls, 7);
+        assert!(!*calls.inner.stats_on.borrow(), "the next call starts off");
     }
 
     /// GIVEN a running call WHEN its task runs THEN a switch of the statistics
