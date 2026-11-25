@@ -32,7 +32,8 @@ use super::sfu::{self, OpenIdToken, SfuError, SfuGrant};
 use super::status::can_send_member_state;
 use super::video::{Notifier, Picture, VideoStore};
 use super::worker::{
-    CallHost, CallWorkerLink, StartError, WorkerAudio, WorkerExit, WorkerProcess, exit_is_crash,
+    CallHost, CallWorkerLink, EVENT_QUEUE, StartError, WorkerAudio, WorkerExit, WorkerProcess,
+    exit_is_crash,
 };
 use super::{MAX_CALL_MEMBERS, device_test, keys::FrameKey};
 use crate::session::Admission;
@@ -3464,6 +3465,24 @@ impl Call {
     /// not change, and the page asks for pictures of that stream only. So no
     /// picture of a new stream shows under the old participant, even on a
     /// page whose status is older.
+    /// Called when the alone deadline fires. A join may wait unread then:
+    /// `select!` picks among ready arms at random, and `members_changed` can
+    /// hold the loop past the deadline. So the worker's waiting messages are
+    /// applied first, at most one queue's worth, and the call ends only if
+    /// the deadline still holds after them.
+    fn alone_still_due(&mut self, inner: &Inner) -> Result<bool, EndReason> {
+        for _ in 0..EVENT_QUEUE {
+            match self.link.events.try_recv() {
+                Ok(event) => self.worker_event(inner, &event)?,
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    return Err(EndReason::WorkerStopped);
+                }
+            }
+        }
+        Ok(self.alone.is_due(time::Instant::now()))
+    }
+
     fn worker_event(&mut self, inner: &Inner, event: &FromWorker) -> Result<(), EndReason> {
         self.alone.observe(event, time::Instant::now());
         if let FromWorker::Diagnostic {
@@ -4075,7 +4094,11 @@ impl Call {
                     self.key_received(inner, candidate, &mut parked)?;
                 }
                 Some(reason) = self.failed.recv() => return Err(reason),
-                () = self.alone.due() => return Err(EndReason::Alone),
+                () = self.alone.due() => {
+                    if self.alone_still_due(inner)? {
+                        return Err(EndReason::Alone);
+                    }
+                }
                 () = async {
                     match due {
                         Some(at) => time::sleep_until(at.into()).await,
@@ -6526,6 +6549,52 @@ mod tests {
         assert_eq!(*plain(&levels), [0, 55, 100].map(SoundUpdate::Own));
         assert_eq!(call.view.state(), state);
         assert_eq!(changes.load(Ordering::SeqCst), before);
+    }
+
+    /// GIVEN a call alone for 30 seconds with a join that waits unread
+    /// WHEN the alone deadline fires THEN the join is applied first and the
+    /// call stays; with nothing waiting after another 30 seconds alone it
+    /// ends; and a closed worker channel is the worker's stop.
+    #[tokio::test(start_paused = true)]
+    async fn given_a_join_waiting_at_the_alone_deadline_then_the_call_stays() {
+        let mut fixture = test_call(
+            no_admission(),
+            Arc::new(Flags::default()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let inner = controller(FakeHost::new(true, None)).inner.clone();
+        let bob = |joined: bool| {
+            let identity = "@b:example.org:B".to_owned();
+            if joined {
+                FromWorker::ParticipantJoined {
+                    connection: 0,
+                    identity,
+                }
+            } else {
+                FromWorker::ParticipantLeft {
+                    connection: 0,
+                    identity,
+                }
+            }
+        };
+        fixture
+            .call
+            .worker_event(&inner, &FromWorker::Connected)
+            .unwrap();
+        time::advance(super::super::alone::ALONE_LIMIT).await;
+        fixture._events.try_send(bob(true)).unwrap();
+        assert_eq!(fixture.call.alone_still_due(&inner), Ok(false));
+        assert_eq!(fixture.call.alone.deadline(), None);
+
+        fixture.call.worker_event(&inner, &bob(false)).unwrap();
+        time::advance(super::super::alone::ALONE_LIMIT).await;
+        assert_eq!(fixture.call.alone_still_due(&inner), Ok(true));
+
+        drop(fixture._events);
+        assert_eq!(
+            fixture.call.alone_still_due(&inner),
+            Err(EndReason::WorkerStopped)
+        );
     }
 
     /// GIVEN the worker already reported the camera `On` while the own tile

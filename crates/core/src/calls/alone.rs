@@ -78,6 +78,11 @@ impl Alone {
         self.since.map(|since| since + ALONE_LIMIT)
     }
 
+    /// Whether the deadline has passed at `now`.
+    pub fn is_due(&self, now: Instant) -> bool {
+        self.deadline().is_some_and(|at| at <= now)
+    }
+
     /// Completes at the deadline. Never completes while someone else is
     /// present or the worker is not connected. Cancel safe.
     pub async fn due(&self) {

@@ -123,7 +123,10 @@ session, and every join passes through it.
   cleared when anyone joins on any connection, and set again to 30 seconds
   from the moment the last one leaves.
 * The call task waits for the deadline beside its other events. When it
-  passes, the task ends with `EndReason::Alone`, which is the path of a
+  passes, the task first applies the worker's messages that wait unread (at
+  most one queue's worth), because a join can arrive at the same moment or
+  while another event holds the task. Only if the deadline still holds after
+  them does the task end with `EndReason::Alone`, which is the path of a
   normal end: the worker gets `Leave`, the membership is removed (or the
   delayed event is sent), and the handlers go. The page sees the call end
   with the code `alone` and the text "You were the only person in the call
