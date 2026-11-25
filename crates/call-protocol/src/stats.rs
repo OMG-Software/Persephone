@@ -267,11 +267,6 @@ impl Reader<'_> {
         Ok(Some(value))
     }
 
-    fn u16(&mut self) -> Result<u16, DecodeError> {
-        let bytes = self.take(2)?;
-        Ok(u16::from_be_bytes([bytes[0], bytes[1]]))
-    }
-
     fn millis(&mut self) -> Result<u16, DecodeError> {
         let value = self.u16()?;
         if value > MAX_STATS_MS {
