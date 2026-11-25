@@ -276,8 +276,14 @@ Decision:
   protocol, which the worker also uses: at least 2x2, at most 7680 on a side
   and 3840x2160 pixels). A monitor whose device name is not printable ASCII
   is not listed. The question numbers the offered monitors ("Screen 2 of 2")
-  and says how many it left out. With none that fits, no window opens and the
-  share is "unavailable".
+  and says how many it left out. It also says where each monitor is, so two
+  monitors of the same size read apart: "main screen" (the Windows primary
+  monitor), or its side of the main screen from the rectangles ("left of the
+  main screen", "above and right of the main screen"), and, when two or more
+  offered monitors are on one side, their order there ("2nd from the left",
+  "1st from the top"). A change of the main monitor while the question is
+  open voids a Yes. With none that fits, no window opens and the share is
+  "unavailable".
 * The question says that the shared screen can show Persephone's messages,
   as on macOS, because the display affinity of ADR-0045 was not measured
   against a GDI copy (see below).

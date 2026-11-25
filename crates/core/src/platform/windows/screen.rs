@@ -10,10 +10,13 @@
 //! Windows can give it to another output when the monitors change, so the
 //! core reads every monitor's name, rectangle and mode before the first
 //! question and again after a Share: any change voids the answer, and the
-//! share stays off. The worker takes only the monitor with that name and
-//! size, and checks its place again before and after each copy, so a change
-//! after the answer gives "not found" or ends the share, never another
-//! screen. This module lists monitors with the same rules as
+//! share stays off. The worker takes only the monitor with that name, size
+//! and rectangle, and checks its place again before and after each copy, so
+//! a change after the answer gives "not found", ends the share, or copies
+//! only the approved rectangle. The question says where each monitor is: the
+//! main screen, or its side of the main screen, with its order when two or
+//! more offered monitors are on one side, so monitors of the same size read
+//! apart. This module lists monitors with the same rules as
 //! `crates/call-worker/src/screen/wgc.rs` (the call protocol's
 //! `MAX_SCREEN_MONITORS` and `MAX_MONITOR_SIDE`, the size of the current
 //! display mode, in display order). A monitor whose name is not printable
@@ -47,8 +50,8 @@ use windows_sys::Win32::UI::HiDpi::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     IDNO, IDYES, KillTimer, MB_DEFBUTTON2, MB_ICONWARNING, MB_SETFOREGROUND, MB_TOPMOST, MB_YESNO,
-    MB_YESNOCANCEL, MESSAGEBOX_RESULT, MSG, MessageBoxW, PM_REMOVE, PeekMessageW, PostQuitMessage,
-    SetTimer, WM_QUIT,
+    MB_YESNOCANCEL, MESSAGEBOX_RESULT, MONITORINFOF_PRIMARY, MSG, MessageBoxW, PM_REMOVE,
+    PeekMessageW, PostQuitMessage, SetTimer, WM_QUIT,
 };
 
 use crate::calls::screen::{ScreenGrant, ScreenRefusal, ScreenSource};
@@ -59,13 +62,15 @@ const MAX_MONITORS: usize = MAX_SCREEN_MONITORS as usize;
 const CANCEL_CHECK_MS: u32 = 100;
 
 /// One monitor, as the user sees it, with the device name and the rectangle
-/// (physical pixels) the worker finds it by.
+/// (physical pixels) the worker finds it by. `main` is Windows' main
+/// (primary) monitor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Screen {
     pub name: MonitorName,
     pub width: u32,
     pub height: u32,
     pub rect: DesktopRect,
+    pub main: bool,
 }
 
 /// The user's answer to one screen.
@@ -105,21 +110,29 @@ impl ScreenSource for MonitorScreen {
 }
 
 /// The question for the monitor at `place` (from 0) among the `count`
-/// offered ones. The number the user reads counts the offered monitors.
+/// offered ones. The number the user reads counts the offered monitors, and
+/// `whereabouts` (from [`whereabouts`]) says where the monitor is.
 /// `left_out` monitors are listed but have a size that cannot be shared.
-pub fn prompt_text(place: usize, count: usize, screen: Screen, left_out: usize) -> String {
+pub fn prompt_text(
+    place: usize,
+    count: usize,
+    screen: Screen,
+    whereabouts: Option<&str>,
+    left_out: usize,
+) -> String {
     let name = place + 1;
+    let size = match whereabouts {
+        Some(words) => format!("{}x{}, {words}", screen.width, screen.height),
+        None => format!("{}x{}", screen.width, screen.height),
+    };
     let (what, buttons) = if count > 1 {
         (
-            format!(
-                "Share Screen {name} of {count} ({}x{})?",
-                screen.width, screen.height
-            ),
+            format!("Share Screen {name} of {count} ({size})?"),
             "Yes shares this screen. No shows the next screen. Cancel stops.",
         )
     } else {
         (
-            format!("Share Screen {name} ({}x{})?", screen.width, screen.height),
+            format!("Share Screen {name} ({size})?"),
             "Yes shares this screen. No cancels.",
         )
     };
@@ -137,11 +150,121 @@ pub fn prompt_text(place: usize, count: usize, screen: Screen, left_out: usize) 
     )
 }
 
+/// Where `screen` is: the main screen, or its side of `main` (from the
+/// rectangles; a screen beside the main one on both axes is "above and
+/// left" and so on). `None` when the main screen is not listed, or for a
+/// rectangle that overlaps the main one (Windows does not place monitors so).
+fn side(screen: Screen, main: Option<Screen>) -> Option<&'static str> {
+    if screen.main {
+        return Some("main screen");
+    }
+    let (left, top, right, bottom) = screen.rect.edges();
+    let (main_left, main_top, main_right, main_bottom) = main?.rect.edges();
+    let across = if right <= main_left {
+        -1
+    } else if left >= main_right {
+        1
+    } else {
+        0
+    };
+    let down = if bottom <= main_top {
+        -1
+    } else if top >= main_bottom {
+        1
+    } else {
+        0
+    };
+    match (across, down) {
+        (-1, 0) => Some("left of the main screen"),
+        (1, 0) => Some("right of the main screen"),
+        (0, -1) => Some("above the main screen"),
+        (0, 1) => Some("below the main screen"),
+        (-1, -1) => Some("above and left of the main screen"),
+        (1, -1) => Some("above and right of the main screen"),
+        (-1, 1) => Some("below and left of the main screen"),
+        (1, 1) => Some("below and right of the main screen"),
+        _ => None,
+    }
+}
+
+/// `n` as an English ordinal: 1st, 2nd, 3rd, 4th, 11th, 21st.
+fn ordinal(n: usize) -> String {
+    let suffix = match (n % 10, n % 100) {
+        (_, 11..=13) => "th",
+        (1, _) => "st",
+        (2, _) => "nd",
+        (3, _) => "rd",
+        _ => "th",
+    };
+    format!("{n}{suffix}")
+}
+
+/// Twice the centre of a screen's rectangle (no rounding).
+fn centre(screen: &Screen) -> (i64, i64) {
+    let (left, top, right, bottom) = screen.rect.edges();
+    (
+        i64::from(left) + i64::from(right),
+        i64::from(top) + i64::from(bottom),
+    )
+}
+
+/// `screen`'s order in `group` along the axis on which the group's centres
+/// are farther apart: "2nd from the left" or "1st from the top".
+fn order(group: &[Screen], screen: Screen) -> String {
+    let centres: Vec<(i64, i64)> = group.iter().map(centre).collect();
+    let spread = |axis: fn(&(i64, i64)) -> i64| {
+        let max = centres.iter().map(axis).max().unwrap_or(0);
+        let min = centres.iter().map(axis).min().unwrap_or(0);
+        max - min
+    };
+    let across = spread(|c| c.0) >= spread(|c| c.1);
+    let (x, y) = centre(&screen);
+    let before = centres
+        .iter()
+        .filter(|&&(cx, cy)| {
+            if across {
+                (cx, cy) < (x, y)
+            } else {
+                (cy, cx) < (y, x)
+            }
+        })
+        .count();
+    let from = if across { "left" } else { "top" };
+    format!("{} from the {from}", ordinal(before + 1))
+}
+
+/// What the question says about where each `offered` screen is (same
+/// order): its [`side`], and when two or more offered screens have the same
+/// side, also its [`order`] among them, so screens of the same size read
+/// apart. `main` is the main screen when the list has it.
+pub fn whereabouts(offered: &[Screen], main: Option<Screen>) -> Vec<Option<String>> {
+    let sides: Vec<Option<&'static str>> =
+        offered.iter().map(|screen| side(*screen, main)).collect();
+    offered
+        .iter()
+        .zip(&sides)
+        .map(|(screen, own)| {
+            let own = (*own)?;
+            let group: Vec<Screen> = offered
+                .iter()
+                .zip(&sides)
+                .filter(|(_, other)| **other == Some(own))
+                .map(|(other, _)| *other)
+                .collect();
+            if group.len() < 2 {
+                Some(own.to_owned())
+            } else {
+                Some(format!("{own}, {}", order(&group, *screen)))
+            }
+        })
+        .collect()
+}
+
 /// Shows each screen that can be shared in turn until the user shares one or
 /// stops. `screens` is the whole list in the worker's order; the target
-/// names the chosen screen by its device name and size. `ask` shows one
-/// window and returns the answer. A cancel flag set while a window was open
-/// ends the pick even after "Share".
+/// names the chosen screen by its device name, size and rectangle. `ask`
+/// shows one window and returns the answer. A cancel flag set while a window
+/// was open ends the pick even after "Share".
 pub fn pick(
     screens: &[Screen],
     cancel: &AtomicBool,
@@ -156,10 +279,12 @@ pub fn pick(
         return Err(ScreenRefusal::Unavailable);
     }
     let left_out = screens.len() - offered.len();
+    let main = screens.iter().copied().find(|screen| screen.main);
+    let places = whereabouts(&offered, main);
     let mut at = 0;
     loop {
         let screen = offered[at];
-        let text = prompt_text(at, offered.len(), screen, left_out);
+        let text = prompt_text(at, offered.len(), screen, places[at].as_deref(), left_out);
         let answer = ask(&text, offered.len() > 1);
         if cancel.load(Ordering::SeqCst) {
             return Err(ScreenRefusal::Cancelled);
@@ -302,13 +427,15 @@ fn ask_with_timer(
 const MAX_SEEN: usize = 64;
 
 /// One monitor as Windows reports it: its device name (zeros after the
-/// name), its rectangle on the virtual screen, and its current display mode
-/// (0x0 when it has none).
+/// name), its rectangle on the virtual screen, its current display mode
+/// (0x0 when it has none), and whether it is the main monitor. A change of
+/// the main monitor also voids a Share, because the question named it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct Seen {
     device: [u16; 32],
     rect: (i32, i32, i32, i32),
     mode: (u32, u32),
+    main: bool,
 }
 
 /// Every monitor as Windows reports it, also those that are not offered,
@@ -383,6 +510,7 @@ fn read_monitor(monitor: HMONITOR) -> Option<Seen> {
             device,
             rect: (rect.left, rect.top, rect.right, rect.bottom),
             mode,
+            main: info.monitorInfo.dwFlags & MONITORINFOF_PRIMARY != 0,
         })
     }
 }
@@ -409,6 +537,7 @@ fn screen_of(seen: &Seen) -> Option<Screen> {
         width,
         height,
         rect,
+        main: seen.main,
     })
 }
 
@@ -452,6 +581,16 @@ mod tests {
             width,
             height,
             rect: DesktopRect::new(left, top, right, bottom).expect("a rectangle"),
+            main: false,
+        }
+    }
+
+    /// The main screen `number`, of this size, at the origin.
+    fn main_screen(number: u8, width: u32, height: u32) -> Screen {
+        let (right, bottom) = (width as i32, height as i32);
+        Screen {
+            main: true,
+            ..placed(number, width, height, (0, 0, right, bottom))
         }
     }
 
@@ -547,18 +686,153 @@ mod tests {
     /// the number of screens.
     #[test]
     fn given_the_prompt_then_it_names_the_screen_the_audience_and_the_buttons() {
-        let one = prompt_text(0, 1, qhd(), 0);
-        assert!(one.contains("Screen 1 (2560x1440)"));
+        let one = prompt_text(0, 1, qhd(), Some("main screen"), 0);
+        assert!(one.contains("Screen 1 (2560x1440, main screen)?"));
         assert!(one.contains("Everyone in the call"));
         assert!(one.contains("no border"));
         assert!(one.contains("No cancels"));
         assert!(one.contains("Persephone's messages"));
         assert!(!one.contains("not shown"));
-        let two = prompt_text(1, 2, hd(), 1);
-        assert!(two.contains("Screen 2 of 2 (1920x1080)"));
+        let two = prompt_text(1, 2, hd(), Some("left of the main screen"), 1);
+        assert!(two.contains("Screen 2 of 2 (1920x1080, left of the main screen)?"));
         assert!(two.contains("No shows the next screen"));
         assert!(two.contains("One screen cannot be shared at its size"));
-        assert!(prompt_text(0, 1, hd(), 2).contains("2 screens cannot be shared"));
+        let unplaced = prompt_text(0, 1, hd(), None, 2);
+        assert!(unplaced.contains("Screen 1 (1920x1080)?"));
+        assert!(unplaced.contains("2 screens cannot be shared"));
+    }
+
+    /// GIVEN screens around the main screen WHEN the question says where
+    /// each is THEN the main screen is named, each other screen gets its side
+    /// of the main screen (both sides when it is beside it on both axes), and
+    /// no place is said when the main screen is not listed.
+    #[test]
+    fn given_screens_around_the_main_one_then_each_question_says_its_side() {
+        let main = main_screen(1, 1920, 1080);
+        let around = [
+            main,
+            placed(2, 1920, 1080, (-1920, 0, 0, 1080)),
+            placed(3, 1920, 1080, (1920, 0, 3840, 1080)),
+            placed(4, 1920, 1080, (0, -1080, 1920, 0)),
+            placed(5, 1920, 1080, (0, 1080, 1920, 2160)),
+            placed(6, 1920, 1080, (1920, -1080, 3840, 0)),
+            placed(7, 1920, 1080, (-1920, 1080, 0, 2160)),
+        ];
+        let said = whereabouts(&around, Some(main));
+        let said: Vec<&str> = said
+            .iter()
+            .map(|words| words.as_deref().expect("a place"))
+            .collect();
+        assert_eq!(
+            said,
+            [
+                "main screen",
+                "left of the main screen",
+                "right of the main screen",
+                "above the main screen",
+                "below the main screen",
+                "above and right of the main screen",
+                "below and left of the main screen",
+            ]
+        );
+        // A taller screen beside the main one is still beside it.
+        let tall = placed(2, 1080, 1920, (1920, -400, 3000, 1520));
+        assert_eq!(
+            whereabouts(&[tall], Some(main)),
+            [Some("right of the main screen".to_owned())]
+        );
+        let lone = placed(2, 1920, 1080, (1920, 0, 3840, 1080));
+        assert_eq!(whereabouts(&[lone], None), [None::<String>]);
+        assert_eq!(
+            whereabouts(&[main, lone], None),
+            [Some("main screen".to_owned()), None]
+        );
+    }
+
+    /// GIVEN two or more screens on the same side of the main screen WHEN
+    /// the question says where each is THEN each also gets its order among
+    /// them: from the left for screens in a row, from the top for screens in
+    /// a column, so two screens of the same size read apart.
+    #[test]
+    fn given_screens_on_one_side_when_asked_then_their_order_tells_them_apart() {
+        let main = main_screen(1, 2560, 1440);
+        let row = [
+            main,
+            placed(2, 1920, 1080, (4480, 0, 6400, 1080)),
+            placed(3, 1920, 1080, (2560, 0, 4480, 1080)),
+        ];
+        assert_eq!(
+            whereabouts(&row, Some(main)),
+            [
+                Some("main screen".to_owned()),
+                Some("right of the main screen, 2nd from the left".to_owned()),
+                Some("right of the main screen, 1st from the left".to_owned()),
+            ]
+        );
+        let column = [
+            placed(2, 1920, 1080, (2560, 540, 4480, 1620)),
+            placed(3, 1920, 1080, (2560, -540, 4480, 540)),
+        ];
+        assert_eq!(
+            whereabouts(&column, Some(main)),
+            [
+                Some("right of the main screen, 2nd from the top".to_owned()),
+                Some("right of the main screen, 1st from the top".to_owned()),
+            ]
+        );
+        // Screens on other sides are not numbered.
+        let apart = [
+            placed(2, 1920, 1080, (-1920, 0, 0, 1080)),
+            placed(3, 1920, 1080, (2560, 0, 4480, 1080)),
+        ];
+        assert_eq!(
+            whereabouts(&apart, Some(main)),
+            [
+                Some("left of the main screen".to_owned()),
+                Some("right of the main screen".to_owned()),
+            ]
+        );
+        assert_eq!(
+            [1, 2, 3, 4, 11, 12, 13, 21, 22, 23].map(ordinal),
+            [
+                "1st", "2nd", "3rd", "4th", "11th", "12th", "13th", "21st", "22nd", "23rd"
+            ]
+        );
+    }
+
+    /// GIVEN two screens of the same size, the main one second in the list
+    /// WHEN the user goes through the questions THEN each says where its
+    /// screen is, and the main screen is found in the whole list, also when
+    /// it is too large to be offered.
+    #[test]
+    fn given_two_screens_of_one_size_when_asked_then_the_questions_differ() {
+        let main = main_screen(2, 1920, 1080);
+        let left = placed(1, 1920, 1080, (-1920, 0, 0, 1080));
+        let cancel = AtomicBool::new(false);
+        let asked = RefCell::new(Vec::new());
+        let mut answers = vec![Answer::Next, Answer::Cancel].into_iter();
+        let chosen = pick(&[left, main], &cancel, |text, _| {
+            asked.borrow_mut().push(text.to_owned());
+            answers.next().expect("an answer")
+        });
+        assert_eq!(chosen, Err(ScreenRefusal::Cancelled));
+        let asked = asked.borrow();
+        assert!(asked[0].contains("Screen 1 of 2 (1920x1080, left of the main screen)?"));
+        assert!(asked[1].contains("Screen 2 of 2 (1920x1080, main screen)?"));
+        let big_main = main_screen(2, 7680, 4320);
+        let right = placed(1, 1920, 1080, (7680, 0, 9600, 1080));
+        let asked = RefCell::new(String::new());
+        let chosen = pick(&[right, big_main], &cancel, |text, several| {
+            assert!(!several);
+            *asked.borrow_mut() = text.to_owned();
+            Answer::Cancel
+        });
+        assert_eq!(chosen, Err(ScreenRefusal::Cancelled));
+        assert!(
+            asked
+                .borrow()
+                .contains("Screen 1 (1920x1080, right of the main screen)?")
+        );
     }
 
     /// GIVEN a monitor too large to capture between two others WHEN the user
@@ -659,6 +933,7 @@ mod tests {
             device: name,
             rect,
             mode,
+            main: false,
         }
     }
 
