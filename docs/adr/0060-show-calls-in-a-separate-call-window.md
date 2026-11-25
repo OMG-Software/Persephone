@@ -45,8 +45,8 @@ commands.
   uses the main window's navigation rule and refuses new windows.
 * The capability `call` lets that window call `watch_session`,
   `call_status`, `call_video_frame`, `call_leave`, `call_mute`,
-  `call_deafen`, `call_volume`, `call_camera`, `call_screen` and
-  `close_call_window`, and nothing else. It cannot read rooms, members,
+  `call_deafen`, `call_volume`, `call_camera`, `call_screen`,
+  `close_call_window` and `call_window_ready`, and nothing else. It cannot read rooms, members,
   messages, account settings or files, start a call or start a device test.
 * The main window opens it with `open_call_window` when a call starts to
   join, once for each call. The call bar has a "Call window" button that
@@ -55,8 +55,9 @@ commands.
 * On 25 November 2026 the owner asked to show the call's controls, video,
   volume, level meter and participants in the call window only. While the
   call window opens, the main window's call bar shows only the phone icon,
-  the room, the phase, the "Call window" button and, after a declined ring
-  (ADR-0052), the "Declined" note, which the call window does not show. It
+  the room, the phase, the "Call window" button, a "Leave" button and,
+  after a declined ring (ADR-0052), the "Declined" note, which the call
+  window does not show. It
   also shows the camera, screen share and device change notes, so a camera
   that did not start, a running or refused screen share and a failed
   microphone or speaker are seen while the call window is closed. The
@@ -67,6 +68,16 @@ commands.
   reason and "Dismiss". This replaces the driver above for an open call
   window: the bar keeps the controls only when the call window cannot open,
   and its "Call window" button reopens a closed call window.
+* Also on 25 November 2026 the owner asked for both the "Leave" button in
+  the short bar and a ready signal. A shown window does not prove that its
+  page works, so after its first `call_status` read the call page calls
+  `call_window_ready`. The host accepts it from the `call` window only, and
+  forgets it when a new call window is made or the call page loads again.
+  `open_call_window` returns only when the page is ready. When the page
+  does not say so within 10 seconds, the open fails with `unavailable`, and
+  the main window shows the call's controls. At most four opens wait at
+  once; another one fails at once. "Leave" in the short bar covers the
+  wait, and a call page that stops working later.
 * The host keeps each window's session, sound level and level channels under
   the window's label. Room subscriptions belong to the main window only. A
   call window that closes or reloads drops only its own channels.
@@ -110,9 +121,6 @@ commands.
 * A second web view uses more memory during a call.
 * Names and the chosen theme are not shown in the call window.
 * The page code for the grid repeats some of `CallVideo.svelte`.
-* Known limitation (25 November 2026): the main window counts the call
-  window as open when the host shows it, not when its page works. If the
-  call page fails to start after the window shows, neither window offers
-  mute or leave for that call. A ready signal from the call page, or a
-  Leave button in the short bar, would close this gap; the owner has not
-  chosen one yet.
+* A call page that stops working after it said it is ready leaves the main
+  window with "Leave" only, not mute, until the call window is opened again
+  and fails its ready wait.

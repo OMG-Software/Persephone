@@ -432,9 +432,10 @@ export function minimiseToTray(): Promise<void> {
 }
 
 /**
- * Opens the call window (ADR-0060), or brings it to the front. It shows the
- * call's video grid, participants and controls. The main window keeps a
- * short call bar, with the full controls only when this fails.
+ * Opens the call window (ADR-0060), or brings it to the front, and resolves
+ * when its page says it is ready. It shows the call's video grid,
+ * participants and controls. The main window keeps a short call bar, with
+ * the full controls only when this fails.
  */
 export function openCallWindow(): Promise<void> {
   return invoke<void>('open_call_window');
@@ -443,6 +444,14 @@ export function openCallWindow(): Promise<void> {
 /** Closes the call window, if it is open. The call goes on. */
 export function closeCallWindow(): Promise<void> {
   return invoke<void>('close_call_window');
+}
+
+/**
+ * The call page says that it reaches the core and shows the call
+ * (ADR-0060). Until it does, the main window's open waits, then fails.
+ */
+export function callWindowReady(): Promise<void> {
+  return invoke<void>('call_window_ready');
 }
 
 /** Locks the session; `locking` means work is still finishing (call again). */

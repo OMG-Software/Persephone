@@ -246,7 +246,7 @@ test('GIVEN a call whose ring was declined WHEN the call bar renders THEN it say
   assert.doesNotMatch(plain, /Declined/);
 });
 
-test('GIVEN a call window that opens WHEN the call bar renders THEN it shows the room, the phase and the call window button only', async () => {
+test('GIVEN a call window that opens WHEN the call bar renders THEN it shows the room, the phase, the call window button and Leave only', async () => {
   const { default: CallBar } = await vite.ssrLoadModule('/src/CallBar.svelte');
   const status = {
     phase: 'active', roomId: '!r:s', muted: true, deafened: false, volume: 100, ended: null, joinError: null,
@@ -262,7 +262,9 @@ test('GIVEN a call window that opens WHEN the call bar renders THEN it shows the
   // The camera and screen share notes still show: the call window may be closed.
   assert.match(short, /class="call-camera-note note"[^>]*>The chosen camera is not connected</);
   assert.match(short, /class="call-screen-note note"[^>]*>You are sharing your screen</);
-  const controls = /call-mute|call-deafen|class="secondary call-camera"|class="secondary call-screen"|call-leave|type="range"|role="meter"|call-people|@a:s/;
+  // Leave stays, in case the call page stops working.
+  assert.match(short, /class="secondary call-leave"[^>]*>Leave</);
+  const controls = /call-mute|call-deafen|class="secondary call-camera"|class="secondary call-screen"|type="range"|role="meter"|call-people|@a:s/;
   assert.doesNotMatch(short, controls);
   assert.doesNotMatch(short, /call-device-note/);
   // A device change still shows, and the bar stays short.

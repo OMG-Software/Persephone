@@ -775,9 +775,10 @@
   // once per call: closing it during the call keeps it closed until the call
   // bar's "Call window" button.
   let callWindowFor = false;
-  // The call window could not open for this call. The main window then shows
-  // the call's controls and video itself; otherwise only the call window
-  // does. A later open that works hides them again.
+  // The call window could not open for this call, or its page did not say
+  // in time that it is ready. The main window then shows the call's controls
+  // and video itself; otherwise only the call window does, and the short bar
+  // keeps Leave. A later open that works hides them again.
   let callWindowFailed = $state(false);
   // Which open replies count is decided in callWindow.ts.
   const callWindowOpener = new CallWindowOpener(

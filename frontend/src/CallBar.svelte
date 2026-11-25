@@ -35,12 +35,13 @@
   // the page so that a change in it is announced. Speaking changes are not
   // announced: each participant's mark is read in place only.
   //
-  // The call window holds the call's controls (ADR-0060). While it can open,
-  // the bar shows only the room, the phase, a "Call window" button, the
+  // The call window holds the call's controls (ADR-0060). Unless it failed
+  // to open or its page did not say it is ready, the bar shows only the room, the phase, a "Call window" button, a "Leave"
+  // button, which works even when the call page stops working, the
   // "Declined" note, which the call window does not show, and the camera,
   // screen share and device change notes, which must be seen while the call
-  // window is closed. When it could not open (`full`), the bar shows every
-  // control, so the call can still be muted or left here.
+  // window is closed. When it failed (`full`), the bar shows every control,
+  // so the call can still be muted or left here.
   let {
     status,
     dismissed,
@@ -106,6 +107,10 @@
   </button>
 {/snippet}
 
+{#snippet leaveButton()}
+  <button type="button" class="secondary call-leave" onclick={onleave}>Leave</button>
+{/snippet}
+
 <div class="visually-hidden" aria-live="polite" aria-atomic="true">
   {callAnnouncement(status, dismissed)}
 </div>
@@ -120,6 +125,7 @@
           <button type="button" class="secondary call-dismiss" onclick={ondismiss}>Dismiss</button>
         {:else if !full}
           {@render callWindowButton()}
+          {@render leaveButton()}
         {:else}
           <button
             type="button"
@@ -163,7 +169,7 @@
             {screen.label}
           </button>
           {@render callWindowButton()}
-          <button type="button" class="secondary call-leave" onclick={onleave}>Leave</button>
+          {@render leaveButton()}
         {/if}
       </span>
     </div>
