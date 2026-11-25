@@ -44,9 +44,9 @@ pub mod launcher;
 use core_link::{Band, CoreError, CoreLink, Video};
 use persephone_contracts::{
     AccountChange, AccountSettings, AccountStatus, AppStatus, CallDeviceTestKind,
-    CallDeviceTestStatus, CallDevices, CallParticipantLevel, CallReadiness, CallRings, CallStatus,
-    ContactStatus, ConversationStart, DeviceList, DiagnosticsStatus, DisplayName, HomeserverFound,
-    ImagePick, ImageView, InviteList, JoinedRoom, NewSessions, NotificationLevel,
+    CallDeviceTestStatus, CallDevices, CallParticipantLevel, CallReadiness, CallRings, CallStats,
+    CallStatus, ContactStatus, ConversationStart, DeviceList, DiagnosticsStatus, DisplayName,
+    HomeserverFound, ImagePick, ImageView, InviteList, JoinedRoom, NewSessions, NotificationLevel,
     NotificationSettings, PendingMessage, ProfileList, ProxySetting, PublicRoomPage, RoomActivity,
     RoomChange, RoomCreation, RoomIdentityChanges, RoomInvite, RoomList, RoomMembers, RoomPicture,
     RoomReaders, RoomServers, RoomSettings, SecurityStatus, StoreState, ThreePidList,
@@ -390,6 +390,10 @@ pub struct Subscriptions {
     sound_level: Mutex<HashMap<String, Channel<u8>>>,
     /// Each page's channel for the other devices' levels (ADR-0059).
     levels: Mutex<HashMap<String, Channel<Vec<CallParticipantLevel>>>>,
+    /// Each page's channel for the call statistics (ADR-0066). A window has
+    /// one only while its page has the technical details open, so a reading
+    /// goes only to a page that asked for it.
+    stats: Mutex<HashMap<String, Channel<CallStats>>>,
     toasts: Mutex<Toasts>,
     capture: Arc<capture::CaptureState>,
 }
@@ -417,6 +421,18 @@ impl Subscriptions {
         self.levels
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn stats(&self) -> MutexGuard<'_, HashMap<String, Channel<CallStats>>> {
+        self.stats
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Drops the statistics channel of the window `label`. True when it had
+    /// one, so the core is told to stop reading.
+    pub fn forget_stats(&self, label: &str) -> bool {
+        self.stats().remove(label).is_some()
     }
 
     /// Tells every page's session channel about `what`.
@@ -497,6 +513,16 @@ impl Subscriptions {
                 }
                 for channel in self.levels().values() {
                     let _ = channel.send(levels.clone());
+                }
+            }
+            // Bounded numbers and IDs only; a reading outside its limits is
+            // dropped whole. Only a window that asked for it has a channel.
+            Event::CallStats { stats } => {
+                if !stats.within_limits() {
+                    return;
+                }
+                for channel in self.stats().values() {
+                    let _ = channel.send(stats.clone());
                 }
             }
             Event::RingsChanged {} => self.tell_sessions("rings"),
@@ -585,6 +611,32 @@ fn watch_session<R: Runtime>(
         .sound_level()
         .insert(label.clone(), on_sound_level);
     subscriptions.levels().insert(label, on_levels);
+}
+
+/// Turns the call's technical details on or off for the calling window
+/// (ADR-0066). Only the call window may call it. The channel is kept only
+/// while they are on, after the core accepted. The core reads the numbers
+/// only while they are on, and the host drops a reading outside its limits.
+#[tauri::command]
+async fn call_stats<R: Runtime>(
+    webview: Webview<R>,
+    core: State<'_, CoreLink>,
+    subscriptions: State<'_, Arc<Subscriptions>>,
+    on: bool,
+    on_stats: Channel<CallStats>,
+) -> Result<(), String> {
+    let label = webview.label().to_owned();
+    if on {
+        // Before the core starts, so the first reading is not lost.
+        subscriptions.stats().insert(label.clone(), on_stats);
+    } else {
+        subscriptions.forget_stats(&label);
+    }
+    let result = relay::<()>(core.inner(), Call::CallStats { on }).await;
+    if on && result.is_err() {
+        subscriptions.forget_stats(&label);
+    }
+    result
 }
 
 /// Locks the core's session. Replies with the resulting state; `locking`
@@ -2105,13 +2157,19 @@ fn restore_from_tray<R: Runtime>(app: &AppHandle<R>) {
 /// would otherwise stay taken. Rooms belong to the main window only.
 fn reset_subscriptions(core: &CoreLink, subscriptions: &Subscriptions, label: &str) {
     let rooms = subscriptions.forget_window(label);
-    if rooms.is_empty() {
+    // A window that goes or reloads stops the call statistics it asked for
+    // (ADR-0066).
+    let stats = subscriptions.forget_stats(label);
+    if rooms.is_empty() && !stats {
         return;
     }
     let core = core.clone();
     tauri::async_runtime::spawn_blocking(move || {
         for room_id in rooms {
             let _ = core.call(Call::Unsubscribe { room_id });
+        }
+        if stats {
+            let _ = core.call(Call::CallStats { on: false });
         }
     });
 }
@@ -2187,6 +2245,7 @@ pub fn configure<R: Runtime>(
             call_microphone,
             call_camera,
             call_screen,
+            call_stats,
             call_video_frame,
             call_status,
             call_rings,

@@ -31,6 +31,8 @@ struct FakeCore {
     timeline_events: Mutex<Option<(String, Vec<String>)>>,
     // What the stored account settings say about capture protection.
     capture_protection: AtomicBool,
+    // The call statistics switches that reached the core, in order.
+    stats_switches: Mutex<Vec<bool>>,
 }
 
 impl FakeCore {
@@ -42,6 +44,7 @@ impl FakeCore {
             pasted: Mutex::new(None),
             timeline_events: Mutex::new(None),
             capture_protection: AtomicBool::new(true),
+            stats_switches: Mutex::new(Vec::new()),
         })
     }
 }
@@ -52,6 +55,9 @@ impl CoreTransport for FakeCore {
         self.calls.fetch_add(1, Ordering::SeqCst);
         if let Call::VerifyMember { room_id, user_id } = &call {
             *self.verified_member.lock().unwrap() = Some((room_id.clone(), user_id.clone()));
+        }
+        if let Call::CallStats { on } = &call {
+            self.stats_switches.lock().unwrap().push(*on);
         }
         if let Call::TimelineEvents { room_id, event_ids } = &call {
             *self.timeline_events.lock().unwrap() = Some((room_id.clone(), event_ids.clone()));
@@ -163,6 +169,7 @@ impl CoreTransport for FakeCore {
             Call::CallCamera { on } => Ok(
                 serde_json::json!({"phase": "active", "roomId": "!r:example.invalid", "muted": false, "deafened": false, "volume": 100, "participants": [], "ended": null, "joinError": null, "camera": if on { "starting" } else { "off" }, "screen": "off", "video": []}),
             ),
+            Call::CallStats { .. } => Ok(serde_json::Value::Null),
             Call::CallScreen { on } => Ok(
                 serde_json::json!({"phase": "active", "roomId": "!r:example.invalid", "muted": false, "deafened": false, "volume": 100, "participants": [], "ended": null, "joinError": null, "camera": "off", "screen": if on { "starting" } else { "off" }, "video": []}),
             ),
@@ -1118,6 +1125,7 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-call-screen",
             "allow-call-devices",
             "allow-set-call-devices",
+            "allow-call-stats",
             "allow-close-call-window"
         ])
     );
@@ -1215,6 +1223,109 @@ fn given_the_call_window_then_it_lists_and_changes_call_devices() {
     for cmd in ["call_device_test_stop", "call_device_test_status"] {
         assert!(invoke(cmd, serde_json::json!({})).is_err(), "{cmd} refused");
     }
+}
+
+/// GIVEN the call statistics command WHEN the main window calls it THEN it is
+/// refused before the core; WHEN the call window turns it on THEN the core
+/// is told, and a reading reaches only that window's channel while it is on,
+/// is dropped when out of its limits, and stops when the window turns it off,
+/// reloads or closes.
+#[test]
+fn given_call_statistics_then_only_the_call_window_may_open_them_and_only_while_open() {
+    use persephone_contracts::{CallStats, CallStatsAudioSent};
+    let delivered: Arc<Mutex<Vec<(u32, String)>>> = Arc::default();
+    let record = delivered.clone();
+    let subscriptions = Arc::new(Subscriptions::default());
+    let core = FakeCore::new(true);
+    let app = configure(
+        mock_builder().channel_interceptor(move |_, callback, _, body| {
+            let body = match body {
+                tauri::ipc::InvokeResponseBody::Json(json) => json.clone(),
+                tauri::ipc::InvokeResponseBody::Raw(_) => "raw".into(),
+            };
+            record.lock().unwrap().push((callback.0, body));
+            true
+        }),
+        core.clone(),
+        subscriptions.clone(),
+    )
+    .build(context())
+    .unwrap();
+    let main = create_main_window(&app).unwrap();
+    let call = create_call_window(&app).unwrap();
+    let reading = |level: u8| CallStats {
+        microphone: Some(CallStatsAudioSent {
+            level,
+            bitrate_kbps: Some(32),
+            packets_sent: 7,
+            packets_lost: None,
+            jitter_ms: None,
+            rtt_ms: None,
+        }),
+        ..CallStats::default()
+    };
+    let stats_on = |on: bool| serde_json::json!({"on": on, "onStats": "__CHANNEL__:9"});
+    let sent = |level: u8| {
+        let text = serde_json::to_string(&reading(level)).unwrap();
+        delivered
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(channel, body)| *channel == 9 && *body == text)
+            .count()
+    };
+
+    // The main window has no permission, so nothing reaches the core.
+    assert!(invoke_on(&main, "call_stats", app_origin(), stats_on(true)).is_err());
+    assert!(core.stats_switches.lock().unwrap().is_empty());
+
+    // Not asked for: no channel, nothing is delivered.
+    subscriptions.dispatch(Event::CallStats { stats: reading(1) });
+    assert_eq!(sent(1), 0);
+
+    // A bad argument never reaches the core.
+    assert!(
+        invoke_on(
+            &call,
+            "call_stats",
+            app_origin(),
+            serde_json::json!({"on": "yes", "onStats": "__CHANNEL__:9"})
+        )
+        .is_err()
+    );
+    assert!(core.stats_switches.lock().unwrap().is_empty());
+
+    // On: the core is told, and a reading in its limits is delivered.
+    assert_eq!(
+        invoke_on(&call, "call_stats", app_origin(), stats_on(true)),
+        Ok(serde_json::Value::Null)
+    );
+    assert_eq!(*core.stats_switches.lock().unwrap(), [true]);
+    subscriptions.dispatch(Event::CallStats { stats: reading(2) });
+    assert_eq!(sent(2), 1);
+
+    // A reading outside its limits is dropped whole.
+    subscriptions.dispatch(Event::CallStats {
+        stats: reading(101),
+    });
+    assert_eq!(sent(101), 0);
+
+    // Off: the channel goes and the core is told.
+    assert_eq!(
+        invoke_on(&call, "call_stats", app_origin(), stats_on(false)),
+        Ok(serde_json::Value::Null)
+    );
+    assert_eq!(*core.stats_switches.lock().unwrap(), [true, false]);
+    subscriptions.dispatch(Event::CallStats { stats: reading(3) });
+    assert_eq!(sent(3), 0);
+
+    // A window that is reloaded or closed drops its channel and tells the
+    // core to stop.
+    invoke_on(&call, "call_stats", app_origin(), stats_on(true)).unwrap();
+    assert!(subscriptions.forget_stats(CALL_WINDOW));
+    assert!(!subscriptions.forget_stats(CALL_WINDOW), "once");
+    subscriptions.dispatch(Event::CallStats { stats: reading(4) });
+    assert_eq!(sent(4), 0);
 }
 
 /// GIVEN device test commands THEN bounded IDs cross, a bad one never

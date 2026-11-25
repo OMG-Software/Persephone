@@ -60,6 +60,7 @@ fn main() {
             "call_microphone",
             "call_camera",
             "call_screen",
+            "call_stats",
             "call_video_frame",
             "call_status",
             "call_rings",
