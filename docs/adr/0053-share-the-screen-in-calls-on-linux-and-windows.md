@@ -230,12 +230,23 @@ Decision:
   that say Windows reports screen sharing as unavailable no longer apply.
   The WGC code stays, because the gate measures it.
 * The core shows its own window for each monitor (a message box per monitor:
-  Yes shares, No shows the next one, Cancel stops), as the "Starting and
-  stopping" section says. The target is the index in display order and the
-  size in pixels, as before.
+  Yes shares, No shows the next one, Cancel stops; No is the default), as the
+  "Starting and stopping" section says. The target is the index in display
+  order and the size in pixels, as before.
+* The core lists monitors with the worker's list rule, so an index names the
+  same monitor on both sides, but it asks only about a monitor that the GDI
+  capture takes (`screen_capture_size_ok` in the call protocol, which the
+  worker also uses: at least 2x2, at most 7680 on a side and 3840x2160
+  pixels). The question says how many monitors it left out. With none that
+  fits, no window opens and the share is "unavailable".
+* The question says that the shared screen can show Persephone's messages,
+  as on macOS, because the display affinity of ADR-0045 was not measured
+  against a GDI copy (see below).
 * Limits of GDI: Windows draws no capture border and no cursor into the
   picture, the copy is the whole monitor (no window share), and the buffer is
-  at most 3840x2160 pixels. A larger monitor reports "unavailable". The capture
+  at most 3840x2160 pixels and 7680 on a side. The core does not offer a
+  larger monitor, and the worker refuses one at the start ("unavailable")
+  instead of a share that sends no picture. The capture
   thread sets per-monitor DPI awareness so that the monitor list and the copy
   use physical pixels; this needs the `Win32_UI_HiDpi` feature of the locked
   `windows 0.62.2` (no new crate, no `Cargo.lock` change).
