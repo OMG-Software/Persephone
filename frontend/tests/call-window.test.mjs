@@ -215,6 +215,29 @@ test('GIVEN two opens WHEN the older one fails last THEN its failure counts for 
   assert.deepEqual(reports, [false]);
 });
 
+test('GIVEN two opens WHEN the older one fails while the newer one still waits THEN only the newer reply counts', async () => {
+  const { calls, opens, reports } = opener();
+  calls.open();
+  calls.open();
+  opens[0].reject('unavailable');
+  await settled();
+  assert.deepEqual(reports, [], 'no full bar while the newer open runs');
+  opens[1].resolve();
+  await settled();
+  assert.deepEqual(reports, [false]);
+
+  // The same with a newer open that fails: its own failure counts.
+  const second = opener();
+  second.calls.open();
+  second.calls.open();
+  second.opens[0].reject('unavailable');
+  await settled();
+  assert.deepEqual(second.reports, []);
+  second.opens[1].reject('unavailable');
+  await settled();
+  assert.deepEqual(second.reports, [true]);
+});
+
 test('GIVEN two opens WHEN the newer one fails after the older one worked THEN the window counts as open', async () => {
   const { calls, opens, reports } = opener();
   calls.open();
