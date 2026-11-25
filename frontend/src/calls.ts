@@ -763,7 +763,8 @@ export const DEVICE_SAVE_FAILURE_TEXT = 'The call devices could not be saved.';
  * call (ADR-0065). A failure is the call status's `deviceChange` (ADR-0059).
  * The status has no mark for a change that worked, so `null` cannot tell
  * "worked" from "not answered yet". After a save the panel says only that
- * the choice is saved, and a failure shows when the worker answers. A speaker that is lost needs a rejoin (`failed`).
+ * the choice is saved, and a failure shows when the worker answers. A
+ * speaker that is lost needs a rejoin (`failed`).
  */
 export const DEVICE_SWITCH_TEXT: Record<CallDeviceChange, string> = {
   not_found: 'The chosen microphone or speaker is not connected. The call keeps the one it had.',

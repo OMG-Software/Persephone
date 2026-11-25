@@ -499,9 +499,12 @@ impl Subscriptions {
 
     /// The page `page` of the window `label` handled its last reading. Sends
     /// the waiting reading, if any, and keeps the page unread, or clears
-    /// `unread`. False when the window shows another page.
+    /// `unread`. False when the window shows another page. The check and the
+    /// change hold the page count, as `keep_stats` does, so a reload cannot
+    /// come between them and give the new page's channel the old page's read.
     fn stats_read(&self, label: &str, page: u64) -> bool {
-        if self.page(label) != page {
+        let pages = self.pages();
+        if pages.get(label).copied().unwrap_or(0) != page {
             return false;
         }
         if let Some(entry) = self.stats().get_mut(label) {
