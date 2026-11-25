@@ -99,8 +99,9 @@ pub struct VideoReceiveStats {
     pub width: u16,
     pub height: u16,
     pub bitrate_kbps: Option<u32>,
-    /// Frames dropped since the track began.
-    pub frames_dropped: u32,
+    /// Frames dropped each second, over the last interval, at most
+    /// [`MAX_STATS_FPS`]. Not known until the second sample.
+    pub dropped_fps: Option<u8>,
     pub packets_lost: u32,
 }
 
@@ -198,7 +199,7 @@ fn put_video_receive(out: &mut Vec<u8>, video: &VideoReceiveStats) {
     out.extend_from_slice(&video.width.to_be_bytes());
     out.extend_from_slice(&video.height.to_be_bytes());
     put_u32(out, video.bitrate_kbps);
-    out.extend_from_slice(&video.frames_dropped.to_be_bytes());
+    put_u8(out, video.dropped_fps);
     out.extend_from_slice(&video.packets_lost.to_be_bytes());
 }
 
@@ -353,7 +354,11 @@ impl Reader<'_> {
             width: self.side()?,
             height: self.side()?,
             bitrate_kbps: self.kbps()?,
-            frames_dropped: self.u32()?,
+            dropped_fps: if self.flag()? {
+                Some(self.fps()?)
+            } else {
+                None
+            },
             packets_lost: self.u32()?,
         })
     }

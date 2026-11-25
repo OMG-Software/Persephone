@@ -15,7 +15,7 @@ pub(crate) fn full_stats() -> CallStats {
         width: MAX_STATS_SIDE,
         height: 1,
         bitrate_kbps: None,
-        frames_dropped: 3,
+        dropped_fps: Some(3),
         packets_lost: u32::MAX,
     };
     let sent = VideoSendStats {
