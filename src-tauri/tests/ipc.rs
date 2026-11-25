@@ -1200,8 +1200,7 @@ fn given_the_call_window_then_it_lists_and_changes_call_devices() {
     for args in [
         serde_json::json!({"recording": "", "playout": null}),
         serde_json::json!({"playout": "s".repeat(513)}),
-        serde_json::json!({"camera": "cam
-1"}),
+        serde_json::json!({"camera": "cam\n1"}),
     ] {
         assert_eq!(
             invoke("set_call_devices", args).unwrap_err(),
