@@ -42,6 +42,13 @@ const WATCH_INTERVAL: Duration = Duration::from_millis(50);
 /// falls to 0 in between.
 static ACTIVE: AtomicUsize = AtomicUsize::new(0);
 
+/// Lets one test at a time start helpers or launches, or wait until none is
+/// active: such tests share [`ACTIVE`], and a hanging helper of one holds it
+/// for seconds while another waits for 0. A tokio mutex, so an async test
+/// holds it across its awaits; a plain test takes it with `blocking_lock`.
+#[cfg(test)]
+pub(crate) static HELPER_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// The number of helpers that are being launched, still run or are being
 /// stopped.
 pub fn helpers_active() -> usize {
@@ -426,6 +433,7 @@ mod tests {
     /// not terminated, the code is the helper's, and no helper is active.
     #[test]
     fn given_a_helper_that_obeys_when_stopped_then_it_is_joined_without_a_terminate() {
+        let _serial = HELPER_TESTS.blocking_lock();
         let helper = FakeHelper::new(true, EXIT_STOPPED);
         let share = start(&helper, 3);
         assert_eq!(share.share(), 3);
@@ -441,6 +449,7 @@ mod tests {
     /// join still ends, in about the stop wait.
     #[test]
     fn given_a_helper_that_hangs_when_stopped_then_the_job_is_terminated_after_the_wait() {
+        let _serial = HELPER_TESTS.blocking_lock();
         let helper = FakeHelper::new(false, EXIT_STOPPED);
         let share = start(&helper, 4);
         let started = Instant::now();
@@ -458,6 +467,7 @@ mod tests {
     /// status is unavailable.
     #[tokio::test]
     async fn given_a_helper_that_exits_when_waited_for_then_the_code_maps_to_the_state() {
+        let _serial = HELPER_TESTS.lock().await;
         for (code, state) in [
             (EXIT_STOPPED, ScreenState::Off),
             (EXIT_NOT_FOUND, ScreenState::NotFound),
@@ -482,6 +492,7 @@ mod tests {
     /// it never ends, so the call task's select does not spin on it.
     #[tokio::test]
     async fn given_an_exit_reported_once_when_waited_again_then_it_stays_pending() {
+        let _serial = HELPER_TESTS.lock().await;
         let helper = FakeHelper::new(true, EXIT_NOT_FOUND);
         let mut share = { start(&helper, 1) };
         helper.exit();
@@ -498,6 +509,7 @@ mod tests {
     /// sees the exit once the waits work again.
     #[test]
     fn given_waits_that_fail_when_watched_then_the_waiter_does_not_spin() {
+        let _serial = HELPER_TESTS.blocking_lock();
         let helper = FakeHelper::new(true, EXIT_STOPPED);
         helper.failing_waits.store(true, Ordering::SeqCst);
         let share = start(&helper, 5);
@@ -513,6 +525,7 @@ mod tests {
     /// share does not wait for a process that has ended.
     #[test]
     fn given_a_helper_that_exits_when_its_exit_is_seen_then_it_is_not_active() {
+        let _serial = HELPER_TESTS.blocking_lock();
         let helper = FakeHelper::new(true, EXIT_NOT_FOUND);
         let share = start(&helper, 6);
         helper.exit();
@@ -529,6 +542,7 @@ mod tests {
     /// `wait_until_idle` sees it.
     #[test]
     fn given_a_dropped_share_then_the_helper_is_stopped_and_reaped() {
+        let _serial = HELPER_TESTS.blocking_lock();
         let polite = FakeHelper::new(true, EXIT_STOPPED);
         drop(start(&polite, 1));
         assert_eq!(polite.controls_closed.load(Ordering::SeqCst), 1);
@@ -553,6 +567,7 @@ mod tests {
     /// stopped share gives no handle.
     #[tokio::test]
     async fn given_a_stop_handle_when_it_stops_the_helper_then_the_exit_is_not_its_own() {
+        let _serial = HELPER_TESTS.lock().await;
         let helper = FakeHelper::new(true, EXIT_NOT_FOUND);
         let mut share = start(&helper, 8);
         let stop = share.stopper().expect("a running share has a handle");
@@ -580,6 +595,7 @@ mod tests {
     /// stop-and-join.
     #[test]
     fn given_a_cancel_or_a_launch_under_way_then_the_launch_guard_says_so() {
+        let _serial = HELPER_TESTS.blocking_lock();
         let cancel = AtomicBool::new(true);
         assert!(LaunchGuard::begin(&cancel).is_none());
         cancel.store(false, Ordering::SeqCst);

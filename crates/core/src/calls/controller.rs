@@ -10017,6 +10017,7 @@ mod tests {
 
     // ---- The Windows capture helper (ADR-0067) ----
 
+    use crate::calls::screen_helper::HELPER_TESTS;
     use crate::calls::screen_helper::HelperShare;
     use crate::calls::screen_helper::fake::FakeHelper;
 
@@ -10040,6 +10041,7 @@ mod tests {
     /// worker's stop is queued, once.
     #[tokio::test]
     async fn given_a_helper_when_the_share_starts_and_stops_then_the_helper_stops_with_it() {
+        let _serial = HELPER_TESTS.lock().await;
         let (mut fixture, inner, _) = call_with_source(true);
         let helper = FakeHelper::new(true, 0);
         fixture.call.screen_command(&inner, true, 0).unwrap();
@@ -10066,6 +10068,7 @@ mod tests {
     #[tokio::test]
     async fn given_a_full_queue_when_the_handle_stops_a_helper_share_then_the_helper_stops_at_once()
     {
+        let _serial = HELPER_TESTS.lock().await;
         let (mut fixture, inner, _) = call_with_source(true);
         let helper = FakeHelper::new(true, 0);
         fixture.call.screen_command(&inner, true, 0).unwrap();
@@ -10102,6 +10105,7 @@ mod tests {
     /// nothing goes to the worker.
     #[tokio::test]
     async fn given_a_helper_of_another_share_when_the_grant_arrives_then_it_is_stopped() {
+        let _serial = HELPER_TESTS.lock().await;
         let (mut fixture, inner, _) = call_with_source(true);
         let helper = FakeHelper::new(true, 0);
         fixture.call.screen_command(&inner, true, 0).unwrap();
@@ -10123,6 +10127,7 @@ mod tests {
     /// THEN its helper is stopped too.
     #[tokio::test]
     async fn given_a_stop_during_the_helper_start_when_the_pick_ends_then_the_helper_is_stopped() {
+        let _serial = HELPER_TESTS.lock().await;
         let (mut fixture, inner, _) = call_with_source(true);
         let helper = FakeHelper::new(true, 0);
         fixture.call.screen_command(&inner, true, 0).unwrap();
@@ -10152,6 +10157,7 @@ mod tests {
     /// of the same share changes nothing.
     #[tokio::test]
     async fn given_a_helper_that_exits_when_the_share_runs_then_the_state_and_a_stop_follow() {
+        let _serial = HELPER_TESTS.lock().await;
         for (state, shown) in [
             (ScreenState::NotFound, CallScreen::NotFound),
             (ScreenState::Unavailable, CallScreen::Unavailable),
@@ -10180,6 +10186,7 @@ mod tests {
     /// the worker's state shows; a state of an older share does not end it.
     #[tokio::test]
     async fn given_the_worker_ends_the_share_then_the_helper_is_released() {
+        let _serial = HELPER_TESTS.lock().await;
         let (mut fixture, inner, _) = call_with_source(true);
         let helper = FakeHelper::new(true, 0);
         fixture.call.screen_command(&inner, true, 0).unwrap();
@@ -10207,6 +10214,7 @@ mod tests {
     /// the call is gone, with no stop of the share needed.
     #[tokio::test]
     async fn given_a_running_share_when_the_call_or_the_session_ends_then_the_helper_is_joined() {
+        let _serial = HELPER_TESTS.lock().await;
         for session_ended in [false, true] {
             let (mut fixture, inner, _) = call_with_source(true);
             let helper = FakeHelper::new(true, 0);
@@ -10231,6 +10239,7 @@ mod tests {
     /// left running.
     #[tokio::test]
     async fn given_a_helper_that_hangs_when_the_call_ends_then_it_is_terminated() {
+        let _serial = HELPER_TESTS.lock().await;
         let (mut fixture, inner, _) = call_with_source(true);
         let helper = FakeHelper::new(false, 0);
         fixture.call.screen_command(&inner, true, 0).unwrap();
@@ -10249,6 +10258,7 @@ mod tests {
     /// helper is still terminated before the end returns.
     #[tokio::test]
     async fn given_a_hanging_helper_when_the_call_ends_then_the_worker_stops_first() {
+        let _serial = HELPER_TESTS.lock().await;
         use crate::calls::screen_helper::STOP_WAIT;
         for session_ended in [false, true] {
             let killed = Arc::new(AtomicBool::new(false));
@@ -10389,6 +10399,7 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test]
     async fn given_a_frame_pipe_when_the_share_starts_then_screen_frames_goes_before_the_start() {
+        let _serial = HELPER_TESTS.lock().await;
         use std::os::windows::io::OwnedHandle;
         let pipe = || {
             let (read, write) = std::io::pipe().expect("a pipe");
@@ -10456,6 +10467,7 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test]
     async fn given_one_free_slot_when_a_share_with_a_pipe_starts_then_only_the_share_fails() {
+        let _serial = HELPER_TESTS.lock().await;
         use std::os::windows::io::OwnedHandle;
         let (mut fixture, inner, _) = call_with_source(true);
         let (command_tx, mut commands) = mpsc::channel(2);
@@ -10495,6 +10507,7 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test]
     async fn given_a_pick_that_starts_a_helper_when_the_call_ends_then_the_helper_is_stopped() {
+        let _serial = HELPER_TESTS.lock().await;
         let (mut fixture, _inner, _) = call_with_source(true);
         let helper = FakeHelper::new(true, 0);
         let cancel = Arc::new(AtomicBool::new(false));

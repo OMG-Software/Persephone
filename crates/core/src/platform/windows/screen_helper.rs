@@ -222,6 +222,7 @@ mod tests {
     #[test]
     #[ignore = "captures the real screen and needs the built persephone-screen-helper.exe"]
     fn given_the_built_helper_when_launched_then_one_real_picture_arrives() {
+        let _serial = crate::calls::screen_helper::HELPER_TESTS.blocking_lock();
         let monitors = super::super::screen::first_capturable_target().expect("a monitor to share");
         let launched = BrokerHelper::at(built_helper())
             .launch(1, &monitors)
