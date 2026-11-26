@@ -259,6 +259,8 @@ pub struct Effects {
     background: [Vec<u8>; 3],
     /// The mask scaled to the luma and to the chroma size.
     alpha: [Vec<u8>; 2],
+    /// The mask columns that each output column reads, for `scale_mask`.
+    columns: Vec<(usize, usize, f32)>,
     /// Blur scratch.
     scratch: Vec<u8>,
     sums: Vec<u32>,
@@ -277,6 +279,7 @@ impl Effects {
         Self {
             background: Default::default(),
             alpha: Default::default(),
+            columns: Vec::new(),
             scratch: Vec::new(),
             sums: Vec::new(),
             drawn: None,
@@ -315,8 +318,14 @@ impl Effects {
     ) -> Result<(), NoMask> {
         let (width, height) = (planes.width, planes.height);
         let (chroma_width, chroma_height) = chroma_size(width, height);
-        scale_mask(mask, width, height, &mut self.alpha[0]);
-        scale_mask(mask, chroma_width, chroma_height, &mut self.alpha[1]);
+        scale_mask(mask, width, height, &mut self.alpha[0], &mut self.columns);
+        scale_mask(
+            mask,
+            chroma_width,
+            chroma_height,
+            &mut self.alpha[1],
+            &mut self.columns,
+        );
         match background {
             Background::None => return Ok(()),
             Background::Blur(strength) => self.blur(planes, strength),
@@ -467,8 +476,14 @@ fn composite(plane: &mut PlaneMut<'_>, alpha: &[u8], background: &[u8]) -> bool 
 }
 
 /// Scales `mask` to `width` x `height` into `out`, bilinear, with pixel
-/// centres aligned.
-fn scale_mask(mask: &Mask, width: usize, height: usize, out: &mut Vec<u8>) {
+/// centres aligned. `columns` is scratch, kept between pictures.
+fn scale_mask(
+    mask: &Mask,
+    width: usize,
+    height: usize,
+    out: &mut Vec<u8>,
+    columns: &mut Vec<(usize, usize, f32)>,
+) {
     out.resize(width * height, 0);
     if (mask.width, mask.height) == (width, height) {
         out.copy_from_slice(&mask.data);
@@ -481,13 +496,13 @@ fn scale_mask(mask: &Mask, width: usize, height: usize, out: &mut Vec<u8>) {
         let first = position.floor() as usize;
         (first, (first + 1).min(from - 1), position - first as f32)
     };
-    let columns: Vec<(usize, usize, f32)> =
-        (0..width).map(|x| column(x, mask.width, width)).collect();
+    columns.clear();
+    columns.extend((0..width).map(|x| column(x, mask.width, width)));
     for (y, out_row) in out.chunks_mut(width).enumerate() {
         let (top, bottom, down) = column(y, mask.height, height);
         let top = &mask.data[top * mask.width..][..mask.width];
         let bottom = &mask.data[bottom * mask.width..][..mask.width];
-        for (value, &(left, right, across)) in out_row.iter_mut().zip(&columns) {
+        for (value, &(left, right, across)) in out_row.iter_mut().zip(columns.iter()) {
             let upper = f32::from(top[left]) * (1.0 - across) + f32::from(top[right]) * across;
             let lower =
                 f32::from(bottom[left]) * (1.0 - across) + f32::from(bottom[right]) * across;
@@ -1128,14 +1143,20 @@ mod tests {
     #[test]
     fn given_mask_of_another_size_when_scaled_then_values_are_interpolated() {
         let ramp = mask(2, 1, |x, _| if x == 0 { 0 } else { 255 });
-        let mut out = Vec::new();
-        scale_mask(&ramp, 8, 3, &mut out);
+        let (mut out, mut columns) = (Vec::new(), Vec::new());
+        scale_mask(&ramp, 8, 3, &mut out, &mut columns);
         assert_eq!(out.len(), 24);
         assert_eq!((out[0], out[7]), (0, 255));
         assert!(out[3] > 0 && out[3] < 255 && out[3] < out[4]);
         assert_eq!(&out[..8], &out[16..]);
+        // The kept columns of a wider picture do not change a narrower one.
+        let mut narrow = Vec::new();
+        scale_mask(&ramp, 4, 1, &mut narrow, &mut columns);
+        assert_eq!(narrow.len(), 4);
+        assert_eq!((narrow[0], narrow[3]), (0, 255));
+        assert!(narrow[1] < narrow[2]);
         let mut same = Vec::new();
-        scale_mask(&ramp, 2, 1, &mut same);
+        scale_mask(&ramp, 2, 1, &mut same, &mut columns);
         assert_eq!(same, [0, 255]);
     }
 
