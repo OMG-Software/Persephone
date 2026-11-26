@@ -600,6 +600,46 @@ test('GIVEN a statistics start still at the host WHEN the panel closes and opens
   assert.deepEqual(sent, [true, false, true]);
 });
 
+test('GIVEN a statistics start that waits for its turn WHEN a reload changes the page count meanwhile THEN the start and the reads of its readings both use the new count', async () => {
+  await watchAs(5);
+  let page = 5;
+  const calls = [];
+  let release;
+  const first = new Promise((resolve) => (release = resolve));
+  mockIPC((command, args) => {
+    if (command === 'diagnostics_status') return { on: false, full: false, failed: false, available: true, path: null };
+    if (command === 'watch_session') return page;
+    calls.push({ command, args });
+    return calls.length === 1 ? first.then(() => null) : null;
+  });
+  const startA = bridge.startCallStats(() => {});
+  const startB = bridge.startCallStats(() => {});
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(
+    calls.map((call) => call.args.page),
+    [5],
+    'the first start is at the host, the second waits for its turn'
+  );
+  page = 9;
+  const nothing = () => {};
+  await bridge.watchSession(nothing, nothing, nothing, nothing, nothing, nothing, nothing, nothing);
+  release();
+  await Promise.all([startA, startB]);
+  const starts = calls.filter((call) => call.command === 'call_stats');
+  assert.deepEqual(
+    starts.map((call) => call.args.page),
+    [5, 9]
+  );
+  const reading = { microphone: null, camera: null, screen: null, participants: [], connections: [] };
+  starts[1].args.onStats.onmessage(reading);
+  const reads = calls.filter((call) => call.command === 'call_stats_read');
+  assert.deepEqual(
+    reads.map((call) => call.args.page),
+    [9],
+    'the reading is acknowledged with the count its channel is kept under'
+  );
+});
+
 test('GIVEN a statistics start that fails WHEN a stop follows THEN the stop is still sent', async () => {
   await watchAs(6);
   const sent = [];

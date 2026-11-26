@@ -571,22 +571,26 @@ export function callCamera(on: boolean): Promise<CallStatus> {
  * {@link stopCallStats}.
  */
 export async function startCallStats(onStats: (stats: CallStats) => void): Promise<void> {
-  const page = statsPage;
-  const channel = new Channel<unknown>((value) => {
-    try {
-      const stats = parseCallStats(value);
-      if (stats !== null) onStats(stats);
-    } finally {
-      statsHandled(page);
+  await inStatsTurn(() => {
+    // Read when the turn comes, once: the host keeps the channel under the
+    // count of the start, so each reading is acknowledged with that count,
+    // also when a reload changed it while the start waited.
+    const page = statsPage;
+    if (page === null) {
+      // The bridge fails with the host's code strings, as `invoke` does, and
+      // the page maps each code to its text, so this failure is a code too.
+      return Promise.reject('core_unavailable'); // NOSONAR: a host code string, not an Error
     }
+    const channel = new Channel<unknown>((value) => {
+      try {
+        const stats = parseCallStats(value);
+        if (stats !== null) onStats(stats);
+      } finally {
+        statsHandled(page);
+      }
+    });
+    return invoke<null>('call_stats', { on: true, page, onStats: channel });
   });
-  // The bridge fails with the host's code strings, as `invoke` does, and the
-  // page maps each code to its text, so this failure is a code too.
-  await inStatsTurn(() =>
-    statsPage === null
-      ? Promise.reject('core_unavailable') // NOSONAR: a host code string, not an Error
-      : invoke<null>('call_stats', { on: true, page: statsPage, onStats: channel })
-  );
 }
 
 /**
@@ -607,8 +611,7 @@ export async function stopCallStats(): Promise<void> {
 // host refuses it, which is expected. `invoke` is async, so every failure,
 // also a bridge that is gone with the page, is a rejection that the catch
 // takes.
-function statsHandled(page: number | null): void {
-  if (page === null) return;
+function statsHandled(page: number): void {
   invoke<null>('call_stats_read', { page }).catch(() => undefined);
 }
 
