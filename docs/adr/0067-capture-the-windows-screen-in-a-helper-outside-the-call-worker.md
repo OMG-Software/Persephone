@@ -85,7 +85,9 @@ it as accepted.
   monitor with the same device name, the same size and the same rectangle
   as the target; none, another size or another rectangle is "not found". It
   uses the existing WGC code (`wgc.rs`, moved from the call worker to the
-  helper). The yellow capture border stays on and the cursor is captured.
+  helper). It leaves `IsBorderRequired` at its default (on) and turns on
+  the cursor capture, so Windows is meant to draw the yellow capture
+  border and the cursor; neither was looked at yet.
   It checks the monitor's place on each loop, and a monitor that moved,
   changed or went away ends the share.
 * A picture is BGRA, at most 3840x2160 pixels and 7680 on a side (the
@@ -176,7 +178,9 @@ it as accepted.
 
 * "Stop sharing", the end of the call, the worker ending the share, the
   helper exiting and the core's session end all end the helper. The
-  worker's stop is queued at once, as before.
+  worker's stop is queued at once when the worker's command queue has
+  room, as before; when it is full, the call task sends it on a later
+  retry. The helper's control pipe is closed at once in both cases.
 * The core owns an explicit stop-and-join. It closes the helper's control
   pipe, waits up to 2 seconds for the exit, terminates the Job if the
   helper is still running, and joins the thread that waits for the process.
@@ -202,8 +206,12 @@ it as accepted.
   own stop or reads the helper's end item, it can still hand on pictures
   that were captured before the stop: one that waits in the pipe, the one
   that it keeps for its gap, and that one again as the repeat of a still
-  screen (`REPEAT_GAP`). The worker's stop closes its frame admission
-  first, so no picture reaches the track after it. "off" means that
+  screen (`REPEAT_GAP`). The worker's stop closes the screen feed's frame
+  admission before anything else (`FrameAdmission::close`): the close
+  waits for a picture that the feed is handing on, and the feed drops each
+  picture that the capture thread hands on after it. The capture thread
+  can still hand a due picture on, but none reaches the track once the
+  close returned. "off" means that
   the capture was told to stop, as with the Linux portal, not that every
   sent picture was revoked. The call task then drops the share's helper, and a
   reaper thread does the wait, the terminate and the join. The
@@ -226,11 +234,12 @@ it as accepted.
 
 ### Positive Consequences
 
-* The picture has the WGC capture border and the cursor.
+* WGC is meant to draw its capture border and the cursor into the picture
+  (not looked at yet, see "Not verified").
 * The documented `WDA_EXCLUDEFROMCAPTURE` behaviour of WGC applies. This is
   not measured yet, so the share question keeps its warning that the shared
   screen can show Persephone's messages. It no longer says that Windows
-  draws no border, because a WGC capture has one.
+  draws no border, because a WGC capture is meant to have one.
 * The capture authority of a share sits in a small process with no network
   code and no untrusted input. The worker, which parses SFU data and media,
   no longer needs to read the screen to share it.
@@ -271,15 +280,19 @@ it as accepted.
 * Two short windows remain, and they need the owner's acceptance with this
   record (see "Stop and lifecycle"):
   * After "Stop sharing", the call can still get pictures that were
-    captured before the stop, until the worker handles its own stop. That
-    stop is queued at once; the time until the worker handles it was not
-    measured. ADR-0053's stop rule allows this. To hold back every picture
+    captured before the stop, until the worker handles its own stop or
+    reads the helper's end item. That stop is queued at once when the
+    worker's command queue has room; when the queue is full, the call task
+    sends it on a later retry, and until then the helper's end item ends
+    the share (the helper writes it once it sees its closed control pipe).
+    None of these times was measured, and no Windows run has checked that
+    the worker's frame admission closes when it handles the stop. ADR-0053's stop rule allows this. To hold back every picture
     after the press, the page would have to wait for the worker before it
     shows "off", which changes ADR-0053.
   * A launch that is still under way after both waits of the end (at most
     2 seconds for the pick, then at most 5 seconds until no helper is
     active) can start a helper after the call ended. That helper captures
-    into its own memory, and the capture border shows, until its pick drops
+    into its own memory, and the capture border can show, until its pick drops
     it just after the launch returns. None of its pictures reaches a worker: no
     worker has its frame pipe, and the core never reads frames. To close
     this window, the end of the call would have to wait for the launch
@@ -301,6 +314,8 @@ it as accepted.
   the helper and the worker together over many pictures are designed and
   unit tested, not measured. Each frame from the pool is closed when it is
   dropped (`wgc::PoolFrame`), so its buffer goes back on every path.
+* That the yellow capture border and the cursor show: no one has looked at
+  a picture of the real helper (`docs/evidence/screen-share-windows.md`).
 * Whether Persephone's windows are hidden from the helper's WGC picture
   (ADR-0045) was not measured. Until it is, the share question keeps its
   warning that the shared screen can show Persephone's messages.

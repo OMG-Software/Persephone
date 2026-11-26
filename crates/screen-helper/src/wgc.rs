@@ -418,10 +418,13 @@ impl Capture {
         self.closed.load(Ordering::Acquire)
     }
 
-    /// Takes the next frame, if one waits. `Ok(false)`: nothing came and
-    /// nothing was copied. A frame that `admit` refuses is not copied but
-    /// kept as the newest picture of the screen; it is copied once `admit`
-    /// lets it through, unless a newer frame came first ([`take_next`]).
+    /// Takes the next frame, if one waits. `Ok(true)`: a picture was copied,
+    /// or the pool was made again for a new size, so the caller polls again
+    /// at once. `Ok(false)`: nothing was copied, also when a frame came and
+    /// `admit` refused it, so the caller waits before the next poll. A
+    /// refused frame is kept as the newest picture of the screen; it is
+    /// copied once `admit` lets it through, unless a newer frame came first
+    /// ([`take_next`]).
     /// `deliver` gets the BGRA bytes as `(width, height, stride, bytes)`;
     /// they are valid only during the call.
     pub fn poll(
@@ -430,7 +433,6 @@ impl Capture {
         deliver: &mut Deliver<'_>,
     ) -> Result<bool, Stage> {
         let arrived = self.pool.TryGetNextFrame().ok().map(PoolFrame);
-        let came = arrived.is_some();
         if let Some(PoolFrame(frame)) = &arrived {
             let content = frame
                 .ContentSize()
@@ -457,7 +459,7 @@ impl Capture {
         // The frame is closed when it goes out of scope, after the surface
         // and the texture made from it (declared later, dropped first).
         let Some(pooled) = take_next(&mut self.held, arrived, admit) else {
-            return Ok(came);
+            return Ok(false);
         };
         let frame = &pooled.0;
         let content = frame

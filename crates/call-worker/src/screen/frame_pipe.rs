@@ -112,7 +112,9 @@ impl PipeReader {
 
     /// Starts the time of the next item: all its reads together may take at
     /// most [`STALL_TIMEOUT`], however the helper spreads its bytes. Call it
-    /// before each item. Without it, each read has that time on its own.
+    /// before each item. The deadline lasts until the next
+    /// [`PipeReader::wait_for_data`]; without one, each read has that time on
+    /// its own.
     pub fn begin_item(&mut self) {
         self.deadline = Some(Instant::now() + self.item_limit);
     }
@@ -136,8 +138,10 @@ impl PipeReader {
         peeked.ok().map(|()| available)
     }
 
-    /// Waits up to `limit` for the first bytes of the next item.
-    pub fn wait_for_data(&self, limit: Duration) -> Wait {
+    /// Waits up to `limit` for the first bytes of the next item. The wait
+    /// ends the last item's deadline, so the next item never reads under it.
+    pub fn wait_for_data(&mut self, limit: Duration) -> Wait {
+        self.deadline = None;
         let started = Instant::now();
         loop {
             if self.stop.load(Ordering::Acquire) {
@@ -316,7 +320,7 @@ mod tests {
     /// after its limit, and a set stop flag ends it at once.
     #[test]
     fn given_a_silent_pipe_when_waited_for_then_idle_or_stopped() {
-        let (reader, _write, stop) = reader();
+        let (mut reader, _write, stop) = reader();
         assert_eq!(reader.wait_for_data(Duration::from_millis(30)), Wait::Idle);
         stop.store(true, Ordering::Release);
         let started = Instant::now();
@@ -372,5 +376,21 @@ mod tests {
         // The whole item would take about 2 s; each byte came in 40 ms.
         assert!(took >= Duration::from_millis(300), "{took:?}");
         assert!(took < Duration::from_millis(1500), "{took:?}");
+    }
+
+    /// GIVEN an item whose deadline has passed WHEN the reader waits for the
+    /// next item and reads it without `begin_item` THEN that read has its own
+    /// time and takes the bytes: the old deadline does not carry over.
+    #[test]
+    fn given_a_passed_item_deadline_when_the_next_item_comes_then_it_reads() {
+        let (mut reader, mut write, _stop) = reader();
+        reader.item_limit = Duration::from_millis(50);
+        reader.begin_item();
+        std::thread::sleep(Duration::from_millis(80));
+        write.write_all(&[7, 8]).expect("the next item's bytes");
+        assert_eq!(reader.wait_for_data(Duration::from_secs(1)), Wait::Data);
+        let mut buf = [0_u8; 2];
+        assert_eq!(reader.read(&mut buf).expect("a read with its own time"), 2);
+        assert_eq!(buf, [7, 8]);
     }
 }

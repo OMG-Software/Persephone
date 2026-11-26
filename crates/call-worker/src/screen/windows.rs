@@ -23,9 +23,14 @@
 //! [`PICTURE_GAP`], counted from the end of the last hand-on, a little more
 //! than the worker's screen limit, and keeps the newest one that came too
 //! soon until its time comes. While the screen stays still, it hands the
-//! newest picture on again every [`REPEAT_GAP`]: the feed drops pictures
-//! until the track is published, so the first one of a still screen would
-//! otherwise never go. Two buffers serve the whole share; a picture of the
+//! newest picture on again every [`REPEAT_GAP`], for the whole share. The
+//! feed drops pictures until the track is published, so the first one of a
+//! still screen would otherwise never go. And the encoder makes a picture
+//! for a remote that subscribes later, or that lost one, only from a new
+//! input picture; whether it would send the last one again on its own was
+//! not measured, so the repeat does not stop after the start. Its cost, one
+//! encode of an unchanged picture a second, was not measured either. Two
+//! buffers serve the whole share; a picture of the
 //! same size is read into one without a new allocation.
 
 use std::sync::Arc;
@@ -52,7 +57,8 @@ const IDLE_WAIT: Duration = Duration::from_millis(100);
 /// drops a picture that comes too soon; with this gap it never has to, so
 /// the newest picture is never lost there.
 pub const PICTURE_GAP: Duration = Duration::from_millis(1000 / MAX_SCREEN_FPS as u64 + 20);
-/// How often the newest picture goes again while no new one comes.
+/// How often the newest picture goes again while no new one comes, for the
+/// whole share (see the module documentation for why it never stops).
 pub const REPEAT_GAP: Duration = Duration::from_secs(1);
 
 /// When the last hand-on ended. The feed's limiter runs inside the
