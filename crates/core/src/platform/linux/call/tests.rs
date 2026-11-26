@@ -68,6 +68,7 @@ fn start_sound_test(audio: &WorkerAudio, test: DeviceTest, device: Option<&str>)
     link.send(ToWorker::TestDevice {
         test,
         device: device.map(str::to_owned),
+        video_effect: persephone_call_protocol::VideoEffect::NONE,
     })
     .expect("the worker reads the test");
     link

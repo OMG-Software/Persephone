@@ -4,8 +4,10 @@
 //! This build has no segmenter. [`available`] is `false` and [`open`] gives
 //! nothing, so the worker refuses blur and pictures and keeps the camera off
 //! for them. The later segmenter (tract with an embedded model, ADR-0068)
-//! goes behind [`Segmenter`] and needs no change to `effects.rs` or the
-//! session. No LiveKit and no OS types.
+//! goes behind [`Segmenter`] and needs no change to the session. It must
+//! read the picture, but [`Planes`] has no read access yet: that step adds
+//! read-only accessors for its size and planes to `effects.rs`, and the
+//! write access stays private there. No LiveKit and no OS types.
 
 use crate::effects::{Mask, Planes};
 

@@ -63,12 +63,14 @@
   // chosen microphone (the meter moves), plays a tone on the chosen speaker,
   // or shows the chosen camera. `soundLevel` is the own level the core sends,
   // `testTicks` goes up when a test changes and `videoTicks` when a camera
-  // picture waits.
+  // picture waits. `callEffectRefused` is the call status's: the worker of a
+  // running call refused the video effect (ADR-0068).
   let {
     soundLevel = 0,
     testTicks = 0,
-    videoTicks = 0
-  }: { soundLevel?: number; testTicks?: number; videoTicks?: number } = $props();
+    videoTicks = 0,
+    callEffectRefused = false
+  }: { soundLevel?: number; testTicks?: number; videoTicks?: number; callEffectRefused?: boolean } = $props();
 
   let test = $state<CallDeviceTestStatus>(IDLE_DEVICE_TEST);
   let testBusy = $state(false);
@@ -121,7 +123,9 @@
   let videoEffect = $state<CallVideoEffect>(NO_VIDEO_EFFECT);
   let mirror = $state(true);
   let effectSaving = $state(false);
-  let effectRefused = $state(false);
+  // The worker answers after the save's reply, so a refusal comes from the
+  // camera test's status or the call's, as each worker answered.
+  const effectRefused = $derived(test.effectRefused || callEffectRefused);
   let loading = $state(false);
   let saving = $state(false);
   // Any request that reads or writes the device record. A refresh or device
@@ -214,10 +218,10 @@
     }
   }
 
-  // Saves the video effect and the mirror after each change. The effect
-  // applies at once to a camera test and to a call that runs; a call's
-  // worker may refuse it (ADR-0068). On failure both go back to the saved
-  // values.
+  // Saves the video effect and the mirror after each change, then the effect
+  // applies to a camera test and to a call that runs; their worker may refuse
+  // it later (ADR-0068). On failure nothing changed, so both go back to the
+  // saved values.
   async function saveEffect() {
     if (busy || !devices) return;
     effectSaving = true;
@@ -225,8 +229,7 @@
     const wanted = videoEffect;
     const wantedMirror = mirror;
     try {
-      const status = await callVideoEffect(wanted, wantedMirror);
-      effectRefused = status.effectRefused;
+      await callVideoEffect(wanted, wantedMirror);
       if (devices) devices = { ...devices, effect: wanted, mirror: wantedMirror };
     } catch (reason) {
       failure = failures[String(reason)] ?? EFFECT_SAVE_TEXT;

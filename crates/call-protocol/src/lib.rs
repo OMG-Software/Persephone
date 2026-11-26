@@ -563,10 +563,14 @@ pub enum ToWorker {
     /// sends `Connected` once the device runs, then `SoundLevel` for a
     /// microphone, or `Camera` and tile 0 pictures for a camera, and `Left`
     /// when the test ends by itself or after `Leave`; `Failed` when the
-    /// device cannot be used.
+    /// device cannot be used. `video_effect` is the effect that a camera test
+    /// starts with (ADR-0068), so its first picture has it; the worker
+    /// answers with [`FromWorker::VideoEffect`] before the camera opens. A
+    /// sound test must send [`VideoEffect::NONE`]; another is refused.
     TestDevice {
         test: DeviceTest,
         device: Option<String>,
+        video_effect: VideoEffect,
     },
     /// Move the running call to another microphone and speaker, and choose
     /// the camera for the next camera start (ADR-0059). `None` is the system
@@ -701,10 +705,15 @@ impl std::fmt::Debug for ToWorker {
             Self::SetDiagnostics { on } => {
                 f.debug_struct("SetDiagnostics").field("on", on).finish()
             }
-            Self::TestDevice { test, device } => f
+            Self::TestDevice {
+                test,
+                device,
+                video_effect,
+            } => f
                 .debug_struct("TestDevice")
                 .field("test", test)
                 .field("device", device)
+                .field("video_effect", video_effect)
                 .finish(),
             Self::SetDevices {
                 recording,
@@ -1548,10 +1557,15 @@ impl ToWorker {
                 out.push(TO_SET_DIAGNOSTICS);
                 out.push(u8::from(*on));
             }
-            Self::TestDevice { test, device } => {
+            Self::TestDevice {
+                test,
+                device,
+                video_effect,
+            } => {
                 out.push(TO_TEST_DEVICE);
                 out.push(*test as u8);
                 put_str(&mut out, device.as_deref().unwrap_or(""));
+                out.extend_from_slice(&video_effect.to_bytes());
             }
             Self::SetDevices {
                 recording,
@@ -1704,10 +1718,20 @@ impl ToWorker {
                 mic_gain: reader.mic_gain()?,
             },
             TO_SET_DIAGNOSTICS => Self::SetDiagnostics { on: reader.bool()? },
-            TO_TEST_DEVICE => Self::TestDevice {
-                test: DeviceTest::try_from(reader.u8()?)?,
-                device: reader.device_choice()?,
-            },
+            TO_TEST_DEVICE => {
+                let test = DeviceTest::try_from(reader.u8()?)?;
+                let device = reader.device_choice()?;
+                let video_effect = reader.video_effect()?;
+                // Only a camera test shows a picture.
+                if test != DeviceTest::Camera && video_effect != VideoEffect::NONE {
+                    return Err(DecodeError::InvalidValue);
+                }
+                Self::TestDevice {
+                    test,
+                    device,
+                    video_effect,
+                }
+            }
             TO_SET_DEVICES => Self::SetDevices {
                 recording: reader.device_choice()?,
                 playout: reader.device_choice()?,
@@ -2477,14 +2501,25 @@ mod tests {
             ToWorker::TestDevice {
                 test: DeviceTest::Microphone,
                 device: None,
+                video_effect: VideoEffect::NONE,
             },
             ToWorker::TestDevice {
                 test: DeviceTest::Speaker,
                 device: Some("{0.0.0.00000000}.{6a2c}".to_owned()),
+                video_effect: VideoEffect::NONE,
             },
             ToWorker::TestDevice {
                 test: DeviceTest::Camera,
                 device: Some("usb#cam".to_owned()),
+                video_effect: VideoEffect::NONE,
+            },
+            ToWorker::TestDevice {
+                test: DeviceTest::Camera,
+                device: None,
+                video_effect: VideoEffect {
+                    background: Background::Blur(BlurStrength::new(MIN_BLUR_PERCENT).unwrap()),
+                    filter: ColourFilter::Cool,
+                },
             },
             ToWorker::SetDevices {
                 recording: Some("m".to_owned()),
@@ -4317,6 +4352,29 @@ mod tests {
     /// failure code in `DevicesSet`.
     #[test]
     fn given_device_and_level_messages_out_of_range_then_they_are_rejected() {
+        // A sound test shows no picture, so it takes no effect (ADR-0068).
+        let warm = VideoEffect {
+            background: Background::None,
+            filter: ColourFilter::Warm,
+        };
+        for test in [DeviceTest::Microphone, DeviceTest::Speaker] {
+            let message = ToWorker::TestDevice {
+                test,
+                device: None,
+                video_effect: warm,
+            };
+            assert_eq!(
+                ToWorker::decode(&message.encode()),
+                Err(DecodeError::InvalidValue),
+                "{test:?}"
+            );
+        }
+        let camera = ToWorker::TestDevice {
+            test: DeviceTest::Camera,
+            device: None,
+            video_effect: warm,
+        };
+        assert_eq!(ToWorker::decode(&camera.encode()), Ok(camera));
         for test in [0, 4, u8::MAX] {
             assert_eq!(
                 ToWorker::decode(&[VERSION, TO_TEST_DEVICE, test, 0, 0]),

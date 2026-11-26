@@ -24,8 +24,12 @@
   // order rules: saves go one at a time and none is dropped, and a closed
   // panel takes no late answer. The own video effect and the preview's
   // mirror (ADR-0068) go through the same queue, as each save changes the
-  // same device record.
-  let { change = null }: { change?: CallDeviceChange | null } = $props();
+  // same device record. `effectRefused` is the call status's: the worker
+  // answers after the save's reply, so only the status has its refusal.
+  let {
+    change = null,
+    effectRefused = false
+  }: { change?: CallDeviceChange | null; effectRefused?: boolean } = $props();
 
   let recording = $state('');
   let playout = $state('');
@@ -99,7 +103,7 @@
       heading="h3"
       onsave={saveEffect}
     />
-    {#if effectView.refused}
+    {#if effectRefused}
       <p class="note" role="status">{EFFECT_REFUSED_TEXT}</p>
     {/if}
     {#if effectView.failure}

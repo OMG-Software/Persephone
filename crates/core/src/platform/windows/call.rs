@@ -203,6 +203,7 @@ mod tests {
         link.send(ToWorker::TestDevice {
             test: DeviceTest::Camera,
             device: None,
+            video_effect: persephone_call_protocol::VideoEffect::NONE,
         })
         .unwrap();
         let picture = || store.newest(0, 0, store.stream(0)).is_some();

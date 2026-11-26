@@ -10,6 +10,7 @@ import {
   BLUR_STEP,
   CAMERA_EFFECT_UNAVAILABLE_TEXT,
   CAMERA_TEXT,
+  EFFECT_REFUSED_TEXT,
   EFFECT_SAVE_TEXT,
   IDLE_CALL,
   NO_VIDEO_EFFECT,
@@ -26,6 +27,7 @@ import {
 let vite;
 let render;
 let CallVideoEffects;
+let CallWindowDevices;
 
 before(async () => {
   // Its own dependency cache, as in render.test.mjs: test files run in
@@ -39,6 +41,7 @@ before(async () => {
     appType: 'custom'
   });
   ({ default: CallVideoEffects } = await vite.ssrLoadModule('/src/CallVideoEffects.svelte'));
+  ({ default: CallWindowDevices } = await vite.ssrLoadModule('/src/CallWindowDevices.svelte'));
   ({ render } = await vite.ssrLoadModule('svelte/server'));
 });
 
@@ -163,10 +166,10 @@ test('GIVEN a device save that runs WHEN the effect changes THEN the effect is s
     ['devices', 'mic-1', null, null],
     ['effect', sea, false]
   ]);
-  assert.deepEqual(last(), { saving: false, refused: false, failure: null });
+  assert.deepEqual(last(), { saving: false, failure: null });
 });
 
-test('GIVEN effect answers WHEN the worker refused or the core failed THEN the newest says so, and an older failure is old news', async () => {
+test('GIVEN effect answers WHEN the core failed THEN the newest says so, and an older failure is old news; a refusal in a reply is not read', async () => {
   const answers = [later(), later()];
   let calls = 0;
   const { panel: made, last } = panel({
@@ -179,9 +182,10 @@ test('GIVEN effect answers WHEN the worker refused or the core failed THEN the n
   answers[0].reject('core_unavailable');
   await Promise.resolve();
   await Promise.resolve();
+  // The reply comes before the worker answers, so its refusal is old.
   answers[1].resolve({ ...IDLE_CALL, phase: 'active', effectRefused: true });
   await Promise.all([one, two]);
-  assert.deepEqual(last(), { saving: false, refused: true, failure: null });
+  assert.deepEqual(last(), { saving: false, failure: null });
 
   const { panel: failing, last: lastFailing } = panel({
     list: never,
@@ -189,7 +193,7 @@ test('GIVEN effect answers WHEN the worker refused or the core failed THEN the n
     effect: () => Promise.reject('something_else')
   });
   await failing.saveEffect(sea, false);
-  assert.deepEqual(lastFailing(), { saving: false, refused: false, failure: EFFECT_SAVE_TEXT });
+  assert.deepEqual(lastFailing(), { saving: false, failure: EFFECT_SAVE_TEXT });
 });
 
 test('GIVEN an effect save that runs WHEN a refresh is asked THEN it does not start; WHEN the panel closes THEN a late answer changes nothing', async () => {
@@ -232,4 +236,11 @@ test('GIVEN no person mask WHEN the controls are rendered THEN blur and the pict
   assert.doesNotMatch(able, /<option value="[a-z]+" disabled/);
   assert.match(able, /id="fx-blur"/);
   assert.match(able, /70%/);
+});
+
+test('GIVEN the call status WHEN its worker refused the effect THEN the call window panel says so; WHEN not THEN no note shows', () => {
+  const html = (props) => render(CallWindowDevices, { props }).body;
+  assert.ok(html({ effectRefused: true }).includes(EFFECT_REFUSED_TEXT));
+  assert.ok(!html({ effectRefused: false }).includes(EFFECT_REFUSED_TEXT));
+  assert.ok(!html({}).includes(EFFECT_REFUSED_TEXT), 'no status, no refusal');
 });

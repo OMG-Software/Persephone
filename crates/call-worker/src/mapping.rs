@@ -767,6 +767,7 @@ mod tests {
         assert!(is_first_message_allowed(&ToWorker::TestDevice {
             test: persephone_call_protocol::DeviceTest::Speaker,
             device: None,
+            video_effect: persephone_call_protocol::VideoEffect::NONE,
         }));
     }
 

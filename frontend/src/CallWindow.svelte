@@ -457,7 +457,7 @@
 
   {#if joined}
     {#if devicesOpen}
-      <CallWindowDevices change={status.deviceChange} />
+      <CallWindowDevices change={status.deviceChange} effectRefused={status.effectRefused} />
     {/if}
     <footer class="call-window-controls">
       <button type="button" class="secondary" aria-pressed={status.muted} disabled={busy} onclick={() => command(() => callMute(!status.muted), 'The microphone did not change. Try again.')}>

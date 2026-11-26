@@ -2923,7 +2923,12 @@
             </p>
             <div class="panel">
               <h3>Devices</h3>
-              <CallDevices soundLevel={callSoundLevel} testTicks={deviceTestTicks} videoTicks={callVideoTicks} />
+              <CallDevices
+                soundLevel={callSoundLevel}
+                testTicks={deviceTestTicks}
+                videoTicks={callVideoTicks}
+                callEffectRefused={callState.effectRefused}
+              />
             </div>
           {:else}
             <p class="lede">No account is signed in. Call devices belong to an account, so there are none to choose.</p>

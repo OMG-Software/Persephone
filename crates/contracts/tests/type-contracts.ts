@@ -319,9 +319,11 @@ const detailsTable: CallStats = {
 const detailsWithAddress: CallStats = { ...detailsTable, connections: [{ ...detailsTable.connections[0], address: "10.0.0.1" }] };
 // @ts-expect-error an unknown value is null, not missing
 const detailsMissingValue: CallStats = { ...detailsTable, microphone: { level: 1, packetsSent: 3, packetsLost: null, jitterMs: null, rttMs: null } };
-const testStatus: CallDeviceTestStatus = { id: 4, test: "camera", state: "running", stream: 2 };
+const testStatus: CallDeviceTestStatus = { id: 4, test: "camera", state: "running", stream: 2, effectRefused: true };
 // @ts-expect-error the test ID is required
-const noTestId: CallDeviceTestStatus = { test: "camera", state: "running", stream: 2 };
+const noTestId: CallDeviceTestStatus = { test: "camera", state: "running", stream: 2, effectRefused: false };
+// @ts-expect-error the effect refusal is a flag, not a reason
+const refusalWithReason: CallDeviceTestStatus = { ...testStatus, effectRefused: "no mask" };
 // @ts-expect-error only the defined device tests are accepted
 const unknownTest: CallDeviceTestKind = "kettle";
 // @ts-expect-error only the defined test states are accepted
@@ -385,5 +387,6 @@ void unknownDeviceChange;
 void levelWithName;
 void testStatus;
 void noTestId;
+void refusalWithReason;
 void unknownTest;
 void unknownTestState;

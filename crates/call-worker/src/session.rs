@@ -770,7 +770,12 @@ enum TestNote {
 /// test early; any other message but the diagnostic switch is a protocol
 /// failure.
 pub async fn test_device(first: ToWorker, input: &mut Receiver<Input>, output: &Output) -> u8 {
-    let ToWorker::TestDevice { test, device } = first else {
+    let ToWorker::TestDevice {
+        test,
+        device,
+        video_effect,
+    } = first
+    else {
         return fail(output, FailureCode::Protocol).await;
     };
     // Only a sound test reaches the microphone or the tone.
@@ -794,7 +799,7 @@ pub async fn test_device(first: ToWorker, input: &mut Receiver<Input>, output: &
     }
     match opened {
         Some(opened) => test_sound(opened, input, output).await,
-        None => test_camera(device, input, output).await,
+        None => test_camera(device, video_effect, input, output).await,
     }
 }
 
@@ -806,11 +811,16 @@ struct TestEffect {
 }
 
 impl TestEffect {
-    fn new() -> Self {
-        Self {
+    /// The test's effect from the start, and the answer to give. An effect
+    /// that cannot run here is refused, as `set` refuses it, and the test
+    /// starts without one.
+    fn starting(requested: VideoEffect) -> (Self, FromWorker) {
+        let mut effect = Self {
             effect: VideoEffect::NONE,
             shared: SharedEffect::new(VideoEffect::NONE),
-        }
+        };
+        let answer = effect.set(requested);
+        (effect, answer)
     }
 
     /// Applies `requested` unless it cannot run here, as a call does, and
@@ -937,12 +947,21 @@ async fn test_sound(
     }
 }
 
-async fn test_camera(device: Option<String>, input: &mut Receiver<Input>, output: &Output) -> u8 {
+async fn test_camera(
+    device: Option<String>,
+    video_effect: VideoEffect,
+    input: &mut Receiver<Input>,
+    output: &Output,
+) -> u8 {
     let pictures = output.pictures();
     let mut limiter = RateLimiter::default();
-    // The test shows the effect as a call would (ADR-0068). The core sends
-    // the saved one directly after `TestDevice`.
-    let mut effect = TestEffect::new();
+    // The test shows the effect as a call would (ADR-0068). It starts with
+    // the one in `TestDevice`, set before the camera opens, so no picture is
+    // shown without it; `SetVideoEffect` changes it later.
+    let (mut effect, started) = TestEffect::starting(video_effect);
+    if output.send(started).await.is_err() {
+        return fail(output, FailureCode::Internal).await;
+    }
     let mut feed_effects = CameraEffects::new(effect.shared.clone(), segmenter::open());
     let (ended_tx, mut ended) = mpsc::channel::<()>(1);
     let (open_tx, mut opened) = mpsc::channel::<Opened<camera::Capture, CameraState>>(1);
@@ -4153,6 +4172,44 @@ async fn fail(output: &Output, code: FailureCode) -> u8 {
 mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
+
+    /// GIVEN the effect that a camera test starts with WHEN it can run here
+    /// THEN the capture thread has it before the camera opens; WHEN it needs
+    /// the person mask, which this build lacks, THEN it is refused and the
+    /// test starts without one (ADR-0068).
+    #[test]
+    fn given_a_camera_test_effect_then_it_is_set_before_the_camera_opens_or_refused() {
+        let warm = VideoEffect {
+            background: persephone_call_protocol::Background::None,
+            filter: persephone_call_protocol::ColourFilter::Warm,
+        };
+        let (effect, answer) = TestEffect::starting(warm);
+        assert_eq!(effect.shared.load(), Some(warm));
+        assert_eq!(
+            answer,
+            FromWorker::VideoEffect {
+                effect: warm,
+                refused: false
+            }
+        );
+
+        assert!(!segmenter::available(), "this build has no person mask");
+        let blur = VideoEffect {
+            background: persephone_call_protocol::Background::Blur(
+                persephone_call_protocol::BlurStrength::new(50).unwrap(),
+            ),
+            ..warm
+        };
+        let (effect, answer) = TestEffect::starting(blur);
+        assert_eq!(effect.shared.load(), Some(VideoEffect::NONE));
+        assert_eq!(
+            answer,
+            FromWorker::VideoEffect {
+                effect: VideoEffect::NONE,
+                refused: true
+            }
+        );
+    }
 
     /// GIVEN notes that come while one is written THEN one writer starts,
     /// only the newest note waits, and after the writer ends the next note

@@ -129,6 +129,10 @@ an embedded ONNX model as the later segmenter (owner choice).
   2 picture), its value (0 for none, the strength for blur, the picture
   number 1 to 4) and the filter (0 to 4). Decoding refuses any other value.
 * `Join` ends with the video effect.
+* `ToWorker::TestDevice` ends with the video effect that a camera test starts
+  with. The worker sets it before the camera opens, so the first picture has
+  it, and answers `FromWorker::VideoEffect` before the camera opens. A sound
+  test must send no effect; decoding refuses another.
 * `ToWorker::SetVideoEffect` (tag 19) changes it in a running call or in a
   camera test. The worker answers `FromWorker::VideoEffect` (tag 24) with the
   effect in use and whether the request was refused.
@@ -140,18 +144,25 @@ an embedded ONNX model as the later segmenter (owner choice).
 * The effect and the mirror choice are part of the call device record
   (`persephone.call_devices.v1`, fields `effect` and `mirror`). A record
   without them reads as no effect and a mirrored preview.
-* The command `call_video_effect` sets both. It applies the effect at once to
-  a running or joining call and to a running camera test, and saves both for
-  later calls, like the microphone settings (ADR-0062). It refuses a value
-  outside the closed sets. The main window and the call window may call it;
-  the call window's device panel (ADR-0065) shows the same controls as the
-  settings.
-* The core sends `SetVideoEffect` directly after a camera `TestDevice`, so the
-  settings preview shows the saved effect.
+* The command `call_video_effect` sets both. It saves both for later calls,
+  then applies the effect to a running or joining call and to a running
+  camera test. It refuses a value outside the closed sets, and a failed save
+  changes nothing. The main window and the call window may call it; the call
+  window's device panel (ADR-0065) shows the same controls as the settings.
+* The core numbers each effect request. A join reads that number before it
+  reads the record, and an effect asked after that read replaces the saved
+  one, also when it was asked before the join took the call slot (for
+  example during the proxy question). So no change is lost during a join.
+* A camera test starts with the saved effect in `TestDevice`, so the settings
+  preview never shows a picture without it. Later changes go as
+  `SetVideoEffect`.
 * The call status carries `effectRefused` (the worker refused the newest
   effect change of this call) and `mirror` (from the record at the join, then
-  each change). The main window and the call window show the own tile from
-  `mirror`, so neither reads the record during a call.
+  each change). The device test status carries `effectRefused` too, while a
+  camera test runs. The worker answers after the command's reply, so the page
+  shows a refusal from these statuses, never from the reply. The main window
+  and the call window show the own tile from `mirror`, so neither reads the
+  record during a call.
 * The page offers blur and the pictures only when the device list's
   `backgroundEffects` is true. In this build it is false, and the page shows
   a note in their place. The call window's effect saves go into the same

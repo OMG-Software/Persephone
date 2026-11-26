@@ -194,7 +194,14 @@ export type CallDeviceTestStatus = {
  * Numbers the tests, so the page can stop the one it started
  * (`call_device_test_stop`). 0 for no test and for a refusal.
  */
-id: number, test: CallDeviceTestKind | null, state: CallDeviceTestState, stream: number, };
+id: number, test: CallDeviceTestKind | null, state: CallDeviceTestState, stream: number, 
+/**
+ * The worker refused the camera test's video effect (ADR-0068), so the
+ * test shows the camera without it. The worker answers after the
+ * command that set the effect, so this comes later than its reply.
+ * False for other tests and once the test has ended.
+ */
+effectRefused: boolean, };
 
 export type CallEnd = "left" | "connection_failed" | "audio_device" | "containment" | "worker_stopped" | "worker_crashed" | "membership_lost" | "keys_unavailable" | "session_ended" | "internal" | "device_not_found" | "alone";
 

@@ -2740,6 +2740,12 @@ pub struct CallDeviceTestStatus {
     #[serde(deserialize_with = "safe_u64")]
     #[ts(type = "number")]
     pub stream: u64,
+    /// The worker refused the camera test's video effect (ADR-0068), so the
+    /// test shows the camera without it. The worker answers after the
+    /// command that set the effect, so this comes later than its reply.
+    /// False for other tests and once the test has ended.
+    #[serde(default)]
+    pub effect_refused: bool,
 }
 
 /// Why a call ended.

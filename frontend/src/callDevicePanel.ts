@@ -1,4 +1,4 @@
-import type { CallDevices, CallStatus, CallVideoEffect } from '../../crates/contracts/generated/contracts';
+import type { CallDevices, CallVideoEffect } from '../../crates/contracts/generated/contracts';
 import {
   DEVICE_FAILURE_TEXT,
   DEVICE_SAVE_FAILURE_TEXT,
@@ -24,11 +24,12 @@ export interface DevicePanelState {
   failure: string | null;
 }
 
-/** What the panel shows about the video effect (ADR-0068). */
+/**
+ * What the panel shows about saving the video effect (ADR-0068). A refusal
+ * by the worker is not here: it comes after the reply, in the call status.
+ */
 export interface EffectState {
   saving: boolean;
-  // The worker refused the newest effect; the camera keeps the one it had.
-  refused: boolean;
   failure: string | null;
 }
 
@@ -36,7 +37,7 @@ export interface EffectState {
 export interface DevicePanelBridge {
   list: () => Promise<CallDevices>;
   save: (recording: string | null, playout: string | null, camera: string | null) => Promise<unknown>;
-  effect: (effect: CallVideoEffect, mirror: boolean) => Promise<CallStatus>;
+  effect: (effect: CallVideoEffect, mirror: boolean) => Promise<unknown>;
 }
 
 const failureText = (reason: unknown, fallback: string) => DEVICE_FAILURE_TEXT[String(reason)] ?? fallback;
@@ -53,6 +54,8 @@ const failureText = (reason: unknown, fallback: string) => DEVICE_FAILURE_TEXT[S
  *   one holds every change. Only the newest save sets the result line.
  * - The video effect (ADR-0068) goes into the same queue, as each save
  *   changes the same device record. Its newest answer sets its own result.
+ *   The reply comes before the worker has answered, so whether the worker
+ *   refused the effect is read from the call status, not from the reply.
  * - After `close`, no answer changes the panel.
  */
 export class DevicePanel {
@@ -61,7 +64,7 @@ export class DevicePanel {
   readonly #onmenus: (menus: DeviceMenus) => void;
   readonly #oneffect: (state: EffectState) => void;
   #state: DevicePanelState = { devices: null, loading: false, saving: false, saved: false, failure: null };
-  #effect: EffectState = { saving: false, refused: false, failure: null };
+  #effect: EffectState = { saving: false, failure: null };
   #queue: Promise<unknown> = Promise.resolve();
   #saves = 0;
   #newest = 0;
@@ -154,16 +157,15 @@ export class DevicePanel {
     const turn = this.#queue.then(run, run);
     this.#queue = turn.catch(() => undefined);
     let failure: string | null = null;
-    let refused = false;
     try {
-      refused = (await turn).effectRefused === true;
+      await turn;
     } catch (reason) {
       failure = failureText(reason, EFFECT_SAVE_TEXT);
     }
     this.#effectSaves -= 1;
     if (!this.#open) return;
     if (mine === this.#newestEffect) {
-      this.#setEffect({ saving: this.#effectSaves > 0, refused, failure });
+      this.#setEffect({ saving: this.#effectSaves > 0, failure });
     } else {
       this.#setEffect({ saving: this.#effectSaves > 0 });
     }

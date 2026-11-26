@@ -984,4 +984,10 @@ export function deviceTestActive(status: CallDeviceTestStatus, kind: CallDeviceT
 }
 
 /** No device test yet. */
-export const IDLE_DEVICE_TEST: CallDeviceTestStatus = { id: 0, test: null, state: 'idle', stream: 0 };
+export const IDLE_DEVICE_TEST: CallDeviceTestStatus = {
+  id: 0,
+  test: null,
+  state: 'idle',
+  stream: 0,
+  effectRefused: false
+};

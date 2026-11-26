@@ -394,6 +394,15 @@ pub(crate) struct OwnVideo {
     pub(crate) mirror: bool,
 }
 
+/// The newest [`OwnVideo`] that the page asked for, numbered from 1
+/// (ADR-0068). A join that read the saved record before an effect was asked
+/// takes it from here; see [`CallController::video_asked`].
+#[derive(Clone, Copy, Debug, Default)]
+struct AskedVideo {
+    number: u64,
+    own: Option<OwnVideo>,
+}
+
 /// What a worker event did to the view.
 #[derive(Debug, PartialEq, Eq)]
 enum Applied {
@@ -1198,6 +1207,9 @@ pub struct JoinScope {
     pub runtime: Handle,
     /// The saved microphone, speaker and camera, read with the proxy setting.
     pub devices: super::devices::Selection,
+    /// [`CallController::video_asked`], read before `devices`: an effect
+    /// asked after it replaces the saved one (ADR-0068).
+    pub video_asked: u64,
     /// Join with the camera on, and with the `video` call intent (ADR-0048).
     pub video: bool,
 }
@@ -1354,6 +1366,10 @@ struct Inner {
     /// The video effect that a camera test shows (ADR-0068): the saved one
     /// when the test starts, then each change.
     test_effect: watch::Sender<VideoEffect>,
+    /// The newest video effect asked for (ADR-0068). Changed and read under
+    /// the slot lock, so an effect asked at any time reaches a join: on the
+    /// join's channel once it claimed the slot, or from here when it claims.
+    asked_video: Mutex<AskedVideo>,
 }
 
 /// One member's sound level and the worker participant that sent it, so a
@@ -1404,6 +1420,7 @@ impl Default for DeviceTestSlot {
                 test: None,
                 state: CallDeviceTestState::Idle,
                 stream: 0,
+                effect_refused: false,
             },
             generation: 0,
             stop: Arc::new(AtomicBool::new(true)),
@@ -1565,6 +1582,7 @@ impl CallController {
                 device_test: Mutex::new(DeviceTestSlot::default()),
                 test_listener: Mutex::new(None),
                 test_effect: watch::channel(VideoEffect::NONE).0,
+                asked_video: Mutex::new(AskedVideo::default()),
             }),
         }
     }
@@ -1687,6 +1705,7 @@ impl CallController {
                 test: Some(test),
                 state,
                 stream: 0,
+                effect_refused: false,
             };
         }
         slot.stop.store(true, Ordering::SeqCst);
@@ -1696,6 +1715,7 @@ impl CallController {
             test: Some(test),
             state: CallDeviceTestState::Starting,
             stream: 0,
+            effect_refused: false,
         };
         let stop = Arc::new(AtomicBool::new(false));
         slot.stop = stop.clone();
@@ -1756,7 +1776,11 @@ impl CallController {
         }
     }
 
-    fn claim(&self, room_id: &RoomId) -> Result<JoinGuard, CallError> {
+    /// Takes the call slot for a join. `video_asked` is
+    /// [`CallController::video_asked`] from before the join read the saved
+    /// record: a video effect asked after that starts on the join's channel,
+    /// so it replaces the saved one (ADR-0068).
+    fn claim(&self, room_id: &RoomId, video_asked: u64) -> Result<JoinGuard, CallError> {
         let mut slot = self.inner.slot();
         if !matches!(*slot, Slot::Idle) {
             return Err(CallError::AlreadyInCall);
@@ -1766,7 +1790,8 @@ impl CallController {
         let kill = Arc::new(Mutex::new(None));
         let devices = watch::channel(None).0;
         let microphone = watch::channel(None).0;
-        let video_effect = watch::channel(None).0;
+        let asked = *plain(&self.inner.asked_video);
+        let video_effect = watch::channel(asked.own.filter(|_| asked.number > video_asked)).0;
         *slot = Slot::Joining(Joining {
             id,
             room_id: room_id.to_owned(),
@@ -1820,7 +1845,7 @@ impl CallController {
         consent: DirectConsent,
     ) -> Result<(), CallError> {
         let DirectConsent(proxy) = consent;
-        let mut guard = self.claim(room_id)?;
+        let mut guard = self.claim(room_id, scope.video_asked)?;
         let access = Access {
             admit: self.inner.admission(),
             generation: scope.generation,
@@ -2093,6 +2118,12 @@ impl CallController {
         // camera opens. The call task asks the portal first and then turns
         // the camera on (`Call::start_portal`), so the join starts it off.
         let portal_camera = uses_portal(&link);
+        // An effect asked since the record was read replaces the saved one
+        // (`claim`); one asked from here on reaches the call task.
+        let own = (*guard.video_effect.borrow()).unwrap_or(OwnVideo {
+            effect: scope.devices.video_effect(),
+            mirror: scope.devices.mirror(),
+        });
         let join = ToWorker::Join {
             sfu_url: grant.url.to_string(),
             jwt: grant.jwt.clone(),
@@ -2107,7 +2138,7 @@ impl CallController {
             volume: scope.devices.volume(),
             auto_level: scope.devices.auto_level(),
             mic_gain: scope.devices.mic_gain(),
-            video_effect: scope.devices.video_effect(),
+            video_effect: own.effect,
         };
         // Before the join, so the worker's connection records are kept
         // (ADR-0058). The call task sends the switch again when it starts.
@@ -2135,7 +2166,7 @@ impl CallController {
             view: View::new(room_id.to_owned(), sfu.url, scope.video)
                 .with_video_streams(video_streams)
                 .with_volume(scope.devices.volume())
-                .with_mirror(scope.devices.mirror()),
+                .with_mirror(own.mirror),
             changes,
             incoming,
             failed,
@@ -2267,11 +2298,18 @@ impl CallController {
     /// running or joining call like the microphone settings. The worker may
     /// refuse an effect that cannot run there; the state's `effect_refused`
     /// then says so. `NotInCall` without a call. The caller saves both for
-    /// later calls.
+    /// later calls before it calls this, so a join that read the saved
+    /// record before the save gets them from here (`video_asked`).
     pub fn set_video_effect(&self, effect: VideoEffect, mirror: bool) -> Result<(), CallError> {
         self.inner.test_effect.send_replace(effect);
         let own = Some(OwnVideo { effect, mirror });
-        match &*self.inner.slot() {
+        let slot = self.inner.slot();
+        {
+            let mut asked = plain(&self.inner.asked_video);
+            asked.number += 1;
+            asked.own = own;
+        }
+        match &*slot {
             Slot::Running(run) => {
                 run.video_effect.send_replace(own);
                 Ok(())
@@ -2282,6 +2320,14 @@ impl CallController {
             }
             Slot::Idle => Err(CallError::NotInCall),
         }
+    }
+
+    /// The number of the newest video effect asked for (ADR-0068). A join
+    /// reads it before it reads the saved call device record; an effect
+    /// asked after that then replaces the saved one, even when it was asked
+    /// before the join claimed the call (`JoinScope::video_asked`).
+    pub fn video_asked(&self) -> u64 {
+        plain(&self.inner.asked_video).number
     }
 
     /// The video effect that the next camera test starts with: the saved
@@ -3321,27 +3367,26 @@ fn run_device_test(
     // `TestDevice`; the worker may open the device, and closes it when it
     // reads `Leave`.
     let stopped_early = stop.load(Ordering::SeqCst);
-    // A camera test shows the saved video effect, then each change
-    // (ADR-0068). The worker answers each with the effect in use.
+    // A camera test starts with the saved video effect, in `TestDevice`, so
+    // its first picture has it; each change follows as `SetVideoEffect`
+    // (ADR-0068). The worker answers each with the effect in use. A sound
+    // test shows no picture and sends none.
     let mut test_effect = inner.test_effect.subscribe();
-    let effect = *test_effect.borrow_and_update();
+    let video_effect = if camera {
+        *test_effect.borrow_and_update()
+    } else {
+        VideoEffect::NONE
+    };
     let sent = if stopped_early {
         Ok(())
     } else {
-        link.send(ToWorker::SetDiagnostics { on })
-            .and_then(|()| {
-                link.send(ToWorker::TestDevice {
-                    test: device_test::worker_test(test),
-                    device,
-                })
+        link.send(ToWorker::SetDiagnostics { on }).and_then(|()| {
+            link.send(ToWorker::TestDevice {
+                test: device_test::worker_test(test),
+                device,
+                video_effect,
             })
-            .and_then(|()| {
-                if camera {
-                    link.send(ToWorker::SetVideoEffect { effect })
-                } else {
-                    Ok(())
-                }
-            })
+        })
     };
     let mut state = if stopped_early {
         CallDeviceTestState::Idle
@@ -3385,6 +3430,10 @@ fn run_device_test(
                 target,
                 message,
             }) => worker_record(level, &target, &message),
+            // The page says that the effect cannot run here (ADR-0068).
+            Ok(FromWorker::VideoEffect { refused, .. }) if camera => {
+                inner.set_test(generation, |status| status.effect_refused = refused);
+            }
             Ok(message) => {
                 if let Some(next) = device_test::next_state(state, &message, user_stopped) {
                     state = next;
@@ -3410,6 +3459,7 @@ fn run_device_test(
     inner.set_test(generation, |status| {
         status.state = state;
         status.stream = 0;
+        status.effect_refused = false;
     });
 }
 
@@ -5258,6 +5308,7 @@ mod tests {
             generation: 0,
             runtime: Handle::current(),
             devices: Default::default(),
+            video_asked: 0,
             video: false,
         };
         let result = calls
@@ -5267,7 +5318,11 @@ mod tests {
         assert_eq!(host.starts.load(Ordering::SeqCst), 0);
         assert_eq!(requests_after(&server, seen).await, Vec::<String>::new());
         assert!(matches!(calls.state(), CallState::Idle));
-        assert!(calls.claim(room_id!("!r:synthetic.test")).is_ok());
+        assert!(
+            calls
+                .claim(room_id!("!r:synthetic.test"), calls.video_asked())
+                .is_ok()
+        );
     }
 
     /// GIVEN the same room WHEN a moderator's level, or an event level of 0
@@ -5286,6 +5341,7 @@ mod tests {
                 generation: 0,
                 runtime: Handle::current(),
                 devices: Default::default(),
+                video_asked: 0,
                 video: false,
             };
             let result = calls
@@ -5843,7 +5899,9 @@ mod tests {
     async fn given_a_call_in_progress_then_nobody_is_asked_about_a_proxy() {
         let host = FakeHost::new(true, None);
         let calls = controller(host.clone());
-        let _guard = calls.claim(room_id!("!r:example.org")).unwrap();
+        let _guard = calls
+            .claim(room_id!("!r:example.org"), calls.video_asked())
+            .unwrap();
         assert_eq!(
             calls.confirm_direct(true).err(),
             Some(CallError::AlreadyInCall)
@@ -5881,15 +5939,20 @@ mod tests {
     async fn given_a_call_in_progress_then_a_second_is_refused() {
         let controller = controller(FakeHost::new(true, None));
         let room = room_id!("!r:example.org");
-        let guard = controller.claim(room).expect("first claim");
+        let guard = controller
+            .claim(room, controller.video_asked())
+            .expect("first claim");
         assert!(matches!(
             *controller.subscribe().borrow(),
             CallState::Joining { .. }
         ));
-        assert_eq!(controller.claim(room).err(), Some(CallError::AlreadyInCall));
+        assert_eq!(
+            controller.claim(room, controller.video_asked()).err(),
+            Some(CallError::AlreadyInCall)
+        );
         drop(guard);
         assert_eq!(*controller.subscribe().borrow(), CallState::Idle);
-        assert!(controller.claim(room).is_ok());
+        assert!(controller.claim(room, controller.video_asked()).is_ok());
     }
 
     /// GIVEN no call WHEN leaving or muting THEN the controller answers
@@ -6115,7 +6178,9 @@ mod tests {
     #[test]
     fn given_a_joining_call_when_the_microphone_changes_then_the_task_gets_it() {
         let calls = controller(FakeHost::new(true, None));
-        let guard = calls.claim(room_id!("!r:example.org")).unwrap();
+        let guard = calls
+            .claim(room_id!("!r:example.org"), calls.video_asked())
+            .unwrap();
         assert_eq!(
             *guard.microphone.borrow(),
             None,
@@ -6193,7 +6258,9 @@ mod tests {
             warm,
             "a camera test shows it without a call"
         );
-        let guard = calls.claim(room_id!("!r:example.org")).unwrap();
+        let guard = calls
+            .claim(room_id!("!r:example.org"), calls.video_asked())
+            .unwrap();
         assert_eq!(
             *guard.video_effect.borrow(),
             None,
@@ -6229,6 +6296,55 @@ mod tests {
         assert_eq!(*calls.inner.test_effect.borrow(), cool);
     }
 
+    /// GIVEN a join that read the saved record WHEN an effect was asked
+    /// before that read THEN the join's channel starts empty, so the saved
+    /// effect stands; WHEN one is asked after the read but before the join
+    /// claims the call (the proxy question runs between them) THEN the
+    /// channel starts with it, so it replaces the saved one (ADR-0068).
+    #[test]
+    fn given_an_effect_asked_before_the_claim_then_the_join_takes_it_only_if_asked_after_the_read()
+    {
+        let warm = VideoEffect {
+            background: persephone_call_protocol::Background::None,
+            filter: persephone_call_protocol::ColourFilter::Warm,
+        };
+        let cool = VideoEffect {
+            filter: persephone_call_protocol::ColourFilter::Cool,
+            ..warm
+        };
+        let room = room_id!("!r:example.org");
+        let calls = controller(FakeHost::new(true, None));
+        assert_eq!(calls.video_asked(), 0);
+        assert_eq!(
+            calls.set_video_effect(warm, true),
+            Err(CallError::NotInCall)
+        );
+        let read = calls.video_asked();
+        assert_eq!(read, 1, "each ask is numbered");
+        let guard = calls.claim(room, read).unwrap();
+        assert_eq!(
+            *guard.video_effect.borrow(),
+            None,
+            "the record read after the save has it"
+        );
+        drop(guard);
+
+        let read = calls.video_asked();
+        assert_eq!(
+            calls.set_video_effect(cool, false),
+            Err(CallError::NotInCall)
+        );
+        let guard = calls.claim(room, read).unwrap();
+        assert_eq!(
+            *guard.video_effect.borrow(),
+            Some(OwnVideo {
+                effect: cool,
+                mirror: false
+            }),
+            "asked after the read: the join's record is older"
+        );
+    }
+
     /// GIVEN a running call WHEN the worker answers a video effect change
     /// THEN the state says whether it was refused, and a repeat changes
     /// nothing (ADR-0068).
@@ -6259,7 +6375,9 @@ mod tests {
             calls.set_devices(Some("mic-1"), None, None),
             Err(CallError::NotInCall)
         );
-        let guard = calls.claim(room_id!("!r:example.org")).unwrap();
+        let guard = calls
+            .claim(room_id!("!r:example.org"), calls.video_asked())
+            .unwrap();
         assert_eq!(
             calls.set_devices(Some("mic-1"), Some("spk-1"), Some("cam-1")),
             Ok(())
@@ -6443,7 +6561,8 @@ mod tests {
         ));
         assert!(matches!(
             sent.try_recv(),
-            Ok(ToWorker::TestDevice { device: Some(id), .. }) if id == "mic"
+            Ok(ToWorker::TestDevice { device: Some(id), video_effect, .. })
+                if id == "mic" && video_effect == VideoEffect::NONE
         ));
         assert_eq!(
             sent.try_recv(),
@@ -6452,28 +6571,41 @@ mod tests {
         );
     }
 
-    /// GIVEN a saved video effect WHEN a camera test starts THEN its worker
-    /// gets the effect directly after `TestDevice` (ADR-0068), so the first
-    /// shown picture has it, and the worker's answer does not end the test.
+    /// GIVEN a saved video effect WHEN a camera test starts THEN `TestDevice`
+    /// carries it (ADR-0068), so the worker has it before the camera opens
+    /// and the first shown picture has it; nothing else is sent before the
+    /// close. WHEN the worker answers that it refused the effect THEN the
+    /// test status says so while the test runs, and the answer does not end
+    /// the test; WHEN the test ends THEN the status no longer says so.
     #[test]
-    fn given_a_camera_test_then_its_worker_gets_the_saved_effect_after_the_test() {
+    fn given_a_camera_test_then_test_device_carries_the_saved_effect() {
         let warm = VideoEffect {
             background: persephone_call_protocol::Background::None,
             filter: persephone_call_protocol::ColourFilter::Warm,
         };
         let host = ScriptHost::new(vec![
+            FromWorker::VideoEffect {
+                effect: VideoEffect::NONE,
+                refused: true,
+            },
             FromWorker::Camera {
                 state: CameraState::On,
-            },
-            FromWorker::VideoEffect {
-                effect: warm,
-                refused: false,
             },
             FromWorker::Left,
         ]);
         let calls = controller(host.clone());
         calls.set_test_effect(warm);
         plain(&calls.inner.device_test).generation = 1;
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let record = seen.clone();
+        // The status as each change leaves it; `set_test` calls the listener
+        // after it drops the test lock.
+        let inner = Arc::downgrade(&calls.inner);
+        calls.set_test_listener(Arc::new(move || {
+            if let Some(inner) = inner.upgrade() {
+                plain(&record).push(plain(&inner.device_test).status.clone());
+            }
+        }));
         run_device_test(
             &calls.inner,
             1,
@@ -6482,7 +6614,15 @@ mod tests {
             &AtomicBool::new(false),
             device_test::TEST_LIMIT,
         );
-        assert_eq!(calls.device_test_status().state, CallDeviceTestState::Done);
+        let status = calls.device_test_status();
+        assert_eq!(status.state, CallDeviceTestState::Done);
+        assert!(!status.effect_refused, "an ended test shows no camera");
+        assert!(
+            plain(&seen)
+                .iter()
+                .any(|status| status.effect_refused && status.state != CallDeviceTestState::Done),
+            "the refusal showed while the test ran"
+        );
         let mut sent = host
             .sent
             .lock()
@@ -6493,10 +6633,13 @@ mod tests {
             sent.try_recv(),
             Ok(ToWorker::SetDiagnostics { .. })
         ));
-        assert!(matches!(sent.try_recv(), Ok(ToWorker::TestDevice { .. })));
         assert_eq!(
             sent.try_recv(),
-            Ok(ToWorker::SetVideoEffect { effect: warm })
+            Ok(ToWorker::TestDevice {
+                test: persephone_call_protocol::DeviceTest::Camera,
+                device: None,
+                video_effect: warm,
+            })
         );
         assert_eq!(sent.try_recv(), Ok(ToWorker::Leave), "then only the close");
     }
@@ -6770,7 +6913,7 @@ mod tests {
     async fn given_a_join_when_the_session_ends_then_the_join_stops_and_the_worker_dies() {
         let calls = controller(FakeHost::new(true, None));
         let room = room_id!("!r:example.org");
-        let guard = calls.claim(room).unwrap();
+        let guard = calls.claim(room, calls.video_asked()).unwrap();
         let (killed, kill) = killer();
         *plain(&guard.kill) = Some(kill);
         calls.stop_for_session_end();
@@ -6870,7 +7013,7 @@ mod tests {
     async fn given_a_join_in_progress_when_leave_is_called_then_the_join_is_cancelled() {
         let calls = controller(FakeHost::new(true, None));
         let room = room_id!("!r:example.org");
-        let guard = calls.claim(room).unwrap();
+        let guard = calls.claim(room, calls.video_asked()).unwrap();
         assert_eq!(guard.flags.halt(), Ok(()));
         assert_eq!(calls.leave().await, Ok(()));
         assert_eq!(guard.flags.halt(), Err(CallError::Cancelled));
@@ -6886,7 +7029,10 @@ mod tests {
                 reason: EndReason::Left
             }
         );
-        assert!(calls.claim(room).is_ok(), "the slot is free again");
+        assert!(
+            calls.claim(room, calls.video_asked()).is_ok(),
+            "the slot is free again"
+        );
     }
 
     /// GIVEN a state listener WHEN the state changes THEN it is told once per
@@ -6900,7 +7046,7 @@ mod tests {
             seen.fetch_add(1, Ordering::SeqCst);
         }));
         let room = room_id!("!r:example.org");
-        let guard = calls.claim(room).unwrap();
+        let guard = calls.claim(room, calls.video_asked()).unwrap();
         assert_eq!(count.load(Ordering::SeqCst), 1);
         drop(guard);
         assert_eq!(count.load(Ordering::SeqCst), 2);
@@ -8452,7 +8598,9 @@ mod tests {
     async fn given_no_connected_call_then_the_camera_is_refused() {
         let calls = controller(FakeHost::new(true, None));
         assert_eq!(calls.set_camera(true), Err(CallError::NotInCall));
-        let _guard = calls.claim(room_id!("!r:example.org")).unwrap();
+        let _guard = calls
+            .claim(room_id!("!r:example.org"), calls.video_asked())
+            .unwrap();
         assert_eq!(calls.set_camera(true), Err(CallError::NotInCall));
 
         let calls = controller(FakeHost::new(true, None));
@@ -8658,7 +8806,9 @@ mod tests {
     #[tokio::test]
     async fn given_a_join_that_ends_then_its_picture_store_is_closed() {
         let calls = controller(FakeHost::new(true, None));
-        let guard = calls.claim(room_id!("!r:example.org")).unwrap();
+        let guard = calls
+            .claim(room_id!("!r:example.org"), calls.video_asked())
+            .unwrap();
         let store = VideoStore::new();
         *plain(&calls.inner.video) = Some(store.clone());
         store.sync(true, [true; 5]);

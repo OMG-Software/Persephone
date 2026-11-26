@@ -1627,7 +1627,8 @@ fn given_a_ready_call_page_then_the_open_returns() {
 }
 
 /// GIVEN device test commands THEN bounded IDs cross, a bad one never
-/// reaches the core, and a reply outside the contract is refused.
+/// reaches the core, and a reply outside the contract is refused. A reply
+/// without the effect refusal (ADR-0068) reaches the page as no refusal.
 #[test]
 fn given_device_test_commands_then_bounded_arguments_cross() {
     let core = FakeCore::new(true);
@@ -1639,7 +1640,9 @@ fn given_device_test_commands_then_bounded_arguments_cross() {
             "call_device_test",
             serde_json::json!({"test": "speaker", "device": "{0.0.0.00000000}.{a}"})
         ),
-        Ok(serde_json::json!({"id": 3, "test": "speaker", "state": "starting", "stream": 0}))
+        Ok(serde_json::json!({
+            "id": 3, "test": "speaker", "state": "starting", "stream": 0, "effectRefused": false
+        }))
     );
     assert_eq!(
         invoke("call_device_test_stop", serde_json::json!({})),

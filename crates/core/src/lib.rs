@@ -2791,12 +2791,15 @@ impl Core {
     }
 
     /// Sets the own camera's video effect and whether the own preview is
-    /// mirrored (ADR-0068): the effect at once for a camera test and a
-    /// running call, and both saved in the profile's call device record for
-    /// later calls, like the microphone settings (`call_microphone`). The
-    /// worker refuses an effect that it cannot run and keeps the old one; the
-    /// call status then says so. A record that cannot be read is not
-    /// replaced; the reply is then `unavailable`.
+    /// mirrored (ADR-0068): both saved in the profile's call device record
+    /// for later calls, then the effect for a camera test and both for a
+    /// running or joining call. The save comes first, so a join that read the
+    /// record before it gets the effect from the controller
+    /// (`CallController::video_asked`). The worker refuses an effect that it
+    /// cannot run and keeps the old one; the call status and the device test
+    /// status then say so, later than this reply. A record that cannot be
+    /// read is not replaced; the reply is then `unavailable`, and nothing
+    /// changes.
     fn call_video_effect(
         &self,
         effect: persephone_contracts::CallVideoEffect,
@@ -2809,9 +2812,6 @@ impl Core {
         let Some(worker_effect) = calls::devices::worker_effect(effect) else {
             return Outcome::Error(ErrorCode::InvalidArgument);
         };
-        // A running call or camera test changes now, even if the save below
-        // fails.
-        let _ = self.calls.set_video_effect(worker_effect, mirror);
         if self.session.is_configured() {
             let lease = match self.session.admit() {
                 Ok(lease) => lease,
@@ -2837,6 +2837,8 @@ impl Core {
                 return Outcome::Error(code);
             }
         }
+        // `NotInCall` is no failure: the saved effect is for the next call.
+        let _ = self.calls.set_video_effect(worker_effect, mirror);
         ok(&calls::status::status(&self.calls.state()))
     }
 
@@ -3119,6 +3121,9 @@ impl Core {
         let proxy = lease
             .stores()
             .block_on(calls::controller::proxy_configured(lease.stores()));
+        // Before the record: a video effect asked after this read replaces
+        // the saved one (ADR-0068).
+        let video_asked = self.calls.video_asked();
         let devices = lease
             .stores()
             .block_on(calls::controller::device_selection(lease.stores()));
@@ -3150,6 +3155,7 @@ impl Core {
             generation,
             runtime: lease.stores().runtime().handle().clone(),
             devices,
+            video_asked,
             video,
         };
         let joined = lease
