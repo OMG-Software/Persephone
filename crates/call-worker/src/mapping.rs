@@ -346,6 +346,15 @@ impl<C, U> Slots<C, U> {
         })
     }
 
+    /// The open connections with their indexes, in no set order. The
+    /// statistics probe names each remote entry by its connection.
+    pub fn open_indexed(&self) -> impl Iterator<Item = (u8, &U)> {
+        self.0.iter().filter_map(|(index, slot)| match slot {
+            Slot::Up(open) => Some((*index, open)),
+            Slot::Connecting(_) | Slot::Ended => None,
+        })
+    }
+
     /// Takes every connection out, for the end of the call.
     pub fn take_all(&mut self) -> Vec<Slot<C, U>> {
         self.0.drain().map(|(_, slot)| slot).collect()
@@ -1209,8 +1218,9 @@ mod tests {
     #[test]
     fn given_mixed_connections_then_only_open_ones_get_the_playout() {
         // GIVEN one open, one pending and one failed connection, WHEN the
-        // open ones are listed for the call's playout (ADR-0055), THEN only
-        // the open one is listed, and the slots are unchanged.
+        // open ones are listed for the call's playout (ADR-0055) or with
+        // their indexes for the statistics (ADR-0066), THEN only the open
+        // one is listed, with its index, and the slots are unchanged.
         let mut slots: Slots<&str, &str> = Slots::default();
         slots.begin(1, "c1").unwrap();
         slots.up(1, "u1");
@@ -1218,6 +1228,13 @@ mod tests {
         slots.begin(3, "c3").unwrap();
         slots.end(3);
         assert_eq!(slots.open().copied().collect::<Vec<_>>(), vec!["u1"]);
+        assert_eq!(
+            slots
+                .open_indexed()
+                .map(|(index, open)| (index, *open))
+                .collect::<Vec<_>>(),
+            vec![(1, "u1")]
+        );
         assert!(slots.is_connecting(2));
     }
 
