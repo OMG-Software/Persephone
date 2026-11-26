@@ -10132,13 +10132,24 @@ mod tests {
     use crate::calls::screen_helper::LaunchGuard;
     use crate::calls::screen_helper::fake::FakeHelper;
 
-    /// A launch under way in the helper count for the next 300 ms.
-    fn launch_held_briefly() -> std::thread::JoinHandle<()> {
+    /// Holds a launch in the helper count while `end` runs: `end` must still
+    /// be waiting after a while, and must finish once the launch is released.
+    /// The end's wait runs on a blocking thread, so its future stays pending
+    /// while the count is held; no elapsed time is measured.
+    async fn waits_for_the_count(end: impl Future<Output = ()>, what: &str) {
         let launch = LaunchGuard::begin(&AtomicBool::new(false)).expect("a launch under way");
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(300));
-            drop(launch);
-        })
+        let mut end = std::pin::pin!(end);
+        assert!(
+            time::timeout(Duration::from_millis(200), &mut end)
+                .await
+                .is_err(),
+            "{what} waits while the count is held"
+        );
+        drop(launch);
+        assert!(
+            time::timeout(Duration::from_secs(3), end).await.is_ok(),
+            "{what} ends once the count is free"
+        );
     }
 
     /// GIVEN a helper count held in the process (a launch under way) WHEN the
@@ -10164,25 +10175,12 @@ mod tests {
             "a call without capture that is left does not wait"
         );
 
-        let release = launch_held_briefly();
-        let started = std::time::Instant::now();
-        quiet().call.finish(true).await;
-        assert!(
-            started.elapsed() >= Duration::from_millis(250),
-            "the end of the session waits for the count"
-        );
-        release.join().expect("the release thread");
+        let ended = quiet();
+        waits_for_the_count(ended.call.finish(true), "the end of the session").await;
 
         let (mut fixture, inner, _) = call_with_source(true);
         fixture.call.screen_command(&inner, true, 0).unwrap();
-        let release = launch_held_briefly();
-        let started = std::time::Instant::now();
-        fixture.call.finish(false).await;
-        assert!(
-            started.elapsed() >= Duration::from_millis(250),
-            "a call that began a pick waits for the count"
-        );
-        release.join().expect("the release thread");
+        waits_for_the_count(fixture.call.finish(false), "a call that began a pick").await;
     }
 
     /// A bare grant of one monitor with a fake helper for share `share`.
