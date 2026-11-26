@@ -991,14 +991,19 @@ async fn finish_worker(link: CallWorkerLink) {
 /// pipe's read end goes with the grant, and the next share starts only
 /// when no helper is active.
 ///
-/// A call that began no pick and held no helper (`capture_used` false) has
-/// no helper of its own that could still be active, so it does not wait for
-/// the process's count: an earlier call's end waited for its own helpers,
-/// and the next share waits until none is active before it starts one.
+/// The wait for the process's count runs only when `wait_for_count` is set:
+/// for a call that began a pick (also one cancelled or refused) or held a
+/// helper, and at the end of the session. A call that did neither, and that
+/// the user left, has no helper of its own that could be active: a helper
+/// comes only from a call that began a pick, whose own end waited for it
+/// (bounded), and the next share waits until none is active before it
+/// starts one. The end of the session waits even then, so a helper that
+/// outlived an earlier call's bounded waits gets one more wait before the
+/// session is gone.
 async fn end_screen_helpers(
     pick: Option<ScreenPick>,
     helper: Option<HelperShare>,
-    capture_used: bool,
+    wait_for_count: bool,
 ) {
     let mut helpers: Vec<HelperShare> = helper.into_iter().collect();
     if let Some(mut pick) = pick {
@@ -1012,7 +1017,7 @@ async fn end_screen_helpers(
             helpers.extend(grant.helper);
         }
     }
-    if helpers.is_empty() && (!capture_used || super::screen_helper::helpers_active() == 0) {
+    if helpers.is_empty() && (!wait_for_count || super::screen_helper::helpers_active() == 0) {
         return;
     }
     let _ = tokio::task::spawn_blocking(move || {
@@ -2389,6 +2394,13 @@ impl CallController {
                 }
                 Slot::Running(run) => {
                     run.flags.ended.store(true, Ordering::SeqCst);
+                    // A screen pick that waits for the user is cancelled
+                    // before `Ended` shows, as the handle's stop does: a Yes
+                    // given after the session ended starts no helper while
+                    // the call task finishes its current step.
+                    if let Some(pick) = plain(&run.screen_control).pick_cancel.take() {
+                        pick.store(true, Ordering::SeqCst);
+                    }
                     if let Some(stop) = run.stop {
                         let _ = stop.send(());
                     }
@@ -2727,10 +2739,11 @@ struct Call {
     /// Windows (ADR-0067): the capture helper of the running share. Dropping
     /// it stops it. It ends with the share, the call and the session.
     screen_helper: Option<HelperShare>,
-    /// The call began a screen pick or held a capture helper. Only such a
-    /// call can leave a helper of its own (a reaped one, or a launch under
-    /// way) that its end waits for; another call does not wait for the
-    /// process's helper count.
+    /// The call began a screen pick (also one later cancelled or refused) or
+    /// held a capture helper. Only such a call can leave a helper of its own
+    /// (a reaped one, or a launch under way) that its end waits for; another
+    /// call that the user leaves does not wait for the process's helper
+    /// count. The end of the session always waits for it.
     screen_capture_used: bool,
     /// A `SetScreen` start went to the worker and no stop or end since.
     screen_sent: bool,
@@ -4842,7 +4855,8 @@ impl Call {
         // gone: no helper outlives the call or the session. The membership
         // ends meanwhile, so a slow helper does not hold it either.
         if session_ended {
-            end_screen_helpers(screen_pick, screen_helper, screen_capture_used).await;
+            // The end of the session always waits for the helper count.
+            end_screen_helpers(screen_pick, screen_helper, true).await;
             return;
         }
         let room_id = view.room_id;
@@ -6467,6 +6481,30 @@ mod tests {
                 reason: EndReason::SessionEnded
             }
         );
+    }
+
+    /// GIVEN a running call whose screen pick waits for the user WHEN the
+    /// session ends THEN the pick is cancelled in the same step, before
+    /// `Ended` shows, so a Yes given afterwards starts no helper.
+    #[test]
+    fn given_a_waiting_pick_when_the_session_ends_then_it_is_cancelled_before_ended() {
+        let calls = controller(FakeHost::new(true, None));
+        run_slot(&calls, 9);
+        let control = match &*calls.inner.slot() {
+            Slot::Running(run) => run.screen_control.clone(),
+            _ => unreachable!("a running call"),
+        };
+        let pick = Arc::new(AtomicBool::new(false));
+        plain(&control).pick_cancel = Some(pick.clone());
+        let at_end = Arc::new(Mutex::new(None));
+        let (flag, seen) = (pick.clone(), at_end.clone());
+        calls.set_listener(Arc::new(move || {
+            plain(&seen).get_or_insert(flag.load(Ordering::SeqCst));
+        }));
+        calls.stop_for_session_end();
+        assert!(matches!(calls.state(), CallState::Ended { .. }));
+        assert_eq!(*plain(&at_end), Some(true), "cancelled before Ended shows");
+        assert!(plain(&control).pick_cancel.is_none());
     }
 
     /// GIVEN no call WHEN the session ends THEN nothing changes.
@@ -10046,31 +10084,52 @@ mod tests {
     use crate::calls::screen_helper::LaunchGuard;
     use crate::calls::screen_helper::fake::FakeHelper;
 
-    /// GIVEN a helper count held in the process (a launch under way) WHEN a
-    /// call that began no pick and held no helper ends THEN its end does not
-    /// wait for that count; WHEN a call that began a pick ends THEN its end
-    /// waits until the count is free.
+    /// A launch under way in the helper count for the next 300 ms.
+    fn launch_held_briefly() -> std::thread::JoinHandle<()> {
+        let launch = LaunchGuard::begin(&AtomicBool::new(false)).expect("a launch under way");
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            drop(launch);
+        })
+    }
+
+    /// GIVEN a helper count held in the process (a launch under way) WHEN the
+    /// user leaves a call that began no pick and held no helper THEN its end
+    /// does not wait for that count; WHEN such a call ends with the session,
+    /// or the user leaves a call that began a pick THEN the end waits until
+    /// the count is free.
     #[tokio::test]
-    async fn given_a_call_without_screen_capture_when_it_ends_then_it_waits_for_no_helper() {
+    async fn given_a_call_without_screen_capture_when_it_is_left_then_it_waits_for_no_helper() {
         let _serial = HELPER_TESTS.lock().await;
-        let never = AtomicBool::new(false);
-        let launch = LaunchGuard::begin(&never).expect("a launch under way");
-        let quiet = test_call(
-            no_admission(),
-            Arc::new(Flags::default()),
-            Arc::new(AtomicBool::new(false)),
+        let quiet = || {
+            test_call(
+                no_admission(),
+                Arc::new(Flags::default()),
+                Arc::new(AtomicBool::new(false)),
+            )
+        };
+        let launch = LaunchGuard::begin(&AtomicBool::new(false)).expect("a launch under way");
+        let left = time::timeout(Duration::from_secs(3), quiet().call.finish(false)).await;
+        drop(launch);
+        assert!(
+            left.is_ok(),
+            "a call without capture that is left does not wait"
         );
-        let ended = time::timeout(Duration::from_secs(3), quiet.call.finish(true)).await;
-        assert!(ended.is_ok(), "a call without capture does not wait");
+
+        let release = launch_held_briefly();
+        let started = std::time::Instant::now();
+        quiet().call.finish(true).await;
+        assert!(
+            started.elapsed() >= Duration::from_millis(250),
+            "the end of the session waits for the count"
+        );
+        release.join().expect("the release thread");
 
         let (mut fixture, inner, _) = call_with_source(true);
         fixture.call.screen_command(&inner, true, 0).unwrap();
-        let release = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(300));
-            drop(launch);
-        });
+        let release = launch_held_briefly();
         let started = std::time::Instant::now();
-        fixture.call.finish(true).await;
+        fixture.call.finish(false).await;
         assert!(
             started.elapsed() >= Duration::from_millis(250),
             "a call that began a pick waits for the count"
@@ -10935,6 +10994,8 @@ mod tests {
     /// question still open is dropped with the call.
     #[tokio::test]
     async fn given_a_call_with_other_sfus_ends_then_the_worker_is_ended() {
+        // The end of the session reads the helper count.
+        let _serial = crate::calls::screen_helper::HELPER_TESTS.lock().await;
         let host = FakeHost::answering_other(true);
         let killed = Arc::new(AtomicBool::new(false));
         let (fixture, inner) = other_call(&host, killed.clone());
