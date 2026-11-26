@@ -1363,8 +1363,9 @@ struct Inner {
     device_test: Mutex<DeviceTestSlot>,
     /// Tells the owner that the device test changed.
     test_listener: Mutex<Option<Listener>>,
-    /// The video effect that a camera test shows (ADR-0068): the saved one
-    /// when the test starts, then each change.
+    /// The video effect that a camera test asks the worker for (ADR-0068):
+    /// the saved one when the test starts, then each change. The worker can
+    /// refuse it; the device test status then says so (`effect_refused`).
     test_effect: watch::Sender<VideoEffect>,
     /// The newest video effect asked for (ADR-0068). Changed and read under
     /// the slot lock, so an effect asked at any time reaches a join: on the
@@ -2330,8 +2331,8 @@ impl CallController {
         plain(&self.inner.asked_video).number
     }
 
-    /// The video effect that the next camera test starts with: the saved
-    /// one (ADR-0068).
+    /// The video effect that the next camera test asks the worker for: the
+    /// saved one (ADR-0068). The worker can refuse it.
     pub fn set_test_effect(&self, effect: VideoEffect) {
         self.inner.test_effect.send_replace(effect);
     }

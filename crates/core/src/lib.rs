@@ -1582,9 +1582,9 @@ impl Core {
                 }
                 match self.calls_open() {
                     Ok(()) => {
-                        // A camera test shows the saved video effect
+                        // A camera test asks for the saved video effect
                         // (ADR-0068). Its pictures stay on this device, so
-                        // a record that cannot be read shows none.
+                        // a record that cannot be read asks for none.
                         if *test == persephone_contracts::CallDeviceTestKind::Camera {
                             let effect = self.saved_call_devices().map_or(
                                 persephone_call_protocol::VideoEffect::NONE,
