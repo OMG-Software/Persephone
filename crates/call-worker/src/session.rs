@@ -3529,8 +3529,13 @@ fn use_own_key_index(manager: &E2eeManager, own_sids: &[TrackSid], index: i32) {
 }
 
 /// Applies the camera's video effect to `picture` in place (ADR-0068).
-/// `false` when the picture must not go out.
+/// `false` when the picture must not go out. With no effect the picture goes
+/// as it is, as before effects, also one that `Planes` does not take (a side
+/// of 1 pixel after scaling).
 fn apply_effects(effects: &mut CameraEffects, picture: &mut I420Buffer) -> bool {
+    if effects.leaves_plain() {
+        return true;
+    }
     let (width, height) = (picture.width(), picture.height());
     let (y_stride, u_stride, v_stride) = picture.strides();
     let (y, u, v) = picture.data_mut();
@@ -4725,6 +4730,35 @@ mod tests {
         };
         assert!(!is_noted(&event), "it must take no budget");
         assert_eq!(describe_room_event(0, &event), None);
+    }
+
+    /// GIVEN a camera picture of 640x1, which a 1920x2 camera scales to
+    /// WHEN no effect is in use THEN it goes out unchanged, as before
+    /// effects; WHEN a filter is in use THEN it is dropped, because the
+    /// filter cannot run on it; a normal picture with the filter goes out
+    /// changed (ADR-0068).
+    #[test]
+    fn given_a_picture_of_one_row_then_only_an_effect_drops_it() {
+        let shared = SharedEffect::new(VideoEffect::NONE);
+        let mut effects = CameraEffects::new(shared.clone(), None);
+        let mut thin = solid_i420(640, 1, 100, 128, 128);
+        assert!(apply_effects(&mut effects, &mut thin), "no effect: it goes");
+        assert!(thin.data().0.iter().all(|&value| value == 100));
+
+        shared.store(VideoEffect {
+            background: persephone_call_protocol::Background::None,
+            filter: persephone_call_protocol::ColourFilter::Greyscale,
+        });
+        assert!(
+            !apply_effects(&mut effects, &mut thin),
+            "the filter cannot run"
+        );
+        let mut normal = solid_i420(16, 8, 100, 40, 200);
+        assert!(apply_effects(&mut effects, &mut normal));
+        assert!(
+            normal.data().1.iter().all(|&value| value == 128),
+            "greyscale clears the colour"
+        );
     }
 
     fn solid_i420(width: u32, height: u32, y: u8, u: u8, v: u8) -> I420Buffer {

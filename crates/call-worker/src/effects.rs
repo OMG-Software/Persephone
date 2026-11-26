@@ -702,6 +702,13 @@ impl CameraEffects {
         }
     }
 
+    /// Whether the effect in use is none, so a picture goes out as it is
+    /// and needs no [`Planes`]. `false` also for a value that no
+    /// `VideoEffect` gives.
+    pub fn leaves_plain(&self) -> bool {
+        self.effect.load() == Some(VideoEffect::NONE)
+    }
+
     /// Applies the effect in use to one picture. `false` when the picture
     /// must not go out: the effect needs a mask that the segmenter did not
     /// give (fail closed, ADR-0068).

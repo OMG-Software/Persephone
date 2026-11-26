@@ -109,6 +109,9 @@ an embedded ONNX model as the later segmenter (owner choice).
   failure, with `EffectUnavailable`.
 * A picture larger than 640x360 is refused by the effects code itself. This
   repeats the scaling limit.
+* With no effect, a picture goes out as it is and does not pass through the
+  effects code. So a picture that the effects code does not take (a side of 1
+  pixel after scaling) is still sent then. With an effect, it is dropped.
 
 ### Limits and cost
 
@@ -201,7 +204,13 @@ step needs, before any code:
 * the tract dependency tree through the dependency audit and the licence
   list, and the model's Apache-2.0 notice in the third-party notices;
 * a containment check on each OS: whether tract starts threads or makes
-  calls that the call profiles refuse.
+  calls that the call profiles refuse;
+* a rule for a change of one field of the effect. The effect part of
+  `call_video_effect` sends the background, the blur and the filter
+  together. So a window with an old copy that changes only the filter sends
+  its old background again, and can undo a background chosen in the other
+  window. Send each field alone, or read the record before an effect save.
+  This build offers only no background, so it cannot happen yet.
 
 This record is then amended with the results.
 
