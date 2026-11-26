@@ -197,8 +197,13 @@ it as accepted.
   helper's own end. The helper looks at the control pipe before each
   picture that it writes, so no new picture goes after it saw the stop; a
   picture that it is writing goes whole, so the worker reads only complete
-  items. Pictures that were written before the stop was seen can still
-  reach the call before the worker reads its own stop: "off" means that
+  items. The look and the write are not one step, so a stop that comes
+  between them does not stop that picture. Until the worker handles its
+  own stop or reads the helper's end item, it can still hand on pictures
+  that were captured before the stop: one that waits in the pipe, the one
+  that it keeps for its gap, and that one again as the repeat of a still
+  screen (`REPEAT_GAP`). The worker's stop closes its frame admission
+  first, so no picture reaches the track after it. "off" means that
   the capture was told to stop, as with the Linux portal, not that every
   sent picture was revoked. The call task then drops the share's helper, and a
   reaper thread does the wait, the terminate and the join. The
@@ -263,6 +268,23 @@ it as accepted.
   release, and a missing or unsigned helper leaves sharing "unavailable".
 * A helper starts for each share. The border can show for a moment before
   the worker takes its first frame.
+* Two short windows remain, and they need the owner's acceptance with this
+  record (see "Stop and lifecycle"):
+  * After "Stop sharing", the call can still get pictures that were
+    captured before the stop, until the worker handles its own stop. That
+    stop is queued at once; the time until the worker handles it was not
+    measured. ADR-0053's stop rule allows this. To hold back every picture
+    after the press, the page would have to wait for the worker before it
+    shows "off", which changes ADR-0053.
+  * A launch that is still under way after both waits of the end (at most
+    2 seconds for the pick, then at most 5 seconds until no helper is
+    active) can start a helper after the call ended. That helper captures
+    into its own memory, and the capture border shows, until its pick drops
+    it just after the launch returns. None of its pictures reaches a worker: no
+    worker has its frame pipe, and the core never reads frames. To close
+    this window, the end of the call would have to wait for the launch
+    without a limit, so a stuck launch could hold the end of the call and
+    of the session.
 
 ### Not verified
 
@@ -270,7 +292,9 @@ it as accepted.
   participant who sees the share. Each side was tested alone: the real
   helper writes a real, non-black picture to a pipe under its full launch
   (ignored test `platform::windows::screen_helper`), and the worker's reader
-  takes good frames and refuses bad ones (unit tests).
+  takes good frames and refuses bad ones (unit tests). So no live share has
+  shown that a still screen keeps its picture (the repeat) or that a burst
+  of changes ends on the newest picture (the kept picture).
 * No run has read more than one picture from the real helper. Its kept
   frame over the rate gap, whether a kept frame and a frame being copied
   ever leave the two-buffer frame pool without a buffer, and the pacing of
