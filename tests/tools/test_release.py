@@ -231,23 +231,24 @@ class ArchPkgbuildTests(TempTree):
         self.template = self.root / release.ARCH_TEMPLATE
         self.template.parent.mkdir(parents=True)
         shutil.copyfile(release.ROOT / release.ARCH_TEMPLATE, self.template)
-        self.debs = self.root / "in"
-        self.debs.mkdir()
-        self.output = self.root / "build"
+        self.debs = self.root / release.ARCH_INPUT
+        self.debs.mkdir(parents=True)
+        self.output = self.root / release.ARCH_OUTPUT
 
     def write_pkgbuild(self, name=DEB, content=b"deb contents"):
-        deb = self.debs / name
-        if content is not None:
-            deb.write_bytes(content)
-        return run_main(["arch-pkgbuild", "--deb", str(deb), "--output", str(self.output)], self.root)
+        if name is not None:
+            (self.debs / name).write_bytes(content)
+        return run_main(["arch-pkgbuild"], self.root)
 
     def test_pkgbuild_names_the_arch_version_the_deb_and_its_sha256(self):
         # GIVEN the repository template and the x86_64 .deb of the app version
+        # in the input folder
         # WHEN the PKGBUILD is written
-        code, _, stderr = self.write_pkgbuild()
+        code, stdout, stderr = self.write_pkgbuild()
         # THEN it carries the Arch version, the .deb's name and SHA-256 and no
         # placeholder, and the .deb is copied beside it for makepkg.
         self.assertEqual(code, 0, stderr)
+        self.assertIn(f"Wrote {release.ARCH_OUTPUT.as_posix()}/PKGBUILD", stdout)
         text = (self.output / "PKGBUILD").read_text(encoding="utf-8")
         digest = hashlib.sha256(b"deb contents").hexdigest()
         self.assertIn("\npkgver=0.1.0alpha.1\n", text)
@@ -263,13 +264,30 @@ class ArchPkgbuildTests(TempTree):
                      f"Persephone_{self.VERSION}_amd64.AppImage", f"Persephone_{self.VERSION}_amd64-signed.deb"):
             with self.subTest(name=name):
                 code, _, stderr = self.write_pkgbuild(name)
+                (self.debs / name).unlink()
                 self.assertEqual(code, 2)
-                self.assertIn("is not the x86_64 .deb", stderr)
+                # The AppImage is not a .deb, so the folder holds no .deb.
+                expected = "is not the x86_64 .deb" if name.endswith(".deb") else "it holds 0"
+                self.assertIn(expected, stderr)
                 self.assertFalse(self.output.exists())
 
-    def test_a_missing_deb_is_refused(self):
-        # GIVEN no file at the .deb's path WHEN the PKGBUILD is written THEN it fails.
-        code, _, stderr = self.write_pkgbuild(content=None)
+    def test_no_deb_or_two_debs_are_refused(self):
+        # GIVEN an input folder with no .deb, then with two
+        # WHEN the PKGBUILD is written THEN it fails and writes nothing, so
+        # makepkg never chooses between two .debs.
+        code, _, stderr = self.write_pkgbuild(name=None)
+        self.assertEqual(code, 2)
+        self.assertIn("must hold exactly one .deb; it holds 0", stderr)
+        (self.debs / f"Persephone_{self.VERSION}_amd64.deb").write_bytes(b"other")
+        code, _, stderr = self.write_pkgbuild()
+        self.assertEqual(code, 2)
+        self.assertIn("must hold exactly one .deb; it holds 2", stderr)
+        self.assertFalse(self.output.exists())
+
+    def test_a_deb_that_is_not_a_regular_file_is_refused(self):
+        # GIVEN a folder with the .deb's name WHEN the PKGBUILD is written THEN it fails.
+        (self.debs / self.DEB).mkdir()
+        code, _, stderr = self.write_pkgbuild(name=None)
         self.assertEqual(code, 2)
         self.assertIn("is not a regular file", stderr)
         self.assertFalse(self.output.exists())

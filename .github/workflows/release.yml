@@ -827,12 +827,10 @@ jobs:
           name: persephone-linux-x64${{ env.SUFFIX }}
           path: ${{ env.WORK }}/in
 
+      # release.py takes the one .deb in $WORK/in and writes $WORK/build. Its
+      # paths are fixed (ARCH_INPUT and ARCH_OUTPUT), so keep WORK as it is.
       - name: Write the PKGBUILD
-        run: |
-          shopt -s nullglob
-          debs=("$WORK"/in/*.deb)
-          [ "${#debs[@]}" -eq 1 ] || { echo "::error::expected one .deb, found ${#debs[@]}"; exit 1; }
-          python tools/release.py arch-pkgbuild --deb "${debs[0]}" --output "$WORK/build"
+        run: python tools/release.py arch-pkgbuild
 
       # makepkg refuses to run as root. Nothing is compiled, so --nodeps skips
       # the dependencies here; the install step below installs and checks them.
@@ -844,7 +842,9 @@ jobs:
           runuser -u builder -- makepkg --nodeps --noconfirm
 
       # The .deb's data.tar and the package, less pacman's own metadata, must
-      # hold the same files with the same contents.
+      # hold the same files with the same contents, and each file must have
+      # the same type, mode, owner, group and link target. This step runs as
+      # root, so bsdtar restores the modes and owners from both archives.
       - name: Check that the package holds the .deb's files unchanged
         run: |
           shopt -s nullglob
@@ -855,6 +855,10 @@ jobs:
           bsdtar -xf "${packages[0]}" -C "$WORK/verify/package"
           rm "$WORK/verify/package/.PKGINFO" "$WORK/verify/package/.BUILDINFO" "$WORK/verify/package/.MTREE"
           diff -r --no-dereference "$WORK/verify/deb" "$WORK/verify/package"
+          for tree in deb package; do
+            (cd "$WORK/verify/$tree" && find . -mindepth 1 -printf '%M %U %G %l %p\n') | LC_ALL=C sort > "$WORK/verify/$tree.list"
+          done
+          diff "$WORK/verify/deb.list" "$WORK/verify/package.list"
 
       # pacman installs the dependencies from the Arch repositories. Every
       # library that a program links must belong to a package in `depends`,

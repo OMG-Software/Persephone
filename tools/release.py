@@ -18,9 +18,11 @@ configuration (sidecars and bundled licence files) that the workflow merges
 with `cargo tauri --config`. It never adds a signing hook: signing runs in
 separate jobs that build nothing (see docs/release.md).
 
-`arch-pkgbuild --deb FILE --output DIR` writes DIR/PKGBUILD from
-tools/arch/PKGBUILD.in and copies the x86_64 .deb beside it, so that makepkg
-in DIR makes an Arch Linux package with the .deb's files (ADR-0069).
+`arch-pkgbuild` takes the one x86_64 .deb in .local/release/arch/in, writes
+.local/release/arch/build/PKGBUILD from tools/arch/PKGBUILD.in and copies the
+.deb beside it, so that makepkg in that folder makes an Arch Linux package
+with the .deb's files (ADR-0069). As with append-notice, no argument names a
+file.
 
 The edits change only the version strings. Each edit is verified by parsing
 the file again and comparing it with the expected document, so formatting and
@@ -382,6 +384,10 @@ def bundle_config(root, notices, platform):
 
 
 ARCH_TEMPLATE = Path("tools/arch/PKGBUILD.in")
+# The release job downloads the Linux x64 files into ARCH_INPUT and runs
+# makepkg in ARCH_OUTPUT.
+ARCH_INPUT = Path(".local/release/arch/in")
+ARCH_OUTPUT = Path(".local/release/arch/build")
 ARCH_PLACEHOLDERS = ("@PKGVER@", "@DEB@", "@SHA256@")
 _ARCH_PLACEHOLDER = re.compile(r"@[A-Z0-9_]+@")
 
@@ -391,15 +397,20 @@ def arch_deb_name(version):
     return re.compile(rf"Persephone_{re.escape(version)}_amd64(?:-unsigned)?\.deb")
 
 
-def arch_pkgbuild(root, deb, output):
-    """Write `output`/PKGBUILD and copy the x86_64 .deb into `output`.
+def arch_pkgbuild(root=ROOT):
+    """Write ARCH_OUTPUT/PKGBUILD and copy the x86_64 .deb into ARCH_OUTPUT.
 
-    The version is the app version in tauri.conf.json. The .deb must have the
-    name that the Linux job gives it for that version, so that the package
-    cannot be made from the .deb of another version. The PKGBUILD names the
-    .deb's SHA-256, which makepkg checks before it uses the copy.
+    The paths are fixed, so no argument names a file. ARCH_INPUT must hold
+    exactly one .deb. The version is the app version in tauri.conf.json. The
+    .deb must have the name that the Linux job gives it for that version, so
+    that the package cannot be made from the .deb of another version. The
+    PKGBUILD names the .deb's SHA-256, which makepkg checks before it uses the
+    copy.
     """
-    deb = Path(deb)
+    debs = sorted((root / ARCH_INPUT).glob("*.deb"))
+    if len(debs) != 1:
+        raise ReleaseError(f"{ARCH_INPUT.as_posix()} must hold exactly one .deb; it holds {len(debs)}")
+    deb = debs[0]
     version = _get(json.loads(_read(root / "src-tauri/tauri.conf.json")), ["version"])
     if not isinstance(version, str):
         raise ReleaseError("src-tauri/tauri.conf.json has no version")
@@ -418,13 +429,11 @@ def arch_pkgbuild(root, deb, output):
     unknown = _ARCH_PLACEHOLDER.search(text)
     if unknown:
         raise ReleaseError(f"{ARCH_TEMPLATE.as_posix()} has an unknown placeholder {unknown.group()}")
-    output = Path(output)
+    output = root / ARCH_OUTPUT
     output.mkdir(parents=True, exist_ok=True)
-    target = output / deb.name
-    if target.resolve() != deb.resolve():
-        shutil.copyfile(deb, target)
+    shutil.copyfile(deb, output / deb.name)
     _write(output / "PKGBUILD", text)
-    return output / "PKGBUILD"
+    return ARCH_OUTPUT / "PKGBUILD"
 
 
 NOTICE_SOURCE_LIMIT = 1024 * 1024
@@ -566,13 +575,14 @@ def main(argv=None, root=ROOT):
         "Default: win-x64 on windows, mac-arm64 and mac-x64 on macos; linux needs one",
     )
     append.add_argument("--title", help="section title; default from the tag in tools/webrtc.json")
-    arch = commands.add_parser("arch-pkgbuild", help="write an Arch Linux PKGBUILD that repackages the x86_64 .deb")
-    arch.add_argument("--deb", required=True, help="the x86_64 .deb from the Linux release job")
-    arch.add_argument("--output", required=True, help="directory for PKGBUILD and the copy of the .deb")
+    commands.add_parser(
+        "arch-pkgbuild",
+        help=f"write {ARCH_OUTPUT.as_posix()}/PKGBUILD, which repackages the x86_64 .deb in {ARCH_INPUT.as_posix()}",
+    )
     args = parser.parse_args(argv)
     try:
         if args.command == "arch-pkgbuild":
-            print(f"Wrote {arch_pkgbuild(root, args.deb, args.output)}")
+            print(f"Wrote {arch_pkgbuild(root).as_posix()}")
             return 0
         if args.command == "append-notice":
             append_notice(args.title or webrtc_title(root), root, args.platform, args.keys)

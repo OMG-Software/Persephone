@@ -37,7 +37,7 @@ build against PipeWire 1.0.5 headers and link the system's `libpipewire`
 
 Linux users should install their distribution's package: the `.deb` on
 Debian and Ubuntu, the `.rpm` on Fedora and openSUSE, and the `.pkg.tar.zst`
-on Arch Linux (`sudo pacman -U persephone-<version>-1-x86_64.pkg.tar.zst`).
+on Arch Linux (`sudo pacman -U <file>`).
 These use the distribution's GTK and WebKitGTK, which get its security
 updates. The AppImage carries its own copies of those libraries. Use it only
 when no package fits.
@@ -95,12 +95,16 @@ install directory and the web view's data folder.
    Arch Linux package in an `archlinux:base-devel` container. The container
    has the same digest pin as the `arch` job of `check.yml`; change both
    together. After `pacman -Syu`,
-   `python tools/release.py arch-pkgbuild --deb FILE --output DIR` writes
-   `PKGBUILD` from [`tools/arch/PKGBUILD.in`](../tools/arch/PKGBUILD.in) with
-   the Arch version and the `.deb`'s name and SHA-256, and makepkg builds the
+   `python tools/release.py arch-pkgbuild` takes the one `.deb` in
+   `.local/release/arch/in` and writes `.local/release/arch/build/PKGBUILD`
+   from [`tools/arch/PKGBUILD.in`](../tools/arch/PKGBUILD.in) with the Arch
+   version and the `.deb`'s name and SHA-256. The command takes no file
+   arguments, as `append-notice` does. makepkg builds the
    package as an unprivileged user. The job then checks that:
-   - the package holds the `.deb`'s files, byte for byte, and nothing else
-     except pacman's metadata (makepkg does not strip the programs);
+   - the package holds the `.deb`'s files, byte for byte and with the same
+     type, mode, owner, group and link target, and nothing else except
+     pacman's metadata (`options` turns off each makepkg option that changes
+     files, such as stripping);
    - `pacman -U` installs it with its dependencies;
    - every library that the four programs link belongs to a package that
      `depends` lists, and `ldd` finds every library;
@@ -465,8 +469,10 @@ On macOS, `spctl --assess --type execute -vv /Applications/Persephone.app`
 should report a notarized Developer ID source.
 
 On Arch Linux, check the package against `SHA256SUMS` as above, then install
-it with `sudo pacman -U persephone-<version>-1-x86_64.pkg.tar.zst`. The
-package has no pacman signature; Arch's default `LocalFileSigLevel = Optional`
+it with `sudo pacman -U <file>`. The file name holds the Arch version, which
+has no hyphen before a pre-release, for example
+`persephone-0.1.0alpha.1-1-x86_64.pkg.tar.zst`. `latest` and dry-run files
+end in `-unsigned.pkg.tar.zst`. The package has no pacman signature; Arch's default `LocalFileSigLevel = Optional`
 installs it, so `SHA256SUMS` is the check.
 
 ## Limits

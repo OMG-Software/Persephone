@@ -45,16 +45,20 @@ short job, and uses the libraries that Arch provides.
   `linux`. It uses `archlinux:base-devel` pinned by the same digest as the
   `arch` job of `check.yml`, and does a full upgrade (`pacman -Syu`) first.
   It has no secrets. `checksums` waits for it and publishes the package.
-* **PKGBUILD.** `python tools/release.py arch-pkgbuild --deb FILE --output DIR`
-  writes `PKGBUILD` from [`tools/arch/PKGBUILD.in`](../../tools/arch/PKGBUILD.in)
-  and copies the `.deb` beside it. The version comes from
+* **PKGBUILD.** `python tools/release.py arch-pkgbuild` takes the one `.deb`
+  in `.local/release/arch/in`, writes `.local/release/arch/build/PKGBUILD`
+  from [`tools/arch/PKGBUILD.in`](../../tools/arch/PKGBUILD.in) and copies the
+  `.deb` beside it. Like `append-notice`, it takes no file arguments, so no
+  argument can send it to another path. The version comes from
   `src-tauri/tauri.conf.json`. The command refuses a `.deb` whose name is not
   the x86_64 `.deb` of that version. The PKGBUILD names the `.deb`'s
   SHA-256, and makepkg checks it.
 * **Same files.** `package()` unpacks the `.deb`'s `data.tar` and nothing
-  else. `options=('!strip' '!debug')` stops makepkg from changing the
-  programs. The job compares the package's files with the `.deb`'s and fails
-  on any difference.
+  else. `options` sets each makepkg option that changes files (`!strip`,
+  `!debug`, `!zipman`, `!purge`, `docs`, `emptydirs`, `libtool`,
+  `staticlibs`), so `makepkg.conf` cannot change them. The job compares the
+  package's files with the `.deb`'s, by contents and by type, mode, owner,
+  group and link target, and fails on any difference.
 * **Dependencies.** `depends` lists the package of every library that the
   four programs link (their ELF `NEEDED` entries): `cairo`, `gdk-pixbuf2`,
   `glib2`, `glibc`, `gtk3`, `libgcc`, `libpipewire`, `libsoup3` and
@@ -158,6 +162,17 @@ pre-release (commit `b45a06a`), checked against that release's
 * Negative control: with `libsoup3` removed from `depends`, the install step
   failed with "persephone-ui links libsoup-3.0.so.0 from libsoup3, which
   depends does not list".
+
+Later the same day, after review, the job also compared each file's type,
+mode, owner, group and link target, and `options` set each makepkg option
+that changes files. The same VM, image and `.deb` ran the six steps again:
+
+* All six steps passed. The `.deb`'s 27 entries were all owned by root.
+* `pacman -U` installed the file under its published name,
+  `persephone-0.3.0-1-x86_64-unsigned.pkg.tar.zst`.
+* Negative controls: when `package()` changed the `.desktop` file's mode to
+  0666, or its owner to 1:1, the file check failed and showed the changed
+  entry. The `libsoup3` control failed as before.
 
 Not done: a run of the job on GitHub Actions, and a start of the app on Arch
 Linux with a display. A container has no display, session bus or Secret

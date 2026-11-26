@@ -35,9 +35,11 @@ optdepends=(
     'pipewire: sound, video and screen sharing in calls'
     'xdg-desktop-portal: open links, sign in through the browser and share the screen (with a portal backend)'
 )
-# Keep the programs byte for byte as in the .deb: no stripping and no
-# separate debug package.
-options=('!strip' '!debug')
+# Keep the .deb's files byte for byte. These are all the makepkg options
+# that change files, so makepkg.conf cannot change them: no stripping, no
+# separate debug package, no man page compression and no purge; keep the
+# docs, empty directories, libtool files and static libraries.
+options=('!strip' '!debug' '!zipman' '!purge' 'docs' 'emptydirs' 'libtool' 'staticlibs')
 source=('@DEB@')
 sha256sums=('@SHA256@')
 
