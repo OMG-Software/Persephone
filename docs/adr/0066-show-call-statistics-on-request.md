@@ -55,9 +55,11 @@ Facts from the source on 25 November 2026:
 
 ## Decision Outcome
 
-Chosen option: "On request", because it costs nothing while closed, and one
-switch is the smallest command surface. A pull command needs a second command
-for the answer, and a reading is old when the page asks for it.
+Chosen option: "On request", because it costs nothing while closed, and only
+one of its two commands, the switch, reaches the core. The other,
+`call_stats_read`, stays in the UI host and only paces the page. With a pull
+command, each reading is a request that reaches the core and the worker, and
+the worker must read for each request or keep the newest reading always.
 
 ### Switch
 
@@ -78,11 +80,16 @@ for the answer, and a reading is old when the page asks for it.
   again while the call task is busy, the task can see only the newest value,
   "on", and sends nothing: the worker never stopped, so its series and its
   rates go on. When both changes reach the worker, it starts a new series,
-  whose first reading has no rates. A reading that the worker's writer took
-  before the off can still arrive after the on, and the core then shows it
-  once. It is a reading of the same call, taken before the off, and the next
-  reading replaces it. A series number in `SetStats` and `Stats` would let
-  the core drop it; this record does not add one.
+  whose first reading has no rates. Readings taken before the off can still
+  arrive after the on: the one that the worker's writer holds, and those that
+  wait in the core's queue of worker messages (`EVENT_QUEUE`, 64 messages of
+  every kind) while the call task is busy. The worker reads at most once a
+  second, so at most one reading waits for each second that the task is
+  busy. The core passes them on. The core and the UI host keep only the
+  newest waiting reading, but the page can still show more than one of them,
+  one after the other. Each is a reading of the same call, taken before the
+  off, and the next new reading replaces it. A series number in `SetStats`
+  and `Stats` would let the core drop them; this record does not add one.
 
 ### Worker
 
@@ -223,7 +230,8 @@ candidate type, SSRC, codec or other text.
 ### On request
 
 * Good, because it costs nothing while closed.
-* Good, because one command and one event are all it adds.
+* Good, because it adds one event and two commands, and only one of the
+  commands (the switch) reaches the core.
 * Bad, because the first reading takes a second.
 
 ### Always on
@@ -235,8 +243,9 @@ candidate type, SSRC, codec or other text.
 ### Pull command
 
 * Good, because the page paces itself.
-* Bad, because it needs a second command in the call window, and the worker
-  has to read for each request or keep the newest reading always.
+* Bad, because each reading is a request that reaches the core and the
+  worker, and the worker has to read for each request or keep the newest
+  reading always.
 
 ## Links
 
