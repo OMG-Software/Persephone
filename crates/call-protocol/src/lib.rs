@@ -3680,13 +3680,13 @@ mod tests {
         );
     }
 
-    /// GIVEN a message of the previous wire versions (6 to 11)
+    /// GIVEN a message of the previous wire versions (6 to 12)
     /// WHEN it is decoded in either direction
     /// THEN the version is refused.
     #[test]
     fn given_older_wire_versions_when_decoded_then_they_are_refused() {
-        assert_eq!(VERSION, 12);
-        for old in [6, 7, 8, 9, 10, 11] {
+        assert_eq!(VERSION, 13);
+        for old in [6, 7, 8, 9, 10, 11, 12] {
             assert_eq!(
                 ToWorker::decode(&[old, TO_LEAVE]),
                 Err(DecodeError::UnknownVersion)
