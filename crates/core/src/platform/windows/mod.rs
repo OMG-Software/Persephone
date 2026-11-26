@@ -128,6 +128,18 @@ pub(crate) fn start_detached(command: &mut std::process::Command) -> std::io::Re
         .map(drop)
 }
 
+/// Starts a test's child process under the media broker's process-start
+/// lock, as every start of the core does. The test binary also holds the
+/// ignored tests that launch a real call worker or screen helper, and a start
+/// without the lock can inherit their pipe ends.
+#[cfg(test)]
+pub(crate) fn spawn_for_test(
+    command: &mut std::process::Command,
+) -> std::io::Result<std::process::Child> {
+    let _start = persephone_media_broker::process_start_lock();
+    command.spawn()
+}
+
 /// The contained call worker host (ADR-0043).
 pub(crate) fn call_host() -> Arc<dyn crate::calls::worker::CallHost> {
     Arc::new(call::ContainedCallHost::next_to_core())

@@ -1492,14 +1492,17 @@ mod tests {
         let linked = std::os::unix::fs::symlink(&elsewhere, path.parent().unwrap());
         // A junction: it needs no special right, unlike a symbolic link.
         #[cfg(windows)]
-        let linked = std::process::Command::new("cmd")
-            .arg("/C")
-            .arg("mklink")
-            .arg("/J")
-            .arg(path.parent().unwrap())
-            .arg(&elsewhere)
-            .output()
-            .map(|_| ());
+        let linked = crate::platform::windows::spawn_for_test(
+            std::process::Command::new("cmd")
+                .arg("/C")
+                .arg("mklink")
+                .arg("/J")
+                .arg(path.parent().unwrap())
+                .arg(&elsewhere)
+                .stdout(std::process::Stdio::null()),
+        )
+        .and_then(|mut child| child.wait())
+        .map(|_| ());
         #[cfg(not(any(unix, windows)))]
         let linked: io::Result<()> = Err(io::ErrorKind::Unsupported.into());
         linked.unwrap();

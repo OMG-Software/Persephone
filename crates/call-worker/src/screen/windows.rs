@@ -43,12 +43,17 @@ use persephone_call_protocol::screen_frame::{
 };
 use persephone_call_protocol::{MAX_SCREEN_FPS, ScreenState, ScreenTarget};
 
-use super::frame_pipe::{PipeReader, Wait};
-use super::{CapturedFrame, Ended, Format, Grant};
+use super::frame_pipe::{PipeReader, STALL_TIMEOUT, Wait};
+use super::{CapturedFrame, Ended, Format, Grant, OPEN_TIMEOUT};
 
-/// The longest wait for the first item. It is shorter than the open's own
-/// timeout, so the result is always this backend's.
-const FIRST_ITEM_TIMEOUT: Duration = Duration::from_secs(8);
+/// The longest wait for the first item. With the item's own
+/// [`STALL_TIMEOUT`] (3 s) it stays 1 s under the open's own timeout
+/// ([`OPEN_TIMEOUT`], 10 s, counted from before this thread starts), so the
+/// result is always this backend's.
+const FIRST_ITEM_TIMEOUT: Duration = Duration::from_secs(6);
+const _: () = assert!(
+    FIRST_ITEM_TIMEOUT.as_millis() + STALL_TIMEOUT.as_millis() + 1000 <= OPEN_TIMEOUT.as_millis()
+);
 /// How long the loop waits for the next item before it looks at the stop
 /// flag again.
 const IDLE_WAIT: Duration = Duration::from_millis(100);
@@ -167,7 +172,10 @@ pub fn capture<F, E>(
     };
     let _ = open_result.send(Ok(()));
     drop(open_result);
-    // Hands a picture on and says when that ended.
+    // Hands a picture on and says when that ended. `read_item_into` gave
+    // exactly `height * width * 4` bytes of a size within the limits, so
+    // `checked` refuses no picture here; the feed's own limits apply in
+    // `on_frame`.
     let deliver = |on_frame: &mut F, (width, height): (u32, u32), data: &[u8]| {
         if let Some(frame) = CapturedFrame::checked(Format::Bgra, width, height, width * 4, data) {
             on_frame(frame);

@@ -212,13 +212,17 @@ mod tests {
         let target = dir.path().join("target");
         std::fs::create_dir(&target).unwrap();
         let junction = dir.path().join("junction");
-        let made = std::process::Command::new("cmd")
-            .args(["/C", "mklink", "/J"])
-            .arg(&junction)
-            .arg(&target)
-            .output()
-            .unwrap();
-        assert!(made.status.success());
+        let made = crate::platform::windows::spawn_for_test(
+            std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(&junction)
+                .arg(&target)
+                .stdout(std::process::Stdio::null()),
+        )
+        .unwrap()
+        .wait()
+        .unwrap();
+        assert!(made.success());
         assert!(write(&junction, "KEY").is_err());
         assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0);
     }

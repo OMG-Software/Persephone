@@ -46,8 +46,10 @@ mod frame_pipe;
 mod display;
 
 /// The longest wait for the screen to open: on Windows the first item of
-/// the helper's frame pipe (at most 8 s), or on Linux the PipeWire connection and the wait for the stream (up to 6 s),
-/// or on macOS the display list and the stream start (up to 4 s each).
+/// the helper's frame pipe (at most 6 s to its first byte and 3 s for the
+/// item), or on Linux the PipeWire connection and the wait for the stream
+/// (up to 6 s), or on macOS the display list and the stream start (up to
+/// 4 s each).
 const OPEN_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(target_os = "linux")]
 use persephone_call_protocol::MAX_CAPTURE_SIDE;

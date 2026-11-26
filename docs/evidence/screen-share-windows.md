@@ -329,9 +329,19 @@ call worker's AppContainer. The sections above stay as they were.
   desktop unlocked and in use. rustc 1.99.1 (58cf8f9c3 2026-10-13), cargo
   1.99.1 (5f94df478 2026-08-27), debug build, `--locked --offline`.
 * Source: branch `claude/screen-helper-windows`. The run was made from the
-  working tree that became commit `ee816b1`. The later commits change
-  documents, the share question's text and test code only. `Cargo.lock`
-  gained only the new workspace member `persephone-screen-helper`.
+  working tree that became commit `ee816b1`; the branch was rebased on
+  `main` on 26 November 2026, and that commit is now `2f253e2`. The run
+  covers the helper and the worker's reader as they were at that commit
+  only. Later review commits changed both, and this run does not cover
+  them: `077d794` (stop and launch handling, the reader's pipe checks),
+  `b9d8437` (`fb24981` before the rebase: the helper keeps the newest frame
+  that its 200 ms gate refuses and copies it when the gate opens,
+  `wgc::take_next`; the worker hands pictures on at most once each
+  `PICTURE_GAP`), `2f0fb91` (a still screen goes again, a stop is checked
+  before each write), `75ae75f` and `1f64862` (one deadline for each pipe
+  item, slower polling between items, every pool frame closed). The run of
+  26 November below covers the helper after them. `Cargo.lock` gained only
+  the new workspace member `persephone-screen-helper`.
 * Command: `cargo build --locked --offline -p persephone-screen-helper`,
   then `cargo test --locked --offline -p persephone-core --lib -- --ignored
   --nocapture platform::windows::screen_helper`. Exit status 0.
@@ -373,3 +383,40 @@ Not measured, and not claimed:
   helper's writer were each tested alone.
 * The sandbox gate (`python tools/dev.py sandbox`), which was not run for this
   change, and the Windows release workflow in CI.
+
+## Run of the screen helper after the review commits, 26 November 2026
+
+This section also belongs to [ADR-0067](../adr/0067-capture-the-windows-screen-in-a-helper-outside-the-call-worker.md)
+(proposed). It repeats the helper run above on the later helper. The run
+above stays as it was.
+
+* Machine: the same as above: Windows 11 Pro, build 10.0.26300, one
+  interactive session, the desktop unlocked and in use. rustc 1.99.1
+  (58cf8f9c3 2026-10-13), cargo 1.99.1 (5f94df478 2026-08-27), debug build,
+  `--locked --offline`.
+* Source: branch `claude/screen-helper-windows` at `8b9d75e`, with the
+  uncommitted changes of the commit that adds this section. Those changes
+  touch no source of the helper (`crates/screen-helper/src`), of its launch
+  (`crates/media-broker/src`) or of the core's helper code
+  (`calls/screen_helper.rs`, `platform/windows/screen_helper.rs`), so the run
+  covers the helper of `8b9d75e`, with every review commit named above.
+* Command: as above, `cargo build --locked --offline -p
+  persephone-screen-helper`, then `cargo test --locked --offline -p
+  persephone-core --lib -- --ignored --nocapture
+  platform::windows::screen_helper`. Exit status 0.
+
+| Check | Result |
+| --- | --- |
+| Item on the frame pipe | one picture, 2560x1440 (monitor 0), equal to the monitor's mode size |
+| Picture content | at least one pixel with a non-zero colour byte; the picture was not looked at and not compared with the screen |
+| Stop | `stop_and_join` returned exit code 0 (stopped) |
+| Peak committed memory (Job) | 85 MiB; the Job's cap is 512 MiB |
+| Run time | 0.48 s for the test |
+
+Not measured, and not claimed:
+
+* The kept frame (`wgc::take_next`), the 200 ms gate and a still screen sent
+  again: the test reads one picture only.
+* The worker's reader (`frame_pipe`, `PICTURE_GAP`): the core's test reads
+  the pipe itself. The reader's own tests cover it alone.
+* Everything in the list of the run above.

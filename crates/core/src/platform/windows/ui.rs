@@ -245,6 +245,7 @@ fn wide(text: &str) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::windows::spawn_for_test;
     use std::process::{Command, Stdio};
 
     /// GIVEN a Job holding a running child process
@@ -252,12 +253,13 @@ mod tests {
     /// THEN the child's ID is in the list, and none is left after it ends
     #[test]
     fn given_a_job_with_a_child_then_its_pid_is_listed() {
-        let mut child = Command::new("cmd")
-            .args(["/c", "ping -n 30 127.0.0.1 >nul"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .spawn()
-            .expect("start child");
+        let mut child = spawn_for_test(
+            Command::new("cmd")
+                .args(["/c", "ping -n 30 127.0.0.1 >nul"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null()),
+        )
+        .expect("start child");
         let job = contain(&child).expect("contain child");
         let listed = process_ids(&job).expect("list ids");
         assert!(listed.complete);
@@ -278,12 +280,13 @@ mod tests {
     /// for all it is complete (the control)
     #[test]
     fn given_more_processes_than_room_then_the_list_is_incomplete() {
-        let mut child = Command::new("cmd")
-            .args(["/c", "ping -n 30 127.0.0.1 >nul"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .spawn()
-            .expect("start child");
+        let mut child = spawn_for_test(
+            Command::new("cmd")
+                .args(["/c", "ping -n 30 127.0.0.1 >nul"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null()),
+        )
+        .expect("start child");
         let job = contain(&child).expect("contain child");
         // Wait until cmd has started ping inside the Job.
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
