@@ -54,9 +54,9 @@ mod stats_probe;
 use crate::camera::{self, CapturedFrame, Format};
 use crate::containment;
 use crate::mapping::{
-    ConnectFault, LevelMeters, Levels, Microphone, Playout, RoomChange, Slot, Slots, SoundPath,
-    SpeakingTracker, apply, bounded_device_list, choose_device, failure_for_connect, sound_level,
-    system_default, valid_identity,
+    AudioRoster, ConnectFault, LevelMeters, Levels, Microphone, Playout, RoomChange, Slot, Slots,
+    SoundPath, SpeakingTracker, apply, bounded_device_list, choose_device, failure_for_connect,
+    sound_level, system_default, valid_identity,
 };
 #[cfg(target_os = "linux")]
 use crate::mapping::{pulse_device_list, sound_path};
@@ -89,9 +89,6 @@ const SOUND_MEASURE_TIMEOUT: Duration = Duration::from_millis(500);
 /// level (ADR-0059).
 const SOUND_READ_BUDGET: Duration = Duration::from_millis(400);
 const _: () = assert!(SOUND_READ_BUDGET.as_millis() < SOUND_MEASURE_TIMEOUT.as_millis());
-/// The most remote audio tracks measured at once: two for each participant
-/// (a microphone and a screen share's sound).
-const MAX_MEASURED_TRACKS: usize = 2 * MAX_PARTICIPANTS;
 /// How long a camera test shows the camera when nothing stops it.
 const CAMERA_TEST_TIME: Duration = Duration::from_secs(30);
 
@@ -294,6 +291,7 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
         screen_share: 0,
         screen_open_tx,
         remote: RemoteVideo::default(),
+        audio_roster: AudioRoster::default(),
         other_options,
         connect_tx,
         others: Others::default(),
@@ -1057,6 +1055,10 @@ struct Call<'a> {
     screen_share: u32,
     screen_open_tx: mpsc::Sender<Opened<OpenedScreen, ScreenState>>,
     remote: RemoteVideo,
+    /// The subscribed remote audio tracks that the level meters read
+    /// (ADR-0059). The room events keep it, so no tick copies the SDK's
+    /// participant map.
+    audio_roster: AudioRoster<RemoteAudioTrack>,
     /// The room options for a connection to another SFU (ADR-0054).
     other_options: RoomOptions,
     /// A connect task reports here.
@@ -1464,7 +1466,8 @@ fn note_inbound_audio(
 /// Runs every read at once, each bounded by `deadline` (`read_by`), and
 /// gives their outputs in order: `None` for a read that did not finish in
 /// time. One slow read never keeps another from starting. The reads are at
-/// most [`MAX_MEASURED_TRACKS`], and dropping this ends them all.
+/// most [`crate::mapping::MAX_MEASURED_TRACKS`], and dropping this ends them
+/// all.
 async fn read_all<F>(deadline: tokio::time::Instant, reads: Vec<F>) -> Vec<Option<F::Output>>
 where
     F: std::future::Future + Send + 'static,
@@ -2559,26 +2562,6 @@ impl Call<'_> {
         tracks
     }
 
-    /// Every subscribed remote audio track with its connection and its
-    /// participant's identity, at most [`MAX_MEASURED_TRACKS`].
-    fn remote_audio_by_participant(&self) -> Vec<(u8, String, RemoteAudioTrack)> {
-        let rooms = std::iter::once((0, self.room)).chain(self.others.open_indexed());
-        let mut tracks = Vec::new();
-        for (connection, room) in rooms {
-            for (identity, participant) in room.remote_participants() {
-                for publication in participant.track_publications().values() {
-                    if tracks.len() >= MAX_MEASURED_TRACKS {
-                        return tracks;
-                    }
-                    if let Some(RemoteTrack::Audio(track)) = publication.track() {
-                        tracks.push((connection, identity.to_string(), track));
-                    }
-                }
-            }
-        }
-        tracks
-    }
-
     /// Starts a measurement of the own and the received sound, unless one
     /// runs.
     fn measure_sound(&mut self) {
@@ -2589,7 +2572,9 @@ impl Call<'_> {
             Some(LocalTrack::Audio(track)) => Some(track),
             _ => None,
         };
-        let remote = self.remote_audio_by_participant();
+        // The roster, not the SDK's participant map: the tick copies at
+        // most `MAX_MEASURED_TRACKS` tracks.
+        let remote = self.audio_roster.measured();
         let deadline = tokio::time::Instant::now() + SOUND_READ_BUDGET;
         self.sound.start(
             measure_levels(own, remote, deadline, self.playout),
@@ -2720,6 +2705,7 @@ impl Call<'_> {
     /// its room closes. The connection is not reopened (ADR-0054).
     async fn other_lost(&mut self, index: u8, events: &mut OtherEvents) -> Result<(), Closed> {
         events.remove(index);
+        self.audio_roster.remove_connection(index);
         self.remove_tracks(|key| key.2 == index).await?;
         if let Some(Slot::Up(room)) = self.others.end(index) {
             let _ = room.close().await;
@@ -2757,24 +2743,34 @@ impl Call<'_> {
                 participant,
             } => {
                 play_remote_audio(track, self.playout);
+                let identity = participant.identity().to_string();
+                // A track the roster refuses (a full roster) still plays; it
+                // has no level meter.
+                self.audio_roster.add(
+                    connection,
+                    identity.clone(),
+                    publication.sid().to_string(),
+                    track.clone(),
+                );
                 if publication.source() != TrackSource::Microphone {
                     return Ok(());
                 }
-                self.send_muted(
-                    connection,
-                    participant.identity().to_string(),
-                    publication.is_muted(),
-                )
-                .await
+                self.send_muted(connection, identity, publication.is_muted())
+                    .await
             }
             RoomEvent::TrackUnsubscribed {
                 track: RemoteTrack::Audio(_),
                 publication,
                 participant,
-            } if publication.source() == TrackSource::Microphone => {
+            } => {
+                let identity = participant.identity().to_string();
+                self.audio_roster
+                    .remove(connection, &identity, publication.sid().as_str());
+                if publication.source() != TrackSource::Microphone {
+                    return Ok(());
+                }
                 // No microphone counts as muted.
-                self.send_muted(connection, participant.identity().to_string(), true)
-                    .await
+                self.send_muted(connection, identity, true).await
             }
             RoomEvent::TrackMuted {
                 participant: Participant::Remote(participant),
@@ -2868,8 +2864,15 @@ impl Call<'_> {
             }
             RoomEvent::ParticipantDisconnected(participant) => {
                 let identity = participant.identity().to_string();
+                self.audio_roster.remove_participant(connection, &identity);
                 self.remove_tracks(|known| known.0 == identity && known.2 == connection)
                     .await
+            }
+            // A room that closes after a disconnect drops its participants
+            // without unsubscribing their tracks.
+            RoomEvent::Disconnected { .. } => {
+                self.audio_roster.remove_connection(connection);
+                Ok(())
             }
             _ => Ok(()),
         }

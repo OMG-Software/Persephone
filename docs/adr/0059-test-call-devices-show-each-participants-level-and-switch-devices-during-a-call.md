@@ -67,6 +67,16 @@ no media permissions, and a browser test would prove nothing about the worker.
   rules as the own level. It keeps at most `MAX_PARTICIPANTS` gates, ignores
   an invalid identity and an unknown connection, and sends silence once for a
   participant that left.
+* The worker measures the remote tracks of an audio roster
+  (`mapping::AudioRoster`) that the room events keep: a subscription adds a
+  track, and an unsubscription, a participant that leaves, a `Disconnected`
+  event or a lost connection removes tracks. It keeps at most
+  `MAX_KEPT_AUDIO_TRACKS` (128) tracks in subscription order and measures
+  the first `MAX_MEASURED_TRACKS` (64). A track that waits moves up when a
+  measured one goes; a track past the limit has no meter until it is
+  subscribed again. No tick copies the SDK's participant map:
+  `Room::remote_participants` copies the whole map under a read lock, and
+  its size is the SFU's choice.
 * The core keeps the newest level of each device that is not silent and sends
   `CallLevels { levels }` together with `CallSoundLevel`, under the same
   100 ms gap. The host drops a list with more than `MAX_CALL_LEVELS` entries,

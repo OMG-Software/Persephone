@@ -77,6 +77,10 @@ and the page shows the worker's state, not its own request.
 * The volume reaches libwebrtc through `RemoteAudioSource::SetVolume` with
   a gain of percent / 100. libwebrtc accepts 0 to 10; Persephone uses only
   0 to 1.
+* A playout change lists the tracks from the SDK's participant map, which
+  copies the whole map, because it is rare and must reach every track. The
+  level meters run every 100 ms, so they read the bounded audio roster of
+  ADR-0059 instead.
 
 ### Vendored patch
 
