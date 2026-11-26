@@ -12,6 +12,10 @@ import type {
   CallDeviceTestKind,
   CallDeviceTestState,
   CallDeviceTestStatus,
+  CALL_BLUR_DEFAULT,
+  CALL_BLUR_MAX,
+  CALL_BLUR_MIN,
+  CALL_BLUR_STEP,
   CALL_DEVICE_ID_BYTES_MAX,
   CALL_PARTICIPANTS_MAX,
   CALL_SOUND_LEVEL_MAX,
@@ -516,14 +520,17 @@ export function micGainText(percent: number): string {
   return `${micGainValue(percent)}%`;
 }
 
+// The blur bounds (ADR-0068) are typed as the contract's literals, so a
+// change of the contract's `CALL_BLUR_*` fails the type check here instead
+// of offering a strength that the host refuses.
 /** The weakest background blur, in percent (ADR-0068). */
-export const BLUR_MIN = 10;
+export const BLUR_MIN: typeof CALL_BLUR_MIN = 10;
 /** The strongest background blur. */
-export const BLUR_MAX = 100;
+export const BLUR_MAX: typeof CALL_BLUR_MAX = 100;
 /** The blur moves in steps of this many percent. */
-export const BLUR_STEP = 10;
+export const BLUR_STEP: typeof CALL_BLUR_STEP = 10;
 /** The blur when none is saved. */
-export const BLUR_DEFAULT = 50;
+export const BLUR_DEFAULT: typeof CALL_BLUR_DEFAULT = 50;
 /** No video effect: what a profile without a saved one has. */
 export const NO_VIDEO_EFFECT: CallVideoEffect = { background: 'none', blur: BLUR_DEFAULT, filter: 'none' };
 export const VIDEO_EFFECTS_TITLE = 'Video effects';

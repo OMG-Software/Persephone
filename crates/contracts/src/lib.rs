@@ -71,6 +71,13 @@ pub const CALL_BLUR_MIN: u8 = 10;
 pub const CALL_BLUR_MAX: u8 = 100;
 /// The blur strength moves in steps of this many percent (ADR-0068).
 pub const CALL_BLUR_STEP: u8 = 10;
+/// The blur strength the page offers first (ADR-0068).
+pub const CALL_BLUR_DEFAULT: u8 = 50;
+
+// The four `CALL_BLUR_*` values repeat the call protocol's blur bounds; the
+// core checks that they match when it compiles (`calls/devices.rs`), and the
+// page types its copies as the exported literals (`frontend/src/calls.ts`).
+const _: () = assert!(call_blur_valid(CALL_BLUR_DEFAULT));
 
 /// Whether `percent` is a blur strength: [`CALL_BLUR_MIN`] to
 /// [`CALL_BLUR_MAX`] in steps of [`CALL_BLUR_STEP`].
@@ -2892,7 +2899,7 @@ pub struct CallVideoEffect {
 
 impl CallVideoEffect {
     /// The blur strength the page offers first.
-    pub const DEFAULT_BLUR: u8 = 50;
+    pub const DEFAULT_BLUR: u8 = CALL_BLUR_DEFAULT;
 }
 
 impl Default for CallVideoEffect {
@@ -3408,6 +3415,26 @@ pub fn generated_typescript() -> String {
             "The most connections in one call statistics reading.",
             "CALL_STATS_CONNECTIONS_MAX",
             CALL_STATS_CONNECTIONS_MAX as u64,
+        ),
+        (
+            "The weakest background blur of the call video, in percent.",
+            "CALL_BLUR_MIN",
+            u64::from(CALL_BLUR_MIN),
+        ),
+        (
+            "The strongest background blur of the call video, in percent.",
+            "CALL_BLUR_MAX",
+            u64::from(CALL_BLUR_MAX),
+        ),
+        (
+            "The blur strength moves in steps of this many percent.",
+            "CALL_BLUR_STEP",
+            u64::from(CALL_BLUR_STEP),
+        ),
+        (
+            "The blur strength the page offers first.",
+            "CALL_BLUR_DEFAULT",
+            u64::from(CALL_BLUR_DEFAULT),
         ),
     ] {
         output.push_str(&format!("\n/** {doc} */\nexport const {name} = {value};\n"));

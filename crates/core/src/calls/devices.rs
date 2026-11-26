@@ -67,6 +67,19 @@ pub struct Selection {
     pub mirror: Option<bool>,
 }
 
+// The page's blur bounds repeat the worker protocol's (ADR-0068). A blur
+// that the contract accepts and the protocol refuses would make
+// `worker_effect` drop the whole saved effect at each join, so they must
+// match. The page's copies are typed as the contract's exported literals.
+const _: () = {
+    assert!(persephone_contracts::CALL_BLUR_MIN == persephone_call_protocol::MIN_BLUR_PERCENT);
+    assert!(persephone_contracts::CALL_BLUR_MAX == persephone_call_protocol::MAX_BLUR_PERCENT);
+    assert!(persephone_contracts::CALL_BLUR_STEP == persephone_call_protocol::BLUR_STEP_PERCENT);
+    assert!(
+        persephone_contracts::CALL_BLUR_DEFAULT == persephone_call_protocol::DEFAULT_BLUR_PERCENT
+    );
+};
+
 /// The worker's form of a saved video effect, or `None` for a blur strength
 /// that is out of range or off the step (ADR-0068).
 pub fn worker_effect(effect: CallVideoEffect) -> Option<VideoEffect> {

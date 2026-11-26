@@ -1071,3 +1071,15 @@ export const CALL_STATS_SIDE_MAX = 16384;
 
 /** The most connections in one call statistics reading. */
 export const CALL_STATS_CONNECTIONS_MAX = 4;
+
+/** The weakest background blur of the call video, in percent. */
+export const CALL_BLUR_MIN = 10;
+
+/** The strongest background blur of the call video, in percent. */
+export const CALL_BLUR_MAX = 100;
+
+/** The blur strength moves in steps of this many percent. */
+export const CALL_BLUR_STEP = 10;
+
+/** The blur strength the page offers first. */
+export const CALL_BLUR_DEFAULT = 50;
