@@ -46,9 +46,9 @@ static ACTIVE: AtomicUsize = AtomicUsize::new(0);
 /// active: such tests share [`ACTIVE`], and a hanging helper of one holds it
 /// for seconds while another waits for 0. A call's end reads it when that
 /// call began a pick (also one later cancelled or refused) or held a helper,
-/// and at every end of the session (`finish(true)`), so a test that ends
-/// such a call takes it too; a test whose call the user leaves without
-/// either never reads it. A tokio mutex, so an async test holds it across
+/// and whenever the end of the session stops a call (`finish(true)`), so a
+/// test that ends such a call takes it too; a test whose call the user
+/// leaves without either never reads it. A tokio mutex, so an async test holds it across
 /// its awaits; a plain test takes it with `blocking_lock`.
 #[cfg(test)]
 pub(crate) static HELPER_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());

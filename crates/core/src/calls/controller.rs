@@ -993,13 +993,16 @@ async fn finish_worker(link: CallWorkerLink) {
 ///
 /// The wait for the process's count runs only when `wait_for_count` is set:
 /// for a call that began a pick (also one cancelled or refused) or held a
-/// helper, and at the end of the session. A call that did neither, and that
-/// the user left, has no helper of its own that could be active: a helper
-/// comes only from a call that began a pick, whose own end waited for it
-/// (bounded), and the next share waits until none is active before it
-/// starts one. The end of the session waits even then, so a helper that
-/// outlived an earlier call's bounded waits gets one more wait before the
-/// session is gone.
+/// helper, and for a call that the end of the session stops. A call that did
+/// neither, and that the user left, has no helper of its own that could be
+/// active: a helper comes only from a call that began a pick, whose own end
+/// waited for it (bounded), and the next share waits until none is active
+/// before it starts one. A call that the end of the session stops waits
+/// even then, so a helper that outlived an earlier call's bounded waits gets
+/// one more wait. A session that ends with no call running has no call task
+/// to wait in, and `stop_for_session_end` must not block: such a helper is
+/// still stopped by its reaper, and its Job's kill-on-close ends it when the
+/// core exits.
 async fn end_screen_helpers(
     pick: Option<ScreenPick>,
     helper: Option<HelperShare>,
@@ -2394,13 +2397,14 @@ impl CallController {
                 }
                 Slot::Running(run) => {
                     run.flags.ended.store(true, Ordering::SeqCst);
-                    // A screen pick that waits for the user is cancelled
-                    // before `Ended` shows, as the handle's stop does: a Yes
-                    // given after the session ended starts no helper while
-                    // the call task finishes its current step.
-                    if let Some(pick) = plain(&run.screen_control).pick_cancel.take() {
-                        pick.store(true, Ordering::SeqCst);
-                    }
+                    // The screen stops before `Ended` shows, as with the
+                    // handle's stop: the stop is counted, so a pick that
+                    // ends meanwhile begins no new one; a waiting pick is
+                    // cancelled, so a Yes given after the session ended
+                    // starts no helper; and the share's session closes,
+                    // which closes a helper's control pipe at once. The call
+                    // task then finishes its current step and ends.
+                    stop_accepted(&mut plain(&run.screen_control));
                     if let Some(stop) = run.stop {
                         let _ = stop.send(());
                     }
@@ -2743,7 +2747,9 @@ struct Call {
     /// held a capture helper. Only such a call can leave a helper of its own
     /// (a reaped one, or a launch under way) that its end waits for; another
     /// call that the user leaves does not wait for the process's helper
-    /// count. The end of the session always waits for it.
+    /// count. A call that the end of the session stops always waits for it
+    /// (`finish(true)`); a session that ends with no call running waits for
+    /// no helper.
     screen_capture_used: bool,
     /// A `SetScreen` start went to the worker and no stop or end since.
     screen_sent: bool,
@@ -4855,7 +4861,8 @@ impl Call {
         // gone: no helper outlives the call or the session. The membership
         // ends meanwhile, so a slow helper does not hold it either.
         if session_ended {
-            // The end of the session always waits for the helper count.
+            // A call that the end of the session stops always waits for
+            // the helper count.
             end_screen_helpers(screen_pick, screen_helper, true).await;
             return;
         }
@@ -6483,9 +6490,10 @@ mod tests {
         );
     }
 
-    /// GIVEN a running call whose screen pick waits for the user WHEN the
-    /// session ends THEN the pick is cancelled in the same step, before
-    /// `Ended` shows, so a Yes given afterwards starts no helper.
+    /// GIVEN a running call whose screen pick waits for the user and whose
+    /// share has a session WHEN the session ends THEN, in the same step and
+    /// before `Ended` shows, the pick is cancelled (a Yes given afterwards
+    /// starts no helper), the share's session closes, and the stop counts.
     #[test]
     fn given_a_waiting_pick_when_the_session_ends_then_it_is_cancelled_before_ended() {
         let calls = controller(FakeHost::new(true, None));
@@ -6495,16 +6503,56 @@ mod tests {
             _ => unreachable!("a running call"),
         };
         let pick = Arc::new(AtomicBool::new(false));
-        plain(&control).pick_cancel = Some(pick.clone());
+        let dropped = Arc::new(AtomicBool::new(false));
+        {
+            let mut control = plain(&control);
+            control.pick_cancel = Some(pick.clone());
+            control.session = Some(Box::new(SessionGuard(dropped.clone())));
+        }
         let at_end = Arc::new(Mutex::new(None));
-        let (flag, seen) = (pick.clone(), at_end.clone());
+        let (flag, closed, seen) = (pick.clone(), dropped.clone(), at_end.clone());
         calls.set_listener(Arc::new(move || {
-            plain(&seen).get_or_insert(flag.load(Ordering::SeqCst));
+            plain(&seen)
+                .get_or_insert((flag.load(Ordering::SeqCst), closed.load(Ordering::SeqCst)));
         }));
         calls.stop_for_session_end();
         assert!(matches!(calls.state(), CallState::Ended { .. }));
-        assert_eq!(*plain(&at_end), Some(true), "cancelled before Ended shows");
-        assert!(plain(&control).pick_cancel.is_none());
+        assert_eq!(
+            *plain(&at_end),
+            Some((true, true)),
+            "cancelled and closed before Ended shows"
+        );
+        let control = plain(&control);
+        assert!(control.pick_cancel.is_none());
+        assert!(control.session.is_none());
+        assert_eq!(control.stops, 1, "the session's end counts as a stop");
+    }
+
+    /// GIVEN a call whose screen pick waits for the user WHEN the session
+    /// ends and the cancelled pick ends before the call task reads the end
+    /// THEN no new pick begins: the session's end counts as a stop.
+    #[tokio::test]
+    async fn given_a_waiting_pick_when_the_session_ends_then_no_new_pick_begins() {
+        let calls = controller(FakeHost::new(true, None));
+        run_slot(&calls, 10);
+        let control = match &*calls.inner.slot() {
+            Slot::Running(run) => run.screen_control.clone(),
+            _ => unreachable!("a running call"),
+        };
+        let (mut fixture, inner, _) = call_with_source(true);
+        let source = Arc::new(Unanswered::default());
+        fixture.call.screens = source.clone();
+        fixture.call.screen_control = control;
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        calls.stop_for_session_end();
+        let (picked, cancelled) = screen_pick_done(&mut fixture.call.screen_pick).await;
+        assert!(cancelled, "the session's end cancelled the pick");
+        fixture.call.stopped_pick_ended(picked);
+        assert!(
+            fixture.call.screen_pick.is_none(),
+            "no new pick after the session ended"
+        );
+        assert_eq!(source.picks.load(Ordering::SeqCst), 1);
     }
 
     /// GIVEN no call WHEN the session ends THEN nothing changes.
