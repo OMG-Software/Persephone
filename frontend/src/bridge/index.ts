@@ -26,6 +26,7 @@ import type {
   CallStats,
   CallStatus,
   CallUnavailable,
+  CallVideoEffect,
   CallVideoTile,
   ContactStatus,
   ConversationStart,
@@ -711,6 +712,18 @@ export function callVolume(percent: number): Promise<CallStatus> {
  */
 export function callMicrophone(autoLevel: boolean, gain: number): Promise<CallStatus> {
   return invoke<CallStatus>('call_microphone', { autoLevel, gain });
+}
+
+/**
+ * Sets the own camera's video effect and whether the own preview is mirrored
+ * (ADR-0068). The effect applies at once to a camera test and a running call;
+ * both are saved for later calls. Only the effect's three fields cross. The
+ * status says when the worker refused the effect (`effectRefused`): the
+ * camera then keeps the effect it had.
+ */
+export function callVideoEffect(effect: CallVideoEffect, mirror: boolean): Promise<CallStatus> {
+  const { background, blur, filter } = effect;
+  return invoke<CallStatus>('call_video_effect', { effect: { background, blur, filter }, mirror });
 }
 
 /**

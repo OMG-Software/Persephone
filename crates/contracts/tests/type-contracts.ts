@@ -275,7 +275,7 @@ void bigintFilter;
 void unknownAttachment;
 void unknownSync;
 void missingHealth;
-const idleCall: CallStatus = { phase: "idle", roomId: null, muted: false, deafened: false, volume: 100, participants: [], ended: null, joinError: null, camera: "off", screen: "off", video: [], ringDeclined: false, deviceChange: null };
+const idleCall: CallStatus = { phase: "idle", roomId: null, muted: false, deafened: false, volume: 100, participants: [], ended: null, joinError: null, camera: "off", screen: "off", video: [], ringDeclined: false, deviceChange: null, effectRefused: false, mirror: true };
 const readyCall: CallReadiness = { available: false, reason: "no_call_server", activeMembers: 0 };
 // @ts-expect-error a status carries codes, never a token or URL
 const callWithToken: CallStatus = { ...idleCall, token: "secret" };
@@ -285,7 +285,15 @@ const unknownReason: CallUnavailable = "no_microphone";
 const unknownEnd: CallEnd = "crashed";
 // @ts-expect-error only the defined join errors are accepted
 const unknownJoin: CallJoinError = "busy";
-const noDevices: CallDevices = { supported: true, recording: [{ id: "a", name: "Microphone" }], playout: [], cameras: [{ id: "c", name: "Camera" }], selectedRecording: null, selectedPlayout: null, selectedCamera: null, volume: 100, autoLevel: true, micGain: 100, unreadable: false };
+const noDevices: CallDevices = { supported: true, recording: [{ id: "a", name: "Microphone" }], playout: [], cameras: [{ id: "c", name: "Camera" }], selectedRecording: null, selectedPlayout: null, selectedCamera: null, volume: 100, autoLevel: true, micGain: 100, effect: { background: "none", blur: 50, filter: "none" }, mirror: true, backgroundEffects: false, unreadable: false };
+// @ts-expect-error only the defined backgrounds are accepted, never a picture path
+const backgroundPath: CallDevices = { ...noDevices, effect: { background: "C:/me.jpg", blur: 50, filter: "none" } };
+// @ts-expect-error only the defined colour filters are accepted
+const unknownFilter: CallDevices = { ...noDevices, effect: { background: "none", blur: 50, filter: "sepia" } };
+// @ts-expect-error an effect carries its three fields, nothing else
+const effectWithUrl: CallDevices = { ...noDevices, effect: { background: "none", blur: 50, filter: "none", url: "https://x" } };
+// @ts-expect-error the device list says whether blur and pictures can run
+const missingBackgroundEffects: CallDevices = { ...noDevices, backgroundEffects: undefined };
 // @ts-expect-error a device list carries IDs and names, nothing else
 const deviceWithPath: CallDevices = { ...noDevices, recording: [{ id: "a", name: "b", path: "c" }] };
 // @ts-expect-error the saved choice must be explicit null, not missing
@@ -352,6 +360,10 @@ void tileWithoutStream;
 void tileWithUrl;
 void remoteTile;
 void noDevices;
+void backgroundPath;
+void unknownFilter;
+void effectWithUrl;
+void missingBackgroundEffects;
 void deviceWithPath;
 void missingChoice;
 void idleCall;

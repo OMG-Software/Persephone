@@ -3250,7 +3250,7 @@
           </p>
         {/if}
         {#if callWindowFailed && hasVideo(callState)}
-          <CallVideo tiles={callState.video} names={callNames} ticks={callVideoTicks} />
+          <CallVideo tiles={callState.video} names={callNames} ticks={callVideoTicks} mirror={callState.mirror} />
         {/if}
         {#if selectedRoom}
           <div class="room-view" style:--members-width="{shownMembers}px">

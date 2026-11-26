@@ -3,7 +3,8 @@
   import type {
     CallDeviceTestKind,
     CallDeviceTestStatus,
-    CallDevices
+    CallDevices,
+    CallVideoEffect
   } from '../../crates/contracts/generated/contracts';
   import {
     callDevices,
@@ -11,10 +12,12 @@
     callDeviceTestStatus,
     callDeviceTestStop,
     callMicrophone,
+    callVideoEffect,
     callVolume,
     setCallDevices
   } from './bridge';
   import CallVideo from './CallVideo.svelte';
+  import CallVideoEffects from './CallVideoEffects.svelte';
   import {
     DEVICE_FAILURE_TEXT,
     DEVICE_TEST_LABEL,
@@ -34,6 +37,9 @@
     MIC_GAIN_MAX,
     MIC_GAIN_STEP,
     MIC_SAVE_TEXT,
+    EFFECT_REFUSED_TEXT,
+    EFFECT_SAVE_TEXT,
+    NO_VIDEO_EFFECT,
     micGainText,
     micGainValue,
     deviceChoice,
@@ -48,8 +54,8 @@
   } from './calls';
   import { DeviceTests, testLevel, testLive, testTiles } from './deviceTests';
 
-  // The call microphone, speaker, camera and volume (ADR-0043, ADR-0048,
-  // ADR-0055). The core lists the devices through a
+  // The call microphone, speaker, camera, volume and video effect (ADR-0043,
+  // ADR-0048, ADR-0055, ADR-0068). The core lists the devices through a
   // contained worker and keeps the choice with the profile. Device names come
   // from the operating system: they are shown as plain text only.
   //
@@ -111,11 +117,16 @@
   let autoLevel = $state(true);
   let micGain = $state(MIC_GAIN_DEFAULT);
   let micSaving = $state(false);
+  // The own camera's video effect and the preview's mirror (ADR-0068).
+  let videoEffect = $state<CallVideoEffect>(NO_VIDEO_EFFECT);
+  let mirror = $state(true);
+  let effectSaving = $state(false);
+  let effectRefused = $state(false);
   let loading = $state(false);
   let saving = $state(false);
   // Any request that reads or writes the device record. A refresh or device
   // save during a volume save could bring back the old volume, so each waits.
-  const busy = $derived(loading || saving || volumeSaving || micSaving);
+  const busy = $derived(loading || saving || volumeSaving || micSaving || effectSaving);
   let failure = $state<string | null>(null);
   let generation = 0;
 
@@ -136,6 +147,8 @@
       volume = next.volume;
       autoLevel = next.autoLevel;
       micGain = next.micGain;
+      videoEffect = next.effect;
+      mirror = next.mirror;
     } catch (reason) {
       if (mine === generation) failure = failures[String(reason)] ?? 'The call devices could not be listed.';
     } finally {
@@ -198,6 +211,31 @@
       }
     } finally {
       micSaving = false;
+    }
+  }
+
+  // Saves the video effect and the mirror after each change. The effect
+  // applies at once to a camera test and to a call that runs; a call's
+  // worker may refuse it (ADR-0068). On failure both go back to the saved
+  // values.
+  async function saveEffect() {
+    if (busy || !devices) return;
+    effectSaving = true;
+    failure = null;
+    const wanted = videoEffect;
+    const wantedMirror = mirror;
+    try {
+      const status = await callVideoEffect(wanted, wantedMirror);
+      effectRefused = status.effectRefused;
+      if (devices) devices = { ...devices, effect: wanted, mirror: wantedMirror };
+    } catch (reason) {
+      failure = failures[String(reason)] ?? EFFECT_SAVE_TEXT;
+      if (devices) {
+        videoEffect = devices.effect;
+        mirror = devices.mirror;
+      }
+    } finally {
+      effectSaving = false;
     }
   }
 
@@ -284,6 +322,17 @@
       onchange={saveMicrophone}
     />
     <p class="note">{MIC_GAIN_HELP}</p>
+    <CallVideoEffects
+      bind:effect={videoEffect}
+      bind:mirror
+      available={devices?.backgroundEffects ?? false}
+      disabled={!devices || devices.unreadable || busy}
+      prefix="call-effect"
+      onsave={saveEffect}
+    />
+    {#if effectRefused}
+      <p class="note" role="status">{EFFECT_REFUSED_TEXT}</p>
+    {/if}
     {#if devices}
       <p class="note">{devicesNote(devices)}</p>
     {/if}
@@ -322,7 +371,7 @@
       </div>
     {/each}
     {#if cameraTiles.length > 0}
-      <CallVideo tiles={cameraTiles} names={noNames} ticks={videoTicks} />
+      <CallVideo tiles={cameraTiles} names={noNames} ticks={videoTicks} {mirror} />
     {/if}
     <div class="actions">
       <button type="button" class="secondary" disabled={busy} onclick={load}>

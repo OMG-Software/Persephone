@@ -98,6 +98,8 @@ pub fn status(state: &CallState) -> CallStatus {
             video,
             ring_declined,
             device_change,
+            effect_refused,
+            mirror,
         } => CallStatus {
             phase: CallPhase::Active,
             room_id: Some(room_id.to_string()),
@@ -124,6 +126,8 @@ pub fn status(state: &CallState) -> CallStatus {
             video: video.iter().take(CALL_VIDEO_TILES_MAX).cloned().collect(),
             ring_declined: *ring_declined,
             device_change: *device_change,
+            effect_refused: *effect_refused,
+            mirror: *mirror,
         },
         CallState::Ended { room_id, reason } => CallStatus {
             phase: CallPhase::Ended,
@@ -486,6 +490,8 @@ mod tests {
             video: Vec::new(),
             ring_declined: false,
             device_change: None,
+            effect_refused: false,
+            mirror: true,
         };
         let refused = join_reply(CallError::Declined, &CallState::Idle);
         assert_eq!(refused.phase, CallPhase::Idle);
@@ -550,8 +556,17 @@ mod tests {
             ],
             ring_declined: true,
             device_change: Some(persephone_contracts::CallDeviceChange::NotFound),
+            effect_refused: true,
+            mirror: false,
         });
         assert!(active.ring_declined);
+        assert!(active.effect_refused);
+        assert!(!active.mirror);
+        assert!(
+            CallStatus::idle().mirror,
+            "the preview is mirrored by default"
+        );
+        assert!(!CallStatus::idle().effect_refused);
         assert_eq!(
             active.device_change,
             Some(persephone_contracts::CallDeviceChange::NotFound)

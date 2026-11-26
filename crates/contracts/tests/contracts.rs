@@ -861,6 +861,13 @@ fn call_devices_use_camel_case_and_reject_unknown_fields() {
         volume: 40,
         auto_level: false,
         mic_gain: 250,
+        effect: persephone_contracts::CallVideoEffect {
+            background: persephone_contracts::CallBackground::Blur,
+            blur: 70,
+            filter: persephone_contracts::CallColourFilter::Brighten,
+        },
+        mirror: true,
+        background_effects: false,
         unreadable: false,
     };
     let json = serde_json::to_value(&devices).unwrap();
@@ -877,6 +884,9 @@ fn call_devices_use_camel_case_and_reject_unknown_fields() {
             "volume": 40,
             "autoLevel": false,
             "micGain": 250,
+            "effect": {"background": "blur", "blur": 70, "filter": "brighten"},
+            "mirror": true,
+            "backgroundEffects": false,
             "unreadable": false
         })
     );
@@ -890,6 +900,15 @@ fn call_devices_use_camel_case_and_reject_unknown_fields() {
     let mut without = json.clone();
     without.as_object_mut().unwrap().remove("cameras");
     assert!(serde_json::from_value::<persephone_contracts::CallDevices>(without).is_err());
+    // The effect fields are required (ADR-0068).
+    for field in ["effect", "mirror", "backgroundEffects"] {
+        let mut without = json.clone();
+        without.as_object_mut().unwrap().remove(field);
+        assert!(
+            serde_json::from_value::<persephone_contracts::CallDevices>(without).is_err(),
+            "{field}"
+        );
+    }
     let mut no_camera = json.clone();
     no_camera.as_object_mut().unwrap().remove("selectedCamera");
     assert!(

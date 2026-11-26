@@ -17,6 +17,7 @@ mod camera;
 mod camera_channel;
 mod containment;
 mod diagnostics;
+mod effects;
 mod mapping;
 #[cfg(test)]
 mod native_volume_tests;
@@ -24,6 +25,7 @@ mod output;
 #[cfg(target_os = "linux")]
 mod pulse;
 mod screen;
+mod segmenter;
 mod session;
 mod sound_defaults;
 mod sound_test;

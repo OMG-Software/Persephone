@@ -1,5 +1,12 @@
-import type { CallDevices } from '../../crates/contracts/generated/contracts';
-import { DEVICE_FAILURE_TEXT, DEVICE_SAVE_FAILURE_TEXT, deviceChoice, deviceValue } from './calls.ts';
+import type { CallDevices, CallStatus, CallVideoEffect } from '../../crates/contracts/generated/contracts';
+import {
+  DEVICE_FAILURE_TEXT,
+  DEVICE_SAVE_FAILURE_TEXT,
+  EFFECT_SAVE_TEXT,
+  deviceChoice,
+  deviceValue,
+  plainEffect
+} from './calls.ts';
 
 /** The three menus of the device panel; `''` is the system default. */
 export interface DeviceMenus {
@@ -17,10 +24,19 @@ export interface DevicePanelState {
   failure: string | null;
 }
 
+/** What the panel shows about the video effect (ADR-0068). */
+export interface EffectState {
+  saving: boolean;
+  // The worker refused the newest effect; the camera keeps the one it had.
+  refused: boolean;
+  failure: string | null;
+}
+
 /** The bridge calls the panel uses; the component passes the real ones. */
 export interface DevicePanelBridge {
   list: () => Promise<CallDevices>;
   save: (recording: string | null, playout: string | null, camera: string | null) => Promise<unknown>;
+  effect: (effect: CallVideoEffect, mirror: boolean) => Promise<CallStatus>;
 }
 
 const failureText = (reason: unknown, fallback: string) => DEVICE_FAILURE_TEXT[String(reason)] ?? fallback;
@@ -35,30 +51,47 @@ const failureText = (reason: unknown, fallback: string) => DEVICE_FAILURE_TEXT[S
  *   changed while a save runs is sent after it and none is dropped. Each
  *   save sends the three menus as they were when it was asked, so the last
  *   one holds every change. Only the newest save sets the result line.
+ * - The video effect (ADR-0068) goes into the same queue, as each save
+ *   changes the same device record. Its newest answer sets its own result.
  * - After `close`, no answer changes the panel.
  */
 export class DevicePanel {
   readonly #bridge: DevicePanelBridge;
   readonly #onstate: (state: DevicePanelState) => void;
   readonly #onmenus: (menus: DeviceMenus) => void;
+  readonly #oneffect: (state: EffectState) => void;
   #state: DevicePanelState = { devices: null, loading: false, saving: false, saved: false, failure: null };
+  #effect: EffectState = { saving: false, refused: false, failure: null };
   #queue: Promise<unknown> = Promise.resolve();
   #saves = 0;
   #newest = 0;
+  #effectSaves = 0;
+  #newestEffect = 0;
   #open = true;
 
   constructor(
     bridge: DevicePanelBridge,
     onstate: (state: DevicePanelState) => void,
-    onmenus: (menus: DeviceMenus) => void
+    onmenus: (menus: DeviceMenus) => void,
+    oneffect: (state: EffectState) => void = () => {}
   ) {
     this.#bridge = bridge;
     this.#onstate = onstate;
     this.#onmenus = onmenus;
+    this.#oneffect = oneffect;
   }
 
   get state(): DevicePanelState {
     return this.#state;
+  }
+
+  get effect(): EffectState {
+    return this.#effect;
+  }
+
+  #setEffect(change: Partial<EffectState>) {
+    this.#effect = { ...this.#effect, ...change };
+    this.#oneffect(this.#effect);
   }
 
   #set(change: Partial<DevicePanelState>) {
@@ -67,7 +100,7 @@ export class DevicePanel {
   }
 
   async load(): Promise<void> {
-    if (!this.#open || this.#state.loading || this.#saves > 0) return;
+    if (!this.#open || this.#state.loading || this.#saves > 0 || this.#effectSaves > 0) return;
     this.#set({ loading: true, failure: null });
     try {
       const devices = await this.#bridge.list();
@@ -104,6 +137,35 @@ export class DevicePanel {
       this.#set({ saving: this.#saves > 0, saved: failure === null, failure });
     } else {
       this.#set({ saving: this.#saves > 0 });
+    }
+  }
+
+  /**
+   * Sets the video effect and the mirror (ADR-0068) after the saves before
+   * it. The controls keep their values on failure.
+   */
+  async saveEffect(effect: CallVideoEffect, mirror: boolean): Promise<void> {
+    if (!this.#open) return;
+    const mine = ++this.#newestEffect;
+    this.#effectSaves += 1;
+    this.#setEffect({ saving: true, failure: null });
+    const wanted = plainEffect(effect);
+    const run = () => this.#bridge.effect(wanted, mirror);
+    const turn = this.#queue.then(run, run);
+    this.#queue = turn.catch(() => undefined);
+    let failure: string | null = null;
+    let refused = false;
+    try {
+      refused = (await turn).effectRefused === true;
+    } catch (reason) {
+      failure = failureText(reason, EFFECT_SAVE_TEXT);
+    }
+    this.#effectSaves -= 1;
+    if (!this.#open) return;
+    if (mine === this.#newestEffect) {
+      this.#setEffect({ saving: this.#effectSaves > 0, refused, failure });
+    } else {
+      this.#setEffect({ saving: this.#effectSaves > 0 });
     }
   }
 

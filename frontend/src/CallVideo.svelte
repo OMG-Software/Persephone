@@ -15,7 +15,8 @@
   import PersonName from './PersonName.svelte';
   import { SCREEN_TILE, tileCanvas, tileLayout, type TileRef, type VideoPicture } from './video';
 
-  // The video tiles of the call: the own camera (mirrored, labelled "You"),
+  // The video tiles of the call: the own camera (labelled "You", mirrored
+  // unless the user turned that off, ADR-0068),
   // up to four other cameras and the one remote screen share (tile 5).
   // The own screen share has no tile here: the call bar says it is shared. The core sends plain RGBA pictures; this
   // draws each on a canvas and does nothing else with them. Names are
@@ -25,12 +26,15 @@
   let {
     tiles,
     names,
-    ticks
+    ticks,
+    mirror = true
   }: {
     tiles: readonly CallVideoTile[];
     // Display names from the call room's members, by user ID.
     names: ReadonlyMap<string, string>;
     ticks: number;
+    // The own tile is shown mirrored (ADR-0068). Only this page sees it so.
+    mirror?: boolean;
   } = $props();
 
   type Shape = { width: number; height: number; rotation: number };
@@ -92,7 +96,7 @@
   <section class="call-video" aria-label="Call video">
     {#each shown as tile (tile.tile)}
       {@const shape = shapes[tile.tile]}
-      {@const layout = shape ? tileLayout(shape.width, shape.height, shape.rotation, tile.own) : null}
+      {@const layout = shape ? tileLayout(shape.width, shape.height, shape.rotation, tile.own && mirror) : null}
       <figure class="video-tile" class:own={tile.own} class:screen={tile.tile === SCREEN_TILE}>
         <div class="video-frame" style:aspect-ratio={layout ? String(layout.ratio) : '4 / 3'}>
           <canvas

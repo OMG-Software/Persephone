@@ -318,7 +318,7 @@
 
 {#snippet feed(cell: CallCell, isLarge: boolean)}
   {@const shape = cell.tile === null ? undefined : shapes[cell.tile]}
-  {@const layout = shape && cell.tile !== null ? tileLayout(shape.width, shape.height, shape.rotation, cell.own) : null}
+  {@const layout = shape && cell.tile !== null ? tileLayout(shape.width, shape.height, shape.rotation, cell.own && status.mirror) : null}
   <div class="video-tile call-cell" class:screen={cell.screen} class:speaking={cell.speaking} class:large={isLarge} style:--ratio={layout ? String(layout.ratio) : '1.7778'}>
     <button
       type="button"

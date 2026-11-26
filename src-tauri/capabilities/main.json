@@ -51,6 +51,7 @@
     "allow-call-deafen",
     "allow-call-volume",
     "allow-call-microphone",
+    "allow-call-video-effect",
     "allow-call-camera",
     "allow-call-screen",
     "allow-call-video-frame",

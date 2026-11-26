@@ -65,6 +65,30 @@ fn call_mic_gain<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u16, D::E
     }
 }
 
+/// The weakest background blur of the call video, in percent (ADR-0068).
+pub const CALL_BLUR_MIN: u8 = 10;
+/// The strongest background blur of the call video, in percent (ADR-0068).
+pub const CALL_BLUR_MAX: u8 = 100;
+/// The blur strength moves in steps of this many percent (ADR-0068).
+pub const CALL_BLUR_STEP: u8 = 10;
+
+/// Whether `percent` is a blur strength: [`CALL_BLUR_MIN`] to
+/// [`CALL_BLUR_MAX`] in steps of [`CALL_BLUR_STEP`].
+pub const fn call_blur_valid(percent: u8) -> bool {
+    percent >= CALL_BLUR_MIN && percent <= CALL_BLUR_MAX && percent.is_multiple_of(CALL_BLUR_STEP)
+}
+
+fn call_blur<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u8, D::Error> {
+    let value = u8::deserialize(deserializer)?;
+    if call_blur_valid(value) {
+        Ok(value)
+    } else {
+        Err(D::Error::custom(
+            "call blur under 10 or over 100 percent, or off the 10 percent step",
+        ))
+    }
+}
+
 fn call_volume<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u8, D::Error> {
     let value = u8::deserialize(deserializer)?;
     if value <= CALL_VOLUME_MAX {
@@ -2804,7 +2828,75 @@ pub struct CallDevices {
     pub auto_level: bool,
     #[serde(deserialize_with = "call_mic_gain")]
     pub mic_gain: u16,
+    /// The saved video effect of the own camera (ADR-0068). No effect when
+    /// nothing is saved.
+    pub effect: CallVideoEffect,
+    /// The own camera's preview is shown mirrored (ADR-0068). On when
+    /// nothing is saved, as before the choice existed. Others always see
+    /// the picture as it is.
+    pub mirror: bool,
+    /// Whether this build can run the background effects that need the
+    /// person mask: blur and pictures (ADR-0068). The page offers them only
+    /// when it is true.
+    pub background_effects: bool,
     pub unreadable: bool,
+}
+
+/// What the own camera shows behind the person (ADR-0068). `blur` blurs
+/// the camera's own background; the others are pictures that the call
+/// worker draws from code.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CallBackground {
+    #[default]
+    None,
+    Blur,
+    Dusk,
+    Sea,
+    Forest,
+    Studio,
+}
+
+/// A colour filter on the whole own camera picture (ADR-0068).
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CallColourFilter {
+    #[default]
+    None,
+    Greyscale,
+    Warm,
+    Cool,
+    /// Lifts the dark parts of the picture.
+    Brighten,
+}
+
+/// The own camera's video effect (ADR-0068): the background first, then the
+/// colour filter. `blur` is the blur strength in percent,
+/// [`CALL_BLUR_MIN`] to [`CALL_BLUR_MAX`] in steps of [`CALL_BLUR_STEP`].
+/// It is kept while another background is chosen, so the slider keeps its
+/// place.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CallVideoEffect {
+    pub background: CallBackground,
+    #[serde(deserialize_with = "call_blur")]
+    pub blur: u8,
+    pub filter: CallColourFilter,
+}
+
+impl CallVideoEffect {
+    /// The blur strength the page offers first.
+    pub const DEFAULT_BLUR: u8 = 50;
+}
+
+impl Default for CallVideoEffect {
+    fn default() -> Self {
+        Self {
+            background: CallBackground::None,
+            blur: Self::DEFAULT_BLUR,
+            filter: CallColourFilter::None,
+        }
+    }
 }
 
 /// Most video tiles a call shows: the own camera, four remote cameras and
@@ -2823,6 +2915,9 @@ pub enum CallCamera {
     NotFound,
     /// No camera, the OS denied it, it is in use, or capture failed.
     Unavailable,
+    /// The chosen video effect cannot run here, so the camera stays off
+    /// (ADR-0068).
+    EffectUnavailable,
 }
 
 /// The own screen share, as the page shows it (ADR-0053).
@@ -2908,6 +3003,21 @@ pub struct CallStatus {
     /// before any.
     #[serde(default)]
     pub device_change: Option<CallDeviceChange>,
+    /// The last video effect change during this call could not run here
+    /// (ADR-0068); the call keeps the effect it had. False after a change
+    /// that applied, and before any.
+    #[serde(default)]
+    pub effect_refused: bool,
+    /// The page mirrors the own preview (ADR-0068): the saved choice of the
+    /// call device record. True when idle, and in a status from before the
+    /// choice existed.
+    #[serde(default = "mirrored")]
+    pub mirror: bool,
+}
+
+/// The own preview is mirrored unless the user turned it off (ADR-0068).
+const fn mirrored() -> bool {
+    true
 }
 
 /// Why a device change during a call did not apply (ADR-0059).
@@ -2976,6 +3086,8 @@ impl CallStatus {
             video: Vec::new(),
             ring_declined: false,
             device_change: None,
+            effect_refused: false,
+            mirror: true,
         }
     }
 }
@@ -3148,6 +3260,9 @@ pub fn generated_typescript() -> String {
         format!("export {}", CallRing::decl(&config)),
         format!("export {}", CallRings::decl(&config)),
         format!("export {}", CallDevice::decl(&config)),
+        format!("export {}", CallBackground::decl(&config)),
+        format!("export {}", CallColourFilter::decl(&config)),
+        format!("export {}", CallVideoEffect::decl(&config)),
         format!("export {}", CallDevices::decl(&config)),
         format!("export {}", ContactTrust::decl(&config)),
         format!("export {}", ContactStatus::decl(&config)),
@@ -3385,7 +3500,7 @@ mod personal_contract_tests {
     fn call_contracts_refuse_unknown_fields_and_codes() {
         assert_eq!(
             serde_json::to_string(&CallStatus::idle()).unwrap(),
-            r#"{"phase":"idle","roomId":null,"muted":false,"deafened":false,"volume":100,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[],"ringDeclined":false,"deviceChange":null}"#
+            r#"{"phase":"idle","roomId":null,"muted":false,"deafened":false,"volume":100,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[],"ringDeclined":false,"deviceChange":null,"effectRefused":false,"mirror":true}"#
         );
         // A status without the newer fields still reads (ADR-0059).
         let older: CallStatus = serde_json::from_str(
@@ -3425,13 +3540,13 @@ mod personal_contract_tests {
         }
         let devices = |volume: &str| {
             format!(
-                r#"{{"supported":true,"recording":[],"playout":[],"cameras":[],"selectedRecording":null,"selectedPlayout":null,"selectedCamera":null,"volume":{volume},"autoLevel":true,"micGain":100,"unreadable":false}}"#
+                r#"{{"supported":true,"recording":[],"playout":[],"cameras":[],"selectedRecording":null,"selectedPlayout":null,"selectedCamera":null,"volume":{volume},"autoLevel":true,"micGain":100,"effect":{{"background":"none","blur":50,"filter":"none"}},"mirror":false,"backgroundEffects":false,"unreadable":false}}"#
             )
         };
         // The microphone gain is 0 to 400 in steps of 5; the flag is required.
         let gain = |gain: &str, level: &str| {
             format!(
-                r#"{{"supported":true,"recording":[],"playout":[],"cameras":[],"selectedRecording":null,"selectedPlayout":null,"selectedCamera":null,"volume":100,"autoLevel":{level},"micGain":{gain},"unreadable":false}}"#
+                r#"{{"supported":true,"recording":[],"playout":[],"cameras":[],"selectedRecording":null,"selectedPlayout":null,"selectedCamera":null,"volume":100,"autoLevel":{level},"micGain":{gain},"effect":{{"background":"none","blur":50,"filter":"none"}},"mirror":false,"backgroundEffects":false,"unreadable":false}}"#
             )
         };
         for accepted in ["0", "5", "250", "395", "400"] {
@@ -3460,6 +3575,64 @@ mod personal_contract_tests {
                 "{volume}"
             );
         }
+        // The video effect (ADR-0068): blur 10 to 100 in steps of 10, closed
+        // names, every field required, nothing else.
+        let effect = |background: &str, blur: &str, filter: &str| {
+            format!(r#"{{"background":{background},"blur":{blur},"filter":{filter}}}"#)
+        };
+        for blur in ["10", "50", "100"] {
+            let wire = effect(r#""blur""#, blur, r#""warm""#);
+            assert!(
+                serde_json::from_str::<CallVideoEffect>(&wire).is_ok(),
+                "{wire}"
+            );
+        }
+        for background in ["none", "blur", "dusk", "sea", "forest", "studio"] {
+            let wire = effect(&format!("\"{background}\""), "50", r#""none""#);
+            assert!(
+                serde_json::from_str::<CallVideoEffect>(&wire).is_ok(),
+                "{wire}"
+            );
+        }
+        for filter in ["none", "greyscale", "warm", "cool", "brighten"] {
+            let wire = effect(r#""none""#, "50", &format!("\"{filter}\""));
+            assert!(
+                serde_json::from_str::<CallVideoEffect>(&wire).is_ok(),
+                "{wire}"
+            );
+        }
+        for wire in [
+            effect(r#""blur""#, "0", r#""none""#),
+            effect(r#""blur""#, "5", r#""none""#),
+            effect(r#""blur""#, "110", r#""none""#),
+            effect(r#""blur""#, "50.5", r#""none""#),
+            effect(r#""blur""#, "null", r#""none""#),
+            effect(r#""Blur""#, "50", r#""none""#),
+            effect(r#""beach""#, "50", r#""none""#),
+            effect(r#""none""#, "50", r#""sepia""#),
+            effect("null", "50", r#""none""#),
+            r#"{"background":"none","filter":"none"}"#.to_owned(),
+            r#"{"background":"none","blur":50,"filter":"none","image":"x"}"#.to_owned(),
+        ] {
+            assert!(
+                serde_json::from_str::<CallVideoEffect>(&wire).is_err(),
+                "{wire}"
+            );
+        }
+        assert!(
+            (0..=u8::MAX)
+                .filter(|p| call_blur_valid(*p))
+                .eq((10..=100).step_by(10))
+        );
+        let defaults = CallVideoEffect::default();
+        assert_eq!(
+            serde_json::to_string(&defaults).unwrap(),
+            r#"{"background":"none","blur":50,"filter":"none"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&CallCamera::EffectUnavailable).unwrap(),
+            r#""effect_unavailable""#
+        );
         for wire in [
             r#"{"available":true,"reason":null,"activeMembers":256}"#,
             r#"{"available":true,"reason":null,"activeMembers":-1}"#,
@@ -3494,6 +3667,7 @@ mod personal_contract_tests {
         )
         .unwrap();
         assert!(!status.ring_declined);
+        assert!(status.mirror, "a status without the choice is mirrored");
         let summary: RoomSummary = serde_json::from_str(
             r#"{"roomId":"!r:s","displayName":null,"unreadCount":0,"encryption":"encrypted"}"#,
         )

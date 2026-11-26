@@ -14,9 +14,11 @@ use super::worker::{CallHost, StartError, WorkerAudio};
 use crate::{store::Stores, views::project_name};
 use matrix_sdk_crypto::store::CryptoStore;
 use persephone_call_protocol::{
-    DEFAULT_MIC_GAIN_PERCENT, FromWorker, MAX_DEVICE_ID_BYTES, MAX_DEVICE_NAME_BYTES, MAX_DEVICES,
-    MAX_VOLUME_PERCENT, MediaDevice, ToWorker, valid_mic_gain,
+    Background, BackgroundPicture, BlurStrength, ColourFilter, DEFAULT_MIC_GAIN_PERCENT,
+    FromWorker, MAX_DEVICE_ID_BYTES, MAX_DEVICE_NAME_BYTES, MAX_DEVICES, MAX_VOLUME_PERCENT,
+    MediaDevice, ToWorker, VideoEffect, valid_mic_gain,
 };
+use persephone_contracts::{CallBackground, CallColourFilter, CallVideoEffect, call_blur_valid};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -24,9 +26,9 @@ use std::time::{Duration, Instant};
 pub const DEVICES_KEY: &str = "persephone.call_devices.v1";
 /// The largest saved record: three IDs at the limit, each one escaped to
 /// at most two bytes a byte (`"` and `\`) plus its quotes, the field names
-/// the volume and the microphone settings. Every valid selection serializes
-/// under it.
-const MAX_RECORD_BYTES: usize = 3 * (2 * MAX_DEVICE_ID_BYTES + 2) + 160;
+/// the volume, the microphone settings, the video effect and the mirror
+/// flag. Every valid selection serializes under it.
+const MAX_RECORD_BYTES: usize = 3 * (2 * MAX_DEVICE_ID_BYTES + 2) + 256;
 /// How long the worker has to answer `ListDevices`.
 pub const LIST_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long the worker has to exit after the list.
@@ -56,6 +58,35 @@ pub struct Selection {
     /// (ADR-0062). `None` is 100 percent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mic_gain: Option<u16>,
+    /// The own camera's video effect (ADR-0068). `None` is no effect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effect: Option<CallVideoEffect>,
+    /// The own camera's preview is mirrored on the page (ADR-0068). `None`
+    /// is on: the page mirrored it before the choice existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mirror: Option<bool>,
+}
+
+/// The worker's form of a saved video effect, or `None` for a blur strength
+/// that is out of range or off the step (ADR-0068).
+pub fn worker_effect(effect: CallVideoEffect) -> Option<VideoEffect> {
+    let blur = BlurStrength::new(effect.blur)?;
+    let background = match effect.background {
+        CallBackground::None => Background::None,
+        CallBackground::Blur => Background::Blur(blur),
+        CallBackground::Dusk => Background::Picture(BackgroundPicture::Dusk),
+        CallBackground::Sea => Background::Picture(BackgroundPicture::Sea),
+        CallBackground::Forest => Background::Picture(BackgroundPicture::Forest),
+        CallBackground::Studio => Background::Picture(BackgroundPicture::Studio),
+    };
+    let filter = match effect.filter {
+        CallColourFilter::None => ColourFilter::None,
+        CallColourFilter::Greyscale => ColourFilter::Greyscale,
+        CallColourFilter::Warm => ColourFilter::Warm,
+        CallColourFilter::Cool => ColourFilter::Cool,
+        CallColourFilter::Brighten => ColourFilter::Brighten,
+    };
+    Some(VideoEffect { background, filter })
 }
 
 /// Whether `id` can be a device ID: not empty, bounded, no control character.
@@ -74,6 +105,26 @@ impl Selection {
                 .volume
                 .is_none_or(|volume| volume <= MAX_VOLUME_PERCENT)
             && self.mic_gain.is_none_or(valid_mic_gain)
+            && self
+                .effect
+                .is_none_or(|effect| call_blur_valid(effect.blur))
+    }
+
+    /// The saved video effect, else none (ADR-0068).
+    pub fn effect(&self) -> CallVideoEffect {
+        self.effect.unwrap_or_default()
+    }
+
+    /// The video effect for the worker. A record that `is_valid` refused
+    /// never gets here; a blur that is not valid reads as no effect only
+    /// for such a record.
+    pub fn video_effect(&self) -> VideoEffect {
+        worker_effect(self.effect()).unwrap_or(VideoEffect::NONE)
+    }
+
+    /// Whether the own preview is mirrored: the saved choice, else on.
+    pub fn mirror(&self) -> bool {
+        self.mirror.unwrap_or(true)
     }
 
     /// The automatic microphone level to use: the saved one, else on.
@@ -144,6 +195,8 @@ pub struct Listing {
     pub recording: Vec<MediaDevice>,
     pub playout: Vec<MediaDevice>,
     pub cameras: Vec<MediaDevice>,
+    /// The worker can run background blur and pictures (ADR-0068).
+    pub background_effects: bool,
 }
 
 /// Why the devices could not be listed. The page sees one code.
@@ -217,11 +270,13 @@ pub fn list(host: &dyn CallHost, cancel: &AtomicBool) -> Result<Listing, ListErr
             recording,
             playout,
             cameras,
+            background_effects,
         }) => Ok(Listing {
             supported: true,
             recording: clean(recording),
             playout: clean(playout),
             cameras: clean(cameras),
+            background_effects,
         }),
         _ => Err(ListError::NoAnswer),
     }
@@ -391,6 +446,103 @@ mod tests {
         assert!(parse(at_limit.as_bytes()).is_ok());
     }
 
+    /// GIVEN a record with and without a video effect WHEN read THEN a
+    /// missing effect is none and the preview is mirrored, a saved one
+    /// is kept and has its worker form, and a blur off the 10 percent steps
+    /// or an unknown name is unreadable (ADR-0068).
+    #[test]
+    fn given_a_saved_video_effect_then_it_is_read_or_default() {
+        let old = parse(br#"{"recording":"a","playout":null,"volume":40}"#).unwrap();
+        assert_eq!(
+            (old.effect, old.mirror, old.effect(), old.mirror()),
+            (None, None, CallVideoEffect::default(), true)
+        );
+        assert_eq!(old.video_effect(), VideoEffect::NONE);
+        let set = parse(
+            br#"{"recording":null,"playout":null,"effect":{"background":"blur","blur":70,"filter":"warm"},"mirror":true}"#,
+        )
+        .unwrap();
+        assert!(set.mirror());
+        let plain = parse(br#"{"recording":null,"playout":null,"mirror":false}"#).unwrap();
+        assert!(!plain.mirror(), "a saved choice wins");
+        assert_eq!(
+            set.video_effect(),
+            VideoEffect {
+                background: Background::Blur(BlurStrength::new(70).unwrap()),
+                filter: ColourFilter::Warm,
+            }
+        );
+        for bad in [
+            &br#"{"recording":null,"playout":null,"effect":{"background":"blur","blur":55,"filter":"none"}}"#[..],
+            br#"{"recording":null,"playout":null,"effect":{"background":"blur","blur":0,"filter":"none"}}"#,
+            br#"{"recording":null,"playout":null,"effect":{"background":"blur","blur":110,"filter":"none"}}"#,
+            br#"{"recording":null,"playout":null,"effect":{"background":"moon","blur":50,"filter":"none"}}"#,
+            br#"{"recording":null,"playout":null,"effect":{"background":"none","blur":50,"filter":"sepia"}}"#,
+            br#"{"recording":null,"playout":null,"effect":{"background":"none","blur":50}}"#,
+            br#"{"recording":null,"playout":null,"effect":{"background":"none","blur":50,"filter":"none","x":1}}"#,
+            br#"{"recording":null,"playout":null,"mirror":1}"#,
+        ] {
+            assert_eq!(
+                parse(bad),
+                Err(Unreadable),
+                "{:?}",
+                String::from_utf8_lossy(bad)
+            );
+        }
+    }
+
+    /// GIVEN each saved background and filter WHEN given to the worker THEN
+    /// each has its own worker form, the blur strength goes only with blur,
+    /// and a blur that is not valid has none (ADR-0068).
+    #[test]
+    fn given_each_saved_effect_then_its_worker_form_matches() {
+        let pictures = [
+            (CallBackground::Dusk, BackgroundPicture::Dusk),
+            (CallBackground::Sea, BackgroundPicture::Sea),
+            (CallBackground::Forest, BackgroundPicture::Forest),
+            (CallBackground::Studio, BackgroundPicture::Studio),
+        ];
+        for (saved, picture) in pictures {
+            let effect = CallVideoEffect {
+                background: saved,
+                blur: 30,
+                filter: CallColourFilter::None,
+            };
+            assert_eq!(
+                worker_effect(effect).map(|effect| effect.background),
+                Some(Background::Picture(picture))
+            );
+        }
+        let filters = [
+            (CallColourFilter::None, ColourFilter::None),
+            (CallColourFilter::Greyscale, ColourFilter::Greyscale),
+            (CallColourFilter::Warm, ColourFilter::Warm),
+            (CallColourFilter::Cool, ColourFilter::Cool),
+            (CallColourFilter::Brighten, ColourFilter::Brighten),
+        ];
+        for (saved, filter) in filters {
+            let effect = CallVideoEffect {
+                filter: saved,
+                ..CallVideoEffect::default()
+            };
+            assert_eq!(
+                worker_effect(effect),
+                Some(VideoEffect {
+                    background: Background::None,
+                    filter,
+                })
+            );
+        }
+        for blur in [0, 5, 55, 110] {
+            let effect = CallVideoEffect {
+                background: CallBackground::Blur,
+                blur,
+                filter: CallColourFilter::None,
+            };
+            assert_eq!(worker_effect(effect), None, "{blur}");
+        }
+    }
+
     /// GIVEN three IDs at the limit made only of characters JSON escapes
     /// WHEN saved THEN the record fits under the cap and reads back.
     #[test]
@@ -404,6 +556,12 @@ mod tests {
                 volume: Some(MAX_VOLUME_PERCENT),
                 auto_level: Some(false),
                 mic_gain: Some(MAX_MIC_GAIN_PERCENT),
+                effect: Some(CallVideoEffect {
+                    background: CallBackground::Forest,
+                    blur: 100,
+                    filter: CallColourFilter::Greyscale,
+                }),
+                mirror: Some(false),
             };
             assert!(selection.is_valid());
             let bytes = serde_json::to_vec(&selection).unwrap();
@@ -549,6 +707,7 @@ mod tests {
             ],
             playout: vec![device("p", "")],
             cameras: vec![device("c", " Front\u{202E}  camera "), device("c", "Again")],
+            background_effects: true,
         }));
         let listing = list(&host, &AtomicBool::new(false)).unwrap();
         assert!(listing.supported);
@@ -561,6 +720,7 @@ mod tests {
         );
         assert_eq!(listing.playout, vec![device("p", "")]);
         assert_eq!(listing.cameras, vec![device("c", "Front\u{FFFD} camera")]);
+        assert!(listing.background_effects);
         assert!(host.ended.load(Ordering::SeqCst));
         for _ in 0..100 {
             if !host.sent.lock().unwrap().is_empty() {
@@ -583,6 +743,7 @@ mod tests {
             recording: Vec::new(),
             playout: Vec::new(),
             cameras: Vec::new(),
+            background_effects: false,
         }));
         assert_eq!(
             list(&host, &AtomicBool::new(true)),

@@ -52,7 +52,7 @@ use matrix_sdk::{
 };
 use persephone_call_protocol::{
     CameraState, FailureCode, FrameKeyMsg, FromWorker, MAX_VOLUME_PERCENT, ScreenState, ToWorker,
-    TurnServer, VIDEO_TILES, valid_mic_gain,
+    TurnServer, VIDEO_TILES, VideoEffect, valid_mic_gain,
 };
 use persephone_contracts::{
     CALL_PARTICIPANTS_MAX, CallCamera, CallDeviceChange, CallDeviceTestKind, CallDeviceTestState,
@@ -233,6 +233,11 @@ pub enum CallState {
         ring_declined: bool,
         /// The last device change of this call failed (ADR-0059).
         device_change: Option<CallDeviceChange>,
+        /// The last video effect change of this call was refused
+        /// (ADR-0068).
+        effect_refused: bool,
+        /// The page mirrors the own preview (ADR-0068).
+        mirror: bool,
     },
     Ended {
         room_id: OwnedRoomId,
@@ -381,6 +386,14 @@ impl AudioWants {
     }
 }
 
+/// The own camera's video effect and whether the page mirrors its preview
+/// (ADR-0068), set together by one page command.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct OwnVideo {
+    pub(crate) effect: VideoEffect,
+    pub(crate) mirror: bool,
+}
+
 /// What a worker event did to the view.
 #[derive(Debug, PartialEq, Eq)]
 enum Applied {
@@ -433,6 +446,11 @@ struct View {
     ring_declined: bool,
     /// The last device change failed (ADR-0059).
     device_change: Option<CallDeviceChange>,
+    /// The worker refused the last video effect change (ADR-0068).
+    effect_refused: bool,
+    /// The page mirrors the own preview (ADR-0068): the saved choice, then
+    /// each change.
+    mirror: bool,
 }
 
 /// Remote video tiles: tiles 1 to 4 are cameras, tile 5 is the screen share.
@@ -465,6 +483,8 @@ impl View {
             video_streams: Default::default(),
             ring_declined: false,
             device_change: None,
+            effect_refused: false,
+            mirror: true,
         }
     }
 
@@ -603,6 +623,21 @@ impl View {
         (self.camera == CallCamera::On, remote)
     }
 
+    /// Starts the view with the saved mirror choice (ADR-0068).
+    fn with_mirror(mut self, mirror: bool) -> Self {
+        self.mirror = mirror;
+        self
+    }
+
+    /// The mirror choice changed; the worker has no part in it.
+    fn set_mirror(&mut self, mirror: bool) -> Applied {
+        if self.mirror == mirror {
+            return Applied::Same;
+        }
+        self.mirror = mirror;
+        Applied::Changed
+    }
+
     /// Starts the view with the saved playout volume.
     fn with_volume(mut self, volume: u8) -> Self {
         self.volume = volume.min(MAX_VOLUME_PERCENT);
@@ -720,11 +755,19 @@ impl View {
                 self.device_change = change;
                 Applied::Changed
             }
+            FromWorker::VideoEffect { refused, .. } => {
+                if self.effect_refused == *refused {
+                    return Applied::Same;
+                }
+                self.effect_refused = *refused;
+                Applied::Changed
+            }
             FromWorker::Camera { state } => self.set_camera(match state {
                 CameraState::Off => CallCamera::Off,
                 CameraState::On => CallCamera::On,
                 CameraState::NotFound => CallCamera::NotFound,
                 CameraState::Unavailable => CallCamera::Unavailable,
+                CameraState::EffectUnavailable => CallCamera::EffectUnavailable,
             }),
             FromWorker::Screen { state, .. } => self.set_screen(match state {
                 ScreenState::Off => CallScreen::Off,
@@ -920,6 +963,8 @@ impl View {
             video: self.video_tiles(),
             ring_declined: self.ring_declined,
             device_change: self.device_change,
+            effect_refused: self.effect_refused,
+            mirror: self.mirror,
         }
     }
 }
@@ -1181,6 +1226,9 @@ struct Joining {
     /// `None` until one is set: the join sends the saved settings. The call
     /// task gets the same channel, like `devices`.
     microphone: watch::Sender<Option<MicSettings>>,
+    /// The video effect set while the call joins (ADR-0068), like
+    /// `microphone`.
+    video_effect: watch::Sender<Option<OwnVideo>>,
 }
 
 struct RunHandle {
@@ -1202,6 +1250,9 @@ struct RunHandle {
     /// The latest microphone settings (ADR-0062) set since the join
     /// started, kept like the volume. `None` until one is set.
     microphone: watch::Sender<Option<MicSettings>>,
+    /// The latest video effect (ADR-0068) set since the join started, kept
+    /// like the microphone settings. `None` until one is set.
+    video_effect: watch::Sender<Option<OwnVideo>>,
     /// The latest microphone and speaker choice made during the call
     /// (ADR-0059). `None` until one is made.
     devices: watch::Sender<Option<DeviceChoice>>,
@@ -1300,6 +1351,9 @@ struct Inner {
     device_test: Mutex<DeviceTestSlot>,
     /// Tells the owner that the device test changed.
     test_listener: Mutex<Option<Listener>>,
+    /// The video effect that a camera test shows (ADR-0068): the saved one
+    /// when the test starts, then each change.
+    test_effect: watch::Sender<VideoEffect>,
 }
 
 /// One member's sound level and the worker participant that sent it, so a
@@ -1458,6 +1512,7 @@ struct JoinGuard {
     kill: Arc<Mutex<Option<Arc<dyn WorkerProcess>>>>,
     devices: watch::Sender<Option<DeviceChoice>>,
     microphone: watch::Sender<Option<MicSettings>>,
+    video_effect: watch::Sender<Option<OwnVideo>>,
     armed: bool,
 }
 
@@ -1509,6 +1564,7 @@ impl CallController {
                 next_id: AtomicU64::new(0),
                 device_test: Mutex::new(DeviceTestSlot::default()),
                 test_listener: Mutex::new(None),
+                test_effect: watch::channel(VideoEffect::NONE).0,
             }),
         }
     }
@@ -1710,6 +1766,7 @@ impl CallController {
         let kill = Arc::new(Mutex::new(None));
         let devices = watch::channel(None).0;
         let microphone = watch::channel(None).0;
+        let video_effect = watch::channel(None).0;
         *slot = Slot::Joining(Joining {
             id,
             room_id: room_id.to_owned(),
@@ -1717,6 +1774,7 @@ impl CallController {
             kill: kill.clone(),
             devices: devices.clone(),
             microphone: microphone.clone(),
+            video_effect: video_effect.clone(),
         });
         drop(slot);
         // The call needs the devices: a device test ends.
@@ -1732,6 +1790,7 @@ impl CallController {
             kill,
             devices,
             microphone,
+            video_effect,
             armed: true,
         })
     }
@@ -1785,6 +1844,7 @@ impl CallController {
         let screen_control = call.screen_control.clone();
         let volume = call.volume.clone();
         let microphone = call.microphone.clone();
+        let video_effect = call.video_effect.clone();
         let devices = call.devices.clone();
         let mut call = Some(call);
         let halted = {
@@ -1813,6 +1873,7 @@ impl CallController {
                         screen_control,
                         volume,
                         microphone,
+                        video_effect,
                         devices,
                         task: Some(task),
                     });
@@ -2046,6 +2107,7 @@ impl CallController {
             volume: scope.devices.volume(),
             auto_level: scope.devices.auto_level(),
             mic_gain: scope.devices.mic_gain(),
+            video_effect: scope.devices.video_effect(),
         };
         // Before the join, so the worker's connection records are kept
         // (ADR-0058). The call task sends the switch again when it starts.
@@ -2072,7 +2134,8 @@ impl CallController {
             alone: Alone::default(),
             view: View::new(room_id.to_owned(), sfu.url, scope.video)
                 .with_video_streams(video_streams)
-                .with_volume(scope.devices.volume()),
+                .with_volume(scope.devices.volume())
+                .with_mirror(scope.devices.mirror()),
             changes,
             incoming,
             failed,
@@ -2082,6 +2145,7 @@ impl CallController {
             audio: AudioWants::default(),
             volume: watch::channel(scope.devices.volume()).0,
             microphone: guard.microphone.clone(),
+            video_effect: guard.video_effect.clone(),
             devices: guard.devices.clone(),
             levels: BTreeMap::new(),
             portal: None,
@@ -2196,6 +2260,34 @@ impl CallController {
             }
             Slot::Idle => Err(CallError::NotInCall),
         }
+    }
+
+    /// Sets the own camera's video effect and the preview's mirror
+    /// (ADR-0068): the effect at once for a camera test, and both for the
+    /// running or joining call like the microphone settings. The worker may
+    /// refuse an effect that cannot run there; the state's `effect_refused`
+    /// then says so. `NotInCall` without a call. The caller saves both for
+    /// later calls.
+    pub fn set_video_effect(&self, effect: VideoEffect, mirror: bool) -> Result<(), CallError> {
+        self.inner.test_effect.send_replace(effect);
+        let own = Some(OwnVideo { effect, mirror });
+        match &*self.inner.slot() {
+            Slot::Running(run) => {
+                run.video_effect.send_replace(own);
+                Ok(())
+            }
+            Slot::Joining(join) => {
+                join.video_effect.send_replace(own);
+                Ok(())
+            }
+            Slot::Idle => Err(CallError::NotInCall),
+        }
+    }
+
+    /// The video effect that the next camera test starts with: the saved
+    /// one (ADR-0068).
+    pub fn set_test_effect(&self, effect: VideoEffect) {
+        self.inner.test_effect.send_replace(effect);
     }
 
     /// Moves the running or joining call to another microphone and speaker,
@@ -2706,6 +2798,10 @@ struct Call {
     /// `None` until one is set, as the Join carried the saved ones. The
     /// controller sends; the task subscribes.
     microphone: watch::Sender<Option<MicSettings>>,
+    /// The video effect (ADR-0068) set since the join started; `None` until
+    /// one is set, as the Join carried the saved one. The controller sends;
+    /// the task subscribes.
+    video_effect: watch::Sender<Option<OwnVideo>>,
     /// A device change during the call (ADR-0059). The controller sends;
     /// the task subscribes.
     devices: watch::Sender<Option<DeviceChoice>>,
@@ -3225,15 +3321,27 @@ fn run_device_test(
     // `TestDevice`; the worker may open the device, and closes it when it
     // reads `Leave`.
     let stopped_early = stop.load(Ordering::SeqCst);
+    // A camera test shows the saved video effect, then each change
+    // (ADR-0068). The worker answers each with the effect in use.
+    let mut test_effect = inner.test_effect.subscribe();
+    let effect = *test_effect.borrow_and_update();
     let sent = if stopped_early {
         Ok(())
     } else {
-        link.send(ToWorker::SetDiagnostics { on }).and_then(|()| {
-            link.send(ToWorker::TestDevice {
-                test: device_test::worker_test(test),
-                device,
+        link.send(ToWorker::SetDiagnostics { on })
+            .and_then(|()| {
+                link.send(ToWorker::TestDevice {
+                    test: device_test::worker_test(test),
+                    device,
+                })
             })
-        })
+            .and_then(|()| {
+                if camera {
+                    link.send(ToWorker::SetVideoEffect { effect })
+                } else {
+                    Ok(())
+                }
+            })
     };
     let mut state = if stopped_early {
         CallDeviceTestState::Idle
@@ -3260,6 +3368,10 @@ fn run_device_test(
         if diagnostics.has_changed().unwrap_or(false) {
             let on = *diagnostics.borrow_and_update();
             let _ = link.send(ToWorker::SetDiagnostics { on });
+        }
+        if camera && leave_by.is_none() && test_effect.has_changed().unwrap_or(false) {
+            let effect = *test_effect.borrow_and_update();
+            let _ = link.send(ToWorker::SetVideoEffect { effect });
         }
         match link.events.try_recv() {
             // After the user's stop the meter shows nothing more.
@@ -4380,6 +4492,18 @@ impl Call {
         Ok(())
     }
 
+    /// The user changed the video effect or the mirror: the worker applies
+    /// the effect to the camera at once, or refuses it and keeps the old one,
+    /// and answers with the effect in use; the page sees the mirror at once
+    /// (ADR-0068).
+    fn video_effect_changed(&mut self, inner: &Inner, own: OwnVideo) -> Result<(), EndReason> {
+        self.send_worker(ToWorker::SetVideoEffect { effect: own.effect })?;
+        if self.view.set_mirror(own.mirror) == Applied::Changed {
+            self.publish(inner);
+        }
+        Ok(())
+    }
+
     /// The user changed the microphone level or gain: the worker applies it
     /// to the audio processing at once and does not answer. The values were
     /// checked when they were set; the check here keeps a bad one from ever
@@ -4514,6 +4638,9 @@ impl Call {
         // since the join started, the Join's settings stand.
         let mut microphone = self.microphone.subscribe();
         microphone.mark_changed();
+        // The same for the video effect (ADR-0068).
+        let mut video_effect = self.video_effect.subscribe();
+        video_effect.mark_changed();
         // A device choice made since the join started; the join used the
         // saved one. A choice made before this point is sent at once.
         let mut devices = self.devices.subscribe();
@@ -4571,6 +4698,12 @@ impl Call {
                     let settings = *microphone.borrow_and_update();
                     if let Some(settings) = settings {
                         self.microphone_changed(settings)?;
+                    }
+                }
+                Ok(()) = video_effect.changed() => {
+                    let own = *video_effect.borrow_and_update();
+                    if let Some(own) = own {
+                        self.video_effect_changed(inner, own)?;
                     }
                 }
                 Ok(()) = devices.changed() => {
@@ -5596,7 +5729,8 @@ mod tests {
             view.apply(&FromWorker::Devices {
                 recording: Vec::new(),
                 playout: Vec::new(),
-                cameras: Vec::new()
+                cameras: Vec::new(),
+                background_effects: false,
             }),
             Applied::End(EndReason::WorkerFailed(FailureCode::Protocol))
         );
@@ -6005,6 +6139,115 @@ mod tests {
         );
     }
 
+    /// GIVEN a running call task WHEN the video effect changes THEN the
+    /// worker gets each one as it is (ADR-0068); the worker decides whether
+    /// it can run it.
+    #[test]
+    fn given_a_running_call_when_the_video_effect_changes_then_the_worker_gets_it() {
+        let fixture = test_call(
+            no_admission(),
+            Arc::new(Flags::default()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let inner = controller(FakeHost::new(true, None)).inner.clone();
+        let (mut call, mut to_worker) = (fixture.call, fixture.to_worker);
+        call.view.connected = true;
+        let blur = VideoEffect {
+            background: persephone_call_protocol::Background::Blur(
+                persephone_call_protocol::BlurStrength::new(40).unwrap(),
+            ),
+            filter: persephone_call_protocol::ColourFilter::Greyscale,
+        };
+        for (effect, mirror) in [(blur, false), (VideoEffect::NONE, true)] {
+            call.video_effect_changed(&inner, OwnVideo { effect, mirror })
+                .unwrap();
+            assert_eq!(
+                to_worker.try_recv().unwrap(),
+                ToWorker::SetVideoEffect { effect }
+            );
+            assert_eq!(call.view.mirror, mirror, "the page sees the mirror");
+        }
+    }
+
+    /// GIVEN no call, a joining call and a running call WHEN the video
+    /// effect is set THEN no call is `NotInCall`, a call keeps only the
+    /// newest value for its task, and a camera test gets each value
+    /// (ADR-0068).
+    #[test]
+    fn given_the_video_effect_when_set_then_the_call_and_the_test_get_the_newest() {
+        let warm = VideoEffect {
+            background: persephone_call_protocol::Background::None,
+            filter: persephone_call_protocol::ColourFilter::Warm,
+        };
+        let cool = VideoEffect {
+            filter: persephone_call_protocol::ColourFilter::Cool,
+            ..warm
+        };
+        let calls = controller(FakeHost::new(true, None));
+        assert_eq!(
+            calls.set_video_effect(warm, true),
+            Err(CallError::NotInCall)
+        );
+        assert_eq!(
+            *calls.inner.test_effect.borrow(),
+            warm,
+            "a camera test shows it without a call"
+        );
+        let guard = calls.claim(room_id!("!r:example.org")).unwrap();
+        assert_eq!(
+            *guard.video_effect.borrow(),
+            None,
+            "the join sends the saved one"
+        );
+        assert_eq!(calls.set_video_effect(cool, false), Ok(()));
+        let mut task = guard.video_effect.subscribe();
+        task.mark_changed();
+        assert!(task.has_changed().unwrap(), "an earlier value is sent");
+        assert_eq!(
+            *task.borrow_and_update(),
+            Some(OwnVideo {
+                effect: cool,
+                mirror: false
+            })
+        );
+        drop(guard);
+
+        let (_store, _commands, _killed) = running_call(&calls, active_state());
+        assert_eq!(calls.set_video_effect(warm, false), Ok(()));
+        assert_eq!(calls.set_video_effect(cool, true), Ok(()));
+        let Slot::Running(run) = &*calls.inner.slot() else {
+            panic!("running");
+        };
+        assert_eq!(
+            *run.video_effect.subscribe().borrow(),
+            Some(OwnVideo {
+                effect: cool,
+                mirror: true
+            }),
+            "only the newest value is kept"
+        );
+        assert_eq!(*calls.inner.test_effect.borrow(), cool);
+    }
+
+    /// GIVEN a running call WHEN the worker answers a video effect change
+    /// THEN the state says whether it was refused, and a repeat changes
+    /// nothing (ADR-0068).
+    #[test]
+    fn given_a_video_effect_answer_then_the_state_says_whether_it_was_refused() {
+        let mut view = view();
+        view.apply(&FromWorker::Connected);
+        assert!(!view.effect_refused);
+        for refused in [true, false] {
+            let answer = FromWorker::VideoEffect {
+                effect: VideoEffect::NONE,
+                refused,
+            };
+            assert_eq!(view.apply(&answer), Applied::Changed);
+            assert_eq!(view.effect_refused, refused);
+            assert_eq!(view.apply(&answer), Applied::Same, "a repeat");
+        }
+    }
+
     /// GIVEN a call that is still joining WHEN the microphone and speaker
     /// change THEN the choice waits on the join's channel, and a task that
     /// subscribes later still sees it; WHEN no call runs THEN it is
@@ -6202,6 +6445,60 @@ mod tests {
             sent.try_recv(),
             Ok(ToWorker::TestDevice { device: Some(id), .. }) if id == "mic"
         ));
+        assert_eq!(
+            sent.try_recv(),
+            Ok(ToWorker::Leave),
+            "a sound test gets no video effect, only the closing `Leave`"
+        );
+    }
+
+    /// GIVEN a saved video effect WHEN a camera test starts THEN its worker
+    /// gets the effect directly after `TestDevice` (ADR-0068), so the first
+    /// shown picture has it, and the worker's answer does not end the test.
+    #[test]
+    fn given_a_camera_test_then_its_worker_gets_the_saved_effect_after_the_test() {
+        let warm = VideoEffect {
+            background: persephone_call_protocol::Background::None,
+            filter: persephone_call_protocol::ColourFilter::Warm,
+        };
+        let host = ScriptHost::new(vec![
+            FromWorker::Camera {
+                state: CameraState::On,
+            },
+            FromWorker::VideoEffect {
+                effect: warm,
+                refused: false,
+            },
+            FromWorker::Left,
+        ]);
+        let calls = controller(host.clone());
+        calls.set_test_effect(warm);
+        plain(&calls.inner.device_test).generation = 1;
+        run_device_test(
+            &calls.inner,
+            1,
+            CallDeviceTestKind::Camera,
+            None,
+            &AtomicBool::new(false),
+            device_test::TEST_LIMIT,
+        );
+        assert_eq!(calls.device_test_status().state, CallDeviceTestState::Done);
+        let mut sent = host
+            .sent
+            .lock()
+            .unwrap()
+            .take()
+            .expect("the worker started");
+        assert!(matches!(
+            sent.try_recv(),
+            Ok(ToWorker::SetDiagnostics { .. })
+        ));
+        assert!(matches!(sent.try_recv(), Ok(ToWorker::TestDevice { .. })));
+        assert_eq!(
+            sent.try_recv(),
+            Ok(ToWorker::SetVideoEffect { effect: warm })
+        );
+        assert_eq!(sent.try_recv(), Ok(ToWorker::Leave), "then only the close");
     }
 
     /// GIVEN a test that never ran (a camera open that hangs) WHEN the
@@ -6443,6 +6740,7 @@ mod tests {
             screen_control: Arc::default(),
             volume: watch::channel(MAX_VOLUME_PERCENT).0,
             microphone: watch::channel(None).0,
+            video_effect: watch::channel(None).0,
             devices: watch::channel(None).0,
             task: None,
         });
@@ -6694,6 +6992,7 @@ mod tests {
             audio: AudioWants::default(),
             volume: watch::channel(MAX_VOLUME_PERCENT).0,
             microphone: watch::channel(None).0,
+            video_effect: watch::channel(None).0,
             devices: watch::channel(None).0,
             levels: BTreeMap::new(),
             portal: None,
@@ -7349,6 +7648,7 @@ mod tests {
             volume: watch::channel(MAX_VOLUME_PERCENT).0,
             devices: watch::channel(None).0,
             microphone: watch::channel(None).0,
+            video_effect: watch::channel(None).0,
             task: None,
         });
     }
@@ -7361,6 +7661,7 @@ mod tests {
             kill: Arc::default(),
             devices: watch::channel(None).0,
             microphone: watch::channel(None).0,
+            video_effect: watch::channel(None).0,
         });
     }
 
@@ -7881,6 +8182,7 @@ mod tests {
             screen_control: call.screen_control.clone(),
             volume: call.volume.clone(),
             microphone: call.microphone.clone(),
+            video_effect: call.video_effect.clone(),
             devices: call.devices.clone(),
             task: None,
         });
@@ -7937,6 +8239,10 @@ mod tests {
             (CameraState::On, CallCamera::On),
             (CameraState::NotFound, CallCamera::NotFound),
             (CameraState::Unavailable, CallCamera::Unavailable),
+            (
+                CameraState::EffectUnavailable,
+                CallCamera::EffectUnavailable,
+            ),
             (CameraState::Off, CallCamera::Off),
         ] {
             assert_eq!(view.apply(&FromWorker::Camera { state }), Applied::Changed);
@@ -8115,6 +8421,7 @@ mod tests {
             screen_control: Arc::default(),
             volume: watch::channel(MAX_VOLUME_PERCENT).0,
             microphone: watch::channel(None).0,
+            video_effect: watch::channel(None).0,
             devices: watch::channel(None).0,
             task: None,
         });
@@ -8134,6 +8441,8 @@ mod tests {
             video: Vec::new(),
             ring_declined: false,
             device_change: None,
+            effect_refused: false,
+            mirror: true,
         }
     }
 
@@ -8207,6 +8516,8 @@ mod tests {
             }],
             ring_declined: false,
             device_change: None,
+            effect_refused: false,
+            mirror: true,
         });
         assert!(calls.video_picture(0, 0, store.stream(0)).is_some());
         assert_eq!(calls.set_camera(false), Ok(()));
