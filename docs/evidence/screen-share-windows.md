@@ -331,9 +331,10 @@ call worker's AppContainer. The sections above stay as they were.
 * Source: branch `claude/screen-helper-windows`. The run was made from the
   working tree that became commit `ee816b1`; the branch was rebased on
   `main` on 26 November 2026, and that commit is now `2f253e2`. The run
-  covers the helper and the worker's reader as they were at that commit
-  only. Later review commits changed both, and this run does not cover
-  them: `077d794` (stop and launch handling, the reader's pipe checks),
+  covers the helper as it was at that commit only: the core's test reads
+  the frame pipe with the call protocol's `read_item`, not with the
+  worker's reader. Later review commits changed the helper and the worker's
+  reader, and this run does not cover them: `077d794` (stop and launch handling, the reader's pipe checks),
   `b9d8437` (`fb24981` before the rebase: the helper keeps the newest frame
   that its 200 ms gate refuses and copies it when the gate opens,
   `wgc::take_next`; the worker hands pictures on at most once each
@@ -379,8 +380,9 @@ Not measured, and not claimed:
 * A second monitor, other DPI scales, protected content, and a locked or
   secure desktop.
 * A call with a remote participant who sees the share, and the worker
-  reading the helper's pipe in a live call. The worker's reader and the
-  helper's writer were each tested alone.
+  reading the helper's pipe, in a live call or at all: the worker's reader
+  (`crates/call-worker/src/screen/frame_pipe.rs`) has unit tests of its
+  own, which are not part of this record.
 * The sandbox gate (`python tools/dev.py sandbox`), which was not run for this
   change, and the Windows release workflow in CI.
 
@@ -419,5 +421,6 @@ Not measured, and not claimed:
 * The kept frame (`wgc::take_next`), the 200 ms gate and a still screen sent
   again: the test reads one picture only.
 * The worker's reader (`frame_pipe`, `PICTURE_GAP`): the core's test reads
-  the pipe itself. The reader's own tests cover it alone.
+  the pipe with the call protocol's `read_item`. The reader's unit tests in
+  `crates/call-worker` are not part of this record.
 * Everything in the list of the run above.

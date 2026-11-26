@@ -205,11 +205,15 @@ mod tests {
         let helper = HelperShare::start(1, launched.process).expect("a helper share");
         let frames = launched.frames;
         let (sender, receiver) = mpsc::channel();
+        // The read end comes back with the item and stays open until the
+        // helper was stopped: with no reader, its next write would end it
+        // with "frame pipe closed" (13) instead of a stop.
         std::thread::spawn(move || {
             let mut file = File::from(frames);
-            let _ = sender.send(read_item(&mut file, 1));
+            let item = read_item(&mut file, 1);
+            let _ = sender.send((item, file));
         });
-        let item = receiver
+        let (item, read_end) = receiver
             .recv_timeout(Duration::from_secs(30))
             .expect("an item in 30 s");
         let Ok(ScreenItem::Frame(frame)) = item else {
@@ -228,6 +232,7 @@ mod tests {
             .count();
         assert!(lit > 0, "the picture is black");
         assert_eq!(helper.stop_and_join(), Some(EXIT_STOPPED));
+        drop(read_end);
         // The Job's memory cap is 512 MiB; this is the measured peak.
         let peak = process.peak_memory();
         eprintln!(

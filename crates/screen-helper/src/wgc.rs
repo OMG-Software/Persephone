@@ -328,6 +328,16 @@ pub fn open(index: usize, expected: Option<(u32, u32)>) -> Result<Capture, Stage
     open_monitor(&monitor)
 }
 
+/// Whether a capture of `size` is within the capture limits
+/// ([`super::monitor::size_ok`]). Checked before any frame buffer of that
+/// size is made.
+fn size_fits(size: SizeInt32) -> bool {
+    match (u32::try_from(size.Width), u32::try_from(size.Height)) {
+        (Ok(width), Ok(height)) => super::monitor::size_ok(width, height),
+        _ => false,
+    }
+}
+
 /// Starts capturing `monitor`, which the caller took from [`monitors`] a
 /// moment ago (the helper chooses it by name, size and rectangle).
 pub fn open_monitor(monitor: &Monitor) -> Result<Capture, Stage> {
@@ -337,7 +347,8 @@ pub fn open_monitor(monitor: &Monitor) -> Result<Capture, Stage> {
     let item: GraphicsCaptureItem = unsafe { interop.CreateForMonitor(monitor.handle) }
         .map_err(|error| note(Stage::Item, error))?;
     let size = item.Size().map_err(|error| note(Stage::Item, error))?;
-    if size.Width < 2 || size.Height < 2 {
+    // The pool's buffers have this size: check it before they exist.
+    if !size_fits(size) {
         return Err(Stage::BadSize);
     }
 
@@ -439,8 +450,10 @@ impl Capture {
                 .map_err(|error| note(Stage::Texture, error))?;
             if content.Width != self.size.Width || content.Height != self.size.Height {
                 // The monitor changed size: the next frames use the new size,
-                // and a kept frame of the old size goes.
-                if content.Width < 2 || content.Height < 2 {
+                // and a kept frame of the old size goes. `Recreate` makes the
+                // buffers of the new size, so a size past the capture limits
+                // is refused before it.
+                if !size_fits(content) {
                     return Err(Stage::BadSize);
                 }
                 self.held = None;
@@ -545,7 +558,23 @@ impl Drop for Capture {
 
 #[cfg(test)]
 mod tests {
-    use super::take_next;
+    use super::{SizeInt32, size_fits, take_next};
+
+    /// GIVEN capture sizes WHEN they are checked before a frame pool is made
+    /// or made again THEN sizes within the capture limits fit, and a size
+    /// past them (an 8K monitor), a negative size and a size below 2 do not.
+    #[test]
+    fn given_capture_sizes_when_checked_then_only_sizes_within_the_limits_fit() {
+        let size = |w: i32, h: i32| SizeInt32 {
+            Width: w,
+            Height: h,
+        };
+        assert!(size_fits(size(2560, 1440)));
+        assert!(size_fits(size(3840, 2160)));
+        assert!(!size_fits(size(7680, 4320)));
+        assert!(!size_fits(size(-1920, 1080)));
+        assert!(!size_fits(size(1, 1080)));
+    }
 
     /// GIVEN frames that the gate refuses WHEN no newer one comes THEN the
     /// newest refused one is taken once the gate opens, and only once; an

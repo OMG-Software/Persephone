@@ -187,8 +187,11 @@ it as accepted.
   retry. The helper's control pipe is closed at once in both cases.
 * The core owns an explicit stop-and-join. It closes the helper's control
   pipe, waits up to 2 seconds for the exit, terminates the Job if the
-  helper is still running, and joins the thread that waits for the process.
-  The end of the call and the end of the session do this before they go on.
+  helper is still running and waits up to 5 seconds more, and joins the
+  thread that waits for the process when it saw the exit. The end of the
+  call and the end of the session first end the call worker (its leave, or
+  a kill when the session ended), so the microphone, the camera and the
+  room never wait for a helper, and then do this before the call is gone.
   They also cancel a share pick that still runs and wait for it (at most
   2 seconds), so a helper that it started is stopped and joined too. Then
   they wait until no helper that an earlier stop left to its reaper is
@@ -352,8 +355,9 @@ it as accepted.
 
 ### A helper process outside the AppContainer
 
-* Good, because WGC works, the border and cursor show, and the capture code
-  is outside the core and outside the worker.
+* Good, because WGC works, the border and the cursor are meant to show (no
+  one has looked at them yet, see "Not verified"), and the capture code is
+  outside the core and outside the worker.
 * Bad, because it adds an uncontained process and a frame channel, and does
   not remove the worker's ability to copy the screen with GDI.
 

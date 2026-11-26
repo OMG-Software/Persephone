@@ -286,6 +286,8 @@ mod tests {
     /// Everything a capture reported.
     #[derive(Default)]
     struct Seen {
+        /// How many callbacks have started (a slow one counts at once).
+        entered: usize,
         frames: Vec<(u32, u32, usize)>,
         /// The first byte of each picture, and when it came.
         fills: Vec<(u8, Instant)>,
@@ -328,6 +330,7 @@ mod tests {
                 &flag,
                 open_tx,
                 move |frame| {
+                    frame_seen.lock().unwrap().entered += 1;
                     if calls == slow_one {
                         std::thread::sleep(slow);
                     }
@@ -345,9 +348,14 @@ mod tests {
 
     /// Waits until `count` pictures were seen, at most 5 s.
     fn wait_for_fills(seen: &Mutex<Seen>, count: usize) {
+        wait_until(seen, |seen| seen.fills.len() >= count, "pictures go");
+    }
+
+    /// Waits until `done` holds for what was seen, at most 5 s.
+    fn wait_until(seen: &Mutex<Seen>, done: impl Fn(&Seen) -> bool, what: &str) {
         let deadline = Instant::now() + Duration::from_secs(5);
-        while seen.lock().unwrap().fills.len() < count {
-            assert!(Instant::now() < deadline, "{count} pictures go");
+        while !done(&seen.lock().unwrap()) {
+            assert!(Instant::now() < deadline, "{what}");
             std::thread::sleep(Duration::from_millis(10));
         }
     }
@@ -366,13 +374,20 @@ mod tests {
         let (open, seen, _stop, thread) = run(9, Some(read), monitor());
         write_picture(&mut write, 9, 4, 2, &[1; 32]).expect("a picture");
         assert_eq!(open_result(&open), Ok(()));
+        // The open result goes before the first picture is handed on.
+        wait_for_fills(&seen, 1);
         // The next picture of a changed screen comes after the gap.
         std::thread::sleep(PICTURE_GAP + Duration::from_millis(50));
         write_picture(&mut write, 9, 4, 2, &[2; 32]).expect("a picture");
+        // An end item ends the share at once, also before a waiting
+        // picture is due, so it goes only after picture 2 was seen.
+        wait_for_fills(&seen, 2);
         write_end(&mut write, 9, ScreenEnd::NotFound).expect("an end");
         thread.join().expect("the capture thread");
         let seen = seen.lock().unwrap();
         assert_eq!(seen.frames, vec![(4, 2, 32); 2]);
+        let fills: Vec<u8> = seen.fills.iter().map(|(fill, _)| *fill).collect();
+        assert_eq!(fills, [1, 2]);
         assert_eq!(seen.ended, Some(Ended::NotFound));
     }
 
@@ -446,9 +461,13 @@ mod tests {
         let (open, seen, stop, thread) = run_slow(9, Some(read), monitor(), 1, slow);
         write_picture(&mut write, 9, 4, 2, &[1; 32]).expect("a picture");
         assert_eq!(open_result(&open), Ok(()));
+        wait_for_fills(&seen, 1);
         std::thread::sleep(PICTURE_GAP + Duration::from_millis(50));
-        // Picture 2 goes at once and its callback is slow; picture 3 waits.
+        // Picture 2 goes at once and its callback is slow. Picture 3 is
+        // written while that callback waits, so it cannot take picture 2's
+        // place, and it waits for the gap.
         write_picture(&mut write, 9, 4, 2, &[2; 32]).expect("a picture");
+        wait_until(&seen, |seen| seen.entered >= 2, "picture 2 is handed on");
         write_picture(&mut write, 9, 4, 2, &[3; 32]).expect("a picture");
         wait_for_fills(&seen, 3);
         stop.store(true, Ordering::Release);
@@ -468,14 +487,17 @@ mod tests {
         assert_eq!(open_result(&open), Err(ScreenState::Unavailable));
         thread.join().expect("the capture thread");
         let file = File::open(std::env::current_exe().expect("this program")).expect("a file");
-        // SAFETY: the backend gives a refused handle back without closing it,
-        // so the file's own owner closes it once.
-        let alias = unsafe {
-            OwnedHandle::from_raw_handle(std::os::windows::io::AsRawHandle::as_raw_handle(&file))
-        };
-        let (open, _seen, _stop, thread) = run(1, Some(alias), monitor());
+        let owned = OwnedHandle::from(file);
+        let raw = std::os::windows::io::AsRawHandle::as_raw_handle(&owned);
+        let (open, _seen, _stop, thread) = run(1, Some(owned), monitor());
         assert_eq!(open_result(&open), Err(ScreenState::Unavailable));
         thread.join().expect("the capture thread");
+        // The backend gave up the refused handle without closing it: it is
+        // still open, and this test owns it again and closes it.
+        // SAFETY: `PipeReader::new` released the handle (`into_raw_handle`)
+        // and nothing else owns it.
+        let back = File::from(unsafe { OwnedHandle::from_raw_handle(raw) });
+        assert!(back.metadata().is_ok(), "a refused handle is not closed");
         let (read, _write) = pipe();
         let display = ScreenTarget::Display {
             id: 1,

@@ -4594,9 +4594,10 @@ impl Call {
         Ok(())
     }
 
-    /// Ends the call: the keeper, the worker, then (unless the session
-    /// ended) the membership and the handlers in one operation. After the end
-    /// of the session the worker is killed at once, and no request is sent.
+    /// Ends the call: the keeper, the worker, then the screen pick and the
+    /// capture helpers together with (unless the session ended) the
+    /// membership and the handlers in one operation. After the end of the
+    /// session the worker is killed at once, and no request is sent.
     async fn finish(self, session_ended: bool) {
         let Call {
             access,
@@ -4619,26 +4620,32 @@ impl Call {
         drop(portal);
         drop(screen_closed);
         close_session(&mut plain(&screen_control));
-        // The screen pick and the capture helpers end with the call and with
-        // the session, before anything else goes on. No helper outlives the
-        // call.
-        end_screen_helpers(screen_pick, screen_helper).await;
         // No more restarts, so the leave cannot be pushed back.
         tasks.abort_all();
+        // The worker ends first: it holds the microphone, the camera and the
+        // room, and a helper's bounded stop (seconds, for a helper that
+        // ignores its control pipe) must not keep them after the user left.
+        // Its end also closes its copy of the frame pipe.
         if session_ended {
             drop(link);
+        } else {
+            finish_worker(link).await;
+        }
+        // The screen pick and the capture helpers end before the call is
+        // gone: no helper outlives the call or the session. The membership
+        // ends meanwhile, so a slow helper does not hold it either.
+        if session_ended {
+            end_screen_helpers(screen_pick, screen_helper).await;
             return;
         }
-        finish_worker(link).await;
         let room_id = view.room_id;
-        let _ = access
-            .run(|client| async move {
-                end_membership(&client, &room_id, &delayed, &state_key).await;
-                for handle in handles {
-                    client.remove_event_handler(handle);
-                }
-            })
-            .await;
+        let membership = access.run(|client| async move {
+            end_membership(&client, &room_id, &delayed, &state_key).await;
+            for handle in handles {
+                client.remove_event_handler(handle);
+            }
+        });
+        let ((), _) = tokio::join!(end_screen_helpers(screen_pick, screen_helper), membership);
     }
 }
 
@@ -9647,6 +9654,58 @@ mod tests {
             .unwrap();
         fixture.call.finish(true).await;
         assert!(helper.terminated.load(Ordering::SeqCst));
+    }
+
+    /// GIVEN a share whose helper ignores its control pipe WHEN the call
+    /// ends THEN the worker's `Leave` goes, and WHEN the core's session ends
+    /// THEN the worker is killed, while the helper's stop still waits: the
+    /// microphone, the camera and the room do not wait for the helper. The
+    /// helper is still terminated before the end returns.
+    #[tokio::test]
+    async fn given_a_hanging_helper_when_the_call_ends_then_the_worker_stops_first() {
+        use crate::calls::screen_helper::STOP_WAIT;
+        for session_ended in [false, true] {
+            let killed = Arc::new(AtomicBool::new(false));
+            let mut fixture = test_call(no_admission(), Arc::new(Flags::default()), killed.clone());
+            fixture.call.screens = Arc::new(Scripted {
+                available: true,
+                picks: AtomicUsize::new(0),
+            });
+            let inner = controller(FakeHost::new(true, None)).inner.clone();
+            let helper = FakeHelper::new(false, 0);
+            fixture.call.screen_command(&inner, true, 0).unwrap();
+            fixture
+                .call
+                .screen_picked(&inner, Ok(helper_grant(&helper, 1)))
+                .unwrap();
+            assert!(is_monitor_start(fixture.to_worker.try_recv().ok()));
+            let TestCall {
+                call,
+                mut to_worker,
+                ..
+            } = fixture;
+            let end = tokio::spawn(call.finish(session_ended));
+            let stopped = time::timeout(STOP_WAIT / 2, async {
+                if session_ended {
+                    while !killed.load(Ordering::SeqCst) {
+                        time::sleep(Duration::from_millis(10)).await;
+                    }
+                } else {
+                    while !matches!(to_worker.recv().await, Some(ToWorker::Leave) | None) {}
+                }
+            })
+            .await;
+            assert!(
+                stopped.is_ok(),
+                "session_ended {session_ended}: the worker stops at once"
+            );
+            assert!(
+                !helper.terminated.load(Ordering::SeqCst),
+                "the helper's stop still waits"
+            );
+            end.await.expect("the end of the call");
+            assert!(helper.terminated.load(Ordering::SeqCst));
+        }
     }
 
     /// A worker process that takes handles, as the Windows one does.
