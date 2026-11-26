@@ -150,7 +150,9 @@ persephone-media-broker = { path = "../media-broker" }
 # System_SystemInformation: the idle time (GetLastInputInfo, GetTickCount);
 # Security_WinTrust, Security_Cryptography_Catalog and System_ProcessStatus: the
 # loaded-module report (WinVerifyTrust, catalog lookup, module listing;
-# Cryptography_Sip gates the WTHelper* signer functions).
+# Cryptography_Sip gates the WTHelper* signer functions); UI_HiDpi: the screen
+# chooser reads monitor rectangles in physical pixels, as the call worker does
+# (SetThreadDpiAwarenessContext).
 windows-sys = { version = "=0.61.2", features = [
   "Win32_Foundation",
   "Win32_Graphics_Gdi",
@@ -167,6 +169,7 @@ windows-sys = { version = "=0.61.2", features = [
   "Win32_System_SystemInformation",
   "Win32_System_Threading",
   "Win32_UI_Controls_Dialogs",
+  "Win32_UI_HiDpi",
   "Win32_UI_Input_KeyboardAndMouse",
   "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging",

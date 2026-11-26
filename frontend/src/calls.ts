@@ -25,6 +25,7 @@ import type {
   CallStatus,
   CallUnavailable
 } from '../../crates/contracts/generated/contracts';
+import type { DesktopPlatform } from './modules';
 
 /** Shown when a camera command fails before the core answers. */
 export const CAMERA_COMMAND_TEXT = 'The camera did not change. Try again.';
@@ -240,7 +241,9 @@ export const SCREEN_STARTING_TEXT = 'Starting the screen share…';
 export const SCREEN_SHARING_TEXT = 'You are sharing your screen';
 export const SCREEN_NOT_FOUND_TEXT = 'The chosen screen is not available any more';
 export const SCREEN_UNAVAILABLE_TEXT = 'Screen sharing is not available here';
-export const SCREEN_REFUSED_TEXT = 'Your system did not allow the screen share';
+export const SCREEN_REFUSED_TEXT = 'Your system did not allow the screen share.';
+/** The refusal on macOS, which names the permission to give (ADR-0064). */
+export const SCREEN_REFUSED_MAC_TEXT = `${SCREEN_REFUSED_TEXT} On macOS, allow Persephone in System Settings, Privacy & Security, Screen Recording.`;
 
 /** The note beside the screen share button; empty when it needs none. */
 export const SCREEN_TEXT: Record<CallScreen, string> = {
@@ -251,6 +254,16 @@ export const SCREEN_TEXT: Record<CallScreen, string> = {
   unavailable: SCREEN_UNAVAILABLE_TEXT,
   refused: SCREEN_REFUSED_TEXT
 };
+
+/**
+ * The note beside the screen share button on `platform`; empty when it
+ * needs none. Only macOS names a setting: on Windows a refusal means that
+ * the screen could not be read (a locked or secure desktop), which no
+ * setting changes.
+ */
+export function screenNote(screen: CallScreen, platform: DesktopPlatform): string {
+  return screen === 'refused' && platform === 'mac' ? SCREEN_REFUSED_MAC_TEXT : SCREEN_TEXT[screen];
+}
 
 export type ScreenButtonView = {
   label: string;

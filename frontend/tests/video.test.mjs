@@ -631,7 +631,7 @@ test('GIVEN the screen tile WHEN the fetcher asks THEN it is asked like any othe
   assert.deepEqual(fetcher.active, [5]);
 });
 
-test('GIVEN each screen state WHEN the call bar is rendered THEN the button and the note follow the state and nothing names a source', () => {
+test('GIVEN each screen state WHEN the call bar is rendered THEN the button and the note follow the state and nothing names a source', async () => {
   const base = {
     phase: 'active',
     roomId: '!r:s',
@@ -674,6 +674,34 @@ test('GIVEN each screen state WHEN the call bar is rendered THEN the button and 
   assert.match(bar('off', { screenBusy: true }), /call-screen[^>]*disabled/);
   assert.match(bar('refused'), /aria-pressed="false"/);
   assert.match(bar('on'), /aria-pressed="true"/);
+  // Both windows show the platform's refusal text as rendered: on macOS it
+  // names the setting, elsewhere it does not.
+  const { default: CallWindow } = await vite.ssrLoadModule('/src/CallWindow.svelte');
+  const asPlatform = (platform, draw) => {
+    const real = globalThis.navigator;
+    Object.defineProperty(globalThis, 'navigator', { value: { platform }, configurable: true, writable: true });
+    try {
+      return draw();
+    } finally {
+      Object.defineProperty(globalThis, 'navigator', { value: real, configurable: true, writable: true });
+    }
+  };
+  const windowStatus = {
+    ...base, deafened: false, volume: 100, ringDeclined: false, deviceChange: null, screen: 'refused'
+  };
+  const windows = {
+    'call bar': () => bar('refused'),
+    'call window': () => render(CallWindow, { props: { initialStatus: windowStatus } }).body
+  };
+  for (const [name, draw] of Object.entries(windows)) {
+    const mac = asPlatform('MacIntel', draw);
+    assert.match(mac, /did not allow the screen share\. On macOS, allow Persephone in System Settings/, name);
+    for (const other of ['Win32', 'Linux x86_64']) {
+      const shown = asPlatform(other, draw);
+      assert.match(shown, /did not allow the screen share\./, `${name} ${other}`);
+      assert.doesNotMatch(shown, /System Settings/, `${name} ${other}`);
+    }
+  }
 });
 
 test('GIVEN a participant that shares WHEN the call bar is rendered THEN the mark is plain text, also for a hostile name', () => {

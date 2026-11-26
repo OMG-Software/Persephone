@@ -505,7 +505,14 @@ mod tests {
     #[test]
     fn given_a_monitor_target_when_captured_on_linux_then_it_is_unavailable() {
         assert!(!accepts(&ScreenTarget::Monitor {
-            index: 0,
+            name: persephone_call_protocol::MonitorName::new(br"\\.\DISPLAY1").expect("a name"),
+            width: 1920,
+            height: 1080,
+            rect: persephone_call_protocol::DesktopRect::new(0, 0, 1920, 1080)
+                .expect("a rectangle"),
+        }));
+        assert!(!accepts(&ScreenTarget::Display {
+            id: 1,
             width: 1920,
             height: 1080
         }));

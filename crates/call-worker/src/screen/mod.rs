@@ -1,11 +1,11 @@
 //! Screen capture (ADR-0053). The platform-neutral API: no platform and no
 //! LiveKit types.
 //!
-//! One backend per OS: `windows.rs` (Windows.Graphics.Capture, through
-//! `wgc.rs`), `linux.rs` (PipeWire over the ScreenCast portal remote) and
-//! `unsupported.rs` for the rest (macOS reports screen sharing as
-//! unavailable until its own decision). A backend offers `capture()`; this
-//! module wraps it in [`open`]. The core names the screen: the worker never
+//! One backend per OS: `windows.rs` (GDI `BitBlt`, through `gdi.rs`;
+//! `wgc.rs` is kept for the gate's measurement), `linux.rs` (PipeWire over
+//! the ScreenCast portal remote), `macos.rs` (ScreenCaptureKit, ADR-0064,
+//! with its pure rules in `display.rs`) and `unsupported.rs` for the rest. A
+//! backend offers `capture()`; this module wraps it in [`open`]. The core names the screen: the worker never
 //! lists screens to the user and never picks another one. A capture runs on
 //! its own thread. [`Capture::stop`] and `Drop` ask it to end and wait for
 //! it, but only for a bounded time: `stop` can return `Some(capture)` with
@@ -29,42 +29,94 @@ mod backend;
 #[cfg(target_os = "linux")]
 #[path = "linux.rs"]
 mod backend;
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(target_os = "macos")]
+#[path = "macos.rs"]
+mod backend;
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 #[path = "unsupported.rs"]
 mod backend;
 
+/// The rules of a display share that need no OS type (ADR-0064); `macos.rs`
+/// uses them, and the tests run them everywhere.
+#[cfg(any(target_os = "macos", test))]
+mod display;
+
+// The call backend reads the monitor list of `wgc.rs`; the rest of it is the
+// Windows.Graphics.Capture code that the containment gate measures (it is
+// denied in the AppContainer, so the worker does not use it).
 #[cfg(windows)]
+mod gdi;
+#[cfg(windows)]
+#[allow(dead_code)]
 mod wgc;
 
 /// The longest wait for the screen to open: the Windows capture setup, or
-/// on Linux the PipeWire connection and the wait for the stream (up to 6 s).
+/// on Linux the PipeWire connection and the wait for the stream (up to 6 s),
+/// or on macOS the display list and the stream start (up to 4 s each).
 const OPEN_TIMEOUT: Duration = Duration::from_secs(10);
-/// No screen picture is larger than this on either side (a 4K screen, a wide
-/// screen).
-const MAX_CAPTURE_SIDE: u32 = 7680;
-/// Nor has it more pixels than 3840x2160.
-const MAX_CAPTURE_PIXELS: u64 = 3840 * 2160;
+#[cfg(target_os = "linux")]
+use persephone_call_protocol::MAX_CAPTURE_SIDE;
+/// A screen size the worker can take: at most 7680 on a side and 3840x2160
+/// pixels. Checked before any buffer for the frame is made. The core offers
+/// only screens within the same rule, from the call protocol.
+pub use persephone_call_protocol::screen_capture_size_ok as capture_size_ok;
 
-/// A screen size the worker can take. Checked before any buffer for the
-/// frame is made.
-pub fn capture_size_ok(width: u32, height: u32) -> bool {
-    width >= 2
-        && height >= 2
-        && width <= MAX_CAPTURE_SIDE
-        && height <= MAX_CAPTURE_SIDE
-        && u64::from(width) * u64::from(height) <= MAX_CAPTURE_PIXELS
+// The Windows monitor list and the GDI capture keep their own numbers,
+// because the containment gate compiles those files without this crate.
+// They must equal the protocol's, which the core uses to name and offer a
+// monitor: a different list rule or capture rule offers a monitor that
+// the worker then refuses.
+#[cfg(windows)]
+const _: () = assert!(
+    wgc::MAX_MONITORS == persephone_call_protocol::MAX_SCREEN_MONITORS as usize
+        && wgc::MAX_MONITOR_SIDE == persephone_call_protocol::MAX_MONITOR_SIDE
+        && gdi::MAX_SIDE == persephone_call_protocol::MAX_CAPTURE_SIDE
+        && gdi::MAX_PIXELS == persephone_call_protocol::MAX_CAPTURE_PIXELS
+        && gdi_rule_matches()
+);
+
+/// The GDI rule and the protocol's agree at each edge: the 2x2 minimum, the
+/// side limit and the pixel limit, each just inside and just outside.
+#[cfg(windows)]
+const fn gdi_rule_matches() -> bool {
+    use persephone_call_protocol::MAX_CAPTURE_SIDE as SIDE;
+    let edges: [(u32, u32); 11] = [
+        (2, 2),
+        (1, 2),
+        (2, 1),
+        (0, 0),
+        (SIDE, 2),
+        (SIDE + 1, 2),
+        (2, SIDE + 1),
+        (3840, 2160),
+        (3840, 2161),
+        (2880, 2880),
+        (2881, 2880),
+    ];
+    let mut at = 0;
+    while at < edges.len() {
+        let (width, height) = edges[at];
+        if gdi::size_ok(width, height) != capture_size_ok(width, height) {
+            return false;
+        }
+        at += 1;
+    }
+    true
 }
 
 /// The byte order of the 32-bit pixels in a [`CapturedFrame`], as in memory.
 /// The fourth byte is alpha or padding; it is never used.
-/// `unsupported.rs` (macOS) makes no frame, so only tests make one there.
-#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
+/// `unsupported.rs` makes no frame, so only tests make one there.
+#[cfg_attr(
+    not(any(windows, target_os = "linux", target_os = "macos")),
+    allow(dead_code)
+)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Format {
-    /// B, G, R, A (Windows BGRA; PipeWire BGRx and BGRA).
+    /// B, G, R, A (Windows and macOS BGRA; PipeWire BGRx and BGRA).
     Bgra,
     /// R, G, B, A (PipeWire RGBx and RGBA).
-    #[cfg_attr(windows, allow(dead_code))]
+    #[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
     Rgba,
 }
 
@@ -91,7 +143,10 @@ impl<'a> CapturedFrame<'a> {
 
     /// A frame over `data`, or `None` when `data` is shorter than a whole
     /// picture or the size is outside the capture limits.
-    #[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
+    #[cfg_attr(
+        not(any(windows, target_os = "linux", target_os = "macos")),
+        allow(dead_code)
+    )]
     pub fn checked(
         format: Format,
         width: u32,
@@ -110,9 +165,12 @@ impl<'a> CapturedFrame<'a> {
     }
 }
 
-/// Why a capture ended by itself. `unsupported.rs` (macOS) starts no
-/// capture, so only tests make one there.
-#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
+/// Why a capture ended by itself. `unsupported.rs` starts no capture, so
+/// only tests make one there.
+#[cfg_attr(
+    not(any(windows, target_os = "linux", target_os = "macos")),
+    allow(dead_code)
+)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Ended {
     /// The source went: the window or screen closed, the portal session
@@ -123,7 +181,8 @@ pub enum Ended {
 }
 
 /// What one screen start brought for its open: on Linux, the PipeWire remote
-/// the core sent over the camera channel with kind `s`. Empty on Windows.
+/// the core sent over the camera channel with kind `s`. Empty on Windows
+/// and macOS.
 /// Dropping it closes the remote.
 #[derive(Default)]
 pub struct Grant {
@@ -242,20 +301,33 @@ mod tests {
         assert_eq!(frame.data.len(), 64);
     }
 
-    /// GIVEN a target of the other OS's kind WHEN it is opened THEN the
-    /// result is `Unavailable` and no thread starts.
+    /// GIVEN a target of another OS's kind WHEN it is opened THEN the result
+    /// is `Unavailable` and no thread starts.
     #[test]
     fn given_a_target_of_another_os_when_opened_then_it_is_unavailable() {
-        let wrong = if cfg!(windows) {
-            ScreenTarget::Portal { node: 1 }
-        } else {
-            ScreenTarget::Monitor {
-                index: 0,
-                width: 1920,
-                height: 1080,
-            }
+        let portal = ScreenTarget::Portal { node: 1 };
+        let monitor = ScreenTarget::Monitor {
+            name: persephone_call_protocol::MonitorName::new(br"\\.\DISPLAY1").expect("a name"),
+            width: 1920,
+            height: 1080,
+            rect: persephone_call_protocol::DesktopRect::new(0, 0, 1920, 1080)
+                .expect("a rectangle"),
         };
-        let result = open(wrong, Grant::default(), |_| {}, |_| {});
-        assert_eq!(result.err(), Some(ScreenState::Unavailable));
+        let display = ScreenTarget::Display {
+            id: 1,
+            width: 1920,
+            height: 1080,
+        };
+        let wrong = if cfg!(windows) {
+            [portal, display]
+        } else if cfg!(target_os = "macos") {
+            [portal, monitor]
+        } else {
+            [monitor, display]
+        };
+        for target in wrong {
+            let result = open(target, Grant::default(), |_| {}, |_| {});
+            assert_eq!(result.err(), Some(ScreenState::Unavailable), "{target:?}");
+        }
     }
 }

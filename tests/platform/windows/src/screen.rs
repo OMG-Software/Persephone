@@ -14,9 +14,15 @@
 //! capability SID, mitigations, Job limits) plus one candidate capability.
 //! Keep the two in step.
 //!
-//! Exit status of the parent: 0 when the control captured a frame and every
-//! container run finished (whatever it measured); 1 when the control failed
-//! or a run could not be launched; the result lines say what each set got.
+//! Exit status of the parent: 0 when the control captured a frame, the GDI
+//! control captured a picture with more than one colour, and every
+//! container run finished (whatever it measured); 1 when a control failed,
+//! when the GDI control saw only black or one colour (the measurement then
+//! cannot tell a blocked copy in the container from the screen itself, so
+//! it is inconclusive: show a varied screen and run it again), or when a run
+//! could not be launched. The result lines say what each set got. A DXGI
+//! control with no frame (a still desktop gives none) is printed only. An
+//! `HRESULT` is printed only when a call recorded one.
 //! A set that cannot capture is a measurement, not a gate failure: the
 //! worker is granted only a capability that a set below shows to work.
 
@@ -50,9 +56,16 @@ use windows_sys::Win32::System::Threading::{
     TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject,
 };
 
+#[path = "screen_alt.rs"]
+mod alt;
+#[allow(dead_code)] // the worker uses the parts the probe does not
+#[path = "../../../../crates/call-worker/src/screen/gdi.rs"]
+mod gdi;
 #[allow(dead_code)] // the worker uses the parts the probe does not
 #[path = "../../../../crates/call-worker/src/screen/wgc.rs"]
 mod wgc;
+
+use alt::Method;
 
 const PARENT_ARG: &str = "--screen-probe";
 const CHILD_ARG: &str = "--screen-probe-child";
@@ -111,11 +124,23 @@ pub fn dispatch() -> Option<i32> {
             .next()
             .and_then(|arg| arg.to_str().and_then(|text| text.parse::<u32>().ok()))
             .unwrap_or(0);
-        let stage = child(index);
+        let method = args
+            .next()
+            .and_then(|arg| arg.to_str().and_then(|text| text.parse::<u32>().ok()))
+            .and_then(Method::from_number)
+            .unwrap_or(Method::Wgc);
+        let stage = child_for(method, index);
         // Exit codes are the only channel out of the container, and 32 bits
         // cannot hold a stage and a whole HRESULT. Part 1 and 2 return the
         // stage of this run with one half of its last HRESULT.
-        let hresult = wgc::last_error() as u32;
+        let hresult = match method {
+            Method::Wgc => wgc::last_error(),
+            _ => alt::last_error(),
+        } as u32;
+        if part == 3 && stage == 0 && method != Method::Wgc {
+            // A real picture: its mean colour, for the parent to compare.
+            return Some((MEAN_FLAG | alt::last_mean()) as i32);
+        }
         return Some(encode(stage, hresult, part) as i32);
     }
     if first == OsStr::new(PARENT_ARG) {
@@ -134,14 +159,18 @@ fn encode(stage: u32, hresult: u32, part: u32) -> u32 {
     }
 }
 
-/// The last capture stage (`wgc::Stage::BadSize`).
-const LAST_STAGE: u32 = wgc::Stage::BadSize as u32;
+/// Part 3 of a method that captured returns this flag and the mean colour.
+const MEAN_FLAG: u32 = 0x0100_0000;
+
+/// The last capture stage of any method (`alt::UNIFORM`).
+const LAST_STAGE: u32 = alt::LAST_STAGE;
 
 /// Whether `code` is a status the child gives for `part`: a stage for part 0
 /// (0 is a frame), or a stage with an HRESULT half for part 1 and 2. A crash
 /// or an unread exit code is not one.
 fn known_status(code: u32, part: u32) -> bool {
     match part {
+        3 => code <= LAST_STAGE || (code & !0x00FF_FFFF) == MEAN_FLAG,
         0 => code <= LAST_STAGE,
         _ => decode(code).is_some_and(|(stage, _)| stage <= LAST_STAGE),
     }
@@ -162,7 +191,20 @@ fn combine(stage: u32, high: u32, low: u32) -> Option<u32> {
     (high_stage == stage && low_stage == stage).then_some((high << 16) | low)
 }
 
-/// The capture attempt: 0 when a frame arrived, else the stage that failed
+/// The capture attempt of one method.
+fn child_for(method: Method, index: usize) -> u32 {
+    match method {
+        Method::Wgc => child(index),
+        other => {
+            let Ok(_com) = wgc::ComGuard::start() else {
+                return wgc::Stage::Com as u32;
+            };
+            alt::run(other)
+        }
+    }
+}
+
+/// The WGC capture attempt: 0 when a frame arrived, else the stage that failed
 /// (`wgc::Stage` as a number).
 fn child(index: usize) -> u32 {
     let Ok(_com) = wgc::ComGuard::start() else {
@@ -188,6 +230,19 @@ fn child(index: usize) -> u32 {
     if got { 0 } else { wgc::Stage::NoFrame as u32 }
 }
 
+/// What follows a method's result: the mean colour for a frame that
+/// arrived (also a black or one-colour one), the `HRESULT` for a failed call
+/// that recorded one, else nothing.
+fn result_detail(stage: u32) -> String {
+    if stage == 0 || alt::is_unvaried(stage) {
+        return format!(", mean colour {:#08x}", alt::last_mean());
+    }
+    match alt::last_error() {
+        0 => ", no HRESULT recorded".to_owned(),
+        code => format!(", HRESULT {:#010x}", code as u32),
+    }
+}
+
 fn describe(code: u32) -> String {
     let name = match code {
         0 => "captured a frame",
@@ -205,6 +260,7 @@ fn describe(code: u32) -> String {
         12 => "frame texture unreadable",
         13 => "frame map failed",
         14 => "bad capture size",
+        15..=24 => alt::describe(code).unwrap_or("unnamed stage"),
         NOT_STARTED => "the process did not run",
         _ => "the process ended with another code",
     };
@@ -242,25 +298,85 @@ fn parent() -> i32 {
         println!("screen-probe: INCONCLUSIVE, the control did not capture a frame");
         return 1;
     }
+    let mut failed = false;
+    for method in [Method::Dxgi, Method::Gdi] {
+        let stage = child_for(method, 0);
+        let mut line = describe(stage);
+        line.push_str(&result_detail(stage));
+        if stage != 0 {
+            // DXGI waits for a screen change, so a still desktop gives it no
+            // frame: its control is information. GDI copies the screen as it
+            // is, so a GDI control without a varied picture fails the
+            // measurement (inconclusive for black or one colour).
+            failed |= method == Method::Gdi;
+            if method == Method::Gdi && alt::is_unvaried(stage) {
+                line.push_str(
+                    "; INCONCLUSIVE, a container copy could not be told from this screen",
+                );
+            }
+        }
+        println!(
+            "screen-probe: control {} (this process, no container): {line}",
+            method.name()
+        );
+    }
     let profile = format!("Persephone.Screen.Probe.{}", std::process::id());
     let Some(container) = Container::create(&profile) else {
         println!("screen-probe: could not create the AppContainer profile");
         return 1;
     };
-    let mut failed = false;
-    let mut sets: Vec<(String, Vec<&str>)> =
-        vec![("call worker today".to_owned(), CALL_CAPABILITIES.to_vec())];
+    let mut sets: Vec<(Method, String, Vec<&str>)> = vec![(
+        Method::Wgc,
+        "call worker today".to_owned(),
+        CALL_CAPABILITIES.to_vec(),
+    )];
     for (name, extra) in CANDIDATES {
         let mut caps = CALL_CAPABILITIES.to_vec();
         caps.extend_from_slice(extra);
-        sets.push((name.to_owned(), caps));
+        sets.push((Method::Wgc, name.to_owned(), caps));
     }
-    for (name, caps) in &sets {
-        let run = |part| run_in_container(&container, &exe, caps, part);
+    // The other methods need no capability name to try; run them with the
+    // worker's own capabilities.
+    for method in [Method::Dxgi, Method::Gdi] {
+        sets.push((
+            method,
+            "call worker today".to_owned(),
+            CALL_CAPABILITIES.to_vec(),
+        ));
+    }
+    for (method, name, caps) in &sets {
+        let run = |part| run_in_container(&container, &exe, caps, part, *method);
         match run(0) {
             Ok(code) => {
                 let mut line = describe(code);
-                if code != 0 {
+                if code == 0 && *method != Method::Wgc {
+                    // Repeat once to read the mean colour of the picture.
+                    match run(3) {
+                        Ok(mean) if (mean & !0x00FF_FFFF) == MEAN_FLAG => {
+                            line.push_str(&format!(", mean colour {:#08x}", mean & 0x00FF_FFFF));
+                        }
+                        // A capture result of the repeat is a result.
+                        Ok(other) => line.push_str(&format!(
+                            ", mean colour unknown (repeat gave {})",
+                            describe(other)
+                        )),
+                        Err(RunError::Unconfirmed(error, child)) => {
+                            return abandon(container, name, &error, child);
+                        }
+                        // A repeat that did not run is a failed measurement.
+                        Err(RunError::Failed(error)) => {
+                            line.push_str(&format!(
+                                ", mean colour unknown (repeat run failed: {error})"
+                            ));
+                            failed = true;
+                        }
+                    }
+                }
+                if alt::is_unvaried(code) {
+                    // The capture call succeeded and the pixels were judged:
+                    // no call failed, so there is no error code to read.
+                    line.push_str(", no HRESULT: the capture call succeeded");
+                } else if code != 0 {
                     // The error code of the failed call, in two more runs. Each
                     // run reports its own stage. Use the halves only when both
                     // runs failed at the stage of the first run.
@@ -278,6 +394,9 @@ fn parent() -> i32 {
                     };
                     match (high, low) {
                         (Ok(high), Ok(low)) => match combine(code, high, low) {
+                            // A stage that failed with no recorded error (for
+                            // example a null handle) has no HRESULT.
+                            Some(0) => line.push_str(", no error recorded for this stage"),
                             Some(hresult) => line.push_str(&format!(
                                 ", HRESULT {hresult:#010x} (halves of two repeat runs, same stage)"
                             )),
@@ -292,7 +411,8 @@ fn parent() -> i32 {
                     }
                 }
                 println!(
-                    "screen-probe: AppContainer [{}] ({name}): {line}",
+                    "screen-probe: AppContainer {} [{}] ({name}): {line}",
+                    method.name(),
                     caps.join(", ")
                 );
             }
@@ -618,6 +738,7 @@ fn run_in_container(
     exe: &Path,
     capabilities: &[&str],
     part: u32,
+    method: Method,
 ) -> Result<u32, RunError> {
     let sid = container
         .sid()
@@ -719,10 +840,14 @@ fn run_in_container(
     }
 
     let executable: Vec<u16> = exe.as_os_str().encode_wide().chain(Some(0)).collect();
-    let mut command: Vec<u16> = OsStr::new(&format!("\"{}\" {CHILD_ARG} 0 {part}", exe.display()))
-        .encode_wide()
-        .chain(Some(0))
-        .collect();
+    let mut command: Vec<u16> = OsStr::new(&format!(
+        "\"{}\" {CHILD_ARG} 0 {part} {}",
+        exe.display(),
+        method.number()
+    ))
+    .encode_wide()
+    .chain(Some(0))
+    .collect();
     let system_root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
     let directory: Vec<u16> = system_root.encode_wide().chain(Some(0)).collect();
     // Only the OS runtime variables the AppContainer needs to start, sorted
@@ -856,6 +981,26 @@ mod tests {
         }
         assert!(describe(0xC000_0005).contains("another code"));
         assert!(describe(NOT_STARTED).contains("did not run"));
+    }
+
+    /// GIVEN a control result WHEN its detail is printed THEN a frame, also a
+    /// black or one-colour one, shows its mean colour and no HRESULT, and a
+    /// failed call without a recorded HRESULT says so instead of printing 0.
+    #[test]
+    fn given_control_results_when_detailed_then_no_hresult_is_made_up() {
+        assert!(alt::is_unvaried(alt::BLACK) && alt::is_unvaried(alt::UNIFORM));
+        assert!(!alt::is_unvaried(0) && !alt::is_unvaried(alt::COPY));
+        // A new test thread has recorded nothing.
+        assert_eq!(alt::last_error(), 0);
+        for stage in [0, alt::BLACK, alt::UNIFORM] {
+            assert!(
+                result_detail(stage).starts_with(", mean colour "),
+                "{stage}"
+            );
+        }
+        for stage in [alt::COPY, alt::DEVICE, alt::GDI_BLT] {
+            assert_eq!(result_detail(stage), ", no HRESULT recorded", "{stage}");
+        }
     }
 
     /// GIVEN two runs that failed at the stage of the first run WHEN the
