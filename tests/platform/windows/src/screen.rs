@@ -6,7 +6,7 @@
 //! then launches the same executable in an AppContainer with the call
 //! worker's capabilities and process mitigations, once for each capability
 //! set below, and reports how far `CreateForMonitor` and one frame got. The
-//! capture code is the worker's own `screen/wgc.rs`, compiled into this
+//! capture code is the screen helper's own `wgc.rs` (ADR-0067), compiled into this
 //! executable, so the measurement uses the code that ships.
 //!
 //! The launch below repeats `LaunchSpec::call()` of
@@ -58,11 +58,14 @@ use windows_sys::Win32::System::Threading::{
 
 #[path = "screen_alt.rs"]
 mod alt;
-#[allow(dead_code)] // the worker uses the parts the probe does not
-#[path = "../../../../crates/call-worker/src/screen/gdi.rs"]
+#[allow(dead_code)] // the probe uses the parts of the capture it measures
+#[path = "gdi.rs"]
 mod gdi;
-#[allow(dead_code)] // the worker uses the parts the probe does not
-#[path = "../../../../crates/call-worker/src/screen/wgc.rs"]
+#[allow(dead_code)] // the helper uses the parts the probe does not
+#[path = "../../../../crates/screen-helper/src/monitor.rs"]
+mod monitor;
+#[allow(dead_code)] // the helper uses the parts the probe does not
+#[path = "../../../../crates/screen-helper/src/wgc.rs"]
 mod wgc;
 
 use alt::Method;

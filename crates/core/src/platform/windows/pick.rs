@@ -227,13 +227,17 @@ mod tests {
         let image = target.join("photo.png");
         std::fs::write(&image, b"\x89PNG\r\n\x1a\n").unwrap();
         let junction = dir.path().join("junction");
-        let made = std::process::Command::new("cmd")
-            .args(["/C", "mklink", "/J"])
-            .arg(&junction)
-            .arg(&target)
-            .output()
-            .unwrap();
-        assert!(made.status.success(), "mklink /J failed");
+        let made = crate::platform::windows::spawn_for_test(
+            std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(&junction)
+                .arg(&target)
+                .stdout(std::process::Stdio::null()),
+        )
+        .unwrap()
+        .wait()
+        .unwrap();
+        assert!(made.success(), "mklink /J failed");
         let budgets = ResourceBudgets::default();
         assert_eq!(
             read_image_file(&junction, &budgets).err(),

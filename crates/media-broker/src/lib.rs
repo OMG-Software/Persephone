@@ -44,7 +44,11 @@ pub use macos::{SeatbeltContainment, start_call_worker};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use unix::{LongLivedWorker, StartedCallWorker};
 #[cfg(windows)]
-pub use windows::{AppContainerProfile, LongLivedWorker, StartedCallWorker, start_call_worker};
+pub use windows::{
+    AppContainerProfile, LongLivedWorker, ScreenHelperPipes, ScreenHelperProcess,
+    StartedCallWorker, StartedScreenHelper, process_start_lock, start_call_worker,
+    start_screen_helper,
+};
 
 /// How a call worker ended, as the OS reports it. The core maps it to a
 /// closed reason; no worker text is involved.

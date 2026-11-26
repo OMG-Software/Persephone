@@ -11,6 +11,7 @@ pub mod pick;
 pub mod profile;
 pub mod save;
 pub mod screen;
+pub mod screen_helper;
 pub mod ui;
 pub mod vault;
 
@@ -115,14 +116,30 @@ pub(crate) fn ui_host() -> Box<dyn UiHost> {
 
 /// Starts a new core for a profile switch, detached from this one as the
 /// launcher starts it: no console and its own process group, so it outlives
-/// this process.
+/// this process. The start holds the media broker's process-start lock, so
+/// it cannot inherit a worker's or screen helper's pipe end.
 pub(crate) fn start_detached(command: &mut std::process::Command) -> std::io::Result<()> {
     use std::os::windows::process::CommandExt;
     use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS};
+    let _start = persephone_media_broker::process_start_lock();
     command
         .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
         .spawn()
         .map(drop)
+}
+
+/// Starts a test's child process under the media broker's process-start
+/// lock, as every other start in the core does (the `ShellExecuteW` link
+/// opener aside). Every test start of the library on Windows goes through
+/// it: the test binary also holds the ignored tests that launch a real call
+/// worker or screen helper, and a start without the lock can inherit their
+/// pipe ends.
+#[cfg(test)]
+pub(crate) fn spawn_for_test(
+    command: &mut std::process::Command,
+) -> std::io::Result<std::process::Child> {
+    let _start = persephone_media_broker::process_start_lock();
+    command.spawn()
 }
 
 /// The contained call worker host (ADR-0043).

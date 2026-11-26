@@ -75,7 +75,11 @@ class BuildTest(unittest.TestCase):
         self.assertIn("--release", commands[1], "the worker embeds the release guest in every profile")
         self.assertEqual(
             [packages(command) for command in commands[2:]],
-            [["persephone-core", "persephone-media-worker"], ["persephone-call-worker"], ["persephone-desktop"]],
+            [
+                ["persephone-core", "persephone-media-worker", "persephone-screen-helper"],
+                ["persephone-call-worker"],
+                ["persephone-desktop"],
+            ],
             "the UI and the call worker build apart, so their features are not unified into the core and worker",
         )
 
@@ -98,7 +102,10 @@ class BuildTest(unittest.TestCase):
         commands = []
         with self.assertRaises(subprocess.CalledProcessError):
             build("build", commands=commands, fails=lambda command: "persephone-core" in command)
-        self.assertEqual(packages(commands[-1]), ["persephone-core", "persephone-media-worker"])
+        self.assertEqual(
+            packages(commands[-1]),
+            ["persephone-core", "persephone-media-worker", "persephone-screen-helper"],
+        )
 
     def test_given_build_then_the_call_worker_gets_the_verified_libwebrtc_path(self):
         # GIVEN a verified libwebrtc, WHEN build runs, THEN the worker build names it.

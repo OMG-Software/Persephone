@@ -318,3 +318,109 @@ Notes:
 * Not measured: a copy of the second monitor in the container, other DPI
   scales, protected content, a locked or secure desktop, and whether the
   Persephone main window is hidden from a GDI copy (ADR-0045).
+
+## Run of the screen helper, 25 November 2026
+
+This section belongs to [ADR-0067](../adr/0067-capture-the-windows-screen-in-a-helper-outside-the-call-worker.md)
+(proposed). It records what ran for the helper, which captures outside the
+call worker's AppContainer. The sections above stay as they were.
+
+* Machine: Windows 11 Pro, build 10.0.26300, one interactive session, the
+  desktop unlocked and in use. rustc 1.99.1 (58cf8f9c3 2026-10-13), cargo
+  1.99.1 (5f94df478 2026-08-27), debug build, `--locked --offline`.
+* Source: branch `claude/screen-helper-windows`. The run was made from the
+  working tree that became commit `ee816b1`; the branch was rebased on
+  `main` on 26 November 2026, and that commit is now `2f253e2`. The run
+  covers the helper as it was at that commit only: the core's test reads
+  the frame pipe with the call protocol's `read_item`, not with the
+  worker's reader. Later review commits changed the helper and the worker's
+  reader, and this run does not cover them: `077d794` (stop and launch handling, the reader's pipe checks),
+  `b9d8437` (`fb24981` before the rebase: the helper keeps the newest frame
+  that its 200 ms gate refuses and copies it when the gate opens,
+  `wgc::take_next`; the worker hands pictures on at most once each
+  `PICTURE_GAP`), `2f0fb91` (a still screen goes again, a stop is checked
+  before each write), `75ae75f` and `1f64862` (one deadline for each pipe
+  item, slower polling between items, every pool frame closed). The run of
+  26 November below covers the helper after them. `Cargo.lock` gained only
+  the new workspace member `persephone-screen-helper`.
+* Command: `cargo build --locked --offline -p persephone-screen-helper`,
+  then `cargo test --locked --offline -p persephone-core --lib -- --ignored
+  --nocapture platform::windows::screen_helper`. Exit status 0.
+  It starts the helper through the broker with its full launch: normal
+  token, Job (one process, kill on close, 512 MiB, UI limits), the call
+  worker's mitigations without the Win32k lockdown and the dynamic-code
+  prohibition, child processes blocked, no console, two inherited handles.
+  It then reads one item from the frame pipe, stops the helper and joins it.
+
+| Check | Result |
+| --- | --- |
+| Item on the frame pipe | one picture, 2560x1440 (monitor 0), equal to the monitor's rectangle |
+| Picture content | at least one pixel with a non-zero colour byte; the picture was not looked at and not compared with the screen |
+| Stop | closing the control pipe ended the helper with exit code 0; no terminate was needed |
+| Peak committed memory (Job) | 87 MiB; the Job's cap is 512 MiB |
+| Run time | 0.4 to 0.9 s from launch to join |
+
+Measured during the work, not kept as a run:
+
+* A probe started with `CREATE_NO_WINDOW` and the child process policy failed
+  at start with exit code `0xC0000142` (`STATUS_DLL_INIT_FAILED`). Removing
+  every mitigation bit, using the full environment, or leaving the standard
+  handles unset did not change it; leaving out the child process policy
+  made it start. With `DETACHED_PROCESS` (no console) and the policy on, it
+  starts. A console program needs `conhost.exe`, which is a child process.
+  The launch test (`helper_probe_child` in `crates/media-broker`) shows a
+  program started this way gets its two pipe handles, writes to the frame
+  pipe, cannot start `cmd.exe`, and ends when the control pipe closes.
+
+Not measured, and not claimed:
+
+* That the yellow capture border and the cursor show: the picture was not
+  looked at.
+* That Persephone's windows are hidden from this picture (ADR-0045).
+* A second monitor, other DPI scales, protected content, and a locked or
+  secure desktop.
+* A call with a remote participant who sees the share, and the worker
+  reading the helper's pipe, in a live call or at all: the worker's reader
+  (`crates/call-worker/src/screen/frame_pipe.rs`) has unit tests of its
+  own, which are not part of this record.
+* The sandbox gate (`python tools/dev.py sandbox`), which was not run for this
+  change, and the Windows release workflow in CI.
+
+## Run of the screen helper after the review commits, 26 November 2026
+
+This section also belongs to [ADR-0067](../adr/0067-capture-the-windows-screen-in-a-helper-outside-the-call-worker.md)
+(proposed). It repeats the helper run above on the later helper. The run
+above stays as it was.
+
+* Machine: the same as above: Windows 11 Pro, build 10.0.26300, one
+  interactive session, the desktop unlocked and in use. rustc 1.99.1
+  (58cf8f9c3 2026-10-13), cargo 1.99.1 (5f94df478 2026-08-27), debug build,
+  `--locked --offline`.
+* Source: branch `claude/screen-helper-windows` at `8b9d75e`, with the
+  uncommitted changes of the commit that adds this section. Those changes
+  touch no source of the helper (`crates/screen-helper/src`), of its launch
+  (`crates/media-broker/src`) or of the core's helper code
+  (`crates/core/src/calls/screen_helper.rs`,
+  `crates/core/src/platform/windows/screen_helper.rs`), so the run
+  covers the helper of `8b9d75e`, with every review commit named above.
+* Command: as above, `cargo build --locked --offline -p
+  persephone-screen-helper`, then `cargo test --locked --offline -p
+  persephone-core --lib -- --ignored --nocapture
+  platform::windows::screen_helper`. Exit status 0.
+
+| Check | Result |
+| --- | --- |
+| Item on the frame pipe | one picture, 2560x1440 (monitor 0), equal to the monitor's mode size |
+| Picture content | at least one pixel with a non-zero colour byte; the picture was not looked at and not compared with the screen |
+| Stop | `stop_and_join` returned exit code 0 (stopped) |
+| Peak committed memory (Job) | 85 MiB; the Job's cap is 512 MiB |
+| Run time | 0.48 s for the test |
+
+Not measured, and not claimed:
+
+* The kept frame (`wgc::take_next`), the 200 ms gate and a still screen sent
+  again: the test reads one picture only.
+* The worker's reader (`frame_pipe`, `PICTURE_GAP`): the core's test reads
+  the pipe with the call protocol's `read_item`. The reader's unit tests in
+  `crates/call-worker` are not part of this record.
+* Everything in the list of the run above.

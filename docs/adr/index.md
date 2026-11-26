@@ -73,6 +73,7 @@
 * [0064 - Share the screen in calls on macOS](0064-share-the-screen-in-calls-on-macos.md)
 * [0065 - Choose the large video and change devices in the call window](0065-choose-the-large-video-and-change-devices-in-the-call-window.md)
 * [0066 - Show call statistics on request](0066-show-call-statistics-on-request.md)
+* [0067 - Capture the Windows screen in a helper outside the call worker](0067-capture-the-windows-screen-in-a-helper-outside-the-call-worker.md)
 
 ## Superseded Records
 

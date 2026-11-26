@@ -21,12 +21,13 @@ use std::{
     },
     path::Path,
     ptr::{null, null_mut},
+    sync::{Mutex, MutexGuard, PoisonError},
     time::Duration,
 };
 use windows_sys::Win32::{
     Foundation::{
-        GetLastError, HANDLE, HANDLE_FLAG_INHERIT, LocalFree, STILL_ACTIVE, SetHandleInformation,
-        WAIT_OBJECT_0, WAIT_TIMEOUT,
+        DUPLICATE_SAME_ACCESS, DuplicateHandle, GetLastError, HANDLE, HANDLE_FLAG_INHERIT,
+        LocalFree, STILL_ACTIVE, SetHandleInformation, WAIT_OBJECT_0, WAIT_TIMEOUT,
     },
     Security::{
         AllocateAndInitializeSid, DeriveCapabilitySidsFromName, FreeSid,
@@ -39,15 +40,21 @@ use windows_sys::Win32::{
             AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
             JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
             JOB_OBJECT_LIMIT_PROCESS_MEMORY, JOB_OBJECT_LIMIT_PROCESS_TIME,
-            JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-            JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation,
+            JOB_OBJECT_UILIMIT_DESKTOP, JOB_OBJECT_UILIMIT_DISPLAYSETTINGS,
+            JOB_OBJECT_UILIMIT_EXITWINDOWS, JOB_OBJECT_UILIMIT_GLOBALATOMS,
+            JOB_OBJECT_UILIMIT_HANDLES, JOB_OBJECT_UILIMIT_READCLIPBOARD,
+            JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS, JOB_OBJECT_UILIMIT_WRITECLIPBOARD,
+            JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_BASIC_UI_RESTRICTIONS,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectBasicAccountingInformation,
+            JobObjectBasicUIRestrictions, JobObjectExtendedLimitInformation,
             QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
         },
         Pipes::CreatePipe,
         Threading::{
             CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
-            DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess,
-            InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
+            DETACHED_PROCESS, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
+            GetCurrentProcess, GetExitCodeProcess, InitializeProcThreadAttributeList,
+            LPPROC_THREAD_ATTRIBUTE_LIST, PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY,
             PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY,
             PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, PROCESS_INFORMATION, ResumeThread,
             STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess, UpdateProcThreadAttribute,
@@ -283,12 +290,42 @@ impl Drop for AttributeList {
     }
 }
 
-/// A pipe whose child end is inheritable and whose broker end is not.
+/// Every process start of this process holds this lock: the broker's
+/// launches and the core's own `std::process::Command` starts. A handle is
+/// inheritable only while a start holds the lock, and it is closed before
+/// the lock is released, so no other start can inherit it. Windows lets a
+/// start without a handle list inherit every inheritable handle, and the
+/// standard library starts with no handle list.
+static PROCESS_START: Mutex<()> = Mutex::new(());
+
+/// Takes the process-start lock. Hold it across a whole process start
+/// (`Command::spawn`, or a launch here) and take it before nothing else.
+pub fn process_start_lock() -> MutexGuard<'static, ()> {
+    PROCESS_START.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Makes `handles` inheritable for the process start that holds `_start`.
+/// The caller closes them before it releases the lock.
+fn inheritable_for(
+    _start: &MutexGuard<'static, ()>,
+    handles: &[HANDLE],
+) -> Result<(), LaunchError> {
+    for &handle in handles {
+        // SAFETY: each handle is a valid handle of this process.
+        if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) } == 0 {
+            return Err(api("SetHandleInformation"));
+        }
+    }
+    Ok(())
+}
+
+/// A pipe with no inheritable end. A launch makes the child's end
+/// inheritable with [`inheritable_for`] under the process-start lock.
 fn pipe(child_reads: bool) -> Result<(OwnedHandle, OwnedHandle), LaunchError> {
     let attributes = SECURITY_ATTRIBUTES {
         nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
         lpSecurityDescriptor: null_mut(),
-        bInheritHandle: 1,
+        bInheritHandle: 0,
     };
     let (mut read, mut write): (HANDLE, HANDLE) = (null_mut(), null_mut());
     // SAFETY: both out-pointers are valid; the handles are owned below.
@@ -301,10 +338,6 @@ fn pipe(child_reads: bool) -> Result<(OwnedHandle, OwnedHandle), LaunchError> {
     } else {
         (write, read)
     };
-    // SAFETY: clears inheritance on the broker's own end.
-    if unsafe { SetHandleInformation(raw(&broker), HANDLE_FLAG_INHERIT, 0) } == 0 {
-        return Err(api("SetHandleInformation"));
-    }
     Ok((child, broker))
 }
 
@@ -457,6 +490,19 @@ impl Drop for CapabilitySids {
 }
 
 fn job(spec: &LaunchSpec) -> Result<OwnedHandle, LaunchError> {
+    job_with(spec.memory_limit_bytes, spec.cpu_time_limit, false)
+}
+
+/// A Job that holds one process, kills it when the Job closes, and caps its
+/// committed memory and, when asked, its CPU time. With `ui_limits` the
+/// process also cannot use the clipboard, change system parameters or
+/// display settings, use global atoms, switch or create desktops, log the
+/// user off, or touch the USER handles of processes outside the Job.
+fn job_with(
+    memory_limit_bytes: usize,
+    cpu_time_limit: Option<Duration>,
+    ui_limits: bool,
+) -> Result<OwnedHandle, LaunchError> {
     // SAFETY: an anonymous Job with default security.
     let job = unsafe { CreateJobObjectW(null(), null()) };
     if job.is_null() {
@@ -468,13 +514,13 @@ fn job(spec: &LaunchSpec) -> Result<OwnedHandle, LaunchError> {
         | JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
         | JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION
         | JOB_OBJECT_LIMIT_PROCESS_MEMORY;
-    if let Some(cpu_time_limit) = spec.cpu_time_limit {
+    if let Some(cpu_time_limit) = cpu_time_limit {
         limits.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_PROCESS_TIME;
         limits.BasicLimitInformation.PerProcessUserTimeLimit =
             i64::try_from(cpu_time_limit.as_nanos() / 100).unwrap_or(i64::MAX);
     }
     limits.BasicLimitInformation.ActiveProcessLimit = 1;
-    limits.ProcessMemoryLimit = spec.memory_limit_bytes;
+    limits.ProcessMemoryLimit = memory_limit_bytes;
     // SAFETY: `limits` is the documented structure for this class.
     let ok = unsafe {
         SetInformationJobObject(
@@ -486,6 +532,23 @@ fn job(spec: &LaunchSpec) -> Result<OwnedHandle, LaunchError> {
     };
     if ok == 0 {
         return Err(api("SetInformationJobObject"));
+    }
+    if ui_limits {
+        let restrictions = JOBOBJECT_BASIC_UI_RESTRICTIONS {
+            UIRestrictionsClass: HELPER_UI_LIMITS,
+        };
+        // SAFETY: `restrictions` is the documented structure for this class.
+        let ok = unsafe {
+            SetInformationJobObject(
+                raw(&job),
+                JobObjectBasicUIRestrictions,
+                (&restrictions as *const JOBOBJECT_BASIC_UI_RESTRICTIONS).cast(),
+                size_of_val(&restrictions) as u32,
+            )
+        };
+        if ok == 0 {
+            return Err(api("SetInformationJobObject"));
+        }
     }
     Ok(job)
 }
@@ -632,9 +695,13 @@ fn launch(
     worker: &Path,
     spec: &LaunchSpec,
 ) -> Result<Started, LaunchError> {
+    // Taken first, so it is released last: the child's pipe ends close
+    // before any other start can run (`PROCESS_START`).
+    let start = process_start_lock();
     let sid = profile.sid()?;
     let (child_stdin, broker_stdin) = pipe(true)?;
     let (child_stdout, broker_stdout) = pipe(false)?;
+    inheritable_for(&start, &[raw(&child_stdin), raw(&child_stdout)])?;
     let job = job(spec)?;
 
     let capability_sids = CapabilitySids::derive(spec.capabilities, spec.device_capabilities)?;
@@ -740,19 +807,354 @@ fn launch(
     })
 }
 
-fn job_stats(job: &OwnedHandle, process: &OwnedHandle, elapsed: Duration) -> WorkerStats {
-    let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-    let mut accounting = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
-    let mut exit_code = u32::MAX;
-    // SAFETY: each buffer is the documented structure for its class.
+// ---------------------------------------------------------------------------
+// The screen helper (ADR-0067)
+// ---------------------------------------------------------------------------
+
+/// Committed memory for the screen helper: two 3840x2160 BGRA pictures (the
+/// staging copy and the repacked copy, about 64 MiB) and the Direct3D and
+/// WinRT runtime. The peak measured on 25 November 2026 was 87 MiB for one
+/// monitor on the development machine; the limit leaves room for a 4K
+/// monitor and for a graphics driver that commits more.
+const SCREEN_HELPER_MEMORY_LIMIT_BYTES: usize = 512 * 1024 * 1024;
+
+/// What the screen helper's Job forbids the process to do with the desktop.
+/// None of it is needed for Windows.Graphics.Capture of one monitor.
+const HELPER_UI_LIMITS: u32 = JOB_OBJECT_UILIMIT_HANDLES
+    | JOB_OBJECT_UILIMIT_READCLIPBOARD
+    | JOB_OBJECT_UILIMIT_WRITECLIPBOARD
+    | JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS
+    | JOB_OBJECT_UILIMIT_DISPLAYSETTINGS
+    | JOB_OBJECT_UILIMIT_GLOBALATOMS
+    | JOB_OBJECT_UILIMIT_DESKTOP
+    | JOB_OBJECT_UILIMIT_EXITWINDOWS;
+
+/// `PROCESS_CREATION_CHILD_PROCESS_RESTRICTED` from winnt.h.
+const CHILD_PROCESS_RESTRICTED: u32 = 0x1;
+
+/// The creation-time mitigations of the screen helper: the same flags as the
+/// call worker's. Like the call worker, the helper has no dynamic-code
+/// prohibition (the graphics driver generates code in the process) and no
+/// Win32k lockdown (WinRT capture and Direct3D need Win32k system calls;
+/// the call worker's audio stack needs them too).
+fn helper_mitigation_flags() -> u64 {
+    mitigation_flags(Mitigations {
+        prohibit_dynamic_code: false,
+        disable_win32k: false,
+    })
+}
+
+/// The two pipes of one screen share, made before the helper starts. The
+/// helper gets the control pipe's read end and the frame pipe's write end;
+/// the core keeps the other two. No end is inheritable: the launch makes the
+/// helper's two ends inheritable under the process-start lock and closes
+/// them before it releases the lock.
+pub struct ScreenHelperPipes {
+    control_for_helper: OwnedHandle,
+    control_for_core: OwnedHandle,
+    frames_for_helper: OwnedHandle,
+    frames_for_core: OwnedHandle,
+}
+
+impl ScreenHelperPipes {
+    pub fn new() -> Result<Self, LaunchError> {
+        let (control_for_helper, control_for_core) = pipe(true)?;
+        let (frames_for_helper, frames_for_core) = pipe(false)?;
+        Ok(Self {
+            control_for_helper,
+            control_for_core,
+            frames_for_helper,
+            frames_for_core,
+        })
+    }
+
+    /// The handle value of the helper's control pipe end. The helper gets
+    /// the same value, because it inherits the handle.
+    pub fn control_value(&self) -> u32 {
+        handle_value(&self.control_for_helper)
+    }
+
+    /// The handle value of the helper's frame pipe end.
+    pub fn frames_value(&self) -> u32 {
+        handle_value(&self.frames_for_helper)
+    }
+}
+
+/// The 32-bit significant value of a kernel handle. Windows handles fit in
+/// 32 bits on every supported system, so the value goes into a `u32` field
+/// of the call protocol.
+fn handle_value(handle: &OwnedHandle) -> u32 {
+    use std::os::windows::io::AsRawHandle;
+    handle.as_raw_handle() as usize as u32
+}
+
+/// A screen helper in its Job. Dropping it closes the Job, and
+/// KILL_ON_JOB_CLOSE ends the process.
+pub struct ScreenHelperProcess(JobWorker);
+
+impl ScreenHelperProcess {
+    /// Waits up to `timeout` for the process to exit. Returns whether it did.
+    pub fn wait_exit(&self, timeout: Duration) -> bool {
+        self.0.wait(timeout) == Wait::Exited
+    }
+
+    /// Ends the helper now by terminating its Job.
+    pub fn terminate(&self) {
+        self.0.kill();
+    }
+
+    /// The exit code. `None` while the process runs or when the OS cannot
+    /// say.
+    pub fn exit_code(&self) -> Option<u32> {
+        let mut code = 0u32;
+        // SAFETY: reads the exit code of the helper's own process handle.
+        let ok = unsafe { GetExitCodeProcess(raw(&self.0.process), &mut code) };
+        (ok != 0 && code != STILL_ACTIVE as u32).then_some(code)
+    }
+
+    /// The peak committed memory of the process, from its Job. Zero when the
+    /// OS does not say.
+    pub fn peak_memory(&self) -> usize {
+        job_peak_memory(&self.0.job)
+    }
+}
+
+/// A started screen helper and the core's ends of its pipes.
+pub struct StartedScreenHelper {
+    pub process: ScreenHelperProcess,
+    /// The write end of the control pipe. Dropping it asks the helper to
+    /// end. The core never writes to it.
+    pub control: File,
+    /// The read end of the frame pipe. It goes to the call worker
+    /// ([`LongLivedWorker::give_handle`]); the core never reads it.
+    pub frames: OwnedHandle,
+}
+
+/// The characters a helper argument may hold: ASCII letters and digits and
+/// `-`, `=`, `,`, `.`. No quote, space or backslash, so the command line
+/// needs no escaping. The helper's arguments (`HelperStart::to_args` of the
+/// call protocol) use only these.
+fn helper_argument_ok(argument: &str) -> bool {
+    !argument.is_empty()
+        && argument
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-=,.".contains(&byte))
+}
+
+/// Starts the screen helper at `exe` with `args` and its two pipes.
+///
+/// The helper runs with the user's normal token, because Windows.Graphics.
+/// Capture is refused in an AppContainer. It starts suspended, in a Job with
+/// one active process, kill-on-close and a memory limit, with the creation-
+/// time mitigations of [`helper_mitigation_flags`], with child process
+/// creation blocked, inheriting only the two pipe handles of `pipes` (an
+/// explicit handle list), with null standard handles, no console and a
+/// minimal environment. It is in the Job before it runs.
+///
+/// The helper has no console (`DETACHED_PROCESS`): a console program would
+/// make the system start `conhost.exe` for it, and the child process policy
+/// stops that (the process then fails to start with `STATUS_DLL_INIT_FAILED`,
+/// measured on 25 November 2026).
+pub fn start_screen_helper(
+    exe: &Path,
+    args: &[String],
+    pipes: ScreenHelperPipes,
+) -> Result<StartedScreenHelper, LaunchError> {
+    if args.len() > 16 || !args.iter().all(|argument| helper_argument_ok(argument)) {
+        return Err(LaunchError::Api {
+            call: "helper argument",
+            code: 0,
+        });
+    }
+    launch_helper(exe, args, pipes)
+}
+
+/// The handles the helper inherits: exactly its two pipe ends, in this
+/// order. Nothing else is inherited.
+fn helper_inherit_list(pipes: &ScreenHelperPipes) -> [HANDLE; 2] {
+    [
+        raw(&pipes.control_for_helper),
+        raw(&pipes.frames_for_helper),
+    ]
+}
+
+/// [`start_screen_helper`] without the argument check, so a test can start
+/// a probe program.
+fn launch_helper(
+    exe: &Path,
+    args: &[String],
+    pipes: ScreenHelperPipes,
+) -> Result<StartedScreenHelper, LaunchError> {
+    // Taken first, so it is released last: the helper's pipe ends close
+    // before any other start can run (`PROCESS_START`).
+    let start = process_start_lock();
+    let inherited = helper_inherit_list(&pipes);
+    let ScreenHelperPipes {
+        control_for_helper,
+        control_for_core,
+        frames_for_helper,
+        frames_for_core,
+    } = pipes;
+    inheritable_for(&start, &inherited)?;
+    let job = job_with(SCREEN_HELPER_MEMORY_LIMIT_BYTES, None, true)?;
+    let mitigations = helper_mitigation_flags();
+    let child_policy = CHILD_PROCESS_RESTRICTED;
+    let mut attributes = AttributeList::new(3)?;
+    // SAFETY: each value outlives CreateProcessW below.
     unsafe {
+        attributes.set(
+            PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
+            inherited.as_ptr().cast(),
+            size_of_val(&inherited),
+        )?;
+        attributes.set(
+            PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY as usize,
+            (&mitigations as *const u64).cast(),
+            size_of_val(&mitigations),
+        )?;
+        attributes.set(
+            PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY as usize,
+            (&child_policy as *const u32).cast(),
+            size_of_val(&child_policy),
+        )?;
+    }
+    let executable: Vec<u16> = exe.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut command: Vec<u16> = OsStr::new("\"")
+        .encode_wide()
+        .chain(exe.as_os_str().encode_wide())
+        .chain(OsStr::new("\"").encode_wide())
+        .collect();
+    for argument in args {
+        command.push(u16::from(b' '));
+        command.extend(OsStr::new(argument).encode_wide());
+    }
+    command.push(0);
+    let directory: Vec<u16> = env::var_os("SystemRoot")
+        .unwrap_or_else(|| "C:\\Windows".into())
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let environment = environment_block();
+    let mut startup = STARTUPINFOEXW::default();
+    startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
+    // Null standard handles: the helper has no console and no input.
+    startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    startup.lpAttributeList = attributes.as_ptr();
+    let mut info = PROCESS_INFORMATION::default();
+    // SAFETY: all buffers are NUL-terminated and live through the call; with
+    // a handle list, only the two listed handles are inherited.
+    let created = unsafe {
+        CreateProcessW(
+            executable.as_ptr(),
+            command.as_mut_ptr(),
+            null(),
+            null(),
+            1,
+            EXTENDED_STARTUPINFO_PRESENT
+                | CREATE_SUSPENDED
+                | DETACHED_PROCESS
+                | CREATE_UNICODE_ENVIRONMENT,
+            environment.as_ptr().cast(),
+            directory.as_ptr(),
+            &startup.StartupInfo,
+            &mut info,
+        )
+    };
+    if created == 0 {
+        return Err(api("CreateProcessW"));
+    }
+    let process = owned(info.hProcess);
+    let thread = owned(info.hThread);
+    // The helper must not run a single instruction outside the Job.
+    // SAFETY: both handles are valid; on failure the suspended process is killed.
+    if unsafe { AssignProcessToJobObject(raw(&job), raw(&process)) } == 0 {
+        let error = api("AssignProcessToJobObject");
+        unsafe { TerminateProcess(raw(&process), 1) };
+        return Err(error);
+    }
+    // The helper has its own copies now.
+    drop(control_for_helper);
+    drop(frames_for_helper);
+    // SAFETY: resumes the helper's primary thread.
+    if unsafe { ResumeThread(raw(&thread)) } == u32::MAX {
+        let error = api("ResumeThread");
+        unsafe { TerminateJobObject(raw(&job), 1) };
+        return Err(error);
+    }
+    Ok(StartedScreenHelper {
+        process: ScreenHelperProcess(JobWorker { process, job }),
+        control: File::from(control_for_core),
+        frames: frames_for_core,
+    })
+}
+
+/// Duplicates `source` into the process `target` and gives the value of the
+/// new handle there. The new handle has the access of the old one and is not
+/// inheritable.
+fn duplicate_into(target: HANDLE, source: &OwnedHandle) -> Result<u32, LaunchError> {
+    let mut duplicate: HANDLE = null_mut();
+    // SAFETY: `source` is a handle of this process; `target` is a process
+    // handle with PROCESS_DUP_HANDLE access; `duplicate` is a valid out
+    // value.
+    let ok = unsafe {
+        DuplicateHandle(
+            GetCurrentProcess(),
+            raw(source),
+            target,
+            &mut duplicate,
+            0,
+            0,
+            DUPLICATE_SAME_ACCESS,
+        )
+    };
+    if ok == 0 {
+        return Err(api("DuplicateHandle"));
+    }
+    // A value that does not fit the call protocol's field is never sent. It
+    // cannot be closed from here, and the worker ends with the call.
+    u32::try_from(duplicate as usize).map_err(|_| LaunchError::Api {
+        call: "DuplicateHandle",
+        code: 0,
+    })
+}
+
+impl LongLivedWorker {
+    /// Duplicates `handle` into the worker process and gives its value
+    /// there. The core sends the value to the worker (`ScreenFrames`); the
+    /// worker checks that it is a pipe before it reads. The caller keeps its
+    /// own handle and closes it.
+    pub fn give_handle(&self, handle: &OwnedHandle) -> Result<u32, LaunchError> {
+        duplicate_into(raw(&self.0.process), handle)
+    }
+}
+
+/// The peak committed memory of the Job's process in bytes, from the Job's
+/// extended limit information. Zero when the OS does not say.
+fn job_peak_memory(job: &OwnedHandle) -> usize {
+    let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+    // SAFETY: `limits` is the documented structure for this class.
+    let ok = unsafe {
         QueryInformationJobObject(
             raw(job),
             JobObjectExtendedLimitInformation,
             (&mut limits as *mut JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
             size_of_val(&limits) as u32,
             null_mut(),
-        );
+        )
+    };
+    if ok == 0 {
+        0
+    } else {
+        limits.PeakProcessMemoryUsed
+    }
+}
+
+fn job_stats(job: &OwnedHandle, process: &OwnedHandle, elapsed: Duration) -> WorkerStats {
+    let mut accounting = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
+    let mut exit_code = u32::MAX;
+    let peak_process_memory = job_peak_memory(job);
+    // SAFETY: each buffer is the documented structure for its class.
+    unsafe {
         QueryInformationJobObject(
             raw(job),
             JobObjectBasicAccountingInformation,
@@ -764,7 +1166,7 @@ fn job_stats(job: &OwnedHandle, process: &OwnedHandle, elapsed: Duration) -> Wor
     }
     WorkerStats {
         elapsed,
-        peak_process_memory: limits.PeakProcessMemoryUsed,
+        peak_process_memory,
         user_cpu: Duration::from_nanos(u64::try_from(accounting.TotalUserTime).unwrap_or(0) * 100),
         exit_code,
     }
@@ -936,5 +1338,317 @@ mod tests {
                 "unexpected variable {name}"
             );
         }
+    }
+
+    // --- The screen helper (ADR-0067) ---
+
+    /// GIVEN the screen helper's mitigations WHEN compared with the call
+    /// worker's THEN they are the same set: every bit of the media worker's
+    /// except dynamic-code prohibition and Win32k disable, which Direct3D
+    /// and the capture runtime need. Strict handle checks, DEP, ASLR,
+    /// extension points off, font loading off and the image-load limits stay.
+    #[test]
+    fn given_the_helper_spec_then_mitigations_are_the_call_workers() {
+        let flags = helper_mitigation_flags();
+        assert_eq!(flags, mitigation_flags(LaunchSpec::call().mitigations));
+        for bit in [
+            STRICT_HANDLE_CHECKS_ALWAYS_ON,
+            EXTENSION_POINT_DISABLE_ALWAYS_ON,
+            FONT_DISABLE_ALWAYS_ON,
+            IMAGE_LOAD_NO_REMOTE_ALWAYS_ON,
+            IMAGE_LOAD_NO_LOW_LABEL_ALWAYS_ON,
+            IMAGE_LOAD_PREFER_SYSTEM32_ALWAYS_ON,
+            BOTTOM_UP_ASLR_ALWAYS_ON,
+            HIGH_ENTROPY_ASLR_ALWAYS_ON,
+            HEAP_TERMINATE_ALWAYS_ON,
+        ] {
+            assert_eq!(flags & bit, bit);
+        }
+        assert_eq!(flags & DEP_ENABLE, DEP_ENABLE);
+        assert_eq!(
+            flags & (PROHIBIT_DYNAMIC_CODE_ALWAYS_ON | WIN32K_SYSTEM_CALL_DISABLE_ALWAYS_ON),
+            0
+        );
+    }
+
+    /// GIVEN the pipes of one share WHEN the helper's inherit list is built
+    /// THEN it holds exactly two handles: the control pipe's read end and the
+    /// frame pipe's write end, in the order of the helper's arguments, with
+    /// the values the core puts on the command line. The core's ends are not
+    /// in the list and are not inheritable.
+    #[test]
+    fn given_helper_pipes_then_it_inherits_only_its_two_ends() {
+        use windows_sys::Win32::Foundation::GetHandleInformation;
+        let pipes = ScreenHelperPipes::new().expect("pipes");
+        let list = helper_inherit_list(&pipes);
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0], raw(&pipes.control_for_helper));
+        assert_eq!(list[1], raw(&pipes.frames_for_helper));
+        assert_ne!(list[0], list[1]);
+        // That the values on the command line name the handles the helper
+        // inherits is seen in the child: `helper_probe_child` calls
+        // `GetFileType` on them.
+        let flags = |handle: &OwnedHandle| {
+            let mut flags = 0u32;
+            // SAFETY: reads the flags of a handle this test owns.
+            assert_ne!(unsafe { GetHandleInformation(raw(handle), &mut flags) }, 0);
+            flags
+        };
+        // No end is inheritable until a launch holds the process-start lock.
+        assert_eq!(flags(&pipes.control_for_helper) & HANDLE_FLAG_INHERIT, 0);
+        assert_eq!(flags(&pipes.frames_for_helper) & HANDLE_FLAG_INHERIT, 0);
+        assert_eq!(flags(&pipes.control_for_core) & HANDLE_FLAG_INHERIT, 0);
+        assert_eq!(flags(&pipes.frames_for_core) & HANDLE_FLAG_INHERIT, 0);
+    }
+
+    /// GIVEN the helper's Job WHEN its limits are read THEN it holds one
+    /// active process, kills it on close, caps memory at the helper's limit
+    /// and has no CPU limit, and its UI limits stop the clipboard, global
+    /// atoms, other processes' USER handles and desktop changes.
+    #[test]
+    fn given_the_helper_job_then_it_holds_one_process_with_a_memory_cap_and_ui_limits() {
+        let job = job_with(SCREEN_HELPER_MEMORY_LIMIT_BYTES, None, true).expect("a job");
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        let mut ui = JOBOBJECT_BASIC_UI_RESTRICTIONS::default();
+        // SAFETY: each buffer is the documented structure for its class.
+        unsafe {
+            assert_ne!(
+                QueryInformationJobObject(
+                    raw(&job),
+                    JobObjectExtendedLimitInformation,
+                    (&mut limits as *mut JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                    size_of_val(&limits) as u32,
+                    null_mut(),
+                ),
+                0
+            );
+            assert_ne!(
+                QueryInformationJobObject(
+                    raw(&job),
+                    JobObjectBasicUIRestrictions,
+                    (&mut ui as *mut JOBOBJECT_BASIC_UI_RESTRICTIONS).cast(),
+                    size_of_val(&ui) as u32,
+                    null_mut(),
+                ),
+                0
+            );
+        }
+        let flags = limits.BasicLimitInformation.LimitFlags;
+        for flag in [
+            JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            JOB_OBJECT_LIMIT_PROCESS_MEMORY,
+            JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION,
+        ] {
+            assert_eq!(flags & flag, flag);
+        }
+        assert_eq!(flags & JOB_OBJECT_LIMIT_PROCESS_TIME, 0);
+        assert_eq!(limits.BasicLimitInformation.ActiveProcessLimit, 1);
+        assert_eq!(limits.ProcessMemoryLimit, 512 * 1024 * 1024);
+        assert_eq!(ui.UIRestrictionsClass, HELPER_UI_LIMITS);
+        assert_ne!(HELPER_UI_LIMITS & JOB_OBJECT_UILIMIT_HANDLES, 0);
+        assert_ne!(HELPER_UI_LIMITS & JOB_OBJECT_UILIMIT_READCLIPBOARD, 0);
+    }
+
+    /// GIVEN arguments with a quote, a space, a backslash, a NUL, a letter
+    /// outside ASCII or none at all WHEN the helper is started THEN the
+    /// start is refused before any process exists; the arguments the call
+    /// protocol builds pass.
+    #[test]
+    fn given_unsafe_helper_arguments_when_started_then_nothing_is_launched() {
+        for bad in [
+            "",
+            "a b",
+            "a\"b",
+            r"a\b",
+            "a\0b",
+            "caf\u{e9}",
+            "--x;",
+            "a&b",
+        ] {
+            assert!(!helper_argument_ok(bad), "{bad:?}");
+            let pipes = ScreenHelperPipes::new().expect("pipes");
+            let result = start_screen_helper(
+                Path::new(r"C:\Windows\System32\cmd.exe"),
+                &[bad.to_owned()],
+                pipes,
+            );
+            assert!(
+                matches!(
+                    result,
+                    Err(LaunchError::Api {
+                        call: "helper argument",
+                        ..
+                    })
+                ),
+                "{bad:?}"
+            );
+        }
+        for good in [
+            "--share=7",
+            "--name=5c5c2e5c444953504c415931",
+            "--rect=-1920,-100,0,980",
+        ] {
+            assert!(helper_argument_ok(good), "{good}");
+        }
+        let pipes = ScreenHelperPipes::new().expect("pipes");
+        let many = vec!["--a=1".to_owned(); 17];
+        assert!(start_screen_helper(Path::new("x.exe"), &many, pipes).is_err());
+    }
+
+    /// GIVEN a pipe WHEN it is duplicated into a process THEN the new handle
+    /// is another value for the same pipe, and a bad source is refused. The
+    /// process here is this one, which has the access that the core has to
+    /// the call worker it started.
+    #[test]
+    fn given_a_pipe_when_duplicated_into_a_process_then_the_copy_is_the_same_pipe() {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_TYPE_PIPE, GetFileType};
+        let pipes = ScreenHelperPipes::new().expect("pipes");
+        // SAFETY: the pseudo handle of this process, valid for the call.
+        let me = unsafe { GetCurrentProcess() };
+        let value = duplicate_into(me, &pipes.frames_for_core).expect("a duplicate");
+        let copy = value as usize as HANDLE;
+        assert_ne!(copy, raw(&pipes.frames_for_core));
+        // SAFETY: `copy` is a handle this test just made in this process.
+        unsafe {
+            assert_eq!(GetFileType(copy), FILE_TYPE_PIPE);
+            assert_ne!(CloseHandle(copy), 0);
+        }
+        // A handle value that is not open is refused, and never closed here.
+        // SAFETY: the value is not a live handle; `ManuallyDrop` keeps it
+        // from being closed.
+        let stale = std::mem::ManuallyDrop::new(unsafe {
+            OwnedHandle::from_raw_handle(0x00ff_fff0_usize as RawHandle)
+        });
+        assert!(matches!(
+            duplicate_into(me, &stale),
+            Err(LaunchError::Api {
+                call: "DuplicateHandle",
+                ..
+            })
+        ));
+    }
+
+    /// The probe that `given_a_started_helper_...` launches. It runs only
+    /// inside that test's child process (it is ignored otherwise): it
+    /// checks what the helper's launch gave it, then waits for the control
+    /// pipe to close.
+    #[test]
+    #[ignore = "runs as the child of the helper launch test"]
+    fn helper_probe_child() {
+        use std::io::Write;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_TYPE_PIPE, GetFileType};
+        use windows_sys::Win32::System::Pipes::PeekNamedPipe;
+        let numbers: Vec<usize> = env::args()
+            .filter_map(|argument| argument.parse::<usize>().ok())
+            .collect();
+        let [control, frames] = numbers[..] else {
+            std::process::exit(21)
+        };
+        let (control, frames) = (control as HANDLE, frames as HANDLE);
+        // SAFETY: asks the kernel about the two inherited handles.
+        let (control_type, frames_type) = unsafe { (GetFileType(control), GetFileType(frames)) };
+        if control_type != FILE_TYPE_PIPE || frames_type != FILE_TYPE_PIPE {
+            std::process::exit(22);
+        }
+        // A child process cannot be made: one active process in the Job, and
+        // the child process policy.
+        if std::process::Command::new(r"C:\Windows\System32\cmd.exe")
+            .args(["/c", "exit"])
+            .status()
+            .is_ok()
+        {
+            std::process::exit(23);
+        }
+        // SAFETY: the frame pipe's write end is inherited and owned here.
+        let mut out = unsafe { File::from_raw_handle(frames as RawHandle) };
+        if out.write_all(b"k").is_err() {
+            std::process::exit(24);
+        }
+        // Wait for the core to close its end of the control pipe.
+        for _ in 0..1000 {
+            let mut available = 0u32;
+            // SAFETY: peeks the control pipe; nothing is read.
+            let peeked = unsafe {
+                PeekNamedPipe(
+                    control,
+                    null_mut(),
+                    0,
+                    null_mut(),
+                    &mut available,
+                    null_mut(),
+                )
+            };
+            if peeked == 0 {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::process::exit(25);
+    }
+
+    /// GIVEN this test program started as a helper WHEN it runs THEN it has
+    /// its two pipes and nothing else to wait on, it cannot start a child
+    /// process, the frame pipe carries its byte to the core, closing the
+    /// control pipe ends it, and its exit code is read.
+    #[test]
+    fn given_a_started_helper_then_it_has_only_its_pipes_and_ends_when_control_closes() {
+        use std::io::Read;
+        let pipes = ScreenHelperPipes::new().expect("pipes");
+        let (control, frames) = (pipes.control_value(), pipes.frames_value());
+        let exe = env::current_exe().expect("this test program");
+        let args: Vec<String> = [
+            "--ignored",
+            "--exact",
+            "windows::tests::helper_probe_child",
+            "--nocapture",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .chain([control.to_string(), frames.to_string()])
+        .collect();
+        let started = launch_helper(&exe, &args, pipes).expect("the probe starts");
+        let mut frames = File::from(started.frames);
+        let mut byte = [0u8; 1];
+        if frames.read_exact(&mut byte).is_err() {
+            started.process.wait_exit(Duration::from_secs(5));
+            panic!("no byte; exit code {:?}", started.process.exit_code());
+        }
+        assert_eq!(&byte, b"k");
+        assert!(!started.process.wait_exit(Duration::from_millis(50)));
+        assert_eq!(started.process.exit_code(), None);
+        drop(started.control);
+        assert!(started.process.wait_exit(Duration::from_secs(20)));
+        assert_eq!(started.process.exit_code(), Some(0));
+        assert!(started.process.peak_memory() > 0);
+        // The frame pipe is closed at the helper's end now.
+        assert_eq!(frames.read(&mut byte).expect("end of pipe"), 0);
+    }
+
+    /// A probe that ignores the control pipe and sleeps. It runs only as the
+    /// child of the terminate test.
+    #[test]
+    #[ignore = "runs as the child of the helper terminate test"]
+    fn helper_probe_sleep() {
+        std::thread::sleep(Duration::from_secs(120));
+    }
+
+    /// GIVEN a started helper that ignores the control pipe WHEN the core
+    /// terminates its Job THEN it ends at once and has an exit code.
+    #[test]
+    fn given_a_started_helper_when_terminated_then_it_ends_with_a_code() {
+        let pipes = ScreenHelperPipes::new().expect("pipes");
+        let exe = env::current_exe().expect("this test program");
+        let args: Vec<String> = ["--ignored", "--exact", "windows::tests::helper_probe_sleep"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let helper = launch_helper(&exe, &args, pipes).expect("the probe starts");
+        assert!(!helper.process.wait_exit(Duration::from_millis(200)));
+        assert_eq!(helper.process.exit_code(), None);
+        helper.process.terminate();
+        assert!(helper.process.wait_exit(Duration::from_secs(5)));
+        assert_eq!(helper.process.exit_code(), Some(1));
     }
 }

@@ -1,11 +1,13 @@
 //! Screen capture (ADR-0053). The platform-neutral API: no platform and no
 //! LiveKit types.
 //!
-//! One backend per OS: `windows.rs` (GDI `BitBlt`, through `gdi.rs`;
-//! `wgc.rs` is kept for the gate's measurement), `linux.rs` (PipeWire over
-//! the ScreenCast portal remote), `macos.rs` (ScreenCaptureKit, ADR-0064,
-//! with its pure rules in `display.rs`) and `unsupported.rs` for the rest. A
-//! backend offers `capture()`; this module wraps it in [`open`]. The core names the screen: the worker never
+//! One backend per OS: `windows.rs` (no capture of its own: it reads the
+//! frames that the screen helper writes to a pipe, ADR-0067; Windows.Graphics.
+//! Capture is denied in the call AppContainer, so the helper runs outside
+//! it), `linux.rs` (PipeWire over the ScreenCast portal remote), `macos.rs`
+//! (ScreenCaptureKit, ADR-0064, with its pure rules in `display.rs`) and
+//! `unsupported.rs` for the rest. A backend offers `capture()`; this module
+//! wraps it in [`open`]. The core names the screen: the worker never
 //! lists screens to the user and never picks another one. A capture runs on
 //! its own thread. [`Capture::stop`] and `Drop` ask it to end and wait for
 //! it, but only for a bounded time: `stop` can return `Some(capture)` with
@@ -35,24 +37,21 @@ mod backend;
 #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 #[path = "unsupported.rs"]
 mod backend;
+#[cfg(windows)]
+mod frame_pipe;
+#[cfg(windows)]
+pub use frame_pipe::FramePipe;
 
 /// The rules of a display share that need no OS type (ADR-0064); `macos.rs`
 /// uses them, and the tests run them everywhere.
 #[cfg(any(target_os = "macos", test))]
 mod display;
 
-// The call backend reads the monitor list of `wgc.rs`; the rest of it is the
-// Windows.Graphics.Capture code that the containment gate measures (it is
-// denied in the AppContainer, so the worker does not use it).
-#[cfg(windows)]
-mod gdi;
-#[cfg(windows)]
-#[allow(dead_code)]
-mod wgc;
-
-/// The longest wait for the screen to open: the Windows capture setup, or
-/// on Linux the PipeWire connection and the wait for the stream (up to 6 s),
-/// or on macOS the display list and the stream start (up to 4 s each).
+/// The longest wait for the screen to open: on Windows the first item of
+/// the helper's frame pipe (at most 6 s to its first byte and 3 s for the
+/// item), or on Linux the PipeWire connection and the wait for the stream
+/// (up to 6 s), or on macOS the display list and the stream start (up to
+/// 4 s each).
 const OPEN_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(target_os = "linux")]
 use persephone_call_protocol::MAX_CAPTURE_SIDE;
@@ -60,49 +59,6 @@ use persephone_call_protocol::MAX_CAPTURE_SIDE;
 /// pixels. Checked before any buffer for the frame is made. The core offers
 /// only screens within the same rule, from the call protocol.
 pub use persephone_call_protocol::screen_capture_size_ok as capture_size_ok;
-
-// The Windows monitor list and the GDI capture keep their own numbers,
-// because the containment gate compiles those files without this crate.
-// They must equal the protocol's, which the core uses to name and offer a
-// monitor: a different list rule or capture rule offers a monitor that
-// the worker then refuses.
-#[cfg(windows)]
-const _: () = assert!(
-    wgc::MAX_MONITORS == persephone_call_protocol::MAX_SCREEN_MONITORS as usize
-        && wgc::MAX_MONITOR_SIDE == persephone_call_protocol::MAX_MONITOR_SIDE
-        && gdi::MAX_SIDE == persephone_call_protocol::MAX_CAPTURE_SIDE
-        && gdi::MAX_PIXELS == persephone_call_protocol::MAX_CAPTURE_PIXELS
-        && gdi_rule_matches()
-);
-
-/// The GDI rule and the protocol's agree at each edge: the 2x2 minimum, the
-/// side limit and the pixel limit, each just inside and just outside.
-#[cfg(windows)]
-const fn gdi_rule_matches() -> bool {
-    use persephone_call_protocol::MAX_CAPTURE_SIDE as SIDE;
-    let edges: [(u32, u32); 11] = [
-        (2, 2),
-        (1, 2),
-        (2, 1),
-        (0, 0),
-        (SIDE, 2),
-        (SIDE + 1, 2),
-        (2, SIDE + 1),
-        (3840, 2160),
-        (3840, 2161),
-        (2880, 2880),
-        (2881, 2880),
-    ];
-    let mut at = 0;
-    while at < edges.len() {
-        let (width, height) = edges[at];
-        if gdi::size_ok(width, height) != capture_size_ok(width, height) {
-            return false;
-        }
-        at += 1;
-    }
-    true
-}
 
 /// The byte order of the 32-bit pixels in a [`CapturedFrame`], as in memory.
 /// The fourth byte is alpha or padding; it is never used.
@@ -178,28 +134,63 @@ pub enum Ended {
     Source,
     /// Capture failed. The share is unavailable.
     Failed,
+    /// The chosen monitor is gone or changed (Windows: the helper said so).
+    /// The share is `NotFound`.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    NotFound,
+}
+
+impl Ended {
+    /// The share state that this end means.
+    pub fn state(self) -> ScreenState {
+        match self {
+            Self::Source => ScreenState::Off,
+            Self::Failed => ScreenState::Unavailable,
+            Self::NotFound => ScreenState::NotFound,
+        }
+    }
 }
 
 /// What one screen start brought for its open: on Linux, the PipeWire remote
-/// the core sent over the camera channel with kind `s`. Empty on Windows
-/// and macOS.
-/// Dropping it closes the remote.
+/// the core sent over the camera channel with kind `s`; on Windows, the read
+/// end of the screen helper's frame pipe that came with `ScreenFrames`
+/// (ADR-0067), and the number of its share. Empty on macOS.
+/// Dropping it closes the remote or the pipe.
 #[derive(Default)]
 pub struct Grant {
     #[cfg(target_os = "linux")]
     remote: Option<std::os::fd::OwnedFd>,
+    #[cfg(windows)]
+    share: u32,
+    #[cfg(windows)]
+    frames: Option<FramePipe>,
 }
 
 impl Grant {
     /// Takes the oldest screen remote the channel holds. The core sends each
     /// remote directly before its `SetScreen`, so call this once for each
     /// such command, in order.
+    #[cfg(not(windows))]
     pub fn take() -> Self {
         Self {
             #[cfg(target_os = "linux")]
             remote: crate::camera_channel::take_handle(crate::camera_channel::Kind::Screen),
         }
     }
+
+    /// The frame pipe of share `share`, or none when no pipe came for it.
+    #[cfg(windows)]
+    pub fn from_frames(share: u32, frames: Option<FramePipe>) -> Self {
+        Self { share, frames }
+    }
+}
+
+/// The frame pipe at handle value `value` of this process, owned, when it is
+/// a pipe that the worker does not own yet (Windows, ADR-0067). Any other
+/// value gives `None` and is left untouched.
+#[cfg(windows)]
+pub fn adopt_frames(value: u32) -> Option<FramePipe> {
+    frame_pipe::adopt(value)
 }
 
 /// Capture threads that have not ended, as for the camera.

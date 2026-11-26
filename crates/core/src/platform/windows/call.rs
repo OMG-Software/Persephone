@@ -80,6 +80,12 @@ impl WorkerProcess for JobProcess {
         self.0.wait_exit(timeout)
     }
 
+    /// The call worker is an AppContainer process that the core started, so
+    /// the core holds a handle with the right to duplicate into it.
+    fn give_handle(&self, handle: &std::os::windows::io::OwnedHandle) -> Option<u32> {
+        self.0.give_handle(handle).ok()
+    }
+
     fn exit_status(&self) -> Option<WorkerExit> {
         self.0.exit_status().map(|exit| match exit {
             persephone_media_broker::WorkerExit::Code(code) => WorkerExit::Code(code),
@@ -133,7 +139,7 @@ impl Launcher for WindowsLauncher {
 
     /// The core's own window that names each monitor (ADR-0053).
     fn screen_source(&self) -> Arc<dyn crate::calls::screen::ScreenSource> {
-        Arc::new(super::screen::MonitorScreen)
+        Arc::new(super::screen::MonitorScreen::next_to_core())
     }
 
     /// The same box with Yes and No: a message box has no custom button

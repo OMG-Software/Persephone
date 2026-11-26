@@ -319,6 +319,9 @@ def main():
         # dependency features are not unified into the core and worker.
         core_and_worker = ["-p", "persephone-core", "--bin", "persephone"]
         core_and_worker += ["-p", "persephone-media-worker", "--bin", "persephone-media-worker"]
+        # The screen helper (ADR-0067) is a Windows sidecar; it builds on every
+        # OS (a stub elsewhere) so a break shows before the release does.
+        core_and_worker += ["-p", "persephone-screen-helper", "--bin", "persephone-screen-helper"]
         run(["cargo", "build", *cargo_flags, *profile, *core_and_worker], environment)
         # Apart from the core and worker: the call worker needs the static C runtime.
         if worker_built:

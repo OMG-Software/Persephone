@@ -1,27 +1,27 @@
 //! The Windows screen source (ADR-0053): the core's own window names each
 //! monitor, and the user shares one or cancels.
 //!
-//! The core names the monitor to the worker by its GDI device name
+//! The core names the monitor to the screen helper (ADR-0067; before it, to
+//! the worker) by its GDI device name
 //! (`MONITORINFOEXW::szDevice`, such as `\\.\DISPLAY1`), its size in pixels
 //! when the user saw it, and its rectangle in physical pixels (read with
-//! per-monitor DPI awareness, as the worker reads it). The worker copies
-//! exactly that rectangle, so it copies the part of the desktop the user
-//! approved even if a name moved. A device name names a display output, and
+//! per-monitor DPI awareness, as the helper reads it). The helper takes only
+//! the monitor with that name, size and rectangle, so it captures the part
+//! of the desktop the user approved even if a name moved. A device name names a display output, and
 //! Windows can give it to another output when the monitors change, so the
 //! core reads every monitor's name, rectangle and mode before the first
 //! question and again after a Share: any change voids the answer, and the
-//! share stays off. The worker takes only the monitor with that name, size
-//! and rectangle, and checks its place again before and after each copy, so
-//! a change after the answer gives "not found", ends the share, or copies
-//! only the approved rectangle. The question says where each monitor is: the
+//! share stays off. The helper takes only the monitor with that name, size
+//! and rectangle, and checks its place again on each loop, so a change after
+//! the answer gives "not found" or ends the share. The question says where each monitor is: the
 //! main screen, or its side of the main screen, with its order when two or
 //! more offered monitors are on one side, so monitors of the same size read
 //! apart. This module lists monitors with the same rules as
-//! `crates/call-worker/src/screen/wgc.rs` (the call protocol's
+//! `crates/screen-helper/src/wgc.rs` (the call protocol's
 //! `MAX_SCREEN_MONITORS` and `MAX_MONITOR_SIDE`, the size of the current
 //! display mode, in display order). A monitor whose name is not printable
-//! ASCII, or has a space, is not listed. It offers only the monitors that the worker's GDI
-//! capture takes (`screen_capture_size_ok`); another one is not asked, and
+//! ASCII, or has a space, is not listed. It offers only the monitors that the helper
+//! captures (`screen_capture_size_ok`); another one is not asked, and
 //! the question says how many were left out.
 //!
 //! The window is a message box: Yes shares the shown screen, No shows the
@@ -55,6 +55,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::calls::screen::{ScreenGrant, ScreenRefusal, ScreenSource};
+use crate::calls::screen_helper::{HelperShare, LaunchGuard, wait_until_idle};
+
+use super::screen_helper::{BrokerHelper, HelperLaunch};
 
 /// The most monitors the list keeps (as in the worker).
 const MAX_MONITORS: usize = MAX_SCREEN_MONITORS as usize;
@@ -81,8 +84,29 @@ pub enum Answer {
     Cancel,
 }
 
-/// The Windows monitor source.
-pub struct MonitorScreen;
+/// How long a new share waits for the helper of the last share to be
+/// stopped and joined. Two helpers never run at once.
+const HELPER_IDLE_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+/// How often that wait looks at the cancel flag.
+const IDLE_CHECK: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// The Windows monitor source. After the user's Yes it starts the capture
+/// helper for the share (ADR-0067).
+pub struct MonitorScreen {
+    launcher: Arc<dyn HelperLaunch>,
+}
+
+impl MonitorScreen {
+    /// The source that starts the helper executable next to the core.
+    pub fn next_to_core() -> Self {
+        Self::with_launcher(Arc::new(BrokerHelper::next_to_core()))
+    }
+
+    /// The source that starts helpers with `launcher`.
+    pub fn with_launcher(launcher: Arc<dyn HelperLaunch>) -> Self {
+        Self { launcher }
+    }
+}
 
 impl ScreenSource for MonitorScreen {
     fn available(&self) -> bool {
@@ -105,8 +129,70 @@ impl ScreenSource for MonitorScreen {
             remote: None,
             session: None,
             closed: None,
+            helper: None,
         })
     }
+
+    /// Starts the capture helper for the monitor that the user approved and
+    /// the layout check confirmed. The helper takes only that monitor (name,
+    /// size and rectangle), and its frame pipe's read end goes into the
+    /// grant for the call worker. A previous share's helper is stopped and
+    /// joined first, so no two run at once. A cancel in between stops the
+    /// helper again. Any failure is `Unavailable`; no other capture is tried.
+    fn capture(
+        &self,
+        grant: ScreenGrant,
+        share: u32,
+        cancel: &Arc<AtomicBool>,
+    ) -> Result<ScreenGrant, ScreenRefusal> {
+        // The wait for the last helper can take seconds; a call that ends
+        // meanwhile starts no helper. The call's end also waits for this
+        // pick, and for a launch that passed the last check (the launch
+        // guard), so a cancel that comes after that check still stops and
+        // joins the helper.
+        let waited = std::time::Instant::now();
+        loop {
+            if cancel.load(Ordering::SeqCst) {
+                return Err(ScreenRefusal::Cancelled);
+            }
+            if wait_until_idle(IDLE_CHECK) {
+                break;
+            }
+            if waited.elapsed() >= HELPER_IDLE_WAIT {
+                return Err(ScreenRefusal::Unavailable);
+            }
+        }
+        // From the last check until the helper counts as active, the launch
+        // counts as one: the call's end waits for it.
+        let launching = LaunchGuard::begin(cancel).ok_or(ScreenRefusal::Cancelled)?;
+        let launched = self.launcher.launch(share, &grant.target)?;
+        let helper =
+            HelperShare::start(share, launched.process).ok_or(ScreenRefusal::Unavailable)?;
+        drop(launching);
+        if cancel.load(Ordering::SeqCst) {
+            // Dropping the helper stops it.
+            return Err(ScreenRefusal::Cancelled);
+        }
+        Ok(ScreenGrant {
+            remote: Some(launched.frames),
+            helper: Some(helper),
+            ..grant
+        })
+    }
+}
+
+/// The first monitor that a share can take, as a target: the ignored test
+/// of the real helper uses it.
+#[cfg(test)]
+pub fn first_capturable_target() -> Option<ScreenTarget> {
+    monitors().screens.into_iter().find_map(|screen| {
+        screen_capture_size_ok(screen.width, screen.height).then_some(ScreenTarget::Monitor {
+            name: screen.name,
+            width: screen.width,
+            height: screen.height,
+            rect: screen.rect,
+        })
+    })
 }
 
 /// The question for the monitor at `place` (from 0) among the `count`
@@ -141,12 +227,13 @@ pub fn prompt_text(
         1 => "\n\nOne screen cannot be shared at its size and is not shown.".to_owned(),
         n => format!("\n\n{n} screens cannot be shared at their size and are not shown."),
     };
-    // A GDI copy was not measured against the display affinity that hides
-    // the main window (ADR-0045), so the question warns as on macOS.
+    // The helper's capture is documented to respect the display affinity
+    // that hides the main window (ADR-0045), but that was not measured for
+    // this share, so the question warns as on macOS. The call bar shows the
+    // share; the text promises no capture border.
     format!(
         "{what}\n\nEveryone in the call can see it. It can show Persephone's \
-         messages. Windows draws no border around a shared screen; the call bar \
-         shows that it is shared.{left_out}\n\n{buttons}"
+         messages. The call bar shows that it is shared.{left_out}\n\n{buttons}"
     )
 }
 
@@ -683,14 +770,15 @@ mod tests {
     }
 
     /// GIVEN the window text THEN it names the screen and its size, says that
-    /// everyone sees it and that there is no border, and the buttons match
+    /// everyone sees it and that the call bar shows it, and the buttons match
     /// the number of screens.
     #[test]
     fn given_the_prompt_then_it_names_the_screen_the_audience_and_the_buttons() {
         let one = prompt_text(0, 1, qhd(), Some("main screen"), 0);
         assert!(one.contains("Screen 1 (2560x1440, main screen)?"));
         assert!(one.contains("Everyone in the call"));
-        assert!(one.contains("no border"));
+        assert!(one.contains("The call bar shows that it is shared"));
+        assert!(!one.contains("border"));
         assert!(one.contains("No cancels"));
         assert!(one.contains("Persephone's messages"));
         assert!(!one.contains("not shown"));

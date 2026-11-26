@@ -212,6 +212,12 @@ keeps the choice in the process that owns authority.
 
 Status of this amendment: proposed, needs owner approval.
 
+[ADR-0067](0067-capture-the-windows-screen-in-a-helper-outside-the-call-worker.md)
+proposes to replace the Windows capture parts of this amendment: a helper
+process outside the call worker would capture with Windows.Graphics.Capture
+and pass the frames to the worker over a pipe. This amendment stays as
+written until the owner accepts that record.
+
 The measurement of 19 November tried only Windows.Graphics.Capture. On
 25 November the gate also measured DXGI Desktop Duplication and GDI `BitBlt`
 inside the call AppContainer, with the call launcher's own capabilities

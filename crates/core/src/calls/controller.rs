@@ -28,6 +28,7 @@ use super::other_sfu::{Home, MAX_OTHER_SFUS, OtherSfus, Plan, home, is_other_hos
 use super::readiness::{Discovery, Flow, TurnServers, sfu_transport, turn_servers};
 use super::rings::{self, Plan as RingPlan, Watch};
 use super::screen::{ScreenGrant, ScreenRefusal, ScreenSource};
+use super::screen_helper::{HelperShare, HelperStop};
 use super::sfu::{self, OpenIdToken, SfuError, SfuGrant};
 use super::stats;
 use super::status::can_send_member_state;
@@ -78,6 +79,20 @@ use zeroize::Zeroizing;
 
 /// How long the worker has to leave on its own before it is ended.
 const WORKER_EXIT: Duration = Duration::from_secs(5);
+/// The command slots a screen start takes at once: on Windows the frame
+/// pipe's `ScreenFrames` and the `SetScreen`, elsewhere the `SetScreen` (the
+/// Linux remote goes over the camera channel).
+#[cfg(windows)]
+const SCREEN_START_COMMANDS: usize = 2;
+#[cfg(not(windows))]
+const SCREEN_START_COMMANDS: usize = 1;
+/// How long the end of a call waits for a cancelled screen pick (ADR-0067).
+/// The question box closes within about 100 ms of the cancel and the idle
+/// wait looks at the cancel every 50 ms, so this only bounds a fault.
+const PICK_END_WAIT: Duration = Duration::from_secs(2);
+/// How long the end of a call waits for the helpers that earlier stops left
+/// to their reaper threads: a stop wait and some margin.
+const REAPED_HELPER_WAIT: Duration = Duration::from_secs(5);
 
 /// Longest wait for one delayed-event restart. It is shorter than the
 /// restart interval.
@@ -959,6 +974,65 @@ async fn start_worker(
 /// Ends the worker; blocks in a blocking task.
 async fn finish_worker(link: CallWorkerLink) {
     let _ = tokio::task::spawn_blocking(move || link.finish(WORKER_EXIT)).await;
+}
+
+/// Ends the screen pick and the capture helpers of a call (ADR-0067). A pick
+/// that still runs is cancelled. On Windows its task is waited for, at most
+/// [`PICK_END_WAIT`], because it may start a helper: a helper that it returns
+/// within that wait is stopped and joined with the running share's one; a
+/// pick that outlives the wait is not joined here. Then the wait goes on
+/// until no helper is active, at most [`REAPED_HELPER_WAIT`], so a helper
+/// that an earlier stop left to its reaper has ended too. A launch under way counts
+/// as active (`LaunchGuard`): a pick that outlived [`PICK_END_WAIT`] after
+/// its last cancel check is waited for here, and it stops its helper
+/// itself when it sees the cancel. Both waits are bounded, so a stuck launch
+/// cannot hold the end of the call or of the session. A launch that is
+/// still under way after them gets no worker: its pick reads the cancel
+/// after the launch and drops the helper (its reaper stops it), the frame
+/// pipe's read end goes with the grant, and the next share starts only
+/// when no helper is active.
+///
+/// The wait for the process's count runs only when `wait_for_count` is set:
+/// for a call that began a pick (also one cancelled or refused) or held a
+/// helper, and for a call that the end of the session stops. A call that did
+/// neither, and that the user left, has no helper of its own: a helper comes
+/// only from a call that began a pick. A helper of an earlier call can still
+/// be active when that call's bounded waits ran out; this end does not wait
+/// for it. The next share waits at most `HELPER_IDLE_WAIT` (5 s, Windows)
+/// until no helper is active and is otherwise `Unavailable`, so no second
+/// helper starts. A call that the end of the session stops waits even then,
+/// so such a helper gets one more wait. A session that ends with no call
+/// running has no call task to wait in, and `stop_for_session_end` must not
+/// block: a helper that an earlier call left can then still be active, until
+/// its reaper's stop ends it or, when no exit shows, until the core exits
+/// and its Job's kill-on-close ends it.
+async fn end_screen_helpers(
+    pick: Option<ScreenPick>,
+    helper: Option<HelperShare>,
+    wait_for_count: bool,
+) {
+    let mut helpers: Vec<HelperShare> = helper.into_iter().collect();
+    if let Some(mut pick) = pick {
+        pick.cancel.store(true, Ordering::SeqCst);
+        // Only the Windows pick starts a helper; elsewhere the cancel is
+        // enough. A grant that the pick made anyway drops here, except its
+        // helper.
+        if cfg!(windows)
+            && let Ok(Ok(Ok(grant))) = time::timeout(PICK_END_WAIT, &mut pick.task).await
+        {
+            helpers.extend(grant.helper);
+        }
+    }
+    if helpers.is_empty() && (!wait_for_count || super::screen_helper::helpers_active() == 0) {
+        return;
+    }
+    let _ = tokio::task::spawn_blocking(move || {
+        for helper in helpers {
+            helper.stop_and_join();
+        }
+        super::screen_helper::wait_until_idle(REAPED_HELPER_WAIT);
+    })
+    .await;
 }
 
 /// Writes the leave now: through the delayed event, else directly.
@@ -2019,6 +2093,8 @@ impl CallController {
             screen_wanted: false,
             screen_last_on: false,
             screen_closed: None,
+            screen_helper: None,
+            screen_capture_used: false,
             screen_sent: false,
             proxy: setup.proxy,
             consent: None,
@@ -2254,17 +2330,19 @@ impl CallController {
         // queued, while it publishes, and while it closes the session:
         // 1. The command is counted, so a pick that ends after a stop is
         //    closed unused and a task publication keeps the page's state.
-        // 2. A stop closes the share's session (`close_session`), so capture
-        //    is revoked before `Off` shows: the portal session on Linux; on
-        //    Windows and macOS the worker's stop is queued here, not after
-        //    the call task's network work. A close by the task that is under
-        //    way has finished: it holds the lock until `Close` is sent.
+        // 2. A stop cancels a pick that waits for the user, so a Yes there
+        //    starts no capture helper (Windows) while the stop waits for the
+        //    call task, and closes the share's session (`close_session`), so
+        //    capture is revoked before `Off` shows: the portal session on
+        //    Linux; on Windows and macOS the worker's stop is queued here,
+        //    not after the call task's network work. A close by the task
+        //    that is under way has finished: it holds the lock until `Close`
+        //    is sent.
         // 3. The page shows the command.
         let (stops, request, changed) = {
             let mut control = plain(&run.screen_control);
             if !on {
-                control.stops = control.stops.wrapping_add(1);
-                close_session(&mut control);
+                stop_accepted(&mut control);
             }
             control.requests = control.requests.wrapping_add(1);
             let (stops, request) = (control.stops, control.requests);
@@ -2322,6 +2400,14 @@ impl CallController {
                 }
                 Slot::Running(run) => {
                     run.flags.ended.store(true, Ordering::SeqCst);
+                    // The screen stops before `Ended` shows, as with the
+                    // handle's stop: the stop is counted, so a pick that
+                    // ends meanwhile begins no new one; a waiting pick is
+                    // cancelled, so a Yes given after the session ended
+                    // starts no helper; and the share's session closes,
+                    // which closes a helper's control pipe at once. The call
+                    // task then finishes its current step and ends.
+                    stop_accepted(&mut plain(&run.screen_control));
                     if let Some(stop) = run.stop {
                         let _ = stop.send(());
                     }
@@ -2657,6 +2743,17 @@ struct Call {
     screen_last_on: bool,
     /// Fires when the desktop closes the portal session.
     screen_closed: Option<oneshot::Receiver<()>>,
+    /// Windows (ADR-0067): the capture helper of the running share. Dropping
+    /// it stops it. It ends with the share, the call and the session.
+    screen_helper: Option<HelperShare>,
+    /// The call began a screen pick (also one later cancelled or refused) or
+    /// held a capture helper. Only such a call can leave a helper of its own
+    /// (a reaped one, or a launch under way) that its end waits for; another
+    /// call that the user leaves does not wait for the process's helper
+    /// count. A call that the end of the session stops always waits for it
+    /// (`finish(true)`); a session that ends with no call running waits for
+    /// no helper.
+    screen_capture_used: bool,
     /// A `SetScreen` start went to the worker and no stop or end since.
     screen_sent: bool,
     /// The profile has a SOCKS5 proxy, which the connection to another SFU
@@ -2788,6 +2885,24 @@ struct ScreenControl {
     /// Wakes the call task for a waiting stop. A wake with no task waiting
     /// is kept until it waits.
     wake: Arc<Notify>,
+    /// The cancel flag of the pick that runs: the call task sets it when it
+    /// begins one and clears it when that pick ends (`screen_picked`,
+    /// `stopped_pick_ended`), so it is `None` when no pick waits. An accepted
+    /// stop takes it and sets it under this lock, before `Off` shows: the
+    /// pick's window closes, and a Yes given while the stop waits for the
+    /// call task starts no capture helper.
+    pick_cancel: Option<Arc<AtomicBool>>,
+}
+
+/// What an accepted stop changes at once, with the screen control lock held
+/// and before `Off` shows: the stop is counted, a pick that waits for the
+/// user is cancelled, and the share's session closes.
+fn stop_accepted(control: &mut ScreenControl) {
+    control.stops = control.stops.wrapping_add(1);
+    if let Some(pick) = control.pick_cancel.take() {
+        pick.store(true, Ordering::SeqCst);
+    }
+    close_session(control);
 }
 
 /// Closes the share's session, if open, with the screen control lock held:
@@ -2808,14 +2923,23 @@ fn close_session(control: &mut ScreenControl) {
 /// nothing once `settled` is set (the share ended, or its stop went). A full
 /// queue leaves `settled` unset: the call task then sends the stop when it
 /// reads the command, through its pending stop.
+///
+/// On Windows it also asks the share's capture helper to end (ADR-0067):
+/// the helper stops capturing and closes the frame pipe, so the screen is
+/// no longer copied even while the stop waits for queue room. The call task
+/// still stops and joins the helper, and still sends the worker's stop.
 struct WorkerStop {
     commands: mpsc::Sender<ToWorker>,
     share: u32,
     settled: Arc<AtomicBool>,
+    helper: Option<HelperStop>,
 }
 
 impl Drop for WorkerStop {
     fn drop(&mut self) {
+        if let Some(helper) = &self.helper {
+            helper.stop();
+        }
         if self.settled.load(Ordering::SeqCst) {
             return;
         }
@@ -2863,6 +2987,15 @@ async fn screen_session_closed(slot: &mut Option<oneshot::Receiver<()>>) {
     // A dropped sender is a closed session too.
     let _ = closed.await;
     *slot = None;
+}
+
+/// Waits until the share's capture helper exits by itself, if one runs;
+/// otherwise it never ends. Gives the share state that its exit means.
+async fn screen_helper_exited(slot: &mut Option<HelperShare>) -> ScreenState {
+    let Some(helper) = slot.as_mut() else {
+        return std::future::pending().await;
+    };
+    helper.exited().await
 }
 
 /// Frees the slot when the task ends, also after a panic.
@@ -3338,8 +3471,9 @@ impl Call {
         }
         self.screen_closed = None;
         // On Windows and macOS this queues the worker's stop, unless the
-        // handle's close already did.
+        // handle's close already did. The helper stops with the share.
         self.close_screen_session();
+        self.screen_helper = None;
         if self.screen_sent {
             self.screen_sent = false;
             if self.screen_stop_needed() {
@@ -3354,21 +3488,49 @@ impl Call {
 
     /// Asks the platform's source off the call loop.
     fn begin_screen_pick(&mut self) {
+        self.screen_capture_used = true;
         let source = self.screens.clone();
         let cancel = Arc::new(AtomicBool::new(false));
+        {
+            // The handle cancels this pick when it accepts a stop. A stop it
+            // accepted after the start of this pick, and that this task has
+            // not read yet, cancels it at once: no window opens.
+            let mut control = plain(&self.screen_control);
+            if control.stops != self.screen_pick_stops {
+                cancel.store(true, Ordering::SeqCst);
+            }
+            control.pick_cancel = Some(cancel.clone());
+        }
         let flag = cancel.clone();
+        // The number the share will have: only a finished pick starts a
+        // share, and picks run one at a time, so `screen_picked` takes the
+        // same number (and refuses a helper that has another one).
+        let share = self.screen_share.wrapping_add(1);
         self.screen_pick = Some(ScreenPick {
-            task: tokio::task::spawn_blocking(move || source.choose(&flag)),
+            task: tokio::task::spawn_blocking(move || {
+                let grant = source.choose(&flag)?;
+                // Windows: the helper starts here, after the user's Yes.
+                source.capture(grant, share, &flag)
+            }),
             cancel,
         });
     }
 
     /// A pick that a stop cancelled has ended. Its grant, if any, is dropped
     /// unused, which closes its session. A start that came while it ended
-    /// begins its own pick now: the user answers a new warning.
+    /// begins its own pick now: the user answers a new warning. A stop that
+    /// the handle accepted after that start, and that this task has not read
+    /// yet, ended the pick too: no pick begins for that start.
     fn stopped_pick_ended(&mut self, picked: Result<ScreenGrant, ScreenRefusal>) {
         drop(picked);
-        if self.screen_wanted && !self.screen_sent {
+        let stopped_since = {
+            let mut control = plain(&self.screen_control);
+            // The pick has ended: a stop has no pick to cancel until the
+            // next one begins.
+            control.pick_cancel = None;
+            control.stops != self.screen_pick_stops
+        };
+        if self.screen_wanted && !self.screen_sent && !stopped_since {
             self.begin_screen_pick();
         }
     }
@@ -3388,6 +3550,9 @@ impl Call {
         // first and this lock second.
         let control = self.screen_control.clone();
         let mut accepted = plain(&control);
+        // The pick has ended, whatever it gave: a stop has no pick to cancel
+        // until the next one begins.
+        accepted.pick_cancel = None;
         let current = self.screen_wanted && self.screen_pick_stops == accepted.stops;
         let grant = match picked {
             Ok(grant) if current => grant,
@@ -3402,52 +3567,89 @@ impl Call {
                 return Ok(());
             }
         };
-        // A full command queue is a worker that has not read its commands
-        // yet, not one that stopped: the share alone fails, the call runs on.
         // A stop still waiting for room goes first, so no start overtakes
-        // it: the share fails too. The grant drops here, which closes its
+        // it: the share fails. The grant drops here, which closes its
         // session.
-        if self.screen_stop_pending.is_some() || self.link.queue_full() {
+        if self.screen_stop_pending.is_some() {
             drop(accepted);
             self.screen_failed(inner);
             return Ok(());
         }
+        // Every command of the start has its slot before any goes out
+        // (Windows: `ScreenFrames` and `SetScreen`). A full command queue is
+        // a worker that has not read its commands yet, not one that
+        // stopped: the share alone fails, the call runs on, and no pipe goes
+        // into the worker.
+        let commands = self.link.command_sender();
+        let mut slots = match commands.try_reserve_many(SCREEN_START_COMMANDS) {
+            Ok(slots) => slots,
+            Err(mpsc::error::TrySendError::Full(())) => {
+                drop(accepted);
+                self.screen_failed(inner);
+                return Ok(());
+            }
+            Err(mpsc::error::TrySendError::Closed(())) => return Err(EndReason::WorkerStopped),
+        };
         let ScreenGrant {
             target,
             remote,
             session,
             closed,
+            helper,
         } = grant;
+        let share = self.screen_share.wrapping_add(1);
+        // A helper that serves another share than this one would write
+        // frames that the worker refuses: it is stopped (dropped) and the
+        // share fails.
+        if helper
+            .as_ref()
+            .is_some_and(|helper| helper.share() != share)
+        {
+            drop(accepted);
+            self.screen_failed(inner);
+            return Ok(());
+        }
+        let Some(start) = slots.next() else {
+            drop(accepted);
+            self.screen_failed(inner);
+            return Ok(());
+        };
         // The remote goes first and the command says so by its target: the
-        // worker takes the oldest screen remote with it.
-        if !self.send_screen_remote(remote, &target) {
+        // worker takes the oldest screen remote with it (Windows: the frame
+        // pipe goes into the worker process and `ScreenFrames`, in its own
+        // slot, names it).
+        if !self.send_screen_remote(remote, &target, share, &mut slots) {
             drop(accepted);
             self.screen_failed(inner);
             return Ok(());
         }
         accepted.session = session;
         self.screen_closed = closed;
+        let helper_stop = helper.as_ref().and_then(HelperShare::stopper);
+        self.screen_capture_used |= helper.is_some();
+        self.screen_helper = helper;
         self.screen_sent = true;
-        self.screen_share = self.screen_share.wrapping_add(1);
-        let sent = self.send_worker(ToWorker::SetScreen {
+        self.screen_share = share;
+        start.send(ToWorker::SetScreen {
             target: Some(target),
-            share: self.screen_share,
+            share,
         });
         // A share with no portal session (Windows, macOS) gets a
         // `WorkerStop` as its session, after its start is queued and under
         // the same lock: a stop that the handle accepts then queues the
         // worker's stop behind the start.
-        if sent.is_ok() && accepted.session.is_none() {
+        if accepted.session.is_none() {
             let settled = Arc::new(AtomicBool::new(false));
             accepted.session = Some(Box::new(WorkerStop {
                 commands: self.link.command_sender(),
                 share: self.screen_share,
                 settled: settled.clone(),
+                helper: helper_stop,
             }));
             self.screen_stop_settled = Some(settled);
         }
         drop(accepted);
-        sent
+        Ok(())
     }
 
     /// Whether the running share's stop still has to go to the worker: not
@@ -3474,6 +3676,8 @@ impl Call {
         &self,
         remote: Option<super::screen::Remote>,
         target: &persephone_call_protocol::ScreenTarget,
+        _share: u32,
+        _slots: &mut mpsc::PermitIterator<'_, ToWorker>,
     ) -> bool {
         use persephone_call_protocol::ScreenTarget;
         use std::os::fd::AsFd;
@@ -3486,12 +3690,38 @@ impl Call {
         }
     }
 
-    /// Off Linux there is no remote: a target that needs one is refused.
-    #[cfg(not(target_os = "linux"))]
+    /// Windows (ADR-0067): a monitor's frame pipe goes into the worker
+    /// process, and `ScreenFrames` names it for share `share` in one of
+    /// `slots`; the caller sends the share's `SetScreen` next, in a slot it
+    /// took before. The core's own copy of the pipe closes when `remote`
+    /// drops. A monitor without a pipe goes on: the worker has none for it
+    /// and answers `Unavailable`. A target of another OS is refused.
+    #[cfg(windows)]
+    fn send_screen_remote(
+        &self,
+        remote: Option<super::screen::Remote>,
+        target: &persephone_call_protocol::ScreenTarget,
+        share: u32,
+        slots: &mut mpsc::PermitIterator<'_, ToWorker>,
+    ) -> bool {
+        use persephone_call_protocol::ScreenTarget;
+        match (target, remote) {
+            (ScreenTarget::Monitor { .. }, Some(frames)) => slots
+                .next()
+                .is_some_and(|slot| self.link.send_screen_frames(&frames, share, slot).is_ok()),
+            (ScreenTarget::Monitor { .. }, None) => true,
+            (ScreenTarget::Portal { .. } | ScreenTarget::Display { .. }, _) => false,
+        }
+    }
+
+    /// On macOS there is no remote: a target that needs one is refused.
+    #[cfg(not(any(target_os = "linux", windows)))]
     fn send_screen_remote(
         &self,
         _remote: Option<super::screen::Remote>,
         target: &persephone_call_protocol::ScreenTarget,
+        _share: u32,
+        _slots: &mut mpsc::PermitIterator<'_, ToWorker>,
     ) -> bool {
         matches!(
             target,
@@ -3504,6 +3734,7 @@ impl Call {
     /// from the desktop). The worker's capture ends with it: say so.
     fn screen_ended_by_desktop(&mut self, inner: &Inner) -> Result<(), EndReason> {
         self.close_screen_session();
+        self.screen_helper = None;
         self.screen_wanted = false;
         if self.screen_sent {
             self.screen_sent = false;
@@ -3512,6 +3743,40 @@ impl Call {
             }
         }
         if self.view.set_screen(CallScreen::Off) == Applied::Changed {
+            self.publish(inner);
+        }
+        Ok(())
+    }
+
+    /// The capture helper exited by itself (ADR-0067): a monitor that went
+    /// or changed is `NotFound`, a refused or failed capture is
+    /// `Unavailable`, and an end that nobody asked for is `Off`. The
+    /// worker's capture is stopped and the share is over; the call goes on.
+    /// The worker's own end item says the same, so whichever comes first
+    /// shows, and the later state of the same share is ignored.
+    fn screen_ended_by_helper(
+        &mut self,
+        inner: &Inner,
+        state: ScreenState,
+    ) -> Result<(), EndReason> {
+        self.close_screen_session();
+        self.screen_wanted = false;
+        self.screen_closed = None;
+        // The helper is gone; its share state stands for the whole share.
+        self.screen_helper = None;
+        if self.screen_sent {
+            self.screen_sent = false;
+            if self.screen_stop_needed() {
+                self.send_screen_stop()?;
+            }
+        }
+        let shown = match state {
+            ScreenState::NotFound => CallScreen::NotFound,
+            ScreenState::Refused => CallScreen::Refused,
+            ScreenState::Unavailable => CallScreen::Unavailable,
+            ScreenState::Off | ScreenState::Starting | ScreenState::On => CallScreen::Off,
+        };
+        if self.view.set_screen(shown) == Applied::Changed {
             self.publish(inner);
         }
         Ok(())
@@ -3545,6 +3810,9 @@ impl Call {
         if !running {
             self.screen_sent = false;
             self.screen_closed = None;
+            // The worker ended the share (its end item says why): the
+            // helper has nothing left to serve.
+            self.screen_helper = None;
             // The worker ended the share: its `WorkerStop` sends nothing.
             if let Some(settled) = self.screen_stop_settled.take() {
                 settled.store(true, Ordering::SeqCst);
@@ -4366,6 +4634,9 @@ impl Call {
                 () = screen_session_closed(&mut self.screen_closed) => {
                     self.screen_ended_by_desktop(inner)?;
                 }
+                state = screen_helper_exited(&mut self.screen_helper) => {
+                    self.screen_ended_by_helper(inner, state)?;
+                }
                 event = self.link.events.recv() => {
                     let Some(event) = event else {
                         return Err(EndReason::WorkerStopped);
@@ -4544,9 +4815,10 @@ impl Call {
         Ok(())
     }
 
-    /// Ends the call: the keeper, the worker, then (unless the session
-    /// ended) the membership and the handlers in one operation. After the end
-    /// of the session the worker is killed at once, and no request is sent.
+    /// Ends the call: the keeper, the worker, then the screen pick and the
+    /// capture helpers together with (unless the session ended) the
+    /// membership and the handlers in one operation. After the end of the
+    /// session the worker is killed at once, and no request is sent.
     async fn finish(self, session_ended: bool) {
         let Call {
             access,
@@ -4560,31 +4832,54 @@ impl Call {
             screen_pick,
             screen_control,
             screen_closed,
+            screen_helper,
+            screen_capture_used,
             ..
         } = self;
         // A portal request still waiting for the user is cancelled first, so
         // its dialog does not stay open while the call is torn down. The
         // screen pick and the share's portal session end with the call.
         drop(portal);
-        drop(screen_pick);
         drop(screen_closed);
         close_session(&mut plain(&screen_control));
+        // A pick that waits for the user is cancelled before the worker's
+        // end is awaited: its window closes, and a Yes given meanwhile
+        // starts no helper (`LaunchGuard::begin` refuses once it is set). A
+        // launch already under way is joined with the helpers below.
+        if let Some(pick) = &screen_pick {
+            pick.cancel.store(true, Ordering::SeqCst);
+        }
         // No more restarts, so the leave cannot be pushed back.
         tasks.abort_all();
+        // The worker ends first: it holds the microphone, the camera and the
+        // room, and a helper's bounded stop (seconds, for a helper that
+        // ignores its control pipe) must not keep them after the user left.
+        // Its end also closes its copy of the frame pipe.
         if session_ended {
             drop(link);
+        } else {
+            finish_worker(link).await;
+        }
+        // The screen pick and the capture helpers end before the call is
+        // gone: no helper outlives the call or the session. The membership
+        // ends meanwhile, so a slow helper does not hold it either.
+        if session_ended {
+            // A call that the end of the session stops always waits for
+            // the helper count.
+            end_screen_helpers(screen_pick, screen_helper, true).await;
             return;
         }
-        finish_worker(link).await;
         let room_id = view.room_id;
-        let _ = access
-            .run(|client| async move {
-                end_membership(&client, &room_id, &delayed, &state_key).await;
-                for handle in handles {
-                    client.remove_event_handler(handle);
-                }
-            })
-            .await;
+        let membership = access.run(|client| async move {
+            end_membership(&client, &room_id, &delayed, &state_key).await;
+            for handle in handles {
+                client.remove_event_handler(handle);
+            }
+        });
+        let ((), _) = tokio::join!(
+            end_screen_helpers(screen_pick, screen_helper, screen_capture_used),
+            membership
+        );
     }
 }
 
@@ -6198,6 +6493,71 @@ mod tests {
         );
     }
 
+    /// GIVEN a running call whose screen pick waits for the user and whose
+    /// share has a session WHEN the session ends THEN, in the same step and
+    /// before `Ended` shows, the pick is cancelled (a Yes given afterwards
+    /// starts no helper), the share's session closes, and the stop counts.
+    #[test]
+    fn given_a_waiting_pick_when_the_session_ends_then_it_is_cancelled_before_ended() {
+        let calls = controller(FakeHost::new(true, None));
+        run_slot(&calls, 9);
+        let control = match &*calls.inner.slot() {
+            Slot::Running(run) => run.screen_control.clone(),
+            _ => unreachable!("a running call"),
+        };
+        let pick = Arc::new(AtomicBool::new(false));
+        let dropped = Arc::new(AtomicBool::new(false));
+        {
+            let mut control = plain(&control);
+            control.pick_cancel = Some(pick.clone());
+            control.session = Some(Box::new(SessionGuard(dropped.clone())));
+        }
+        let at_end = Arc::new(Mutex::new(None));
+        let (flag, closed, seen) = (pick.clone(), dropped.clone(), at_end.clone());
+        calls.set_listener(Arc::new(move || {
+            plain(&seen)
+                .get_or_insert((flag.load(Ordering::SeqCst), closed.load(Ordering::SeqCst)));
+        }));
+        calls.stop_for_session_end();
+        assert!(matches!(calls.state(), CallState::Ended { .. }));
+        assert_eq!(
+            *plain(&at_end),
+            Some((true, true)),
+            "cancelled and closed before Ended shows"
+        );
+        let control = plain(&control);
+        assert!(control.pick_cancel.is_none());
+        assert!(control.session.is_none());
+        assert_eq!(control.stops, 1, "the session's end counts as a stop");
+    }
+
+    /// GIVEN a call whose screen pick waits for the user WHEN the session
+    /// ends and the cancelled pick ends before the call task reads the end
+    /// THEN no new pick begins: the session's end counts as a stop.
+    #[tokio::test]
+    async fn given_a_waiting_pick_when_the_session_ends_then_no_new_pick_begins() {
+        let calls = controller(FakeHost::new(true, None));
+        run_slot(&calls, 10);
+        let control = match &*calls.inner.slot() {
+            Slot::Running(run) => run.screen_control.clone(),
+            _ => unreachable!("a running call"),
+        };
+        let (mut fixture, inner, _) = call_with_source(true);
+        let source = Arc::new(Unanswered::default());
+        fixture.call.screens = source.clone();
+        fixture.call.screen_control = control;
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        calls.stop_for_session_end();
+        let (picked, cancelled) = screen_pick_done(&mut fixture.call.screen_pick).await;
+        assert!(cancelled, "the session's end cancelled the pick");
+        fixture.call.stopped_pick_ended(picked);
+        assert!(
+            fixture.call.screen_pick.is_none(),
+            "no new pick after the session ended"
+        );
+        assert_eq!(source.picks.load(Ordering::SeqCst), 1);
+    }
+
     /// GIVEN no call WHEN the session ends THEN nothing changes.
     #[test]
     fn given_no_call_when_the_session_ends_then_the_state_stays_idle() {
@@ -6291,9 +6651,18 @@ mod tests {
     }
 
     fn test_call(admission: Admission, flags: Arc<Flags>, killed: Arc<AtomicBool>) -> TestCall {
+        test_call_with(admission, flags, Box::new(FakeProcess(killed)))
+    }
+
+    /// As [`test_call`], with the worker process `process`.
+    fn test_call_with(
+        admission: Admission,
+        flags: Arc<Flags>,
+        process: Box<dyn WorkerProcess>,
+    ) -> TestCall {
         let (command_tx, to_worker) = mpsc::channel(8);
         let (events, event_rx) = mpsc::channel(4);
-        let link = CallWorkerLink::from_parts(command_tx, event_rx, Box::new(FakeProcess(killed)));
+        let link = CallWorkerLink::from_parts(command_tx, event_rx, process);
         let video_streams = link.video().streams();
         let (changes_tx, changes) = mpsc::channel(1);
         let (incoming_tx, incoming) = mpsc::channel(1);
@@ -6336,6 +6705,8 @@ mod tests {
             screen_wanted: false,
             screen_last_on: false,
             screen_closed: None,
+            screen_helper: None,
+            screen_capture_used: false,
             screen_sent: false,
             proxy: false,
             consent: None,
@@ -8015,6 +8386,7 @@ mod tests {
             remote: None,
             session: Some(Box::new(SessionGuard(dropped.clone()))),
             closed: None,
+            helper: None,
         }
     }
 
@@ -8077,6 +8449,7 @@ mod tests {
         let source = Arc::new(Unanswered::default());
         fixture.call.screens = source.clone();
         fixture.call.screen_command(&inner, true, 0).unwrap();
+        handle_stop(&fixture.call);
         fixture.call.screen_command(&inner, false, 1).unwrap();
         let first = fixture
             .call
@@ -8105,10 +8478,81 @@ mod tests {
             .clone();
         assert!(!Arc::ptr_eq(&first, &second));
         assert!(!second.load(Ordering::SeqCst), "it needs its own answer");
+        assert!(
+            names_pick(&fixture.call, &second),
+            "a stop now cancels the new pick"
+        );
         second.store(true, Ordering::SeqCst);
         let _ = screen_pick_done(&mut fixture.call.screen_pick).await;
         assert_eq!(source.picks.load(Ordering::SeqCst), 2);
         assert!(fixture.to_worker.try_recv().is_err());
+    }
+
+    /// GIVEN a pick whose window waits for the user WHEN the handle accepts
+    /// a stop that the call task has not read yet THEN the pick is cancelled
+    /// at once (before `Off` shows), so a Yes starts no helper; WHEN the pick
+    /// ends before the task reads the stop THEN no new pick begins for the
+    /// stopped start, and the task's stop then leaves the share off.
+    #[tokio::test]
+    async fn given_a_waiting_pick_when_the_handle_accepts_a_stop_then_it_is_cancelled_at_once() {
+        let (mut fixture, inner, _) = call_with_source(true);
+        let source = Arc::new(Unanswered::default());
+        fixture.call.screens = source.clone();
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        let flag = fixture
+            .call
+            .screen_pick
+            .as_ref()
+            .expect("a pick")
+            .cancel
+            .clone();
+        assert!(!flag.load(Ordering::SeqCst));
+        handle_stop(&fixture.call);
+        assert!(flag.load(Ordering::SeqCst), "the accepted stop cancels it");
+        let (picked, cancelled) = screen_pick_done(&mut fixture.call.screen_pick).await;
+        assert!(cancelled);
+        fixture.call.stopped_pick_ended(picked);
+        assert!(
+            fixture.call.screen_pick.is_none(),
+            "no new pick for the stopped start"
+        );
+        assert_eq!(source.picks.load(Ordering::SeqCst), 1);
+        fixture.call.screen_command(&inner, false, 1).unwrap();
+        assert!(fixture.call.screen_pick.is_none());
+        assert!(fixture.to_worker.try_recv().is_err());
+        assert_eq!(fixture.call.view.screen, CallScreen::Off);
+    }
+
+    /// GIVEN a start and then a stop that the handle accepted before the
+    /// call task read the start WHEN the task begins the start's pick THEN
+    /// the pick begins cancelled (the source returns before any window) and
+    /// no second pick follows it.
+    #[tokio::test]
+    async fn given_a_stop_accepted_before_the_pick_begins_then_the_pick_begins_cancelled() {
+        let (mut fixture, inner, _) = call_with_source(true);
+        let source = Arc::new(Unanswered::default());
+        fixture.call.screens = source.clone();
+        handle_stop(&fixture.call);
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        let flag = fixture
+            .call
+            .screen_pick
+            .as_ref()
+            .expect("a pick")
+            .cancel
+            .clone();
+        assert!(flag.load(Ordering::SeqCst), "it begins cancelled");
+        let (picked, cancelled) = screen_pick_done(&mut fixture.call.screen_pick).await;
+        assert!(cancelled);
+        fixture.call.stopped_pick_ended(picked);
+        assert!(fixture.call.screen_pick.is_none());
+        assert!(
+            plain(&fixture.call.screen_control).pick_cancel.is_none(),
+            "the ended pick is not named"
+        );
+        fixture.call.screen_command(&inner, false, 1).unwrap();
+        assert!(fixture.to_worker.try_recv().is_err());
+        assert_eq!(fixture.call.view.screen, CallScreen::Off);
     }
 
     /// GIVEN a pick that a stop cancelled WHEN it ends with a grant, and no
@@ -8126,6 +8570,62 @@ mod tests {
         assert_eq!(source.picks.load(Ordering::SeqCst), 1);
         assert!(fixture.to_worker.try_recv().is_err());
         assert!(!fixture.call.screen_sent);
+    }
+
+    /// Whether the screen control names `flag` as the pick that a stop
+    /// cancels.
+    fn names_pick(call: &Call, flag: &Arc<AtomicBool>) -> bool {
+        plain(&call.screen_control)
+            .pick_cancel
+            .as_ref()
+            .is_some_and(|named| Arc::ptr_eq(named, flag))
+    }
+
+    /// GIVEN a pick that the screen control names WHEN it ends with a
+    /// refusal, or with a grant that starts the share THEN the control names
+    /// no pick any more, so a later stop has no ended pick to cancel.
+    #[tokio::test]
+    async fn given_a_pick_that_ended_then_the_control_names_no_pick() {
+        let (mut fixture, inner, _) = call_with_source(true);
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        let refused = fixture
+            .call
+            .screen_pick
+            .as_ref()
+            .expect("a pick")
+            .cancel
+            .clone();
+        assert!(names_pick(&fixture.call, &refused));
+        let _ = screen_pick_done(&mut fixture.call.screen_pick).await;
+        fixture
+            .call
+            .screen_picked(&inner, Err(ScreenRefusal::Refused))
+            .unwrap();
+        assert!(
+            plain(&fixture.call.screen_control).pick_cancel.is_none(),
+            "a refused pick is not named"
+        );
+
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        let granted = fixture
+            .call
+            .screen_pick
+            .as_ref()
+            .expect("a pick")
+            .cancel
+            .clone();
+        assert!(names_pick(&fixture.call, &granted));
+        let _ = screen_pick_done(&mut fixture.call.screen_pick).await;
+        let dropped = Arc::new(AtomicBool::new(false));
+        fixture
+            .call
+            .screen_picked(&inner, Ok(grant(&dropped)))
+            .unwrap();
+        assert!(fixture.call.screen_sent, "the share runs");
+        assert!(
+            plain(&fixture.call.screen_control).pick_cancel.is_none(),
+            "the pick that started the share is not named"
+        );
     }
 
     fn call_with_source(available: bool) -> (TestCall, Arc<Inner>, Arc<Scripted>) {
@@ -8235,6 +8735,7 @@ mod tests {
             remote: None,
             session: None,
             closed: None,
+            helper: None,
         }
     }
 
@@ -8261,9 +8762,7 @@ mod tests {
     /// What `set_screen(false)` does under the control lock before the call
     /// task reads the stop.
     fn handle_stop(call: &Call) {
-        let mut control = plain(&call.screen_control);
-        control.stops += 1;
-        close_session(&mut control);
+        stop_accepted(&mut plain(&call.screen_control));
     }
 
     /// GIVEN a Windows or macOS share (no portal session) and a call task
@@ -9328,6 +9827,8 @@ mod tests {
     /// flight is cancelled and the session closes with it.
     #[tokio::test]
     async fn given_the_call_ends_then_the_pick_is_cancelled_and_the_session_closes() {
+        // This call began a pick, so its end reads the helper count.
+        let _serial = crate::calls::screen_helper::HELPER_TESTS.lock().await;
         let (mut fixture, inner, _) = call_with_source(true);
         fixture.call.screen_command(&inner, true, 0).unwrap();
         let cancel = fixture
@@ -9599,6 +10100,7 @@ mod tests {
             remote: Some(remote),
             session: Some(Box::new(SessionGuard(dropped.clone()))),
             closed: None,
+            helper: None,
         };
         fixture.call.screen_picked(&inner, Ok(portal)).unwrap();
         let mut byte = [0_u8; 1];
@@ -9620,9 +10122,577 @@ mod tests {
             remote: None,
             session: None,
             closed: None,
+            helper: None,
         };
         fixture.call.screen_picked(&inner, Ok(no_remote)).unwrap();
         assert_eq!(fixture.call.view.screen, CallScreen::Unavailable);
+    }
+
+    // ---- The Windows capture helper (ADR-0067) ----
+
+    use crate::calls::screen_helper::HELPER_TESTS;
+    use crate::calls::screen_helper::HelperShare;
+    use crate::calls::screen_helper::LaunchGuard;
+    use crate::calls::screen_helper::fake::FakeHelper;
+
+    /// Holds a launch in the helper count while `end` runs: `end` must still
+    /// be waiting after a while, and must finish once the launch is released.
+    /// The end's wait runs on a blocking thread, so its future stays pending
+    /// while the count is held; no elapsed time is measured.
+    async fn waits_for_the_count(end: impl Future<Output = ()>, what: &str) {
+        let launch = LaunchGuard::begin(&AtomicBool::new(false)).expect("a launch under way");
+        let mut end = std::pin::pin!(end);
+        assert!(
+            time::timeout(Duration::from_millis(200), &mut end)
+                .await
+                .is_err(),
+            "{what} waits while the count is held"
+        );
+        drop(launch);
+        assert!(
+            time::timeout(Duration::from_secs(3), end).await.is_ok(),
+            "{what} ends once the count is free"
+        );
+    }
+
+    /// GIVEN a helper count held in the process (a launch under way) WHEN the
+    /// user leaves a call that began no pick and held no helper THEN its end
+    /// does not wait for that count; WHEN such a call ends with the session,
+    /// or the user leaves a call that began a pick THEN the end waits until
+    /// the count is free.
+    #[tokio::test]
+    async fn given_a_call_without_screen_capture_when_it_is_left_then_it_waits_for_no_helper() {
+        let _serial = HELPER_TESTS.lock().await;
+        let quiet = || {
+            test_call(
+                no_admission(),
+                Arc::new(Flags::default()),
+                Arc::new(AtomicBool::new(false)),
+            )
+        };
+        let launch = LaunchGuard::begin(&AtomicBool::new(false)).expect("a launch under way");
+        let left = time::timeout(Duration::from_secs(3), quiet().call.finish(false)).await;
+        drop(launch);
+        assert!(
+            left.is_ok(),
+            "a call without capture that is left does not wait"
+        );
+
+        let ended = quiet();
+        waits_for_the_count(ended.call.finish(true), "the end of the session").await;
+
+        let (mut fixture, inner, _) = call_with_source(true);
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        waits_for_the_count(fixture.call.finish(false), "a call that began a pick").await;
+    }
+
+    /// A bare grant of one monitor with a fake helper for share `share`.
+    fn helper_grant(helper: &Arc<FakeHelper>, share: u32) -> ScreenGrant {
+        ScreenGrant {
+            helper: Some(
+                HelperShare::start(share, Arc::new(helper.clone())).expect("a helper share"),
+            ),
+            ..bare_grant()
+        }
+    }
+
+    fn closed(helper: &Arc<FakeHelper>) -> usize {
+        helper.controls_closed.load(Ordering::SeqCst)
+    }
+
+    /// GIVEN a grant with the helper of the next share WHEN the share starts
+    /// THEN the call keeps the helper and the start goes to the worker; WHEN
+    /// the share is stopped THEN the helper's control pipe closes and the
+    /// worker's stop is queued, once.
+    #[tokio::test]
+    async fn given_a_helper_when_the_share_starts_and_stops_then_the_helper_stops_with_it() {
+        let _serial = HELPER_TESTS.lock().await;
+        let (mut fixture, inner, _) = call_with_source(true);
+        let helper = FakeHelper::new(true, 0);
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        fixture
+            .call
+            .screen_picked(&inner, Ok(helper_grant(&helper, 1)))
+            .unwrap();
+        assert!(is_monitor_start(fixture.to_worker.try_recv().ok()));
+        assert!(fixture.call.screen_helper.is_some());
+        assert_eq!(closed(&helper), 0, "the helper runs");
+        fixture.call.screen_command(&inner, false, 0).unwrap();
+        assert!(fixture.call.screen_helper.is_none());
+        assert_eq!(closed(&helper), 1, "its control pipe closed");
+        assert!(is_stop_of(fixture.to_worker.try_recv(), 1));
+        assert!(fixture.to_worker.try_recv().is_err(), "one stop only");
+        assert_eq!(fixture.call.view.screen, CallScreen::Off);
+    }
+
+    /// GIVEN a share with a helper and a full worker queue WHEN the handle
+    /// accepts a stop THEN the helper's control pipe closes at once, before
+    /// the call task reads the stop, so the screen is no longer copied while
+    /// the worker's stop waits; WHEN the queue has room THEN that stop still
+    /// goes, once, and the share is off.
+    #[tokio::test]
+    async fn given_a_full_queue_when_the_handle_stops_a_helper_share_then_the_helper_stops_at_once()
+    {
+        let _serial = HELPER_TESTS.lock().await;
+        let (mut fixture, inner, _) = call_with_source(true);
+        let helper = FakeHelper::new(true, 0);
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        fixture
+            .call
+            .screen_picked(&inner, Ok(helper_grant(&helper, 1)))
+            .unwrap();
+        assert!(is_monitor_start(fixture.to_worker.try_recv().ok()));
+        let share = fixture.call.screen_share;
+        fill_queue(&fixture.call, &mut fixture.to_worker, 0);
+        handle_stop(&fixture.call);
+        assert_eq!(
+            closed(&helper),
+            1,
+            "the capture ends before the task reads the stop"
+        );
+        assert!(
+            fixture.call.screen_helper.is_some(),
+            "the task still owns it"
+        );
+        fixture.call.screen_command(&inner, false, 1).unwrap();
+        assert!(fixture.call.screen_helper.is_none());
+        assert_eq!(fixture.call.screen_stop_pending, Some(share));
+        while fixture.to_worker.try_recv().is_ok() {}
+        let permit = screen_stop_room(Some(fixture.call.link.command_sender())).await;
+        fixture.call.screen_stop_room_ready(permit).unwrap();
+        assert!(is_stop_of(fixture.to_worker.try_recv(), share));
+        assert!(fixture.to_worker.try_recv().is_err(), "one stop only");
+        assert_eq!(fixture.call.view.screen, CallScreen::Off);
+    }
+
+    /// GIVEN a helper that serves another share than the next one WHEN the
+    /// grant arrives THEN the share is unavailable, the helper is stopped and
+    /// nothing goes to the worker.
+    #[tokio::test]
+    async fn given_a_helper_of_another_share_when_the_grant_arrives_then_it_is_stopped() {
+        let _serial = HELPER_TESTS.lock().await;
+        let (mut fixture, inner, _) = call_with_source(true);
+        let helper = FakeHelper::new(true, 0);
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        fixture
+            .call
+            .screen_picked(&inner, Ok(helper_grant(&helper, 7)))
+            .unwrap();
+        assert_eq!(fixture.call.view.screen, CallScreen::Unavailable);
+        assert!(fixture.call.screen_helper.is_none());
+        assert_eq!(closed(&helper), 1);
+        assert!(fixture.to_worker.try_recv().is_err());
+        assert!(!fixture.call.screen_sent);
+    }
+
+    /// GIVEN a stop that the handle accepted after the pick began WHEN the
+    /// pick's grant with a helper arrives THEN the helper is stopped at once
+    /// and no start goes to the worker; and GIVEN a stop that cancelled the
+    /// pick (a stop during the helper's start) WHEN the cancelled pick ends
+    /// THEN its helper is stopped too.
+    #[tokio::test]
+    async fn given_a_stop_during_the_helper_start_when_the_pick_ends_then_the_helper_is_stopped() {
+        let _serial = HELPER_TESTS.lock().await;
+        let (mut fixture, inner, _) = call_with_source(true);
+        let helper = FakeHelper::new(true, 0);
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        handle_stop(&fixture.call);
+        fixture
+            .call
+            .screen_picked(&inner, Ok(helper_grant(&helper, 1)))
+            .unwrap();
+        assert_eq!(closed(&helper), 1, "a stale grant's helper stops");
+        assert!(fixture.to_worker.try_recv().is_err(), "no start went");
+        assert!(fixture.call.screen_helper.is_none());
+
+        let (mut fixture, inner, _) = call_with_source(true);
+        let helper = FakeHelper::new(true, 0);
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        fixture.call.screen_command(&inner, false, 1).unwrap();
+        fixture
+            .call
+            .stopped_pick_ended(Ok(helper_grant(&helper, 1)));
+        assert_eq!(closed(&helper), 1, "a cancelled pick's helper stops");
+        assert!(fixture.to_worker.try_recv().is_err());
+    }
+
+    /// GIVEN a running share WHEN its helper exits by itself with each state
+    /// THEN the page shows that state, the worker's capture is stopped once,
+    /// the helper is released and the call goes on; and a later worker state
+    /// of the same share changes nothing.
+    #[tokio::test]
+    async fn given_a_helper_that_exits_when_the_share_runs_then_the_state_and_a_stop_follow() {
+        let _serial = HELPER_TESTS.lock().await;
+        for (state, shown) in [
+            (ScreenState::NotFound, CallScreen::NotFound),
+            (ScreenState::Unavailable, CallScreen::Unavailable),
+            (ScreenState::Off, CallScreen::Off),
+        ] {
+            let (mut fixture, inner, _) = call_with_source(true);
+            let helper = FakeHelper::new(true, 0);
+            fixture.call.screen_command(&inner, true, 0).unwrap();
+            fixture
+                .call
+                .screen_picked(&inner, Ok(helper_grant(&helper, 1)))
+                .unwrap();
+            assert!(is_monitor_start(fixture.to_worker.try_recv().ok()));
+            fixture.call.screen_ended_by_helper(&inner, state).unwrap();
+            assert_eq!(fixture.call.view.screen, shown, "{state:?}");
+            assert!(fixture.call.screen_helper.is_none());
+            assert!(!fixture.call.screen_sent);
+            assert!(is_stop_of(fixture.to_worker.try_recv(), 1));
+            assert!(fixture.to_worker.try_recv().is_err(), "one stop only");
+            assert!(!fixture.call.screen_state_from_worker(ScreenState::On, 1));
+        }
+    }
+
+    /// GIVEN a running share WHEN the worker reports that it ended (its end
+    /// item named the reason) THEN the helper is released with the share and
+    /// the worker's state shows; a state of an older share does not end it.
+    #[tokio::test]
+    async fn given_the_worker_ends_the_share_then_the_helper_is_released() {
+        let _serial = HELPER_TESTS.lock().await;
+        let (mut fixture, inner, _) = call_with_source(true);
+        let helper = FakeHelper::new(true, 0);
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        fixture
+            .call
+            .screen_picked(&inner, Ok(helper_grant(&helper, 1)))
+            .unwrap();
+        let _ = fixture.to_worker.try_recv();
+        assert!(!fixture.call.screen_state_from_worker(ScreenState::Off, 9));
+        assert!(
+            fixture.call.screen_helper.is_some(),
+            "another share's state"
+        );
+        assert!(
+            fixture
+                .call
+                .screen_state_from_worker(ScreenState::NotFound, 1)
+        );
+        assert!(fixture.call.screen_helper.is_none());
+        assert_eq!(closed(&helper), 1);
+    }
+
+    /// GIVEN a running share WHEN the call ends, or the core's session ends
+    /// THEN the helper's control pipe closes and the helper is joined before
+    /// the call is gone, with no stop of the share needed.
+    #[tokio::test]
+    async fn given_a_running_share_when_the_call_or_the_session_ends_then_the_helper_is_joined() {
+        let _serial = HELPER_TESTS.lock().await;
+        for session_ended in [false, true] {
+            let (mut fixture, inner, _) = call_with_source(true);
+            let helper = FakeHelper::new(true, 0);
+            fixture.call.screen_command(&inner, true, 0).unwrap();
+            fixture
+                .call
+                .screen_picked(&inner, Ok(helper_grant(&helper, 1)))
+                .unwrap();
+            assert_eq!(closed(&helper), 0);
+            fixture.call.finish(session_ended).await;
+            assert_eq!(closed(&helper), 1, "session_ended {session_ended}");
+            assert!(!helper.terminated.load(Ordering::SeqCst));
+            assert!(
+                helper.wait_exit_for_test(Duration::from_secs(1)),
+                "the helper ended"
+            );
+        }
+    }
+
+    /// GIVEN a helper that ignores its control pipe WHEN the call ends THEN
+    /// the end waits the bounded time and terminates the Job: no helper is
+    /// left running.
+    #[tokio::test]
+    async fn given_a_helper_that_hangs_when_the_call_ends_then_it_is_terminated() {
+        let _serial = HELPER_TESTS.lock().await;
+        let (mut fixture, inner, _) = call_with_source(true);
+        let helper = FakeHelper::new(false, 0);
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        fixture
+            .call
+            .screen_picked(&inner, Ok(helper_grant(&helper, 1)))
+            .unwrap();
+        fixture.call.finish(true).await;
+        assert!(helper.terminated.load(Ordering::SeqCst));
+    }
+
+    /// GIVEN a share whose helper ignores its control pipe WHEN the call
+    /// ends THEN the worker's `Leave` goes, and WHEN the core's session ends
+    /// THEN the worker is killed, while the helper's stop still waits: the
+    /// microphone, the camera and the room do not wait for the helper. The
+    /// helper is still terminated before the end returns.
+    #[tokio::test]
+    async fn given_a_hanging_helper_when_the_call_ends_then_the_worker_stops_first() {
+        let _serial = HELPER_TESTS.lock().await;
+        use crate::calls::screen_helper::STOP_WAIT;
+        for session_ended in [false, true] {
+            let killed = Arc::new(AtomicBool::new(false));
+            let mut fixture = test_call(no_admission(), Arc::new(Flags::default()), killed.clone());
+            fixture.call.screens = Arc::new(Scripted {
+                available: true,
+                picks: AtomicUsize::new(0),
+            });
+            let inner = controller(FakeHost::new(true, None)).inner.clone();
+            let helper = FakeHelper::new(false, 0);
+            fixture.call.screen_command(&inner, true, 0).unwrap();
+            fixture
+                .call
+                .screen_picked(&inner, Ok(helper_grant(&helper, 1)))
+                .unwrap();
+            assert!(is_monitor_start(fixture.to_worker.try_recv().ok()));
+            let TestCall {
+                call,
+                mut to_worker,
+                ..
+            } = fixture;
+            let end = tokio::spawn(call.finish(session_ended));
+            let stopped = time::timeout(STOP_WAIT / 2, async {
+                if session_ended {
+                    while !killed.load(Ordering::SeqCst) {
+                        time::sleep(Duration::from_millis(10)).await;
+                    }
+                } else {
+                    // `Leave` must come: a queue that closes without it is
+                    // no stop of the worker.
+                    loop {
+                        match to_worker.recv().await {
+                            Some(ToWorker::Leave) => break,
+                            Some(_) => {}
+                            None => panic!("the worker's queue closed without Leave"),
+                        }
+                    }
+                }
+            })
+            .await;
+            assert!(
+                stopped.is_ok(),
+                "session_ended {session_ended}: the worker stops at once"
+            );
+            assert!(
+                !helper.terminated.load(Ordering::SeqCst),
+                "the helper's stop still waits"
+            );
+            end.await.expect("the end of the call");
+            assert!(helper.terminated.load(Ordering::SeqCst));
+        }
+    }
+
+    /// A worker process whose exit wait lasts until the test sets the flag
+    /// (or the wait's time is up).
+    struct HeldProcess(Arc<AtomicBool>);
+
+    impl WorkerProcess for HeldProcess {
+        fn kill(&self) {}
+        fn wait_exit(&self, timeout: Duration) -> bool {
+            let deadline = std::time::Instant::now() + timeout;
+            while !self.0.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            true
+        }
+    }
+
+    /// GIVEN a pick whose window waits for the user WHEN the call ends
+    /// THEN the pick is cancelled before the end waits for the worker: when
+    /// the worker gets `Leave`, and while its exit is still awaited, a Yes
+    /// can start no helper.
+    #[tokio::test]
+    async fn given_a_waiting_pick_when_the_call_ends_then_it_is_cancelled_before_the_worker_wait() {
+        // This call began a pick, so its end reads the helper count.
+        let _serial = crate::calls::screen_helper::HELPER_TESTS.lock().await;
+        let released = Arc::new(AtomicBool::new(false));
+        let mut fixture = test_call_with(
+            no_admission(),
+            Arc::new(Flags::default()),
+            Box::new(HeldProcess(released.clone())),
+        );
+        fixture.call.screens = Arc::new(Unanswered::default());
+        let inner = controller(FakeHost::new(true, None)).inner.clone();
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        let flag = fixture
+            .call
+            .screen_pick
+            .as_ref()
+            .expect("a pick")
+            .cancel
+            .clone();
+        let TestCall {
+            call,
+            mut to_worker,
+            ..
+        } = fixture;
+        let end = tokio::spawn(call.finish(false));
+        let leave = time::timeout(Duration::from_secs(5), async {
+            loop {
+                match to_worker.recv().await {
+                    Some(ToWorker::Leave) => return true,
+                    Some(_) => {}
+                    None => return false,
+                }
+            }
+        })
+        .await;
+        assert!(matches!(leave, Ok(true)), "the worker gets Leave");
+        assert!(
+            flag.load(Ordering::SeqCst),
+            "the pick is cancelled while the worker's exit is awaited"
+        );
+        released.store(true, Ordering::SeqCst);
+        end.await.expect("the end of the call");
+    }
+
+    /// A worker process that takes handles, as the Windows one does.
+    #[cfg(windows)]
+    struct GivingProcess(Arc<AtomicBool>);
+
+    #[cfg(windows)]
+    impl WorkerProcess for GivingProcess {
+        fn kill(&self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+        fn wait_exit(&self, _: Duration) -> bool {
+            true
+        }
+        fn give_handle(&self, _handle: &std::os::windows::io::OwnedHandle) -> Option<u32> {
+            Some(77)
+        }
+    }
+
+    /// GIVEN a grant with a frame pipe and a helper WHEN the share starts
+    /// THEN the pipe goes into the worker (`ScreenFrames` with the handle
+    /// value and the share number) and the start follows it, in that order;
+    /// a worker that cannot take the handle fails the share and stops the
+    /// helper.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn given_a_frame_pipe_when_the_share_starts_then_screen_frames_goes_before_the_start() {
+        let _serial = HELPER_TESTS.lock().await;
+        use std::os::windows::io::OwnedHandle;
+        let pipe = || {
+            let (read, write) = std::io::pipe().expect("a pipe");
+            (OwnedHandle::from(read), OwnedHandle::from(write))
+        };
+        let (mut fixture, inner, _) = call_with_source(true);
+        let (command_tx, mut commands) = mpsc::channel(4);
+        fixture.call.link = CallWorkerLink::from_parts(
+            command_tx,
+            mpsc::channel(1).1,
+            Box::new(GivingProcess(Arc::new(AtomicBool::new(false)))),
+        );
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        let helper = FakeHelper::new(true, 0);
+        let (read, _write) = pipe();
+        let grant = ScreenGrant {
+            remote: Some(read),
+            ..helper_grant(&helper, 1)
+        };
+        fixture.call.screen_picked(&inner, Ok(grant)).unwrap();
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ToWorker::ScreenFrames {
+                share: 1,
+                handle: 77
+            })
+        ));
+        assert!(is_monitor_start(commands.try_recv().ok()));
+        assert!(fixture.call.screen_helper.is_some());
+
+        // A worker that cannot take the handle: the share fails.
+        let (mut fixture, inner, _) = call_with_source(true);
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        let helper = FakeHelper::new(true, 0);
+        let (read, _write) = pipe();
+        let grant = ScreenGrant {
+            remote: Some(read),
+            ..helper_grant(&helper, 1)
+        };
+        fixture.call.screen_picked(&inner, Ok(grant)).unwrap();
+        assert_eq!(fixture.call.view.screen, CallScreen::Unavailable);
+        assert_eq!(closed(&helper), 1, "the helper stops");
+        assert!(fixture.to_worker.try_recv().is_err());
+    }
+
+    /// A worker process that counts the handles it is given.
+    #[cfg(windows)]
+    struct CountingProcess(Arc<AtomicUsize>);
+
+    #[cfg(windows)]
+    impl WorkerProcess for CountingProcess {
+        fn kill(&self) {}
+        fn wait_exit(&self, _: Duration) -> bool {
+            true
+        }
+        fn give_handle(&self, _handle: &std::os::windows::io::OwnedHandle) -> Option<u32> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Some(78)
+        }
+    }
+
+    /// GIVEN a worker queue with one free slot WHEN a share with a frame
+    /// pipe starts THEN the share alone fails: no pipe goes into the worker,
+    /// nothing more is queued, the helper stops and the call runs on.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn given_one_free_slot_when_a_share_with_a_pipe_starts_then_only_the_share_fails() {
+        let _serial = HELPER_TESTS.lock().await;
+        use std::os::windows::io::OwnedHandle;
+        let (mut fixture, inner, _) = call_with_source(true);
+        let (command_tx, mut commands) = mpsc::channel(2);
+        let given = Arc::new(AtomicUsize::new(0));
+        fixture.call.link = CallWorkerLink::from_parts(
+            command_tx,
+            mpsc::channel(1).1,
+            Box::new(CountingProcess(given.clone())),
+        );
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        fixture
+            .call
+            .link
+            .send(ToWorker::SetMuted { muted: true })
+            .expect("one of two slots");
+        let helper = FakeHelper::new(true, 0);
+        let (read, _write) = std::io::pipe().expect("a pipe");
+        let grant = ScreenGrant {
+            remote: Some(OwnedHandle::from(read)),
+            ..helper_grant(&helper, 1)
+        };
+        assert_eq!(fixture.call.screen_picked(&inner, Ok(grant)), Ok(()));
+        assert_eq!(fixture.call.view.screen, CallScreen::Unavailable);
+        assert_eq!(given.load(Ordering::SeqCst), 0, "no pipe went in");
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ToWorker::SetMuted { muted: true })
+        ));
+        assert!(commands.try_recv().is_err(), "nothing more is queued");
+        assert_eq!(closed(&helper), 1, "the helper stops");
+        assert!(fixture.call.screen_helper.is_none());
+    }
+
+    /// GIVEN a pick that starts its helper just as the call ends WHEN the
+    /// call finishes THEN the finish waits for the pick, and that helper is
+    /// stopped and has ended before the finish returns.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn given_a_pick_that_starts_a_helper_when_the_call_ends_then_the_helper_is_stopped() {
+        let _serial = HELPER_TESTS.lock().await;
+        let (mut fixture, _inner, _) = call_with_source(true);
+        let helper = FakeHelper::new(true, 0);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let seen = cancel.clone();
+        let started = helper.clone();
+        fixture.call.screen_pick = Some(ScreenPick {
+            task: tokio::task::spawn_blocking(move || {
+                // A launch that the cancel came too late to stop.
+                while !seen.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Ok(helper_grant(&started, 1))
+            }),
+            cancel,
+        });
+        fixture.call.finish(true).await;
+        assert_eq!(closed(&helper), 1, "the helper was stopped");
+        assert!(helper.wait_exit_for_test(Duration::ZERO), "and it ended");
     }
 
     // ---- Other SFUs (ADR-0054) ----
@@ -9973,6 +11043,8 @@ mod tests {
     /// question still open is dropped with the call.
     #[tokio::test]
     async fn given_a_call_with_other_sfus_ends_then_the_worker_is_ended() {
+        // The end of the session reads the helper count.
+        let _serial = crate::calls::screen_helper::HELPER_TESTS.lock().await;
         let host = FakeHost::answering_other(true);
         let killed = Arc::new(AtomicBool::new(false));
         let (fixture, inner) = other_call(&host, killed.clone());

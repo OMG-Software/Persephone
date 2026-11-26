@@ -45,9 +45,12 @@ pub struct JobHost;
 impl UiHost for JobHost {
     fn start(&self) -> Result<StartedUi, StartError> {
         let ui = ui_exe().map_err(|_| StartError::NoExe)?;
-        let mut child = ui_command(&ui)
-            .spawn()
-            .map_err(|error| StartError::Spawn { ui, error })?;
+        // The media broker's process-start lock: the UI cannot inherit a
+        // call worker's or screen helper's pipe end while one launches.
+        let start = persephone_media_broker::process_start_lock();
+        let spawned = ui_command(&ui).spawn();
+        drop(start);
+        let mut child = spawned.map_err(|error| StartError::Spawn { ui, error })?;
         // Contain the UI before it creates its web view. The Job holds the UI
         // and its web view processes; closing it on exit ends anything left.
         match contain(&child) {
@@ -242,6 +245,7 @@ fn wide(text: &str) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::windows::spawn_for_test;
     use std::process::{Command, Stdio};
 
     /// GIVEN a Job holding a running child process
@@ -249,12 +253,13 @@ mod tests {
     /// THEN the child's ID is in the list, and none is left after it ends
     #[test]
     fn given_a_job_with_a_child_then_its_pid_is_listed() {
-        let mut child = Command::new("cmd")
-            .args(["/c", "ping -n 30 127.0.0.1 >nul"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .spawn()
-            .expect("start child");
+        let mut child = spawn_for_test(
+            Command::new("cmd")
+                .args(["/c", "ping -n 30 127.0.0.1 >nul"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null()),
+        )
+        .expect("start child");
         let job = contain(&child).expect("contain child");
         let listed = process_ids(&job).expect("list ids");
         assert!(listed.complete);
@@ -275,12 +280,13 @@ mod tests {
     /// for all it is complete (the control)
     #[test]
     fn given_more_processes_than_room_then_the_list_is_incomplete() {
-        let mut child = Command::new("cmd")
-            .args(["/c", "ping -n 30 127.0.0.1 >nul"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .spawn()
-            .expect("start child");
+        let mut child = spawn_for_test(
+            Command::new("cmd")
+                .args(["/c", "ping -n 30 127.0.0.1 >nul"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null()),
+        )
+        .expect("start child");
         let job = contain(&child).expect("contain child");
         // Wait until cmd has started ping inside the Job.
         let deadline = std::time::Instant::now() + Duration::from_secs(10);

@@ -289,6 +289,8 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
         screen_end_reason: None,
         screen_next: NextStart::default(),
         screen_share: 0,
+        #[cfg(windows)]
+        screen_frames: None,
         screen_open_tx,
         remote: RemoteVideo::default(),
         audio_roster: AudioRoster::default(),
@@ -1053,6 +1055,13 @@ struct Call<'a> {
     /// The core's number for the share that runs or opens now. Every
     /// `Screen` state about it carries this number.
     screen_share: u32,
+    /// Windows (ADR-0067): the frame pipe that came with `ScreenFrames`, for
+    /// the share it names. `None` inside the pair: the handle was not a
+    /// pipe, or the worker already owns it, so the share gets none and is
+    /// unavailable. The next `ScreenFrames`, a start that takes it, or the
+    /// end of the call drops (closes) it.
+    #[cfg(windows)]
+    screen_frames: Option<(u32, Option<screen::FramePipe>)>,
     screen_open_tx: mpsc::Sender<Opened<OpenedScreen, ScreenState>>,
     remote: RemoteVideo,
     /// The subscribed remote audio tracks that the level meters read
@@ -2179,9 +2188,7 @@ impl Call<'_> {
                     self.release_screen_capture(opened.capture).await;
                 }
                 let state = match self.screen_end_reason.take() {
-                    Some((ended, screen::Ended::Failed)) if ended == generation => {
-                        ScreenState::Unavailable
-                    }
+                    Some((ended, reason)) if ended == generation => reason.state(),
                     _ => ScreenState::Off,
                 };
                 self.output.send(FromWorker::Screen { state, share }).await
@@ -2306,10 +2313,7 @@ impl Call<'_> {
             return Ok(());
         }
         self.stop_screen(true).await;
-        let state = match ended {
-            screen::Ended::Source => ScreenState::Off,
-            screen::Ended::Failed => ScreenState::Unavailable,
-        };
+        let state = ended.state();
         self.output
             .send(FromWorker::Screen {
                 state,
@@ -2325,10 +2329,7 @@ impl Call<'_> {
     fn screen_on(&mut self, target: ScreenTarget, share: u32) -> Vec<FromWorker> {
         // The remote that came with this command, taken now so it cannot go
         // to another one. A Windows monitor or a macOS display has none.
-        let grant = match target {
-            ScreenTarget::Portal { .. } => screen::Grant::take(),
-            ScreenTarget::Monitor { .. } | ScreenTarget::Display { .. } => screen::Grant::default(),
-        };
+        let grant = self.screen_grant(&target, share);
         match self
             .screen_next
             .admit(&self.screen_gate, target, grant, share)
@@ -2336,6 +2337,49 @@ impl Call<'_> {
             Some((target, grant, share)) => self.screen_start(target, grant, share),
             None => Vec::new(),
         }
+    }
+
+    /// What a start of `target`, share `share`, takes with it. Linux: the
+    /// oldest portal remote of a portal target. Windows: the frame pipe that
+    /// came for this share, never one of another share (that one stays for
+    /// its own start, or is dropped by the next `ScreenFrames`). Other
+    /// targets have none.
+    #[cfg(not(windows))]
+    fn screen_grant(&mut self, target: &ScreenTarget, _share: u32) -> screen::Grant {
+        match target {
+            ScreenTarget::Portal { .. } => screen::Grant::take(),
+            ScreenTarget::Monitor { .. } | ScreenTarget::Display { .. } => screen::Grant::default(),
+        }
+    }
+
+    #[cfg(windows)]
+    fn screen_grant(&mut self, target: &ScreenTarget, share: u32) -> screen::Grant {
+        let frames = match (target, self.screen_frames.take()) {
+            (ScreenTarget::Monitor { .. }, Some((named, frames))) if named == share => frames,
+            // Another share's pipe stays for its own start.
+            (_, kept) => {
+                self.screen_frames = kept;
+                None
+            }
+        };
+        screen::Grant::from_frames(share, frames)
+    }
+
+    /// The read end of the frame pipe of share `share` (ADR-0067). Keeps the
+    /// handle if it is a pipe; the one kept before is closed. A handle that
+    /// is not a pipe, or one the worker already owns (the kept one, or the
+    /// one a capture reads), is kept as none and is never closed or read: it
+    /// is adopted before the kept one is dropped. No answer. Only Windows
+    /// has a helper, so another OS refuses the message.
+    #[cfg(windows)]
+    fn screen_frames(&mut self, share: u32, handle: u32) -> Result<Vec<FromWorker>, FailureCode> {
+        self.screen_frames = Some((share, screen::adopt_frames(handle)));
+        Ok(Vec::new())
+    }
+
+    #[cfg(not(windows))]
+    fn screen_frames(&mut self, _share: u32, _handle: u32) -> Result<Vec<FromWorker>, FailureCode> {
+        Err(FailureCode::Protocol)
     }
 
     /// The commands of a screen start: `Starting` first, then what the open
@@ -2987,6 +3031,7 @@ impl Call<'_> {
                 });
                 Ok(reply)
             }
+            ToWorker::ScreenFrames { share, handle } => self.screen_frames(share, handle),
             ToWorker::SetScreen {
                 target: Some(target),
                 share,

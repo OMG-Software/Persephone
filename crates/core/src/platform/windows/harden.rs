@@ -73,12 +73,13 @@ pub fn block_injected_dlls() -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::block_injected_dlls;
+    use crate::platform::windows::spawn_for_test;
     use std::{
         ffi::{OsString, c_void},
         fs,
         os::windows::ffi::{OsStrExt, OsStringExt},
         path::{Path, PathBuf},
-        process::Command,
+        process::{Command, Stdio},
     };
 
     const PROBE_ENV: &str = "PERSEPHONE_HARDEN_PROBE_DIR";
@@ -175,29 +176,38 @@ mod tests {
             fs::write(dir.join(name), &original).expect("write intact copy");
         }
         for name in ["low-a.dll", "low-b.dll"] {
-            let labelled = Command::new("icacls")
-                .arg(dir.join(name))
-                .args(["/setintegritylevel", "low"])
-                .output()
-                .expect("start icacls");
-            assert!(labelled.status.success(), "icacls failed for {name}");
+            let labelled = spawn_for_test(
+                Command::new("icacls")
+                    .arg(dir.join(name))
+                    .args(["/setintegritylevel", "low"])
+                    .stdout(Stdio::null()),
+            )
+            .expect("start icacls")
+            .wait()
+            .expect("wait for icacls");
+            assert!(labelled.success(), "icacls failed for {name}");
         }
         let mut altered = original;
         altered[at] = b't';
         for name in ["probe-a.dll", "probe-b.dll"] {
             fs::write(dir.join(name), &altered).expect("write probe");
         }
-        let output = Command::new(std::env::current_exe().expect("test exe"))
-            .args([
-                "--exact",
-                HELPER,
-                "--ignored",
-                "--nocapture",
-                "--test-threads=1",
-            ])
-            .env(PROBE_ENV, &dir)
-            .output()
-            .expect("start child");
+        let output = spawn_for_test(
+            Command::new(std::env::current_exe().expect("test exe"))
+                .args([
+                    "--exact",
+                    HELPER,
+                    "--ignored",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(PROBE_ENV, &dir)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .expect("start child")
+        .wait_with_output()
+        .expect("wait for child");
         let _ = fs::remove_dir_all(&dir);
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);

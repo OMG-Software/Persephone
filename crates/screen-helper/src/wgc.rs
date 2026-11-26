@@ -1,9 +1,10 @@
-//! Windows.Graphics.Capture of one monitor (ADR-0053).
+//! Windows.Graphics.Capture of one monitor (ADR-0053, ADR-0067).
 //!
-//! This file uses only `std` and the `windows` crate, so the call worker
-//! (`screen/windows.rs`) and the native containment gate
-//! (`tests/platform/windows`) compile the same source. The gate runs it
-//! inside the worker's AppContainer to measure whether capture works there.
+//! This file uses only `std` and the `windows` crate, so the screen helper
+//! (`persephone-screen-helper`) and the native containment gate
+//! (`tests/platform/windows`) compile the same source. The helper runs it
+//! with the user's token; the gate runs it inside the call worker's
+//! AppContainer to measure that capture is denied there.
 //!
 //! The monitor list is read in display order (`EnumDisplayMonitors`). Each
 //! size is the monitor's current mode in pixels (`EnumDisplaySettingsW`), not
@@ -16,7 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use windows::Foundation::TypedEventHandler;
 use windows::Graphics::Capture::{
-    Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession,
+    Direct3D11CaptureFrame, Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession,
 };
 use windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
 use windows::Graphics::DirectX::DirectXPixelFormat;
@@ -90,14 +91,14 @@ pub enum Stage {
 pub struct Monitor {
     pub handle: HMONITOR,
     /// The GDI device name (`MONITORINFOEXW::szDevice`, for example
-    /// `\\.\DISPLAY1`), with zeros after the name. Only the GDI capture
-    /// (`gdi.rs`) reads it: the share names its monitor by it.
+    /// `\\.\DISPLAY1`), with zeros after the name. The share names its
+    /// monitor by it (`monitor.rs`).
     #[allow(dead_code)]
     pub device: [u16; DEVICE_NAME_UNITS],
     /// The rectangle on the virtual screen (left, top, right, bottom), in
     /// the pixels of the calling thread's DPI awareness (physical pixels for
-    /// a per-monitor aware thread). Only the GDI capture (`gdi.rs`) reads it:
-    /// it copies this rectangle.
+    /// a per-monitor aware thread). The share names its monitor by it too
+    /// (`monitor.rs`).
     #[allow(dead_code)]
     pub rect: (i32, i32, i32, i32),
     /// The size the user is shown: the current display mode, else the
@@ -141,7 +142,7 @@ pub struct Place {
 }
 
 /// A monitor's place from one `GetMonitorInfoW` call, or `None` when Windows
-/// no longer knows the handle. The list and the GDI capture's place checks
+/// no longer knows the handle. The list and the helper's place checks
 /// both read a monitor through this, so their readings compare equal while
 /// it does not change.
 pub fn monitor_place(monitor: HMONITOR) -> Option<Place> {
@@ -243,7 +244,7 @@ impl Drop for ComGuard {
 
 thread_local! {
     /// The `HRESULT` of the last failure on this thread, for the gate's
-    /// probe. The worker never reads it, and it is never sent anywhere.
+    /// probe. The helper never reads it, and it is never sent anywhere.
     static LAST_ERROR: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
 }
 
@@ -273,6 +274,46 @@ pub struct Capture {
     size: SizeInt32,
     closed: Arc<AtomicBool>,
     staging: Option<(ID3D11Texture2D, u32, u32)>,
+    /// The newest frame that `admit` refused ([`take_next`]). It holds one
+    /// of the pool's buffers until it is copied or a newer frame replaces
+    /// it.
+    held: Option<PoolFrame>,
+}
+
+/// A frame from the pool. Dropping it closes it, so its buffer goes back to
+/// the pool at once on every path: after its copy, when a newer frame
+/// replaces it, when the size changes and on an error.
+struct PoolFrame(Direct3D11CaptureFrame);
+
+impl Drop for PoolFrame {
+    fn drop(&mut self) {
+        // A failed close leaves the release of the last reference to do it.
+        let _ = self.0.Close();
+    }
+}
+
+/// What to copy now: a frame that just came when `admit` lets it through,
+/// otherwise the kept one once `admit` does. A frame that `admit` refuses
+/// is kept in place of an older one: it is the newest picture of the
+/// screen, and the capture gives a frame only when the screen changed, so
+/// it must still go when its time comes.
+fn take_next<T>(
+    kept: &mut Option<T>,
+    arrived: Option<T>,
+    admit: &mut dyn FnMut() -> bool,
+) -> Option<T> {
+    match arrived {
+        Some(frame) if admit() => {
+            *kept = None;
+            Some(frame)
+        }
+        Some(frame) => {
+            *kept = Some(frame);
+            None
+        }
+        None if kept.is_some() && admit() => kept.take(),
+        None => None,
+    }
 }
 
 /// Starts capturing the monitor at `index` of [`monitors`]. When `expected`
@@ -284,13 +325,30 @@ pub fn open(index: usize, expected: Option<(u32, u32)>) -> Result<Capture, Stage
     if expected.is_some_and(|size| size != (monitor.width, monitor.height)) {
         return Err(Stage::SizeChanged);
     }
+    open_monitor(&monitor)
+}
+
+/// Whether a capture of `size` is within the capture limits
+/// ([`super::monitor::size_ok`]). Checked before any frame buffer of that
+/// size is made.
+fn size_fits(size: SizeInt32) -> bool {
+    match (u32::try_from(size.Width), u32::try_from(size.Height)) {
+        (Ok(width), Ok(height)) => super::monitor::size_ok(width, height),
+        _ => false,
+    }
+}
+
+/// Starts capturing `monitor`, which the caller took from [`monitors`] a
+/// moment ago (the helper chooses it by name, size and rectangle).
+pub fn open_monitor(monitor: &Monitor) -> Result<Capture, Stage> {
     let interop = factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()
         .map_err(|error| note(Stage::Interop, error))?;
     // SAFETY: `monitor.handle` came from `EnumDisplayMonitors` just now.
     let item: GraphicsCaptureItem = unsafe { interop.CreateForMonitor(monitor.handle) }
         .map_err(|error| note(Stage::Item, error))?;
     let size = item.Size().map_err(|error| note(Stage::Item, error))?;
-    if size.Width < 2 || size.Height < 2 {
+    // The pool's buffers have this size: check it before they exist.
+    if !size_fits(size) {
         return Err(Stage::BadSize);
     }
 
@@ -333,6 +391,12 @@ pub fn open(index: usize, expected: Option<(u32, u32)>) -> Result<Capture, Stage
     let session = pool
         .CreateCaptureSession(&item)
         .map_err(|error| note(Stage::Session, error))?;
+    // The cursor is part of the picture. This is the default; it is set so
+    // the rule is in the code. The yellow border is never touched
+    // (`IsBorderRequired` stays at its default, on): the user always sees
+    // that the screen is shared. A system that lacks the property keeps its
+    // default, which is also on.
+    let _ = session.SetIsCursorCaptureEnabled(true);
     let closed = Arc::new(AtomicBool::new(false));
     let flag = closed.clone();
     item.Closed(
@@ -355,6 +419,7 @@ pub fn open(index: usize, expected: Option<(u32, u32)>) -> Result<Capture, Stage
         size,
         closed,
         staging: None,
+        held: None,
     })
 }
 
@@ -364,8 +429,13 @@ impl Capture {
         self.closed.load(Ordering::Acquire)
     }
 
-    /// Takes the next frame, if one waits. `Ok(false)`: no frame waits.
-    /// A frame that `admit` refuses is dropped before any copy. Otherwise
+    /// Takes the next frame, if one waits. `Ok(true)`: a picture was copied,
+    /// or the pool was made again for a new size, so the caller polls again
+    /// at once. `Ok(false)`: nothing was copied, also when a frame came and
+    /// `admit` refused it, so the caller waits before the next poll. A
+    /// refused frame is kept as the newest picture of the screen; it is
+    /// copied once `admit` lets it through, unless a newer frame came first
+    /// ([`take_next`]).
     /// `deliver` gets the BGRA bytes as `(width, height, stride, bytes)`;
     /// they are valid only during the call.
     pub fn poll(
@@ -373,31 +443,41 @@ impl Capture {
         admit: &mut dyn FnMut() -> bool,
         deliver: &mut Deliver<'_>,
     ) -> Result<bool, Stage> {
-        let Ok(frame) = self.pool.TryGetNextFrame() else {
+        let arrived = self.pool.TryGetNextFrame().ok().map(PoolFrame);
+        if let Some(PoolFrame(frame)) = &arrived {
+            let content = frame
+                .ContentSize()
+                .map_err(|error| note(Stage::Texture, error))?;
+            if content.Width != self.size.Width || content.Height != self.size.Height {
+                // The monitor changed size: the next frames use the new size,
+                // and a kept frame of the old size goes. `Recreate` makes the
+                // buffers of the new size, so a size past the capture limits
+                // is refused before it.
+                if !size_fits(content) {
+                    return Err(Stage::BadSize);
+                }
+                self.held = None;
+                self.pool
+                    .Recreate(
+                        &self.winrt_device,
+                        DirectXPixelFormat::B8G8R8A8UIntNormalized,
+                        POOL_BUFFERS,
+                        content,
+                    )
+                    .map_err(|error| note(Stage::Pool, error))?;
+                self.size = content;
+                return Ok(true);
+            }
+        }
+        // The frame is closed when it goes out of scope, after the surface
+        // and the texture made from it (declared later, dropped first).
+        let Some(pooled) = take_next(&mut self.held, arrived, admit) else {
             return Ok(false);
         };
+        let frame = &pooled.0;
         let content = frame
             .ContentSize()
             .map_err(|error| note(Stage::Texture, error))?;
-        if content.Width != self.size.Width || content.Height != self.size.Height {
-            // The monitor changed size: the next frames use the new size.
-            if content.Width < 2 || content.Height < 2 {
-                return Err(Stage::BadSize);
-            }
-            self.pool
-                .Recreate(
-                    &self.winrt_device,
-                    DirectXPixelFormat::B8G8R8A8UIntNormalized,
-                    POOL_BUFFERS,
-                    content,
-                )
-                .map_err(|error| note(Stage::Pool, error))?;
-            self.size = content;
-            return Ok(true);
-        }
-        if !admit() {
-            return Ok(true);
-        }
         let surface = frame
             .Surface()
             .map_err(|error| note(Stage::Texture, error))?;
@@ -468,9 +548,51 @@ impl Capture {
 impl Drop for Capture {
     fn drop(&mut self) {
         // Closing ends the capture and releases the screen. A failure here
-        // leaves nothing more to do.
+        // leaves nothing more to do. A kept frame goes back first.
+        drop(self.held.take());
         let _ = self.session.Close();
         let _ = self.pool.Close();
         let _ = &self.item;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SizeInt32, size_fits, take_next};
+
+    /// GIVEN capture sizes WHEN they are checked before a frame pool is made
+    /// or made again THEN sizes within the capture limits fit, and a size
+    /// past them (an 8K monitor), a negative size and a size below 2 do not.
+    #[test]
+    fn given_capture_sizes_when_checked_then_only_sizes_within_the_limits_fit() {
+        let size = |w: i32, h: i32| SizeInt32 {
+            Width: w,
+            Height: h,
+        };
+        assert!(size_fits(size(2560, 1440)));
+        assert!(size_fits(size(3840, 2160)));
+        assert!(!size_fits(size(7680, 4320)));
+        assert!(!size_fits(size(-1920, 1080)));
+        assert!(!size_fits(size(1, 1080)));
+    }
+
+    /// GIVEN frames that the gate refuses WHEN no newer one comes THEN the
+    /// newest refused one is taken once the gate opens, and only once; an
+    /// older refused one never is; and a frame that the gate lets through
+    /// goes at once and drops the kept one.
+    #[test]
+    fn given_refused_frames_when_the_gate_opens_then_the_newest_goes() {
+        let mut kept = None;
+        let mut open = || true;
+        let mut shut = || false;
+        assert_eq!(take_next(&mut kept, Some(1), &mut open), Some(1));
+        assert_eq!(take_next(&mut kept, Some(2), &mut shut), None);
+        assert_eq!(take_next(&mut kept, Some(3), &mut shut), None);
+        assert_eq!(take_next(&mut kept, None, &mut shut), None, "not yet");
+        assert_eq!(take_next(&mut kept, None, &mut open), Some(3));
+        assert_eq!(take_next(&mut kept, None, &mut open), None, "taken once");
+        assert_eq!(take_next(&mut kept, Some(4), &mut shut), None);
+        assert_eq!(take_next(&mut kept, Some(5), &mut open), Some(5));
+        assert_eq!(kept, None, "the newer frame replaced the kept one");
     }
 }

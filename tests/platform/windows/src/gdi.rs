@@ -1,26 +1,25 @@
-//! GDI capture of one monitor (ADR-0053, amendment of 25 November 2026).
+//! GDI capture of one monitor (ADR-0053 amendment of 25 November 2026).
 //!
-//! `GetDC(NULL)` and `BitBlt` copy the monitor into a DIB section. The
-//! measurement in `docs/evidence/screen-share-windows.md` shows that this
-//! runs in the call worker's AppContainer with its current capabilities and
-//! mitigations, where Windows.Graphics.Capture and DXGI Desktop Duplication
-//! are denied. The worker makes no window and draws nothing.
+//! The containment gate's measurement only. The call worker no longer
+//! captures the screen (ADR-0067): the screen helper does, with
+//! Windows.Graphics.Capture. This file stays because the gate measures what
+//! the call AppContainer can do: `GetDC(NULL)` and `BitBlt` copy the monitor
+//! into a DIB section there, with the worker's capabilities and mitigations,
+//! where Windows.Graphics.Capture and DXGI Desktop Duplication are denied
+//! (`docs/evidence/screen-share-windows.md`). The code draws nothing.
 //!
-//! This file uses only `std`, the `windows` crate and the monitor list of
-//! `wgc.rs`, so the call worker and the native containment gate compile the
-//! same source. Limits: Windows draws no capture border and no cursor into a
-//! GDI copy, and the copy is the same size as the monitor, at most
-//! [`MAX_PIXELS`] pixels (the DIB section is one buffer of that size).
+//! This file uses only `std`, the `windows` crate and the helper's
+//! `monitor.rs` and `wgc.rs`, so the gate compiles the same source that the
+//! helper uses to choose a monitor. Windows draws no capture border and no
+//! cursor into a GDI copy, and the copy is the same size as the monitor, at
+//! most [`monitor::MAX_PIXELS`] pixels (the DIB section is one buffer of
+//! that size).
 //!
-//! The share names its monitor by the GDI device name (`\\.\DISPLAY1`)
-//! and size the user saw. `open` takes only the listed monitor with that
-//! name and size, and copies exactly its rectangle (`copy_area`), which can
-//! differ from the size of its display mode. The copy reads a rectangle of
-//! the whole desktop, so before and after each copy the capture reads that
-//! monitor's name and rectangle again (`wgc::monitor_place`, the list's own
-//! reading): a monitor that moved, changed its size or went away ends the
-//! share, and the copy made while it changed is dropped. Another monitor is
-//! never sent as the chosen one.
+//! The copy reads a rectangle of the whole desktop, so before and after each
+//! copy the capture reads that monitor's name and rectangle again
+//! (`wgc::monitor_place`, the list's own reading): a monitor that moved,
+//! changed its size or went away ends the capture, and the copy made while
+//! it changed is dropped.
 
 use std::ffi::c_void;
 
@@ -34,15 +33,8 @@ use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetThreadDpiAwarenessContext,
 };
 
+use super::monitor::{self, Choice, Mismatch, device_name, size_ok};
 use super::wgc::{self, Place};
-
-/// The most pixels one capture copies (a 4K screen), as in the call
-/// protocol's `MAX_CAPTURE_PIXELS`.
-pub const MAX_PIXELS: u64 = 3840 * 2160;
-/// The longest side one capture copies, as in the call protocol's
-/// `MAX_CAPTURE_SIDE`. A larger monitor is refused at the start, because
-/// the frame check would drop each of its frames.
-pub const MAX_SIDE: u32 = 7680;
 
 /// Where a capture stopped. The numbers are the exit codes of the gate's
 /// probe (`tests/platform/windows/src/screen_alt.rs`); keep them in step.
@@ -66,77 +58,9 @@ pub enum Stage {
     Blit = 22,
 }
 
-/// Whether a monitor of this size can be copied. Checked before the buffer
-/// exists.
-pub const fn size_ok(width: u32, height: u32) -> bool {
-    width >= 2
-        && height >= 2
-        && width <= MAX_SIDE
-        && height <= MAX_SIDE
-        && (width as u64) * (height as u64) <= MAX_PIXELS
-}
-
-/// Which monitor [`open`] takes.
-#[derive(Clone, Copy, Debug)]
-pub enum Choice<'a> {
-    /// The first listed monitor, whatever its name and size: the gate's
-    /// probe only. A share always names its monitor.
-    #[allow(dead_code)]
-    First,
-    /// The monitor with this GDI device name (UTF-16 code units, no NUL),
-    /// this size in pixels and this rectangle (left, top, right, bottom) on
-    /// the virtual screen in physical pixels.
-    Named {
-        device: &'a [u16],
-        width: u32,
-        height: u32,
-        rect: (i32, i32, i32, i32),
-    },
-}
-
-/// A GDI device name up to its NUL.
-pub fn device_name(raw: &[u16]) -> &[u16] {
-    let end = raw.iter().position(|&unit| unit == 0).unwrap_or(raw.len());
-    &raw[..end]
-}
-
-/// The monitor of `list` that `choice` names. A name that no listed monitor
-/// has is [`Stage::NoMonitor`], another size is [`Stage::SizeChanged`], and
-/// another rectangle is [`Stage::NoMonitor`]: Windows can give a name to
-/// another output, but the rectangle is the part of the desktop the user
-/// approved. The share asked for one screen, and it never takes another.
-pub fn choose(list: &[wgc::Monitor], choice: Choice<'_>) -> Result<wgc::Monitor, Stage> {
-    match choice {
-        Choice::First => list.first().copied().ok_or(Stage::NoMonitor),
-        Choice::Named {
-            device,
-            width,
-            height,
-            rect,
-        } => {
-            let monitor = list
-                .iter()
-                .find(|monitor| device_name(&monitor.device) == device)
-                .copied()
-                .ok_or(Stage::NoMonitor)?;
-            if (monitor.width, monitor.height) != (width, height) {
-                Err(Stage::SizeChanged)
-            } else if monitor.rect != rect {
-                Err(Stage::NoMonitor)
-            } else {
-                Ok(monitor)
-            }
-        }
-    }
-}
-
-/// The monitor list in physical pixels: the calling thread is set to
-/// per-monitor DPI awareness first (for this thread only), as the core is
-/// when it reads the rectangle it sends.
-pub fn physical_monitors() -> Vec<wgc::Monitor> {
-    // SAFETY: changes only the DPI awareness of the calling thread.
-    unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
-    wgc::monitors()
+/// The monitor list in physical pixels (see [`monitor::physical_monitors`]).
+fn physical_monitors() -> Vec<wgc::Monitor> {
+    monitor::physical_monitors()
 }
 
 /// The monitor's place now, or `None` when Windows no longer knows the
@@ -185,7 +109,11 @@ pub fn open(choice: Choice<'_>) -> Result<Capture, Stage> {
     // The coordinates of the monitor list and of the screen DC must be
     // physical pixels, whatever the process manifest says. The setting is
     // for this thread only, and stays for the copies.
-    let monitor = choose(&physical_monitors(), choice)?;
+    let monitor =
+        monitor::choose(&physical_monitors(), choice).map_err(|mismatch| match mismatch {
+            Mismatch::NoMonitor => Stage::NoMonitor,
+            Mismatch::SizeChanged => Stage::SizeChanged,
+        })?;
     if !size_ok(monitor.width, monitor.height) {
         return Err(Stage::BadSize);
     }
@@ -399,86 +327,6 @@ mod tests {
         assert_eq!(copy_area(&huge, &place(&huge)), Err(Stage::BadSize));
     }
 
-    /// GIVEN two monitors of the same size that changed places WHEN the
-    /// share names one by its device name and rectangle THEN that monitor is
-    /// taken, not the one that is now first; a name nobody has is not found,
-    /// another size is a changed size, and the right name with another
-    /// rectangle (the name now on another output) is not found.
-    #[test]
-    fn given_monitors_when_one_is_named_then_only_that_one_is_taken() {
-        let list = [
-            listed(r"\\.\DISPLAY2", 0, 1920, 1080),
-            listed(r"\\.\DISPLAY1", 1920, 1920, 1080),
-        ];
-        let device = wide(r"\\.\DISPLAY1");
-        let right = (1920, 0, 3840, 1080);
-        let named = |width, height, rect| Choice::Named {
-            device: &device,
-            width,
-            height,
-            rect,
-        };
-        let taken = choose(&list, named(1920, 1080, right)).expect("the named monitor");
-        assert_eq!(taken.rect, right);
-        assert_eq!(device_name(&taken.device), device.as_slice());
-        assert_eq!(
-            choose(&list, named(2560, 1440, right)).err(),
-            Some(Stage::SizeChanged)
-        );
-        // DISPLAY1 was approved on the left; the name is now on the right.
-        assert_eq!(
-            choose(&list, named(1920, 1080, (0, 0, 1920, 1080))).err(),
-            Some(Stage::NoMonitor)
-        );
-        let other = wide(r"\\.\DISPLAY9");
-        let missing = Choice::Named {
-            device: &other,
-            width: 1920,
-            height: 1080,
-            rect: right,
-        };
-        assert_eq!(choose(&list, missing).err(), Some(Stage::NoMonitor));
-        // A prefix of a listed name is another name.
-        let prefix = wide(r"\\.\DISPLAY");
-        let short = Choice::Named {
-            device: &prefix,
-            width: 1920,
-            height: 1080,
-            rect: right,
-        };
-        assert_eq!(choose(&list, short).err(), Some(Stage::NoMonitor));
-        assert_eq!(choose(&[], Choice::First).err(), Some(Stage::NoMonitor));
-        assert_eq!(choose(&list, Choice::First).expect("first").rect.0, 0);
-    }
-
-    /// GIVEN a device name buffer WHEN read THEN it ends at the first NUL, or
-    /// at the end of a buffer with none.
-    #[test]
-    fn given_a_device_name_buffer_when_read_then_it_ends_at_the_nul() {
-        assert_eq!(device_name(&[65, 66, 0, 67]), &[65, 66]);
-        assert_eq!(device_name(&[65, 66]), &[65, 66]);
-        assert!(device_name(&[0, 65]).is_empty());
-    }
-
-    /// GIVEN monitor sizes WHEN checked THEN a size the buffer can hold and
-    /// the frame check takes passes, and a degenerate, huge, too wide or
-    /// overflowing one does not.
-    #[test]
-    fn given_monitor_sizes_when_checked_then_only_bounded_sizes_pass() {
-        assert!(size_ok(1920, 1080));
-        assert!(size_ok(3840, 2160));
-        assert!(size_ok(2, 2));
-        assert!(size_ok(MAX_SIDE, 1000));
-        assert!(!size_ok(1, 1080));
-        assert!(!size_ok(1920, 0));
-        assert!(!size_ok(3840, 2161));
-        assert!(!size_ok(7680, 4320));
-        assert!(!size_ok(u32::MAX, u32::MAX));
-        // Under the pixel limit, but wider than any frame the worker sends.
-        assert!(!size_ok(8000, 1000));
-        assert!(!size_ok(MAX_SIDE + 1, 2));
-    }
-
     /// A device name as the place records it: the name, then zeros.
     fn recorded_name(raw: &[u16]) -> [u16; wgc::DEVICE_NAME_UNITS] {
         let mut name = [0; wgc::DEVICE_NAME_UNITS];
@@ -498,7 +346,7 @@ mod tests {
     /// The changes are made to the recorded place, not to the real display
     /// layout. Ignored: it copies the real screen (into memory only). Run it
     /// on Windows after a change to `poll` or the place checks:
-    /// `cargo test -p persephone-call-worker -- --ignored real_monitor`.
+    /// `cargo test -p persephone-test-windows -- --ignored real_monitor`.
     #[test]
     #[ignore = "copies the real screen"]
     fn given_a_real_monitor_when_its_place_changes_then_no_frame_is_delivered() {

@@ -184,6 +184,14 @@ pub trait WorkerProcess: Send + Sync {
     fn confirm_contained(&self) -> bool {
         true
     }
+
+    /// Windows (ADR-0067): duplicates `handle` into the worker process and
+    /// gives its value there; `None` when the process cannot take it. The
+    /// caller keeps and closes its own handle.
+    #[cfg(windows)]
+    fn give_handle(&self, _handle: &std::os::windows::io::OwnedHandle) -> Option<u32> {
+        None
+    }
 }
 
 /// One running, contained call worker.
@@ -259,6 +267,26 @@ impl CallWorkerLink {
         persephone_media_broker::send_screen_fd(channel, fd).map_err(|_| WorkerGone)
     }
 
+    /// Windows (ADR-0067): gives the worker the read end of the capture
+    /// helper's frame pipe for share `share`. The pipe is duplicated into
+    /// the worker process, and `ScreenFrames` names it there, in `slot`; the
+    /// worker checks that it is a pipe before it reads. The caller took the
+    /// slot, and one for the share's `SetScreen`, before it called this, so
+    /// a full queue never leaves the pipe in the worker without its
+    /// command. Send the `SetScreen` directly after. The caller closes its
+    /// own copy.
+    #[cfg(windows)]
+    pub fn send_screen_frames(
+        &self,
+        frames: &std::os::windows::io::OwnedHandle,
+        share: u32,
+        slot: mpsc::Permit<'_, ToWorker>,
+    ) -> Result<(), WorkerGone> {
+        let handle = self.process.give_handle(frames).ok_or(WorkerGone)?;
+        slot.send(ToWorker::ScreenFrames { share, handle });
+        Ok(())
+    }
+
     /// Uses `video` as the link's picture store: the one the host's read
     /// thread writes to.
     pub fn with_video(mut self, video: VideoStore) -> Self {
@@ -286,13 +314,6 @@ impl CallWorkerLink {
     /// link, for example when the session locks.
     pub fn kill_handle(&self) -> Arc<dyn WorkerProcess> {
         Arc::clone(&self.process)
-    }
-
-    /// Whether the command queue is full now: the worker runs but has not
-    /// read its commands yet. A closed queue is not full; `send` then says
-    /// the worker has gone.
-    pub fn queue_full(&self) -> bool {
-        !self.commands.is_closed() && self.commands.capacity() == 0
     }
 
     /// Queues `message` without blocking. `Ok(false)` is a full queue: the
