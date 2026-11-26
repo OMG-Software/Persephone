@@ -44,9 +44,9 @@ pub mod launcher;
 use core_link::{Band, CoreError, CoreLink, Video};
 use persephone_contracts::{
     AccountChange, AccountSettings, AccountStatus, AppStatus, CallDeviceTestKind,
-    CallDeviceTestStatus, CallDevices, CallParticipantLevel, CallReadiness, CallRings, CallStatus,
-    ContactStatus, ConversationStart, DeviceList, DiagnosticsStatus, DisplayName, HomeserverFound,
-    ImagePick, ImageView, InviteList, JoinedRoom, NewSessions, NotificationLevel,
+    CallDeviceTestStatus, CallDevices, CallParticipantLevel, CallReadiness, CallRings, CallStats,
+    CallStatus, ContactStatus, ConversationStart, DeviceList, DiagnosticsStatus, DisplayName,
+    HomeserverFound, ImagePick, ImageView, InviteList, JoinedRoom, NewSessions, NotificationLevel,
     NotificationSettings, PendingMessage, ProfileList, ProxySetting, PublicRoomPage, RoomActivity,
     RoomChange, RoomCreation, RoomIdentityChanges, RoomInvite, RoomList, RoomMembers, RoomPicture,
     RoomReaders, RoomServers, RoomSettings, SecurityStatus, StoreState, ThreePidList,
@@ -373,6 +373,18 @@ struct Toasts {
     waiting: Option<(String, String, bool)>,
 }
 
+/// A page's statistics channel with its backlog. Tauri queues a channel
+/// message over 8 KiB on the host until the web view fetches it, so a stalled
+/// page would let readings pile up. The host sends one reading at a time:
+/// only the newest waits, until the page says it handled the last one.
+struct StatsChannel {
+    channel: Channel<CallStats>,
+    /// A reading went to the page and `call_stats_read` has not come yet.
+    unread: bool,
+    /// The newest reading that came while `unread`.
+    waiting: Option<CallStats>,
+}
+
 /// The page's channel for each room it subscribed to, and its one session
 /// channel. The core accepts at most `MAX_SUBSCRIPTIONS` rooms, and a room
 /// channel is kept only after the core accepted the room, so this map is
@@ -391,6 +403,20 @@ pub struct Subscriptions {
     sound_level: Mutex<HashMap<String, Channel<u8>>>,
     /// Each page's channel for the other devices' levels (ADR-0059).
     levels: Mutex<HashMap<String, Channel<Vec<CallParticipantLevel>>>>,
+    /// Each page's channel for the call statistics (ADR-0066). A window has
+    /// one only while its page has the technical details open, so a reading
+    /// goes only to a page that asked for it.
+    stats: Mutex<HashMap<String, StatsChannel>>,
+    /// How many pages each window has loaded (ADR-0066). A page gets its
+    /// count from `watch_session` and sends it with each statistics request,
+    /// so a request of a page that is gone changes nothing, and a start that a
+    /// reload or close overtook keeps no channel.
+    pages: Mutex<HashMap<String, u64>>,
+    /// Lets one change of the core's statistics switch run at a time. Each
+    /// change ends with the switch as the kept channels want it, so a late
+    /// stop never undoes a later start and a closed page never leaves the
+    /// numbers on.
+    stats_order: tauri::async_runtime::Mutex<()>,
     toasts: Mutex<Toasts>,
     capture: Arc<capture::CaptureState>,
 }
@@ -418,6 +444,86 @@ impl Subscriptions {
         self.levels
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn stats(&self) -> MutexGuard<'_, HashMap<String, StatsChannel>> {
+        self.stats
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn pages(&self) -> MutexGuard<'_, HashMap<String, u64>> {
+        self.pages
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Drops the statistics channel of the window `label`. True when it had
+    /// one, so the core is told to stop reading.
+    pub fn forget_stats(&self, label: &str) -> bool {
+        self.stats().remove(label).is_some()
+    }
+
+    /// The count of the page that the window `label` shows now. `None` when
+    /// no page of the window was counted: counts start at 1, so no request
+    /// can match it.
+    fn page(&self, label: &str) -> Option<u64> {
+        self.pages().get(label).copied()
+    }
+
+    /// Counts a new page for the window `label` and drops its statistics
+    /// channel. Gives the new count, and whether a channel was dropped.
+    fn new_page(&self, label: &str) -> (u64, bool) {
+        let mut pages = self.pages();
+        let count = pages.entry(label.to_owned()).or_default();
+        *count += 1;
+        let page = *count;
+        (page, self.stats().remove(label).is_some())
+    }
+
+    /// Keeps `channel` for the window `label` only while it still shows the
+    /// page `page`. The check and the insert hold the page count, so a reset
+    /// cannot come between them.
+    fn keep_stats(&self, label: String, page: u64, channel: Channel<CallStats>) -> bool {
+        let pages = self.pages();
+        if pages.get(&label).copied() != Some(page) {
+            return false;
+        }
+        self.stats().insert(
+            label,
+            StatsChannel {
+                channel,
+                unread: false,
+                waiting: None,
+            },
+        );
+        true
+    }
+
+    /// The page `page` of the window `label` handled its last reading. Sends
+    /// the waiting reading, if any, and keeps the page unread, or clears
+    /// `unread`. False when the window shows another page. The check and the
+    /// change hold the page count, as `keep_stats` does, so a reload cannot
+    /// come between them and give the new page's channel the old page's read.
+    fn stats_read(&self, label: &str, page: u64) -> bool {
+        let pages = self.pages();
+        if pages.get(label).copied() != Some(page) {
+            return false;
+        }
+        if let Some(entry) = self.stats().get_mut(label) {
+            match entry.waiting.take() {
+                Some(stats) => {
+                    let _ = entry.channel.send(stats);
+                }
+                None => entry.unread = false,
+            }
+        }
+        true
+    }
+
+    /// Whether any page wants the statistics now.
+    fn wants_stats(&self) -> bool {
+        !self.stats().is_empty()
     }
 
     /// Tells every page's session channel about `what`.
@@ -500,6 +606,21 @@ impl Subscriptions {
                     let _ = channel.send(levels.clone());
                 }
             }
+            // Bounded numbers and IDs only; a reading outside its limits is
+            // dropped whole. Only a window that asked for it has a channel.
+            Event::CallStats { stats } => {
+                if !stats.within_limits() {
+                    return;
+                }
+                for entry in self.stats().values_mut() {
+                    if entry.unread {
+                        entry.waiting = Some(stats.clone());
+                    } else {
+                        let _ = entry.channel.send(stats.clone());
+                        entry.unread = true;
+                    }
+                }
+            }
             Event::RingsChanged {} => self.tell_sessions("rings"),
             Event::ModulesChanged {} => self.tell_sessions("modules"),
             // The UI host's own records follow the switch; the page asks for
@@ -571,21 +692,95 @@ async fn unsubscribe_room(
 
 /// Registers the page's session channel, its call sound level channel and
 /// its channel for the other devices' levels, replacing the earlier ones of
-/// the same window.
+/// the same window. A page calls it once, when it starts. It counts a new
+/// page, as `reset_subscriptions` does at the page load, and gives the page
+/// that count (ADR-0066): the page sends it with each `call_stats`, so the
+/// host takes a statistics request only from the page the window shows now.
+/// Counting here too gives each page a count of its own, also when a load
+/// event is missed.
 #[tauri::command]
 fn watch_session<R: Runtime>(
     webview: Webview<R>,
+    core: State<'_, CoreLink>,
     subscriptions: State<'_, Arc<Subscriptions>>,
     on_change: Channel<&'static str>,
     on_sound_level: Channel<u8>,
     on_levels: Channel<Vec<CallParticipantLevel>>,
-) {
+) -> u64 {
     let label = webview.label().to_owned();
+    let page = new_stats_page(core.inner(), subscriptions.inner(), &label);
     subscriptions.session().insert(label.clone(), on_change);
     subscriptions
         .sound_level()
         .insert(label.clone(), on_sound_level);
     subscriptions.levels().insert(label, on_levels);
+    page
+}
+
+/// Turns the call's technical details on or off for the calling window
+/// (ADR-0066). Only the call window may call it, with the count its page got
+/// from `watch_session`. The channel is kept only after the core accepted
+/// the start, and only while the window shows that page. The core reads the
+/// numbers only while they are on, and the host drops a reading outside its
+/// limits.
+///
+/// Tauri reads a command's arguments only in its task, which may start after
+/// the window reloaded or closed. So the page's count comes with the
+/// request: a request with any other count comes from a page the window no
+/// longer shows, and it fails and changes nothing, whenever its task starts.
+/// Each change of the core's switch takes `stats_order`, and so does the
+/// stop of `new_stats_page`. A start that a reload or close overtook while
+/// it was at the core keeps no channel and turns the switch off again.
+#[tauri::command]
+async fn call_stats<R: Runtime>(
+    webview: Webview<R>,
+    core: State<'_, CoreLink>,
+    subscriptions: State<'_, Arc<Subscriptions>>,
+    on: bool,
+    page: u64,
+    on_stats: Channel<CallStats>,
+) -> Result<(), String> {
+    let label = webview.label().to_owned();
+    let _order = subscriptions.stats_order.lock().await;
+    if subscriptions.page(&label) != Some(page) {
+        return Err(INVALID_ARGUMENT.to_owned());
+    }
+    if !on {
+        subscriptions.forget_stats(&label);
+        return relay(
+            core.inner(),
+            Call::CallStats {
+                on: subscriptions.wants_stats(),
+            },
+        )
+        .await;
+    }
+    relay::<()>(core.inner(), Call::CallStats { on: true }).await?;
+    // A reading that comes before the insert is lost; the next comes in a
+    // second.
+    if !subscriptions.keep_stats(label, page, on_stats) && !subscriptions.wants_stats() {
+        let _ = relay::<()>(core.inner(), Call::CallStats { on: false }).await;
+    }
+    Ok(())
+}
+
+/// Says that the calling window's page handled its last statistics reading
+/// (ADR-0066), so the host sends the next one. Only the call window may call
+/// it, with the count its page got from `watch_session`. It never reaches the
+/// core. A request with another count comes from a page the window no longer
+/// shows, and it fails and changes nothing. With no statistics channel it
+/// does nothing.
+#[tauri::command]
+fn call_stats_read<R: Runtime>(
+    webview: Webview<R>,
+    subscriptions: State<'_, Arc<Subscriptions>>,
+    page: u64,
+) -> Result<(), String> {
+    if subscriptions.stats_read(webview.label(), page) {
+        Ok(())
+    } else {
+        Err(INVALID_ARGUMENT.to_owned())
+    }
 }
 
 /// Locks the core's session. Replies with the resulting state; `locking`
@@ -2205,18 +2400,42 @@ fn restore_from_tray<R: Runtime>(app: &AppHandle<R>) {
 
 /// Drops a window's subscriptions when its page (re)loads or the window
 /// goes: the new page holds none of the old channels, and the core's slots
-/// would otherwise stay taken. Rooms belong to the main window only.
-fn reset_subscriptions(core: &CoreLink, subscriptions: &Subscriptions, label: &str) {
+/// would otherwise stay taken. Rooms belong to the main window only. The
+/// page-load and window-destroyed handlers call it; it is public for the
+/// IPC tests, because the mock runtime sends neither event.
+pub fn reset_subscriptions(core: &CoreLink, subscriptions: &Arc<Subscriptions>, label: &str) {
     let rooms = subscriptions.forget_window(label);
-    if rooms.is_empty() {
-        return;
+    // A window that goes or reloads stops the call statistics it asked for.
+    new_stats_page(core, subscriptions, label);
+    if !rooms.is_empty() {
+        let core = core.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            for room_id in rooms {
+                let _ = core.call(Call::Unsubscribe { room_id });
+            }
+        });
     }
-    let core = core.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        for room_id in rooms {
-            let _ = core.call(Call::Unsubscribe { room_id });
-        }
-    });
+}
+
+/// Counts a new page for the window `label` (ADR-0066), drops the
+/// statistics channel it had, and gives the new count. A request of an older
+/// page carries an older count and changes nothing; a start of one that is
+/// already at the core undoes itself. When a channel was dropped, the core
+/// is told to stop, in turn with the starts: when a later page has started
+/// them again first, the switch is already as it should be.
+fn new_stats_page(core: &CoreLink, subscriptions: &Arc<Subscriptions>, label: &str) -> u64 {
+    let (page, dropped) = subscriptions.new_page(label);
+    if dropped {
+        let core = core.clone();
+        let subscriptions = subscriptions.clone();
+        tauri::async_runtime::spawn(async move {
+            let _order = subscriptions.stats_order.lock().await;
+            if !subscriptions.wants_stats() {
+                let _ = relay::<()>(&core, Call::CallStats { on: false }).await;
+            }
+        });
+    }
+    page
 }
 
 /// True only for the bundled app's own origin. Tauri serves embedded assets
@@ -2291,6 +2510,8 @@ pub fn configure<R: Runtime>(
             call_microphone,
             call_camera,
             call_screen,
+            call_stats,
+            call_stats_read,
             call_video_frame,
             call_status,
             call_rings,

@@ -16,6 +16,7 @@
   } from './bridge';
   import CallVideo from './CallVideo.svelte';
   import {
+    DEVICE_FAILURE_TEXT,
     DEVICE_TEST_LABEL,
     DEVICE_TEST_STOP_LABEL,
     deviceTestActive,
@@ -118,12 +119,7 @@
   let failure = $state<string | null>(null);
   let generation = 0;
 
-  const failures: Record<string, string> = {
-    locked: 'The profile is locked.',
-    limit_exceeded: 'Persephone is busy. Try again in a moment.',
-    core_unavailable: 'The call devices could not be listed.',
-    invalid_argument: 'That device cannot be saved.'
-  };
+  const failures = DEVICE_FAILURE_TEXT;
 
   async function load() {
     if (busy) return;

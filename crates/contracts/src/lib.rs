@@ -2455,6 +2455,213 @@ pub struct CallParticipantLevel {
     pub level: u8,
 }
 
+// The `CALL_STATS_*` bounds repeat `MAX_STATS_*` of the call protocol, which
+// the worker clamps each number to. A number over a bound here drops the
+// whole reading, so the core checks at compile time that both sets match
+// (`crates/core/src/calls/stats.rs`). Change them together.
+
+/// The highest bitrate or bandwidth a call statistic shows, in kbit/s.
+pub const CALL_STATS_KBPS_MAX: u32 = 1_000_000;
+/// The longest time a call statistic shows, in milliseconds.
+pub const CALL_STATS_MS_MAX: u16 = 60_000;
+/// The highest frame rate a call statistic shows.
+pub const CALL_STATS_FPS_MAX: u8 = 120;
+/// The longest picture side a call statistic shows, in pixels.
+pub const CALL_STATS_SIDE_MAX: u16 = 16_384;
+/// The most connections one reading describes: the own call server and the
+/// other call servers of ADR-0054.
+pub const CALL_STATS_CONNECTIONS_MAX: usize = 4;
+
+/// Why a sent video runs below what was asked, as WebRTC reports it.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CallStatsLimit {
+    None,
+    Cpu,
+    Bandwidth,
+    Other,
+}
+
+/// The own microphone. An unknown value is null: a rate needs two readings,
+/// and the far end reports loss, jitter and round-trip time later. Each
+/// value that may be null is still a required key, here and in the other
+/// statistics types.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CallStatsAudioSent {
+    /// 0 to [`CALL_SOUND_LEVEL_MAX`].
+    pub level: u8,
+    /// Kbit/s, at most [`CALL_STATS_KBPS_MAX`].
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub bitrate_kbps: Option<u32>,
+    pub packets_sent: u32,
+    /// Packets the far end reports lost.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub packets_lost: Option<u32>,
+    /// Milliseconds, at most [`CALL_STATS_MS_MAX`].
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub jitter_ms: Option<u16>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub rtt_ms: Option<u16>,
+}
+
+/// The own camera or screen share.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CallStatsVideoSent {
+    /// At most [`CALL_STATS_FPS_MAX`].
+    pub fps: u8,
+    /// At most [`CALL_STATS_SIDE_MAX`] each.
+    pub width: u16,
+    pub height: u16,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub bitrate_kbps: Option<u32>,
+    pub limit: CallStatsLimit,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub packets_lost: Option<u32>,
+}
+
+/// The audio of another device in the call.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CallStatsAudioReceived {
+    /// 0 to [`CALL_SOUND_LEVEL_MAX`].
+    pub level: u8,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub bitrate_kbps: Option<u32>,
+    pub packets_received: u32,
+    pub packets_lost: u32,
+    pub jitter_ms: u16,
+    /// The share of the last second's samples that WebRTC made up, 0 to 100.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub concealed_percent: Option<u8>,
+}
+
+/// The video of another device in the call.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CallStatsVideoReceived {
+    pub fps: u8,
+    pub width: u16,
+    pub height: u16,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub bitrate_kbps: Option<u32>,
+    /// Frames dropped each second, at most [`CALL_STATS_FPS_MAX`].
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub dropped_fps: Option<u8>,
+    pub packets_lost: u32,
+}
+
+/// One other device in the call, by the IDs of the call status. The IDs are
+/// validated Matrix IDs (untrusted, shown as text).
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CallStatsParticipant {
+    pub user_id: String,
+    pub device_id: String,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub audio: Option<CallStatsAudioReceived>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub video: Option<CallStatsVideoReceived>,
+}
+
+/// One connection to a call server: 0 is the own one, 1 to 3 are other ones
+/// (ADR-0054).
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CallStatsConnection {
+    pub connection: u8,
+    /// The bandwidth that WebRTC estimates for sending, kbit/s.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub outgoing_kbps: Option<u32>,
+    /// Everything sent and received on the connection, kbit/s.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub send_kbps: Option<u32>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub receive_kbps: Option<u32>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub rtt_ms: Option<u16>,
+}
+
+/// The call's technical details, read about once a second while the call
+/// window shows them (ADR-0066). Numbers with units only: no address, port,
+/// codec or other text but the IDs of the devices.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CallStats {
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub microphone: Option<CallStatsAudioSent>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub camera: Option<CallStatsVideoSent>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub screen: Option<CallStatsVideoSent>,
+    /// At most [`CALL_PARTICIPANTS_MAX`], each device once.
+    pub participants: Vec<CallStatsParticipant>,
+    /// At most [`CALL_STATS_CONNECTIONS_MAX`], each connection once.
+    pub connections: Vec<CallStatsConnection>,
+}
+
+impl CallStats {
+    /// Whether every number is inside its bound, the lists are inside their
+    /// limits, no device or connection comes twice and the IDs fit. A reading
+    /// that fails is dropped whole, never cut.
+    pub fn within_limits(&self) -> bool {
+        let kbps = |value: Option<u32>| value.is_none_or(|value| value <= CALL_STATS_KBPS_MAX);
+        let millis = |value: Option<u16>| value.is_none_or(|value| value <= CALL_STATS_MS_MAX);
+        let sent_audio = |audio: &CallStatsAudioSent| {
+            audio.level <= CALL_SOUND_LEVEL_MAX
+                && kbps(audio.bitrate_kbps)
+                && millis(audio.jitter_ms)
+                && millis(audio.rtt_ms)
+        };
+        let sent_video = |video: &CallStatsVideoSent| {
+            video.fps <= CALL_STATS_FPS_MAX
+                && video.width <= CALL_STATS_SIDE_MAX
+                && video.height <= CALL_STATS_SIDE_MAX
+                && kbps(video.bitrate_kbps)
+        };
+        let audio = |audio: &CallStatsAudioReceived| {
+            audio.level <= CALL_SOUND_LEVEL_MAX
+                && kbps(audio.bitrate_kbps)
+                && audio.jitter_ms <= CALL_STATS_MS_MAX
+                && audio.concealed_percent.is_none_or(|percent| percent <= 100)
+        };
+        let video = |video: &CallStatsVideoReceived| {
+            video.fps <= CALL_STATS_FPS_MAX
+                && video.width <= CALL_STATS_SIDE_MAX
+                && video.height <= CALL_STATS_SIDE_MAX
+                && kbps(video.bitrate_kbps)
+                && video
+                    .dropped_fps
+                    .is_none_or(|fps| fps <= CALL_STATS_FPS_MAX)
+        };
+        self.microphone.as_ref().is_none_or(sent_audio)
+            && self.camera.as_ref().is_none_or(sent_video)
+            && self.screen.as_ref().is_none_or(sent_video)
+            && self.participants.len() <= CALL_PARTICIPANTS_MAX
+            && self.participants.iter().enumerate().all(|(index, person)| {
+                person.user_id.len() <= CALL_USER_ID_BYTES_MAX
+                    && person.device_id.len() <= CALL_DEVICE_ID_BYTES_MAX
+                    && person.audio.as_ref().is_none_or(audio)
+                    && person.video.as_ref().is_none_or(video)
+                    && !self.participants[..index].iter().any(|seen| {
+                        seen.user_id == person.user_id && seen.device_id == person.device_id
+                    })
+            })
+            && self.connections.len() <= CALL_STATS_CONNECTIONS_MAX
+            && self.connections.iter().enumerate().all(|(index, link)| {
+                usize::from(link.connection) < CALL_STATS_CONNECTIONS_MAX
+                    && kbps(link.outgoing_kbps)
+                    && kbps(link.send_kbps)
+                    && kbps(link.receive_kbps)
+                    && millis(link.rtt_ms)
+                    && !self.connections[..index]
+                        .iter()
+                        .any(|seen| seen.connection == link.connection)
+            })
+    }
+}
+
 /// What a device test checks (ADR-0059).
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -2918,6 +3125,14 @@ pub fn generated_typescript() -> String {
         format!("export {}", CallPhase::decl(&config)),
         format!("export {}", CallParticipant::decl(&config)),
         format!("export {}", CallParticipantLevel::decl(&config)),
+        format!("export {}", CallStatsLimit::decl(&config)),
+        format!("export {}", CallStatsAudioSent::decl(&config)),
+        format!("export {}", CallStatsVideoSent::decl(&config)),
+        format!("export {}", CallStatsAudioReceived::decl(&config)),
+        format!("export {}", CallStatsVideoReceived::decl(&config)),
+        format!("export {}", CallStatsParticipant::decl(&config)),
+        format!("export {}", CallStatsConnection::decl(&config)),
+        format!("export {}", CallStats::decl(&config)),
         format!("export {}", CallDeviceTestKind::decl(&config)),
         format!("export {}", CallDeviceTestState::decl(&config)),
         format!("export {}", CallDeviceTestStatus::decl(&config)),
@@ -3047,6 +3262,35 @@ pub fn generated_typescript() -> String {
     output.push_str(&format!(
         "\n/** The top of a call sound level meter. */\nexport const CALL_SOUND_LEVEL_MAX = {CALL_SOUND_LEVEL_MAX};\n"
     ));
+    for (doc, name, value) in [
+        (
+            "The highest call statistic bitrate, in kbit/s.",
+            "CALL_STATS_KBPS_MAX",
+            u64::from(CALL_STATS_KBPS_MAX),
+        ),
+        (
+            "The longest call statistic time, in milliseconds.",
+            "CALL_STATS_MS_MAX",
+            u64::from(CALL_STATS_MS_MAX),
+        ),
+        (
+            "The highest call statistic frame rate.",
+            "CALL_STATS_FPS_MAX",
+            u64::from(CALL_STATS_FPS_MAX),
+        ),
+        (
+            "The longest call statistic picture side, in pixels.",
+            "CALL_STATS_SIDE_MAX",
+            u64::from(CALL_STATS_SIDE_MAX),
+        ),
+        (
+            "The most connections in one call statistics reading.",
+            "CALL_STATS_CONNECTIONS_MAX",
+            CALL_STATS_CONNECTIONS_MAX as u64,
+        ),
+    ] {
+        output.push_str(&format!("\n/** {doc} */\nexport const {name} = {value};\n"));
+    }
     output
 }
 

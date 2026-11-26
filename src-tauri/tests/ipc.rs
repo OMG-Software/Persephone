@@ -6,7 +6,7 @@ use persephone_desktop::{
     BAND_PREFIX_BYTES, CALL_WINDOW, MAIN_WINDOW, Subscriptions, VIDEO_PREFIX_BYTES, configure,
     context,
     core_link::{Band, CoreError, CoreLink, CoreTransport, Video},
-    create_call_window, create_main_window,
+    create_call_window, create_main_window, reset_subscriptions,
 };
 use std::sync::{
     Arc, Mutex,
@@ -17,6 +17,12 @@ use tauri::{
     test::{INVOKE_KEY, MockRuntime, get_ipc_response, mock_builder},
     webview::InvokeRequest,
 };
+
+/// Where a held core call says that it arrived, and where it waits to go on.
+type Gate = (std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>);
+
+/// A device choice as recording, playout and camera; none is the default.
+type DeviceChoice = (Option<String>, Option<String>, Option<String>);
 
 /// Stands in for the core process. Counts calls so tests can show which
 /// requests never reached it.
@@ -31,6 +37,15 @@ struct FakeCore {
     timeline_events: Mutex<Option<(String, Vec<String>)>>,
     // What the stored account settings say about capture protection.
     capture_protection: AtomicBool,
+    // The call statistics switches that reached the core, in order.
+    stats_switches: Mutex<Vec<bool>>,
+    // Refuses a statistics start, as the core does without a call.
+    refuse_stats: AtomicBool,
+    // When set, the next statistics switch says that it arrived, then waits
+    // until the test lets it go.
+    stats_gate: Mutex<Option<Gate>>,
+    // The last device choice that reached the core.
+    call_devices: Mutex<Option<DeviceChoice>>,
 }
 
 impl FakeCore {
@@ -42,6 +57,10 @@ impl FakeCore {
             pasted: Mutex::new(None),
             timeline_events: Mutex::new(None),
             capture_protection: AtomicBool::new(true),
+            stats_switches: Mutex::new(Vec::new()),
+            refuse_stats: AtomicBool::new(false),
+            stats_gate: Mutex::new(None),
+            call_devices: Mutex::new(None),
         })
     }
 }
@@ -52,6 +71,26 @@ impl CoreTransport for FakeCore {
         self.calls.fetch_add(1, Ordering::SeqCst);
         if let Call::VerifyMember { room_id, user_id } = &call {
             *self.verified_member.lock().unwrap() = Some((room_id.clone(), user_id.clone()));
+        }
+        if let Call::CallStats { on } = &call {
+            self.stats_switches.lock().unwrap().push(*on);
+            let gate = self.stats_gate.lock().unwrap().take();
+            if let Some((arrived, release)) = gate {
+                let _ = arrived.send(());
+                let _ = release.recv();
+            }
+            if *on && self.refuse_stats.load(Ordering::SeqCst) {
+                return Err(CoreError::Core(ErrorCode::Unavailable));
+            }
+        }
+        if let Call::SetCallDevices {
+            recording,
+            playout,
+            camera,
+        } = &call
+        {
+            *self.call_devices.lock().unwrap() =
+                Some((recording.clone(), playout.clone(), camera.clone()));
         }
         if let Call::TimelineEvents { room_id, event_ids } = &call {
             *self.timeline_events.lock().unwrap() = Some((room_id.clone(), event_ids.clone()));
@@ -163,6 +202,7 @@ impl CoreTransport for FakeCore {
             Call::CallCamera { on } => Ok(
                 serde_json::json!({"phase": "active", "roomId": "!r:example.invalid", "muted": false, "deafened": false, "volume": 100, "participants": [], "ended": null, "joinError": null, "camera": if on { "starting" } else { "off" }, "screen": "off", "video": []}),
             ),
+            Call::CallStats { .. } => Ok(serde_json::Value::Null),
             Call::CallScreen { on } => Ok(
                 serde_json::json!({"phase": "active", "roomId": "!r:example.invalid", "muted": false, "deafened": false, "volume": 100, "participants": [], "ended": null, "joinError": null, "camera": "off", "screen": if on { "starting" } else { "off" }, "video": []}),
             ),
@@ -1116,6 +1156,10 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-call-volume",
             "allow-call-camera",
             "allow-call-screen",
+            "allow-call-devices",
+            "allow-set-call-devices",
+            "allow-call-stats",
+            "allow-call-stats-read",
             "allow-close-call-window",
             "allow-call-window-ready"
         ])
@@ -1144,7 +1188,6 @@ fn given_the_call_window_then_only_call_commands_are_allowed() {
         ("open_call_window", serde_json::json!({})),
         ("minimise_to_tray", serde_json::json!({})),
         ("exit_app", serde_json::json!({})),
-        ("call_devices", serde_json::json!({})),
         (
             "call_microphone",
             serde_json::json!({"autoLevel": true, "gain": 100}),
@@ -1173,6 +1216,353 @@ fn given_the_call_window_then_only_call_commands_are_allowed() {
         )
         .is_err()
     );
+}
+
+/// GIVEN the call window WHEN it lists the call devices and changes them
+/// THEN both are relayed (ADR-0065); WHEN an ID is empty or too long THEN it
+/// is refused before the core, and the device test commands stay refused.
+#[test]
+fn given_the_call_window_then_it_lists_and_changes_call_devices() {
+    let core = FakeCore::new(true);
+    let app = app_with(core.clone());
+    let _main = create_main_window(&app).unwrap();
+    let window = create_call_window(&app).unwrap();
+    let invoke = |cmd: &str, args| invoke_on(&window, cmd, app_origin(), args);
+    assert_eq!(
+        invoke("call_devices", serde_json::json!({})).unwrap()["recording"][0]["id"],
+        "mic-1"
+    );
+    assert_eq!(
+        invoke(
+            "set_call_devices",
+            serde_json::json!({"recording": "mic-1", "playout": null, "camera": "cam-1"})
+        ),
+        Ok(serde_json::Value::Null)
+    );
+    assert_eq!(
+        *core.call_devices.lock().unwrap(),
+        Some((Some("mic-1".to_owned()), None, Some("cam-1".to_owned()))),
+        "each choice crosses in its place, and null stays the system default"
+    );
+    let relayed = core.calls.load(Ordering::SeqCst);
+    for args in [
+        serde_json::json!({"recording": "", "playout": null}),
+        serde_json::json!({"playout": "s".repeat(513)}),
+        serde_json::json!({"camera": "cam\n1"}),
+    ] {
+        assert_eq!(
+            invoke("set_call_devices", args).unwrap_err(),
+            "invalid_argument"
+        );
+    }
+    assert_eq!(
+        core.calls.load(Ordering::SeqCst),
+        relayed,
+        "nothing relayed"
+    );
+    for cmd in ["call_device_test_stop", "call_device_test_status"] {
+        assert!(invoke(cmd, serde_json::json!({})).is_err(), "{cmd} refused");
+    }
+}
+
+/// GIVEN the call statistics command WHEN the main window calls it THEN it is
+/// refused before the core; WHEN the call window turns it on THEN the core
+/// is told, and a reading reaches only that window's channel while it is on,
+/// is dropped when out of its limits, and stops when the window turns it off,
+/// reloads or closes.
+#[test]
+fn given_call_statistics_then_only_the_call_window_may_open_them_and_only_while_open() {
+    use persephone_contracts::{CallStats, CallStatsAudioSent};
+    let delivered: Arc<Mutex<Vec<(u32, String)>>> = Arc::default();
+    let record = delivered.clone();
+    let subscriptions = Arc::new(Subscriptions::default());
+    let core = FakeCore::new(true);
+    let app = configure(
+        mock_builder().channel_interceptor(move |_, callback, _, body| {
+            let body = match body {
+                tauri::ipc::InvokeResponseBody::Json(json) => json.clone(),
+                tauri::ipc::InvokeResponseBody::Raw(_) => "raw".into(),
+            };
+            record.lock().unwrap().push((callback.0, body));
+            true
+        }),
+        core.clone(),
+        subscriptions.clone(),
+    )
+    .build(context())
+    .unwrap();
+    let main = create_main_window(&app).unwrap();
+    let call = create_call_window(&app).unwrap();
+    let reading = |level: u8| CallStats {
+        microphone: Some(CallStatsAudioSent {
+            level,
+            bitrate_kbps: Some(32),
+            packets_sent: 7,
+            packets_lost: None,
+            jitter_ms: None,
+            rtt_ms: None,
+        }),
+        ..CallStats::default()
+    };
+    let stats_on = |on: bool, page: u64| serde_json::json!({"on": on, "page": page, "onStats": "__CHANNEL__:9"});
+    let watch = serde_json::json!({"onChange": "__CHANNEL__:3", "onSoundLevel": "__CHANNEL__:4",
+                                   "onLevels": "__CHANNEL__:5"});
+    // A page's first request: it counts a new page and gives the page its
+    // count, which each statistics request carries.
+    let new_page = || {
+        invoke_on(&call, "watch_session", app_origin(), watch.clone())
+            .unwrap()
+            .as_u64()
+            .expect("watch_session gives the page count")
+    };
+    let switches = || core.stats_switches.lock().unwrap().clone();
+    let sent = |level: u8| {
+        let text = serde_json::to_string(&reading(level)).unwrap();
+        delivered
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(channel, body)| *channel == 9 && *body == text)
+            .count()
+    };
+    // Every delivery on the statistics channel, whatever it holds: a clamped
+    // or repaired reading would count here, but not in `sent`.
+    let total = || {
+        delivered
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(channel, _)| *channel == 9)
+            .count()
+    };
+    // A reading that the host refuses or that has no channel to go to must
+    // add no delivery at all.
+    let none_delivered = |stats: CallStats| {
+        let before = total();
+        subscriptions.dispatch(Event::CallStats { stats });
+        assert_eq!(total(), before, "no delivery");
+    };
+    // The page handled its last reading (ADR-0066).
+    let read = |from: u64| {
+        invoke_on(
+            &call,
+            "call_stats_read",
+            app_origin(),
+            serde_json::json!({"page": from}),
+        )
+    };
+    // A stop of the host goes on a task of its own, so wait for it, but not
+    // forever: the mock runtime sends no page or window events, so nothing
+    // else would end the wait. A switch that never comes fails here, by name.
+    let wait_for = |count: usize| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let seen = core.stats_switches.lock().unwrap().clone();
+            if seen.len() >= count {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "waited 10 s for {count} statistics switches, saw {seen:?}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    };
+    // A start held at the core until `release` sends.
+    let hold_start = || {
+        let (arrived, at_core) = std::sync::mpsc::channel();
+        let (release, held) = std::sync::mpsc::channel();
+        *core.stats_gate.lock().unwrap() = Some((arrived, held));
+        (at_core, release)
+    };
+
+    // The main window has no permission, so nothing reaches the core. Its
+    // page is counted first, so the request is valid apart from the window:
+    // only the capability can refuse it.
+    let main_page = invoke_on(
+        &main,
+        "watch_session",
+        app_origin(),
+        serde_json::json!({"onChange": "__CHANNEL__:13", "onSoundLevel": "__CHANNEL__:14",
+                           "onLevels": "__CHANNEL__:15"}),
+    )
+    .unwrap()
+    .as_u64()
+    .expect("watch_session gives the main page its count");
+    let refused = invoke_on(&main, "call_stats", app_origin(), stats_on(true, main_page));
+    assert!(refused.is_err());
+    assert_ne!(refused, Err(serde_json::json!("invalid_argument")));
+    assert!(switches().is_empty());
+
+    // Not asked for: no channel, nothing is delivered.
+    none_delivered(reading(1));
+
+    // A bad argument, or no page count, never reaches the core.
+    for bad in [
+        serde_json::json!({"on": "yes", "page": 0, "onStats": "__CHANNEL__:9"}),
+        serde_json::json!({"on": true, "onStats": "__CHANNEL__:9"}),
+        serde_json::json!({"on": true, "page": -1, "onStats": "__CHANNEL__:9"}),
+    ] {
+        assert!(invoke_on(&call, "call_stats", app_origin(), bad).is_err());
+    }
+    assert!(switches().is_empty());
+
+    // Before its page is counted, the window has no count: page 0, which
+    // the map's default would give, is not one, so a start, a stop and a
+    // read are all refused and nothing reaches the core.
+    assert!(invoke_on(&call, "call_stats", app_origin(), stats_on(true, 0)).is_err());
+    assert!(invoke_on(&call, "call_stats", app_origin(), stats_on(false, 0)).is_err());
+    assert!(read(0).is_err());
+    assert!(switches().is_empty());
+
+    let page = new_page();
+
+    // A start that the core refuses keeps no channel.
+    core.refuse_stats.store(true, Ordering::SeqCst);
+    assert!(invoke_on(&call, "call_stats", app_origin(), stats_on(true, page)).is_err());
+    core.refuse_stats.store(false, Ordering::SeqCst);
+    assert_eq!(switches(), [true], "the start was tried");
+    none_delivered(reading(1));
+    assert!(!subscriptions.forget_stats(CALL_WINDOW), "no channel kept");
+    core.stats_switches.lock().unwrap().clear();
+
+    // On: the core is told, and a reading in its limits is delivered.
+    assert_eq!(
+        invoke_on(&call, "call_stats", app_origin(), stats_on(true, page)),
+        Ok(serde_json::Value::Null)
+    );
+    assert_eq!(switches(), [true]);
+    subscriptions.dispatch(Event::CallStats { stats: reading(2) });
+    assert_eq!(sent(2), 1);
+
+    // A reading outside its limits is dropped whole. The page read the
+    // first reading, so a held-back delivery cannot hide a clamped one.
+    assert_eq!(read(page), Ok(serde_json::Value::Null));
+    none_delivered(reading(101));
+
+    // Off: the channel goes and the core is told.
+    assert_eq!(
+        invoke_on(&call, "call_stats", app_origin(), stats_on(false, page)),
+        Ok(serde_json::Value::Null)
+    );
+    assert_eq!(switches(), [true, false]);
+    none_delivered(reading(3));
+
+    // A window that is reloaded or closed drops its channel and tells the
+    // core to stop, through the handler its page load and its close use.
+    invoke_on(&call, "call_stats", app_origin(), stats_on(true, page)).unwrap();
+    assert_eq!(switches(), [true, false, true]);
+    let link: CoreLink = core.clone();
+    reset_subscriptions(&link, &subscriptions, CALL_WINDOW);
+    wait_for(4);
+    assert_eq!(switches(), [true, false, true, false]);
+    // The channel went with it, so another reset has nothing to stop.
+    assert!(!subscriptions.forget_stats(CALL_WINDOW), "once");
+    none_delivered(reading(4));
+
+    // A request of a page that is gone carries its old count, so it fails
+    // and changes nothing, however late Tauri starts its task: after the
+    // reload or close, and after the new page's `watch_session`.
+    core.stats_switches.lock().unwrap().clear();
+    let old = page;
+    assert_eq!(
+        invoke_on(&call, "call_stats", app_origin(), stats_on(true, old)),
+        Err(serde_json::json!("invalid_argument"))
+    );
+    let page = new_page();
+    assert!(invoke_on(&call, "call_stats", app_origin(), stats_on(true, old)).is_err());
+    assert!(switches().is_empty(), "a stale start reaches no core");
+    none_delivered(reading(5));
+    // The new page's own start stands, and a stale stop does not end it.
+    invoke_on(&call, "call_stats", app_origin(), stats_on(true, page)).unwrap();
+    assert!(invoke_on(&call, "call_stats", app_origin(), stats_on(false, old)).is_err());
+    assert_eq!(switches(), [true]);
+    subscriptions.dispatch(Event::CallStats { stats: reading(6) });
+    assert_eq!(sent(6), 1);
+
+    // A start already at the core when the window reloads, or when the new
+    // page's `watch_session` runs: it keeps no channel and turns the numbers
+    // off again, so nothing reads for a page that is gone.
+    reset_subscriptions(&link, &subscriptions, CALL_WINDOW);
+    wait_for(2);
+    core.stats_switches.lock().unwrap().clear();
+    for reload_by_watch in [false, true] {
+        let page = new_page();
+        let (at_core, release) = hold_start();
+        let window = call.clone();
+        let start = std::thread::spawn(move || {
+            invoke_on(
+                &window,
+                "call_stats",
+                app_origin(),
+                serde_json::json!({"on": true, "page": page, "onStats": "__CHANNEL__:9"}),
+            )
+        });
+        at_core
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the start reached the core");
+        if reload_by_watch {
+            new_page();
+        } else {
+            reset_subscriptions(&link, &subscriptions, CALL_WINDOW);
+        }
+        release.send(()).unwrap();
+        assert_eq!(start.join().unwrap(), Ok(serde_json::Value::Null));
+        assert_eq!(
+            switches(),
+            [true, false],
+            "reload by watch: {reload_by_watch}"
+        );
+        none_delivered(reading(7));
+        core.stats_switches.lock().unwrap().clear();
+    }
+
+    // A channel that a page kept goes when a new page starts, also when no
+    // load event came first, and the core is told to stop.
+    let page = new_page();
+    invoke_on(&call, "call_stats", app_origin(), stats_on(true, page)).unwrap();
+    new_page();
+    wait_for(2);
+    assert_eq!(switches(), [true, false]);
+    none_delivered(reading(8));
+
+    // One reading in flight per page, and only the newest waits.
+    let page = new_page();
+    invoke_on(&call, "call_stats", app_origin(), stats_on(true, page)).unwrap();
+    let base = total();
+    for level in [10, 11, 12] {
+        subscriptions.dispatch(Event::CallStats {
+            stats: reading(level),
+        });
+    }
+    assert_eq!((sent(10), sent(11), sent(12)), (1, 0, 0), "one in flight");
+    assert_eq!(total() - base, 1);
+    assert_eq!(read(page), Ok(serde_json::Value::Null));
+    assert_eq!((sent(11), sent(12)), (0, 1), "the newest waited");
+    assert_eq!(total() - base, 2);
+    // Nothing waits now, so a read only frees the page and the next reading
+    // goes at once.
+    assert_eq!(read(page), Ok(serde_json::Value::Null));
+    assert_eq!(total() - base, 2);
+    subscriptions.dispatch(Event::CallStats { stats: reading(13) });
+    assert_eq!(sent(13), 1);
+    // A read of a page that is gone, or from the main window, changes nothing.
+    // The main window's read names its own counted page, so only the
+    // capability can refuse it.
+    assert_eq!(read(page - 1), Err(serde_json::json!("invalid_argument")));
+    let refused = invoke_on(
+        &main,
+        "call_stats_read",
+        app_origin(),
+        serde_json::json!({"page": main_page}),
+    );
+    assert!(refused.is_err());
+    assert_ne!(refused, Err(serde_json::json!("invalid_argument")));
+    subscriptions.dispatch(Event::CallStats { stats: reading(14) });
+    assert_eq!(sent(14), 0, "the stale read did not free the page");
+    // With no statistics channel a read is fine and does nothing.
+    assert!(subscriptions.forget_stats(CALL_WINDOW));
+    assert_eq!(read(page), Ok(serde_json::Value::Null));
 }
 
 /// GIVEN a call window WHEN the main window says its page is ready THEN it

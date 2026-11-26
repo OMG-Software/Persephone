@@ -23,6 +23,7 @@ import type {
   CallReadiness,
   CallRing,
   CallRings,
+  CallStats,
   CallStatus,
   CallUnavailable,
   CallVideoTile,
@@ -99,6 +100,7 @@ import type {
   JoinedRoom
 } from '../../../crates/contracts/generated/contracts';
 import { parseLevels, parseSoundLevel } from '../calls.ts';
+import { parseCallStats } from '../callStats.ts';
 import { MAX_PASTED_IMAGE_BYTES, parseBand, type Band } from '../image.ts';
 import { parseVideoPicture, type VideoPicture } from '../video.ts';
 
@@ -342,7 +344,9 @@ export async function subscribeRoom(
  * ADR-0059): a whole number from 0 to 100; anything else is dropped.
  * `onLevels` gets the other devices' levels on a third channel: every device
  * that is not silent now; a bad list is dropped. `onDeviceTest` runs when a
- * device test changed (ask `callDeviceTestStatus`; it clears nothing).
+ * device test changed (ask `callDeviceTestStatus`; it clears nothing). The
+ * host also gives the page its count, which each statistics request carries
+ * (ADR-0066).
  */
 export async function watchSession(
   onSession: () => void,
@@ -389,7 +393,9 @@ export async function watchSession(
     const parsed = parseLevels(value);
     if (parsed !== null) onLevels(parsed);
   });
-  await invoke<null>('watch_session', { onChange: channel, onSoundLevel: soundLevel, onLevels: levels });
+  const page = await invoke<unknown>('watch_session', { onChange: channel, onSoundLevel: soundLevel, onLevels: levels });
+  // The host counts pages from 1, so 0 is no count.
+  statsPage = typeof page === 'number' && Number.isSafeInteger(page) && page >= 1 ? page : null;
   // The log may already be on (a reloaded page): follow it from now.
   await followDiagnostics();
 }
@@ -551,6 +557,79 @@ export function callJoin(roomId: string, video: boolean): Promise<CallStatus> {
  */
 export function callCamera(on: boolean): Promise<CallStatus> {
   return invoke<CallStatus>('call_camera', { on });
+}
+
+/**
+ * Turns the call's technical details on (ADR-0066): the host asks the core
+ * to read the numbers, and each reading reaches `onStats` about once a
+ * second. Only the call window may call it, after {@link watchSession}: the
+ * request carries the page's count, and with none it fails with
+ * `core_unavailable` and asks nothing. A reading that does not match the
+ * contract is dropped whole. The host sends one reading at a time: after
+ * each one, handled or dropped, the bridge tells the host with
+ * `call_stats_read`, and only then comes the next. Turn them off with
+ * {@link stopCallStats}.
+ */
+export async function startCallStats(onStats: (stats: CallStats) => void): Promise<void> {
+  await inStatsTurn(() => {
+    // Read when the turn comes, once: the host keeps the channel under the
+    // count of the start, so each reading is acknowledged with that count,
+    // also when a reload changed it while the start waited.
+    const page = statsPage;
+    if (page === null) {
+      // The bridge fails with the host's code strings, as `invoke` does, and
+      // the page maps each code to its text, so this failure is a code too.
+      return Promise.reject('core_unavailable'); // NOSONAR: a host code string, not an Error
+    }
+    const channel = new Channel<unknown>((value) => {
+      try {
+        const stats = parseCallStats(value);
+        if (stats !== null) onStats(stats);
+      } finally {
+        statsHandled(page);
+      }
+    });
+    return invoke<null>('call_stats', { on: true, page, onStats: channel });
+  });
+}
+
+/**
+ * Turns the call's technical details off (ADR-0066). Safe to call when they
+ * are off. With no count from {@link watchSession} nothing can have started,
+ * so it asks nothing.
+ */
+export async function stopCallStats(): Promise<void> {
+  await inStatsTurn(() =>
+    statsPage === null
+      ? Promise.resolve(null)
+      : invoke<null>('call_stats', { on: false, page: statsPage, onStats: new Channel<unknown>(() => {}) })
+  );
+}
+
+// Tells the host that the page handled a statistics reading, so it sends the
+// next. Nothing waits for the answer: a reload makes the count stale, and the
+// host refuses it, which is expected. `invoke` is async, so every failure,
+// also a bridge that is gone with the page, is a rejection that the catch
+// takes.
+function statsHandled(page: number): void {
+  invoke<null>('call_stats_read', { page }).catch(() => undefined);
+}
+
+// The page's count from `watch_session` (ADR-0066). The host takes a
+// statistics request only with the count of the page its window shows now,
+// so a request that reaches it after a reload or close changes nothing.
+let statsPage: number | null = null;
+
+// The host keeps one statistics channel per window, and the last start or
+// stop it gets wins. So starts and stops go one at a time, in the order the
+// page asked: the late stop of a closed panel can never turn off the panel
+// opened after it. A failed one does not hold up the next.
+let statsTurn: Promise<unknown> = Promise.resolve();
+
+function inStatsTurn<T>(task: () => Promise<T>): Promise<T> {
+  const turn = statsTurn.then(task, task);
+  statsTurn = turn.catch(() => undefined);
+  return turn;
 }
 
 /**

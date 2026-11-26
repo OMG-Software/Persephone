@@ -15,7 +15,14 @@ use persephone_media_protocol::{
 };
 use zeroize::Zeroizing;
 
-pub const VERSION: u8 = 13;
+mod stats;
+pub use stats::{
+    AudioReceiveStats, AudioSendStats, CallStats, ConnectionStats, MAX_STATS_CONNECTIONS,
+    MAX_STATS_FPS, MAX_STATS_KBPS, MAX_STATS_MS, MAX_STATS_SIDE, QualityLimit, RemoteStats,
+    VideoReceiveStats, VideoSendStats,
+};
+
+pub const VERSION: u8 = 14;
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 /// Longest diagnostic record target (ADR-0058).
 pub const MAX_DIAGNOSTIC_TARGET_BYTES: usize = 64;
@@ -407,6 +414,11 @@ pub enum ToWorker {
         playout: Option<String>,
         camera: Option<String>,
     },
+    /// Start or stop sending [`FromWorker::Stats`], at most one a second
+    /// (ADR-0066). Off when the worker starts. No answer.
+    SetStats {
+        on: bool,
+    },
 }
 
 /// The device that [`ToWorker::TestDevice`] tests. A closed set.
@@ -532,6 +544,7 @@ impl std::fmt::Debug for ToWorker {
                 .field("recording", recording)
                 .field("playout", playout)
                 .finish(),
+            Self::SetStats { on } => f.debug_struct("SetStats").field("on", on).finish(),
         }
     }
 }
@@ -892,6 +905,11 @@ pub enum FromWorker {
         target: String,
         message: String,
     },
+    /// The call's statistics, as numbers with units (ADR-0066). Sent at
+    /// most once a second, and only while [`ToWorker::SetStats`] is on. The
+    /// off drops a reading that waits; one that the worker was already
+    /// writing can still follow the off, and the core drops it.
+    Stats(CallStats),
 }
 
 // Tags of core to worker messages.
@@ -911,7 +929,8 @@ const TO_SET_DIAGNOSTICS: u8 = 13;
 const TO_TEST_DEVICE: u8 = 14;
 const TO_SET_DEVICES: u8 = 15;
 const TO_SET_MICROPHONE: u8 = 16;
-const TO_SCREEN_FRAMES: u8 = 17;
+const TO_SET_STATS: u8 = 17;
+const TO_SCREEN_FRAMES: u8 = 18;
 
 // Tags of worker to core messages.
 const FROM_READY: u8 = 1;
@@ -936,6 +955,7 @@ const FROM_SOUND_LEVEL: u8 = 19;
 const FROM_PARTICIPANT_LEVEL: u8 = 20;
 const FROM_PARTICIPANT_MUTED: u8 = 21;
 const FROM_DEVICES_SET: u8 = 22;
+const FROM_STATS: u8 = 23;
 
 #[derive(Clone, Copy)]
 enum CharRule {
@@ -1343,6 +1363,10 @@ impl ToWorker {
                 put_str(&mut out, playout.as_deref().unwrap_or(""));
                 put_str(&mut out, camera.as_deref().unwrap_or(""));
             }
+            Self::SetStats { on } => {
+                out.push(TO_SET_STATS);
+                out.push(u8::from(*on));
+            }
         }
         out
     }
@@ -1484,6 +1508,7 @@ impl ToWorker {
                 playout: reader.device_choice()?,
                 camera: reader.device_choice()?,
             },
+            TO_SET_STATS => Self::SetStats { on: reader.bool()? },
             _ => return Err(DecodeError::UnknownTag),
         };
         reader.finish()?;
@@ -1657,6 +1682,10 @@ impl FromWorker {
                 put_str(&mut out, target);
                 put_str(&mut out, message);
             }
+            Self::Stats(stats) => {
+                out.push(FROM_STATS);
+                stats::put_stats(&mut out, stats);
+            }
             Self::VideoStopped { tile } => {
                 out.push(FROM_VIDEO_STOPPED);
                 out.push(*tile);
@@ -1771,6 +1800,7 @@ impl FromWorker {
                 }
                 Self::VideoFrame { tile, rotation }
             }
+            FROM_STATS => Self::Stats(stats::read_stats(&mut reader)?),
             _ => return Err(DecodeError::UnknownTag),
         };
         reader.finish()?;
@@ -1988,6 +2018,7 @@ pub fn write_video_frame<W: Write>(
 
 #[cfg(test)]
 mod tests {
+    use super::stats::tests::full_stats;
     use super::*;
     use std::io::Cursor;
 
@@ -2199,6 +2230,8 @@ mod tests {
             },
             ToWorker::SetDiagnostics { on: true },
             ToWorker::SetDiagnostics { on: false },
+            ToWorker::SetStats { on: true },
+            ToWorker::SetStats { on: false },
             ToWorker::TestDevice {
                 test: DeviceTest::Microphone,
                 device: None,
@@ -2368,6 +2401,8 @@ mod tests {
                 target: "t".to_owned(),
                 message: String::new(),
             },
+            FromWorker::Stats(CallStats::default()),
+            FromWorker::Stats(full_stats()),
             FromWorker::VideoStopped { tile: 0 },
             FromWorker::VideoStopped { tile: 4 },
             FromWorker::VideoStopped { tile: SCREEN_TILE },
@@ -2448,7 +2483,7 @@ mod tests {
             width: 0,
             height: 0,
         };
-        write_frame(&mut wire, header, &[99, 1]).unwrap();
+        write_frame(&mut wire, header, &[VERSION + 1, 1]).unwrap();
         let result: Result<FromWorker, _> =
             read_message(&mut Cursor::new(wire), &ResourceBudgets::default());
         assert_eq!(result, Err(ReadError::Decode(DecodeError::UnknownVersion)));
@@ -2587,11 +2622,11 @@ mod tests {
             Err(DecodeError::UnknownTag)
         );
         assert_eq!(
-            ToWorker::decode(&[VERSION, 18]),
+            ToWorker::decode(&[VERSION, 19]),
             Err(DecodeError::UnknownTag)
         );
         assert_eq!(
-            FromWorker::decode(&[VERSION, 23]),
+            FromWorker::decode(&[VERSION, 24]),
             Err(DecodeError::UnknownTag)
         );
         assert_eq!(FromWorker::decode(&[]), Err(DecodeError::Truncated));
@@ -3209,7 +3244,7 @@ mod tests {
     /// 640x360 at 15 per second.
     #[test]
     fn given_tiles_when_limits_asked_then_screen_differs_from_camera() {
-        assert_eq!((VIDEO_TILES, SCREEN_TILE, VERSION), (6, 5, 13));
+        assert_eq!((VIDEO_TILES, SCREEN_TILE, VERSION), (6, 5, 14));
         assert_eq!(MAX_SCREEN_BYTES, 3_686_400);
         assert_eq!(MAX_SCREEN_PIXELS, 921_600);
         for tile in 0..SCREEN_TILE {
@@ -3712,13 +3747,13 @@ mod tests {
         );
     }
 
-    /// GIVEN a message of the previous wire versions (6 to 12)
+    /// GIVEN a message of the previous wire versions (6 to 13)
     /// WHEN it is decoded in either direction
     /// THEN the version is refused.
     #[test]
     fn given_older_wire_versions_when_decoded_then_they_are_refused() {
-        assert_eq!(VERSION, 13);
-        for old in [6, 7, 8, 9, 10, 11, 12] {
+        assert_eq!(VERSION, 14);
+        for old in [6, 7, 8, 9, 10, 11, 12, 13] {
             assert_eq!(
                 ToWorker::decode(&[old, TO_LEAVE]),
                 Err(DecodeError::UnknownVersion)

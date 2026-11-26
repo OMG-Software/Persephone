@@ -59,6 +59,7 @@ pub mod rings;
 pub mod screen;
 pub mod screen_helper;
 pub mod sfu;
+pub mod stats;
 pub mod status;
 pub mod video;
 pub mod worker;

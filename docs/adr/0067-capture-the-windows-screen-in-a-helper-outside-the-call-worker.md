@@ -153,10 +153,11 @@ it as accepted.
   started the worker), and then closes its own copy. Frames never pass
   through the core or the web view.
 * The core tells the worker with `ToWorker::ScreenFrames { share, handle }`
-  directly before the share's `SetScreen`. The call protocol rises to
-  version 13, because version 12 (ADR-0064) is on `main` without this
-  message: a core and a call worker of different builds then refuse each
-  other at the first message, not when a share starts.
+  directly before the share's `SetScreen` (tag 18). The call protocol
+  rises to version 14, because version 13 (ADR-0066, `SetStats` at tag 17)
+  is on `main` without this message: a core and a call worker of different
+  builds then refuse each other at the first message, not when a share
+  starts.
 * The worker takes the handle only when it is a pipe end (`GetFileType`
   reports a pipe and `GetNamedPipeInfo` accepts it, which refuses a socket)
   and none of its own standard handles, before it reads. It never closes a

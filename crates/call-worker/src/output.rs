@@ -6,8 +6,13 @@
 //!   that still waits, so at most one picture per tile is held, and a picture
 //!   never waits in front of a control message. The slot write never blocks.
 //!
+//! - The call statistics (ADR-0066) go into one slot, apart from both. A
+//!   newer reading replaces the one that still waits. The writer writes it
+//!   after the control messages and a waiting picture of its round, so it
+//!   never delays them, and the slot write never blocks.
+//!
 //! A small wake item in the control queue tells the writer that a picture
-//! waits. If the queue is full, the writer is busy and looks at the slots
+//! or a reading waits. If the queue is full, the writer is busy and looks at the slots
 //! anyway before it sleeps.
 
 use std::io::{self, Write};
@@ -15,7 +20,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 #[cfg(test)]
 use persephone_call_protocol::SCREEN_TILE;
-use persephone_call_protocol::{FromWorker, VIDEO_TILES, write_message, write_video_frame};
+use persephone_call_protocol::{
+    CallStats, FromWorker, VIDEO_TILES, write_message, write_video_frame,
+};
 use tokio::sync::mpsc::{self, WeakSender, error::TryRecvError};
 
 use crate::video::rgba_len;
@@ -84,10 +91,12 @@ impl Default for Slots {
 /// The own camera's tile.
 const OWN_TILE: u8 = 0;
 
-/// The newest waiting picture of each tile.
+/// The newest waiting picture of each tile, and the newest waiting
+/// statistics reading.
 #[derive(Default)]
 pub struct VideoSlots {
     slots: Mutex<Slots>,
+    stats: Mutex<Option<CallStats>>,
 }
 
 impl VideoSlots {
@@ -110,6 +119,19 @@ impl VideoSlots {
             });
         }
         valid
+    }
+
+    /// Stores a statistics reading and replaces the one that waits.
+    fn put_stats(&self, stats: CallStats) {
+        *self.stats.lock().unwrap_or_else(PoisonError::into_inner) = Some(stats);
+    }
+
+    /// Takes the waiting statistics reading.
+    fn take_stats(&self) -> Option<CallStats> {
+        self.stats
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
     }
 
     /// Drops the picture that waits for a tile. A remote tile stays closed
@@ -219,6 +241,22 @@ impl Output {
         }
     }
 
+    /// Offers a statistics reading (ADR-0066). It never waits, and it
+    /// replaces a reading that has not gone out, so at most one waits and
+    /// no control message is held up by it.
+    pub fn offer_stats(&self, stats: CallStats) {
+        self.slots.put_stats(stats);
+        // A full queue means the writer is busy and will look at the slot.
+        let _ = self.queue.try_send(Item::Wake);
+    }
+
+    /// Drops the statistics reading that waits, when the core turns the
+    /// statistics off (ADR-0066). A reading that the writer took before
+    /// this call can still go out; the core drops a reading while off.
+    pub fn clear_stats(&self) {
+        drop(self.slots.take_stats());
+    }
+
     /// Drops the picture that waits for a tile. Call it after the tile's
     /// producer has stopped and before `VideoStopped`.
     pub fn clear_picture(&self, tile: u8) {
@@ -293,6 +331,13 @@ fn write_loop_with<W: Write>(
                 return false;
             }
             wrote_picture = true;
+        }
+        // The newest statistics reading, after the control messages and the
+        // picture of this round.
+        if let Some(stats) = input.slots.take_stats()
+            && write_message(&mut out, &FromWorker::Stats(stats)).is_err()
+        {
+            return false;
         }
         // Diagnostic records only after every waiting control message and
         // picture, a few at a time, so neither waits long behind them, and
@@ -576,6 +621,107 @@ mod tests {
             items.last(),
             Some(WorkerItem::Video { tile: 0, .. })
         ));
+    }
+
+    fn stats_with_level(level: u8) -> CallStats {
+        CallStats {
+            microphone: Some(persephone_call_protocol::AudioSendStats {
+                level,
+                bitrate_kbps: None,
+                packets_sent: 0,
+                packets_lost: None,
+                jitter_ms: None,
+                rtt_ms: None,
+            }),
+            ..CallStats::default()
+        }
+    }
+
+    /// GIVEN several statistics readings before the writer runs WHEN it runs
+    /// THEN only the newest goes out, after the control messages and the
+    /// waiting picture.
+    #[test]
+    fn given_stats_pile_up_when_written_then_only_the_newest_goes_after_the_rest() {
+        let (output, receiver) = Output::new();
+        let sink = output.pictures();
+        for level in 1..=5 {
+            output.offer_stats(stats_with_level(level));
+        }
+        sink.put(0, 0, 1, 1, picture(1, 1, 3));
+        output
+            .queue
+            .try_send(output.slots.queued(FromWorker::Left))
+            .unwrap();
+        drop(sink);
+        drop(output);
+        let mut wire = Vec::new();
+        assert!(write_loop(&mut wire, receiver));
+        let items = read_all(wire);
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0], WorkerItem::Message(FromWorker::Left));
+        assert!(matches!(items[1], WorkerItem::Video { tile: 0, .. }));
+        assert_eq!(
+            items[2],
+            WorkerItem::Message(FromWorker::Stats(stats_with_level(5)))
+        );
+    }
+
+    /// GIVEN a reading that waits WHEN the statistics go off before the
+    /// writer runs THEN the reading is not written, and a reading offered
+    /// after that goes out.
+    #[test]
+    fn given_a_waiting_reading_when_stats_go_off_then_it_is_not_written() {
+        let (output, receiver) = Output::new();
+        output.offer_stats(stats_with_level(3));
+        output.clear_stats();
+        output
+            .queue
+            .try_send(output.slots.queued(FromWorker::Left))
+            .unwrap();
+        drop(output);
+        let mut wire = Vec::new();
+        assert!(write_loop(&mut wire, receiver));
+        assert_eq!(read_all(wire), vec![WorkerItem::Message(FromWorker::Left)]);
+
+        let (output, receiver) = Output::new();
+        output.offer_stats(stats_with_level(3));
+        output.clear_stats();
+        output.offer_stats(stats_with_level(4));
+        drop(output);
+        let mut wire = Vec::new();
+        assert!(write_loop(&mut wire, receiver));
+        assert_eq!(
+            read_all(wire),
+            vec![WorkerItem::Message(FromWorker::Stats(stats_with_level(4)))]
+        );
+    }
+
+    /// GIVEN a full control queue WHEN a reading is offered THEN the offer
+    /// does not block and takes no place in the queue, and the reading goes
+    /// out after the queue drains.
+    #[test]
+    fn given_full_queue_when_stats_offered_then_it_does_not_block_or_queue() {
+        let (output, receiver) = Output::new();
+        for _ in 0..OUTPUT_CAPACITY {
+            output
+                .queue
+                .try_send(output.slots.queued(FromWorker::Left))
+                .unwrap();
+        }
+        output.offer_stats(stats_with_level(9));
+        assert_eq!(
+            output.queue.max_capacity() - output.queue.capacity(),
+            OUTPUT_CAPACITY
+        );
+        drop(output);
+        let mut wire = Vec::new();
+        assert!(write_loop(&mut wire, receiver));
+        let items = read_all(wire);
+        assert_eq!(items.len(), OUTPUT_CAPACITY + 1);
+        assert_eq!(
+            items.last(),
+            Some(&WorkerItem::Message(FromWorker::Stats(stats_with_level(9))))
+        );
     }
 
     /// GIVEN pictures for several tiles WHEN the writer runs THEN the tiles take

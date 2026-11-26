@@ -1004,3 +1004,218 @@ fn linux_vault_reasons_are_fixed_store_codes() {
     }
     assert!(serde_json::from_value::<StoreState>(serde_json::json!("no_keyring")).is_err());
 }
+
+fn sample_call_stats() -> persephone_contracts::CallStats {
+    use persephone_contracts::{
+        CallStats, CallStatsAudioReceived, CallStatsAudioSent, CallStatsConnection, CallStatsLimit,
+        CallStatsParticipant, CallStatsVideoReceived, CallStatsVideoSent,
+    };
+    CallStats {
+        microphone: Some(CallStatsAudioSent {
+            level: 100,
+            bitrate_kbps: Some(32),
+            packets_sent: u32::MAX,
+            packets_lost: None,
+            jitter_ms: Some(60_000),
+            rtt_ms: Some(40),
+        }),
+        camera: Some(CallStatsVideoSent {
+            fps: 120,
+            width: 16_384,
+            height: 1,
+            bitrate_kbps: Some(1_000_000),
+            limit: CallStatsLimit::Bandwidth,
+            packets_lost: Some(3),
+        }),
+        screen: None,
+        participants: vec![CallStatsParticipant {
+            user_id: "@bob:example.invalid".into(),
+            device_id: "BOBDEV".into(),
+            audio: Some(CallStatsAudioReceived {
+                level: 5,
+                bitrate_kbps: None,
+                packets_received: 10,
+                packets_lost: 0,
+                jitter_ms: 4,
+                concealed_percent: Some(100),
+            }),
+            video: Some(CallStatsVideoReceived {
+                fps: 30,
+                width: 1280,
+                height: 720,
+                bitrate_kbps: Some(900),
+                dropped_fps: Some(120),
+                packets_lost: 1,
+            }),
+        }],
+        connections: vec![CallStatsConnection {
+            connection: 3,
+            outgoing_kbps: None,
+            send_kbps: Some(1),
+            receive_kbps: None,
+            rtt_ms: Some(60_000),
+        }],
+    }
+}
+
+/// GIVEN a statistics reading at every bound WHEN it crosses the wire THEN
+/// it round-trips with camelCase names, unknown fields are refused, and the
+/// bound itself passes `within_limits`.
+#[test]
+fn call_stats_cross_with_camel_case_names_and_refuse_unknown_fields() {
+    let stats = sample_call_stats();
+    assert!(stats.within_limits());
+    let json = serde_json::to_value(&stats).unwrap();
+    assert_eq!(json["microphone"]["packetsSent"], u32::MAX);
+    assert_eq!(json["camera"]["limit"], "bandwidth");
+    assert_eq!(json["participants"][0]["video"]["droppedFps"], 120);
+    assert!(json["screen"].is_null());
+    assert_eq!(
+        serde_json::from_value::<persephone_contracts::CallStats>(json.clone()).unwrap(),
+        stats
+    );
+    for path in [
+        "/microphone",
+        "/participants/0",
+        "/participants/0/audio",
+        "/connections/0",
+    ] {
+        let mut extra = json.clone();
+        extra.pointer_mut(path).unwrap()["address"] = "10.0.0.1".into();
+        assert!(
+            serde_json::from_value::<persephone_contracts::CallStats>(extra).is_err(),
+            "{path}"
+        );
+    }
+}
+
+/// GIVEN a statistics reading WHEN a value that may be null is null THEN it
+/// reads as unknown, and WHEN its key is left out THEN the reading is
+/// refused: the key is required, as the TypeScript contract declares.
+#[test]
+fn call_stats_need_each_nullable_key() {
+    let json = serde_json::to_value(sample_call_stats()).unwrap();
+    for (path, keys) in [
+        ("", &["microphone", "camera", "screen"][..]),
+        (
+            "/microphone",
+            &["bitrateKbps", "packetsLost", "jitterMs", "rttMs"],
+        ),
+        ("/camera", &["bitrateKbps", "packetsLost"]),
+        ("/participants/0", &["audio", "video"]),
+        (
+            "/participants/0/audio",
+            &["bitrateKbps", "concealedPercent"],
+        ),
+        ("/participants/0/video", &["bitrateKbps", "droppedFps"]),
+        (
+            "/connections/0",
+            &["outgoingKbps", "sendKbps", "receiveKbps", "rttMs"],
+        ),
+    ] {
+        for key in keys {
+            let mut null = json.clone();
+            null.pointer_mut(path).unwrap()[*key] = serde_json::Value::Null;
+            assert!(
+                serde_json::from_value::<persephone_contracts::CallStats>(null).is_ok(),
+                "{path}/{key} may be null"
+            );
+            let mut missing = json.clone();
+            let object = missing.pointer_mut(path).unwrap().as_object_mut().unwrap();
+            assert!(
+                object.remove(*key).is_some(),
+                "{path}/{key} is in the sample"
+            );
+            assert!(
+                serde_json::from_value::<persephone_contracts::CallStats>(missing).is_err(),
+                "{path}/{key} may not be left out"
+            );
+        }
+    }
+}
+
+/// GIVEN a statistics reading with one value over its bound, too many or
+/// repeated entries, or an overlong ID WHEN it is checked THEN it is
+/// refused whole.
+#[test]
+fn call_stats_over_their_bounds_are_refused_whole() {
+    use persephone_contracts::{
+        CALL_DEVICE_ID_BYTES_MAX, CALL_PARTICIPANTS_MAX, CALL_STATS_CONNECTIONS_MAX,
+        CALL_USER_ID_BYTES_MAX, CallStats,
+    };
+    type Edit = Box<dyn Fn(&mut CallStats)>;
+    let edits: [(&str, Edit); 12] = [
+        (
+            "level",
+            Box::new(|s| s.microphone.as_mut().unwrap().level = 101),
+        ),
+        (
+            "bitrate",
+            Box::new(|s| s.camera.as_mut().unwrap().bitrate_kbps = Some(1_000_001)),
+        ),
+        ("fps", Box::new(|s| s.camera.as_mut().unwrap().fps = 121)),
+        (
+            "side",
+            Box::new(|s| s.camera.as_mut().unwrap().height = 16_385),
+        ),
+        (
+            "jitter",
+            Box::new(|s| s.microphone.as_mut().unwrap().jitter_ms = Some(60_001)),
+        ),
+        (
+            "concealed",
+            Box::new(|s| {
+                s.participants[0].audio.as_mut().unwrap().concealed_percent = Some(101);
+            }),
+        ),
+        (
+            "dropped",
+            Box::new(|s| s.participants[0].video.as_mut().unwrap().dropped_fps = Some(121)),
+        ),
+        ("rtt", Box::new(|s| s.connections[0].rtt_ms = Some(60_001))),
+        (
+            "connection number",
+            Box::new(|s| s.connections[0].connection = 4),
+        ),
+        (
+            "user id",
+            Box::new(|s| s.participants[0].user_id = "u".repeat(CALL_USER_ID_BYTES_MAX + 1)),
+        ),
+        (
+            "device id",
+            Box::new(|s| s.participants[0].device_id = "d".repeat(CALL_DEVICE_ID_BYTES_MAX + 1)),
+        ),
+        (
+            "same device twice",
+            Box::new(|s| {
+                let again = s.participants[0].clone();
+                s.participants.push(again);
+            }),
+        ),
+    ];
+    for (name, edit) in edits {
+        let mut stats = sample_call_stats();
+        edit(&mut stats);
+        assert!(!stats.within_limits(), "{name}");
+    }
+    let mut many = sample_call_stats();
+    let one = many.participants[0].clone();
+    many.participants = (0..=CALL_PARTICIPANTS_MAX)
+        .map(|index| persephone_contracts::CallStatsParticipant {
+            device_id: format!("D{index}"),
+            ..one.clone()
+        })
+        .collect();
+    assert!(!many.within_limits(), "too many devices");
+    many.participants.truncate(CALL_PARTICIPANTS_MAX);
+    assert!(many.within_limits());
+    let mut links = sample_call_stats();
+    let first = links.connections[0].clone();
+    links.connections = (0..=CALL_STATS_CONNECTIONS_MAX)
+        .map(|index| persephone_contracts::CallStatsConnection {
+            connection: u8::try_from(index).unwrap(),
+            ..first.clone()
+        })
+        .collect();
+    assert!(!links.within_limits(), "too many connections");
+}
