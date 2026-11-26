@@ -2309,17 +2309,19 @@ impl CallController {
         // queued, while it publishes, and while it closes the session:
         // 1. The command is counted, so a pick that ends after a stop is
         //    closed unused and a task publication keeps the page's state.
-        // 2. A stop closes the share's session (`close_session`), so capture
-        //    is revoked before `Off` shows: the portal session on Linux; on
-        //    Windows and macOS the worker's stop is queued here, not after
-        //    the call task's network work. A close by the task that is under
-        //    way has finished: it holds the lock until `Close` is sent.
+        // 2. A stop cancels a pick that waits for the user, so a Yes there
+        //    starts no capture helper (Windows) while the stop waits for the
+        //    call task, and closes the share's session (`close_session`), so
+        //    capture is revoked before `Off` shows: the portal session on
+        //    Linux; on Windows and macOS the worker's stop is queued here,
+        //    not after the call task's network work. A close by the task
+        //    that is under way has finished: it holds the lock until `Close`
+        //    is sent.
         // 3. The page shows the command.
         let (stops, request, changed) = {
             let mut control = plain(&run.screen_control);
             if !on {
-                control.stops = control.stops.wrapping_add(1);
-                close_session(&mut control);
+                stop_accepted(&mut control);
             }
             control.requests = control.requests.wrapping_add(1);
             let (stops, request) = (control.stops, control.requests);
@@ -2846,6 +2848,22 @@ struct ScreenControl {
     /// Wakes the call task for a waiting stop. A wake with no task waiting
     /// is kept until it waits.
     wake: Arc<Notify>,
+    /// The cancel flag of the newest pick, which the call task sets when it
+    /// begins one. An accepted stop sets it under this lock, before `Off`
+    /// shows: the pick's window closes, and a Yes given while the stop waits
+    /// for the call task starts no capture helper.
+    pick_cancel: Option<Arc<AtomicBool>>,
+}
+
+/// What an accepted stop changes at once, with the screen control lock held
+/// and before `Off` shows: the stop is counted, a pick that waits for the
+/// user is cancelled, and the share's session closes.
+fn stop_accepted(control: &mut ScreenControl) {
+    control.stops = control.stops.wrapping_add(1);
+    if let Some(pick) = control.pick_cancel.take() {
+        pick.store(true, Ordering::SeqCst);
+    }
+    close_session(control);
 }
 
 /// Closes the share's session, if open, with the screen control lock held:
@@ -3433,6 +3451,16 @@ impl Call {
     fn begin_screen_pick(&mut self) {
         let source = self.screens.clone();
         let cancel = Arc::new(AtomicBool::new(false));
+        {
+            // The handle cancels this pick when it accepts a stop. A stop it
+            // accepted after the start of this pick, and that this task has
+            // not read yet, cancels it at once: no window opens.
+            let mut control = plain(&self.screen_control);
+            if control.stops != self.screen_pick_stops {
+                cancel.store(true, Ordering::SeqCst);
+            }
+            control.pick_cancel = Some(cancel.clone());
+        }
         let flag = cancel.clone();
         // The number the share will have: only a finished pick starts a
         // share, and picks run one at a time, so `screen_picked` takes the
@@ -3450,10 +3478,13 @@ impl Call {
 
     /// A pick that a stop cancelled has ended. Its grant, if any, is dropped
     /// unused, which closes its session. A start that came while it ended
-    /// begins its own pick now: the user answers a new warning.
+    /// begins its own pick now: the user answers a new warning. A stop that
+    /// the handle accepted after that start, and that this task has not read
+    /// yet, ended the pick too: no pick begins for that start.
     fn stopped_pick_ended(&mut self, picked: Result<ScreenGrant, ScreenRefusal>) {
         drop(picked);
-        if self.screen_wanted && !self.screen_sent {
+        let stopped_since = plain(&self.screen_control).stops != self.screen_pick_stops;
+        if self.screen_wanted && !self.screen_sent && !stopped_since {
             self.begin_screen_pick();
         }
     }
@@ -4760,6 +4791,13 @@ impl Call {
         drop(portal);
         drop(screen_closed);
         close_session(&mut plain(&screen_control));
+        // A pick that waits for the user is cancelled before the worker's
+        // end is awaited: its window closes, and a Yes given meanwhile
+        // starts no helper (`LaunchGuard::begin` refuses once it is set). A
+        // launch already under way is joined with the helpers below.
+        if let Some(pick) = &screen_pick {
+            pick.cancel.store(true, Ordering::SeqCst);
+        }
         // No more restarts, so the leave cannot be pushed back.
         tasks.abort_all();
         // The worker ends first: it holds the microphone, the camera and the
@@ -6492,9 +6530,18 @@ mod tests {
     }
 
     fn test_call(admission: Admission, flags: Arc<Flags>, killed: Arc<AtomicBool>) -> TestCall {
+        test_call_with(admission, flags, Box::new(FakeProcess(killed)))
+    }
+
+    /// As [`test_call`], with the worker process `process`.
+    fn test_call_with(
+        admission: Admission,
+        flags: Arc<Flags>,
+        process: Box<dyn WorkerProcess>,
+    ) -> TestCall {
         let (command_tx, to_worker) = mpsc::channel(8);
         let (events, event_rx) = mpsc::channel(4);
-        let link = CallWorkerLink::from_parts(command_tx, event_rx, Box::new(FakeProcess(killed)));
+        let link = CallWorkerLink::from_parts(command_tx, event_rx, process);
         let video_streams = link.video().streams();
         let (changes_tx, changes) = mpsc::channel(1);
         let (incoming_tx, incoming) = mpsc::channel(1);
@@ -8280,6 +8327,7 @@ mod tests {
         let source = Arc::new(Unanswered::default());
         fixture.call.screens = source.clone();
         fixture.call.screen_command(&inner, true, 0).unwrap();
+        handle_stop(&fixture.call);
         fixture.call.screen_command(&inner, false, 1).unwrap();
         let first = fixture
             .call
@@ -8312,6 +8360,69 @@ mod tests {
         let _ = screen_pick_done(&mut fixture.call.screen_pick).await;
         assert_eq!(source.picks.load(Ordering::SeqCst), 2);
         assert!(fixture.to_worker.try_recv().is_err());
+    }
+
+    /// GIVEN a pick whose window waits for the user WHEN the handle accepts
+    /// a stop that the call task has not read yet THEN the pick is cancelled
+    /// at once (before `Off` shows), so a Yes starts no helper; WHEN the pick
+    /// ends before the task reads the stop THEN no new pick begins for the
+    /// stopped start, and the task's stop then leaves the share off.
+    #[tokio::test]
+    async fn given_a_waiting_pick_when_the_handle_accepts_a_stop_then_it_is_cancelled_at_once() {
+        let (mut fixture, inner, _) = call_with_source(true);
+        let source = Arc::new(Unanswered::default());
+        fixture.call.screens = source.clone();
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        let flag = fixture
+            .call
+            .screen_pick
+            .as_ref()
+            .expect("a pick")
+            .cancel
+            .clone();
+        assert!(!flag.load(Ordering::SeqCst));
+        handle_stop(&fixture.call);
+        assert!(flag.load(Ordering::SeqCst), "the accepted stop cancels it");
+        let (picked, cancelled) = screen_pick_done(&mut fixture.call.screen_pick).await;
+        assert!(cancelled);
+        fixture.call.stopped_pick_ended(picked);
+        assert!(
+            fixture.call.screen_pick.is_none(),
+            "no new pick for the stopped start"
+        );
+        assert_eq!(source.picks.load(Ordering::SeqCst), 1);
+        fixture.call.screen_command(&inner, false, 1).unwrap();
+        assert!(fixture.call.screen_pick.is_none());
+        assert!(fixture.to_worker.try_recv().is_err());
+        assert_eq!(fixture.call.view.screen, CallScreen::Off);
+    }
+
+    /// GIVEN a start and then a stop that the handle accepted before the
+    /// call task read the start WHEN the task begins the start's pick THEN
+    /// the pick begins cancelled (the source returns before any window) and
+    /// no second pick follows it.
+    #[tokio::test]
+    async fn given_a_stop_accepted_before_the_pick_begins_then_the_pick_begins_cancelled() {
+        let (mut fixture, inner, _) = call_with_source(true);
+        let source = Arc::new(Unanswered::default());
+        fixture.call.screens = source.clone();
+        handle_stop(&fixture.call);
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        let flag = fixture
+            .call
+            .screen_pick
+            .as_ref()
+            .expect("a pick")
+            .cancel
+            .clone();
+        assert!(flag.load(Ordering::SeqCst), "it begins cancelled");
+        let (picked, cancelled) = screen_pick_done(&mut fixture.call.screen_pick).await;
+        assert!(cancelled);
+        fixture.call.stopped_pick_ended(picked);
+        assert!(fixture.call.screen_pick.is_none());
+        fixture.call.screen_command(&inner, false, 1).unwrap();
+        assert!(fixture.to_worker.try_recv().is_err());
+        assert_eq!(fixture.call.view.screen, CallScreen::Off);
     }
 
     /// GIVEN a pick that a stop cancelled WHEN it ends with a grant, and no
@@ -8465,9 +8576,7 @@ mod tests {
     /// What `set_screen(false)` does under the control lock before the call
     /// task reads the stop.
     fn handle_stop(call: &Call) {
-        let mut control = plain(&call.screen_control);
-        control.stops += 1;
-        close_session(&mut control);
+        stop_accepted(&mut plain(&call.screen_control));
     }
 
     /// GIVEN a Windows or macOS share (no portal session) and a call task
@@ -10093,7 +10202,15 @@ mod tests {
                         time::sleep(Duration::from_millis(10)).await;
                     }
                 } else {
-                    while !matches!(to_worker.recv().await, Some(ToWorker::Leave) | None) {}
+                    // `Leave` must come: a queue that closes without it is
+                    // no stop of the worker.
+                    loop {
+                        match to_worker.recv().await {
+                            Some(ToWorker::Leave) => break,
+                            Some(_) => {}
+                            None => panic!("the worker's queue closed without Leave"),
+                        }
+                    }
                 }
             })
             .await;
@@ -10108,6 +10225,68 @@ mod tests {
             end.await.expect("the end of the call");
             assert!(helper.terminated.load(Ordering::SeqCst));
         }
+    }
+
+    /// A worker process whose exit wait lasts until the test sets the flag
+    /// (or the wait's time is up).
+    struct HeldProcess(Arc<AtomicBool>);
+
+    impl WorkerProcess for HeldProcess {
+        fn kill(&self) {}
+        fn wait_exit(&self, timeout: Duration) -> bool {
+            let deadline = std::time::Instant::now() + timeout;
+            while !self.0.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            true
+        }
+    }
+
+    /// GIVEN a pick whose window waits for the user WHEN the call ends
+    /// THEN the pick is cancelled before the end waits for the worker: when
+    /// the worker gets `Leave`, and while its exit is still awaited, a Yes
+    /// can start no helper.
+    #[tokio::test]
+    async fn given_a_waiting_pick_when_the_call_ends_then_it_is_cancelled_before_the_worker_wait() {
+        let released = Arc::new(AtomicBool::new(false));
+        let mut fixture = test_call_with(
+            no_admission(),
+            Arc::new(Flags::default()),
+            Box::new(HeldProcess(released.clone())),
+        );
+        fixture.call.screens = Arc::new(Unanswered::default());
+        let inner = controller(FakeHost::new(true, None)).inner.clone();
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        let flag = fixture
+            .call
+            .screen_pick
+            .as_ref()
+            .expect("a pick")
+            .cancel
+            .clone();
+        let TestCall {
+            call,
+            mut to_worker,
+            ..
+        } = fixture;
+        let end = tokio::spawn(call.finish(false));
+        let leave = time::timeout(Duration::from_secs(5), async {
+            loop {
+                match to_worker.recv().await {
+                    Some(ToWorker::Leave) => return true,
+                    Some(_) => {}
+                    None => return false,
+                }
+            }
+        })
+        .await;
+        assert!(matches!(leave, Ok(true)), "the worker gets Leave");
+        assert!(
+            flag.load(Ordering::SeqCst),
+            "the pick is cancelled while the worker's exit is awaited"
+        );
+        released.store(true, Ordering::SeqCst);
+        end.await.expect("the end of the call");
     }
 
     /// A worker process that takes handles, as the Windows one does.

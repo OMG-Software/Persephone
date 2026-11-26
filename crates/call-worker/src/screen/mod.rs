@@ -39,6 +39,8 @@ mod backend;
 mod backend;
 #[cfg(windows)]
 mod frame_pipe;
+#[cfg(windows)]
+pub use frame_pipe::FramePipe;
 
 /// The rules of a display share that need no OS type (ADR-0064); `macos.rs`
 /// uses them, and the tests run them everywhere.
@@ -161,7 +163,7 @@ pub struct Grant {
     #[cfg(windows)]
     share: u32,
     #[cfg(windows)]
-    frames: Option<std::os::windows::io::OwnedHandle>,
+    frames: Option<FramePipe>,
 }
 
 impl Grant {
@@ -178,16 +180,16 @@ impl Grant {
 
     /// The frame pipe of share `share`, or none when no pipe came for it.
     #[cfg(windows)]
-    pub fn from_frames(share: u32, frames: Option<std::os::windows::io::OwnedHandle>) -> Self {
+    pub fn from_frames(share: u32, frames: Option<FramePipe>) -> Self {
         Self { share, frames }
     }
 }
 
 /// The frame pipe at handle value `value` of this process, owned, when it is
-/// a pipe (Windows, ADR-0067). Any other value gives `None` and is left
-/// untouched.
+/// a pipe that the worker does not own yet (Windows, ADR-0067). Any other
+/// value gives `None` and is left untouched.
 #[cfg(windows)]
-pub fn adopt_frames(value: u32) -> Option<std::os::windows::io::OwnedHandle> {
+pub fn adopt_frames(value: u32) -> Option<FramePipe> {
     frame_pipe::adopt(value)
 }
 

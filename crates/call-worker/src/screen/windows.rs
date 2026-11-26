@@ -332,7 +332,7 @@ mod tests {
         let thread = std::thread::spawn(move || {
             capture(
                 target,
-                Grant::from_frames(share, frames),
+                Grant::from_frames(share, frames.map(crate::screen::FramePipe::for_test)),
                 &flag,
                 open_tx,
                 move |frame| {
@@ -410,7 +410,8 @@ mod tests {
     /// screen then stays still THEN the newest of them still goes once its
     /// time has come, no older one goes after a newer one, and none comes
     /// sooner than the gap: the last picture of a burst is not lost. Which
-    /// pictures in between go depends on when the thread reads them.
+    /// pictures in between go depends on when the thread reads them, and a
+    /// paused test thread can see a picture go again after the repeat gap.
     #[test]
     fn given_a_burst_of_pictures_when_the_screen_settles_then_the_newest_goes() {
         let (read, mut write) = pipe();
@@ -434,7 +435,7 @@ mod tests {
         assert_eq!(fills.first(), Some(&1));
         assert_eq!(fills.last(), Some(&4), "the newest picture goes last");
         assert!(
-            fills.windows(2).all(|pair| pair[0] < pair[1]),
+            fills.windows(2).all(|pair| pair[0] <= pair[1]),
             "no older picture after a newer one: {fills:?}"
         );
         assert!(

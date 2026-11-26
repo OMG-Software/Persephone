@@ -11,8 +11,11 @@
 
 use std::fs::File;
 use std::io::{self, Read};
-use std::os::windows::io::{AsRawHandle, FromRawHandle, IntoRawHandle, OwnedHandle, RawHandle};
+#[cfg(test)]
+use std::os::windows::io::OwnedHandle;
+use std::os::windows::io::{AsRawHandle, FromRawHandle, IntoRawHandle, RawHandle};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::HANDLE;
@@ -57,18 +60,88 @@ pub fn is_pipe(handle: HANDLE) -> bool {
     }
 }
 
-/// The handle with value `value` in this process, owned, when it is a pipe.
-/// A value that is not a pipe is never closed or read: it stays as it was.
+/// The handle values of the frame pipes that this process owns now: each
+/// [`FramePipe`] from its adoption until its close. A worker owns at most
+/// two at once (one kept for a share's start, one that a capture reads), so
+/// [`MAX_OWNED`] only keeps the list small.
+static OWNED: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+/// The most frame pipes owned at once; past it a value is refused.
+const MAX_OWNED: usize = 64;
+
+fn owned() -> MutexGuard<'static, Vec<usize>> {
+    OWNED.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The read end of a frame pipe, owned by this process once. Its value is
+/// listed from its adoption until its close, and the close and the removal
+/// from the list are one step under the list's lock. So [`adopt`] refuses
+/// the value of a pipe that is still open, kept or read by a capture, and
+/// never makes a second owner that would close the handle twice (or close
+/// an unrelated handle that later got the same value).
+pub struct FramePipe {
+    /// `None` only after the pipe was given up or closed.
+    file: Option<File>,
+}
+
+impl FramePipe {
+    /// The handle value, while the pipe is held.
+    pub fn raw(&self) -> Option<RawHandle> {
+        self.file.as_ref().map(AsRawHandle::as_raw_handle)
+    }
+
+    /// Gives the handle up without closing it, and takes its value off the
+    /// list: a handle that is not a pipe may not be this process's to close.
+    fn give_up(mut self) {
+        let mut owned = owned();
+        if let Some(file) = self.file.take() {
+            let value = file.into_raw_handle() as usize;
+            owned.retain(|listed| *listed != value);
+        }
+    }
+
+    /// A handle that a test owns, listed as an adopted one but without the
+    /// pipe check, so the reader's own check can be tried.
+    #[cfg(test)]
+    pub fn for_test(handle: OwnedHandle) -> Self {
+        let mut owned = owned();
+        let raw = handle.into_raw_handle();
+        owned.push(raw as usize);
+        // SAFETY: the handle came owned and was released just above.
+        Self {
+            file: Some(unsafe { File::from_raw_handle(raw) }),
+        }
+    }
+}
+
+impl Drop for FramePipe {
+    fn drop(&mut self) {
+        let mut owned = owned();
+        if let Some(file) = self.file.take() {
+            let value = file.as_raw_handle() as usize;
+            drop(file);
+            owned.retain(|listed| *listed != value);
+        }
+    }
+}
+
+/// The handle with value `value` in this process, owned, when it is a pipe
+/// that this process does not own yet. A value that is not a pipe, or one
+/// that a [`FramePipe`] holds, is never closed or read: it stays as it was.
 /// The core duplicated the handle into this process just before it sent the
-/// value, so a pipe at this value is that handle.
-pub fn adopt(value: u32) -> Option<OwnedHandle> {
+/// value, so a pipe at this value that nothing here owns is that handle.
+pub fn adopt(value: u32) -> Option<FramePipe> {
     let raw = value as usize as RawHandle;
-    if !is_pipe(HANDLE(raw)) {
+    let mut owned = owned();
+    if owned.contains(&(raw as usize)) || owned.len() >= MAX_OWNED || !is_pipe(HANDLE(raw)) {
         return None;
     }
-    // SAFETY: the value names a pipe handle of this process that nothing
-    // else owns (the core made it for this worker alone).
-    Some(unsafe { OwnedHandle::from_raw_handle(raw) })
+    owned.push(raw as usize);
+    // SAFETY: the value names a pipe handle of this process that no
+    // `FramePipe` owns (checked under the list's lock), and the core made it
+    // for this worker alone.
+    Some(FramePipe {
+        file: Some(unsafe { File::from_raw_handle(raw) }),
+    })
 }
 
 /// What a wait for the next item found.
@@ -86,7 +159,7 @@ pub enum Wait {
 
 /// The frame pipe, read with bounded waits.
 pub struct PipeReader {
-    file: File,
+    pipe: FramePipe,
     stop: std::sync::Arc<AtomicBool>,
     /// When the item being read must be complete ([`Self::begin_item`]).
     deadline: Option<Instant>,
@@ -97,13 +170,13 @@ pub struct PipeReader {
 impl PipeReader {
     /// Takes the pipe. A handle that is not a pipe is refused, and is not
     /// closed (it may not be ours to close).
-    pub fn new(handle: OwnedHandle, stop: std::sync::Arc<AtomicBool>) -> Result<Self, ()> {
-        if !is_pipe(HANDLE(handle.as_raw_handle())) {
-            let _ = handle.into_raw_handle();
+    pub fn new(pipe: FramePipe, stop: std::sync::Arc<AtomicBool>) -> Result<Self, ()> {
+        if !pipe.raw().is_some_and(|raw| is_pipe(HANDLE(raw))) {
+            pipe.give_up();
             return Err(());
         }
         Ok(Self {
-            file: File::from(handle),
+            pipe,
             stop,
             deadline: None,
             item_limit: STALL_TIMEOUT,
@@ -122,19 +195,12 @@ impl PipeReader {
     /// Bytes waiting, or `None` when the writer closed the pipe (or the
     /// pipe failed) and nothing is left to read.
     fn available(&self) -> Option<u32> {
+        let raw = self.pipe.raw()?;
         let mut available = 0_u32;
-        // SAFETY: the handle is a pipe made in `new`; `available` is a valid
-        // out value; nothing is read.
-        let peeked = unsafe {
-            PeekNamedPipe(
-                HANDLE(self.file.as_raw_handle()),
-                None,
-                0,
-                None,
-                Some(&mut available),
-                None,
-            )
-        };
+        // SAFETY: the handle is a pipe checked in `new` and held by
+        // `self.pipe`; `available` is a valid out value; nothing is read.
+        let peeked =
+            unsafe { PeekNamedPipe(HANDLE(raw), None, 0, None, Some(&mut available), None) };
         peeked.ok().map(|()| available)
     }
 
@@ -183,7 +249,10 @@ impl Read for PipeReader {
                 Some(0) => {}
                 Some(waiting) => {
                     let take = buf.len().min(waiting as usize);
-                    return self.file.read(&mut buf[..take]);
+                    let Some(mut file) = self.pipe.file.as_ref() else {
+                        return Ok(0);
+                    };
+                    return file.read(&mut buf[..take]);
                 }
             }
             std::thread::sleep(POLL);
@@ -217,7 +286,8 @@ mod tests {
     fn reader() -> (PipeReader, File, Arc<AtomicBool>) {
         let (read, write) = pipe();
         let stop = Arc::new(AtomicBool::new(false));
-        let reader = PipeReader::new(read, stop.clone()).expect("a pipe reader");
+        let reader =
+            PipeReader::new(FramePipe::for_test(read), stop.clone()).expect("a pipe reader");
         (reader, write, stop)
     }
 
@@ -229,9 +299,10 @@ mod tests {
         // The handle goes to the reader, its only owner; a refused handle
         // comes back to the test, which owns it again and closes it.
         let refused = |file: File| {
-            let owned = OwnedHandle::from(file);
-            let raw = owned.as_raw_handle();
-            assert!(PipeReader::new(owned, Arc::new(AtomicBool::new(false))).is_err());
+            let pipe = FramePipe::for_test(OwnedHandle::from(file));
+            let raw = pipe.raw().expect("a handle");
+            assert!(PipeReader::new(pipe, Arc::new(AtomicBool::new(false))).is_err());
+            assert!(!listed(raw), "a refused handle is not listed as owned");
             // SAFETY: `PipeReader::new` gave the refused handle up without
             // closing it (`into_raw_handle`), and nothing else owns it.
             unsafe { File::from_raw_handle(raw) }
@@ -283,7 +354,37 @@ mod tests {
         let (read, _write) = pipe();
         let value = read.into_raw_handle() as usize as u32;
         let adopted = adopt(value).expect("a pipe");
-        assert_eq!(adopted.as_raw_handle() as usize as u32, value);
+        assert_eq!(adopted.raw(), Some(value as usize as RawHandle));
+    }
+
+    /// Whether the value `raw` is listed as an owned frame pipe.
+    fn listed(raw: RawHandle) -> bool {
+        owned().contains(&(raw as usize))
+    }
+
+    /// GIVEN a frame pipe that the worker owns, kept or read by a reader
+    /// WHEN its value comes again THEN it is refused, so the handle never
+    /// gets a second owner, and the first owner still reads it; WHEN the
+    /// first owner closes it THEN the helper's end sees the close.
+    #[test]
+    fn given_a_pipe_the_worker_owns_when_its_value_comes_again_then_it_is_refused() {
+        let (read, mut write) = pipe();
+        let value = read.into_raw_handle() as usize as u32;
+        let first = adopt(value).expect("a pipe");
+        assert!(adopt(value).is_none(), "a kept pipe is not owned twice");
+        let mut reader =
+            PipeReader::new(first, Arc::new(AtomicBool::new(false))).expect("a pipe reader");
+        assert!(adopt(value).is_none(), "nor one that a reader holds");
+        write.write_all(&[7]).expect("a byte");
+        assert_eq!(reader.wait_for_data(Duration::from_secs(1)), Wait::Data);
+        let mut byte = [0_u8; 1];
+        assert_eq!(reader.read(&mut byte).expect("the byte"), 1);
+        assert_eq!(byte, [7], "the refusals closed nothing");
+        drop(reader);
+        assert!(
+            write.write_all(&[8]).is_err(),
+            "the reader's drop closed it"
+        );
     }
 
     /// GIVEN good pictures and an end item on the pipe WHEN read THEN the

@@ -130,9 +130,12 @@ impl HelperLaunch for BrokerHelper {
 mod tests {
     use super::*;
     use crate::calls::screen_helper::HelperShare;
-    use persephone_call_protocol::screen_frame::{ScreenItem, read_item, read_item_into};
+    use persephone_call_protocol::screen_frame::{
+        ScreenEnd, ScreenItem, ScreenRead, read_item, read_item_into,
+    };
     use persephone_call_protocol::screen_helper::EXIT_STOPPED;
     use persephone_call_protocol::{DesktopRect, MonitorName};
+    use std::io::Read;
     use std::sync::mpsc;
 
     /// The built helper under `.local/build`, debug first.
@@ -188,6 +191,26 @@ mod tests {
         ));
     }
 
+    /// Reads pictures until the end item, then expects the pipe to close
+    /// with nothing after it. Gives the number of pictures and the end, or
+    /// what went wrong: a bad or cut item, or bytes after the end.
+    fn drain_to_end(file: &mut File) -> Result<(usize, ScreenEnd), String> {
+        let (mut buffer, mut pictures) = (Vec::new(), 0_usize);
+        let end = loop {
+            match read_item_into(file, 1, &mut buffer) {
+                Ok(ScreenRead::Frame { .. }) => pictures += 1,
+                Ok(ScreenRead::End(end)) => break end,
+                Err(error) => return Err(format!("{error:?} after {pictures} pictures")),
+            }
+        };
+        // A pipe whose writer closed reads as its end (`Ok(0)`).
+        match file.read(&mut [0_u8; 1]) {
+            Ok(0) => Ok((pictures, end)),
+            Ok(_) => Err("bytes after the end item".to_owned()),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
     /// GIVEN the built helper and monitor 0 WHEN the core launches it for a
     /// share THEN the frame pipe delivers one picture of the monitor's size
     /// that is not black, and stop-and-join ends the helper with exit code 0.
@@ -207,18 +230,14 @@ mod tests {
         let (sender, receiver) = mpsc::channel();
         let (drained, reader_done) = mpsc::channel();
         // The reader hands on the first item, then reads on until the
-        // helper's end of the pipe closes. A closed read end would end the
-        // helper with "frame pipe closed" (13), and a picture left unread
+        // helper's end item and the pipe's close. A closed read end would end
+        // the helper with "frame pipe closed" (13), and a picture left unread
         // would hold it in its write until the stop terminates it: either
         // way not a stop.
         std::thread::spawn(move || {
             let mut file = File::from(frames);
             let _ = sender.send(read_item(&mut file, 1));
-            let (mut buffer, mut more) = (Vec::new(), 0_usize);
-            while read_item_into(&mut file, 1, &mut buffer).is_ok() {
-                more += 1;
-            }
-            let _ = drained.send(more);
+            let _ = drained.send(drain_to_end(&mut file));
         });
         let item = receiver
             .recv_timeout(Duration::from_secs(30))
@@ -240,14 +259,17 @@ mod tests {
         assert!(lit > 0, "the picture is black");
         assert_eq!(helper.stop_and_join(), Some(EXIT_STOPPED));
         // The broker closed the core's copy of the write end at the start,
-        // so the helper's exit closes the pipe and the reader ends.
-        let more = reader_done
+        // so the helper's exit closes the pipe and the reader ends: after
+        // the stop's end item, and with nothing after it.
+        let (more, end) = reader_done
             .recv_timeout(Duration::from_secs(10))
-            .expect("the reader ends when the helper's end closes");
+            .expect("the reader ends when the helper's end closes")
+            .expect("pictures, the end item, then the close");
+        assert_eq!(end, ScreenEnd::Stopped);
         // The Job's memory cap is 512 MiB; this is the measured peak.
         let peak = process.peak_memory();
         eprintln!(
-            "screen helper peak committed memory: {} MiB for a {}x{} picture, {more} more items read",
+            "screen helper peak committed memory: {} MiB for a {}x{} picture, {more} more pictures read",
             peak >> 20,
             frame.width,
             frame.height

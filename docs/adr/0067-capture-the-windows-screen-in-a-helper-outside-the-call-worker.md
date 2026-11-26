@@ -153,14 +153,16 @@ it as accepted.
   started the worker), and then closes its own copy. Frames never pass
   through the core or the web view.
 * The core tells the worker with `ToWorker::ScreenFrames { share, handle }`
-  directly before the share's `SetScreen` (tag 18). The call protocol
-  rises to version 14, because version 13 (ADR-0066, `SetStats` at tag 17)
+  directly before the share's `SetScreen`. `ScreenFrames` is tag 18. The
+  call protocol rises to version 14, because version 13 (ADR-0066, `SetStats` at tag 17)
   is on `main` without this message: a core and a call worker of different
   builds then refuse each other at the first message, not when a share
   starts.
 * The worker takes the handle only when it is a pipe end (`GetFileType`
   reports a pipe and `GetNamedPipeInfo` accepts it, which refuses a socket)
-  and none of its own standard handles, before it reads. It never closes a
+  and none of its own standard handles, before it reads. It also refuses
+  the value of a frame pipe that it still owns (kept for a start, or read
+  by a capture), so a handle never has two owners. It never closes a
   handle that it refuses.
 * The pipe carries the bounded frames of `crates/media-protocol`: one
   `Control` frame with a 23-byte message (version, tag, share, format,
@@ -202,7 +204,13 @@ it as accepted.
   the call also waits for a launch that passed the look. Both waits are
   bounded, so a stuck launch cannot hold the end of the call or of the
   session; a launch that ends after them has no worker, and its pick
-  stops the helper when it reads the cancel.
+  stops the helper when it reads the cancel. The end of the call sets the
+  pick's cancel before it waits for the worker, so a Yes given meanwhile
+  starts no helper.
+  A stop from the page also cancels a pick whose window still waits for
+  the user, before the page shows "off" and while the call task may be
+  busy, so a Yes there starts no helper; a pick that the call task begins
+  after such a stop, before it read the stop, begins cancelled.
   A stop from the page closes the helper's control pipe at once, before
   the page shows "off", also when the worker's command queue is full and
   the call task is busy; the exit that follows is not taken as the

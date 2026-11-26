@@ -1057,11 +1057,11 @@ struct Call<'a> {
     screen_share: u32,
     /// Windows (ADR-0067): the frame pipe that came with `ScreenFrames`, for
     /// the share it names. `None` inside the pair: the handle was not a
-    /// pipe, so the share gets none and is unavailable. The next
-    /// `ScreenFrames`, a start that takes it, or the end of the call drops
-    /// (closes) it.
+    /// pipe, or the worker already owns it, so the share gets none and is
+    /// unavailable. The next `ScreenFrames`, a start that takes it, or the
+    /// end of the call drops (closes) it.
     #[cfg(windows)]
-    screen_frames: Option<(u32, Option<std::os::windows::io::OwnedHandle>)>,
+    screen_frames: Option<(u32, Option<screen::FramePipe>)>,
     screen_open_tx: mpsc::Sender<Opened<OpenedScreen, ScreenState>>,
     remote: RemoteVideo,
     /// The subscribed remote audio tracks that the level meters read
@@ -2367,8 +2367,10 @@ impl Call<'_> {
 
     /// The read end of the frame pipe of share `share` (ADR-0067). Keeps the
     /// handle if it is a pipe; the one kept before is closed. A handle that
-    /// is not a pipe is kept as none and is never closed or read. No answer.
-    /// Only Windows has a helper, so another OS refuses the message.
+    /// is not a pipe, or one the worker already owns (the kept one, or the
+    /// one a capture reads), is kept as none and is never closed or read: it
+    /// is adopted before the kept one is dropped. No answer. Only Windows
+    /// has a helper, so another OS refuses the message.
     #[cfg(windows)]
     fn screen_frames(&mut self, share: u32, handle: u32) -> Result<Vec<FromWorker>, FailureCode> {
         self.screen_frames = Some((share, screen::adopt_frames(handle)));
