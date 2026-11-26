@@ -138,6 +138,10 @@ an embedded ONNX model as the later segmenter (owner choice).
 * `ToWorker::SetVideoEffect` (tag 19) changes it in a running call or in a
   camera test. The worker answers `FromWorker::VideoEffect` (tag 24) with the
   effect in use and whether the request was refused.
+* In a call, a full worker queue does not end the call: the core keeps the
+  newest effect and sends it again later, and the mirror changes at once. A
+  camera-on sends a waiting effect first. When it still cannot go, the call
+  ends, so the camera never starts before an effect that was asked earlier.
 * `CameraState::EffectUnavailable` is 4.
 * `FromWorker::Devices` ends with `background_effects` (one byte, 0 or 1).
 

@@ -2163,6 +2163,7 @@ impl CallController {
             remote: RemoteKeys::new(),
             unsent: BTreeMap::new(),
             unsent_retry: None,
+            unsent_effect: None,
             alone: Alone::default(),
             view: View::new(room_id.to_owned(), sfu.url, scope.video)
                 .with_video_streams(video_streams)
@@ -2826,6 +2827,9 @@ struct Call {
     unsent: BTreeMap<String, VecDeque<(String, u8)>>,
     /// When the keys of `unsent` go again.
     unsent_retry: Option<Instant>,
+    /// The newest video effect while the worker's queue is full, and when it
+    /// goes again (ADR-0068). A camera-on sends it first.
+    unsent_effect: Option<(Instant, VideoEffect)>,
     view: View,
     /// Who else is in the call, and the 30 second rule (ADR-0063).
     alone: Alone,
@@ -3533,7 +3537,9 @@ impl Call {
             // needs no second on. On the portal path every camera-on goes
             // with its own remote (`SetCamera { remote: true }`).
         } else {
-            if !on {
+            if on {
+                self.effect_before_camera()?;
+            } else {
                 // The worker stops the capture and closes its remote.
                 self.portal_capture = false;
                 self.portal_sent = false;
@@ -4077,6 +4083,7 @@ impl Call {
         if !self.camera_wanted.load(Ordering::SeqCst) || self.portal_capture {
             return Ok(());
         }
+        self.effect_before_camera()?;
         if !self.send_portal_remote(remote) {
             let refused = FromWorker::Camera {
                 state: CameraState::Unavailable,
@@ -4552,14 +4559,39 @@ impl Call {
         Ok(())
     }
 
-    /// The user changed the video effect or the mirror: the worker applies
-    /// the effect to the camera at once, or refuses it and keeps the old one,
-    /// and answers with the effect in use; the page sees the mirror at once
-    /// (ADR-0068).
+    /// The user changed the video effect or the mirror (ADR-0068): the page
+    /// sees the mirror at once, also while the worker's queue is full, and
+    /// the effect goes to the worker (`send_effect`). The worker applies it
+    /// to the camera at once, or refuses it and keeps the old one, and
+    /// answers with the effect in use.
     fn video_effect_changed(&mut self, inner: &Inner, own: OwnVideo) -> Result<(), EndReason> {
-        self.send_worker(ToWorker::SetVideoEffect { effect: own.effect })?;
         if self.view.set_mirror(own.mirror) == Applied::Changed {
             self.publish(inner);
+        }
+        self.unsent_effect = Some((Instant::now(), own.effect));
+        self.send_effect()
+    }
+
+    /// Sends the waiting video effect. A full queue keeps it for a retry, so
+    /// a busy worker does not end the call; a newer effect replaces it. Only
+    /// a closed queue is an error.
+    fn send_effect(&mut self) -> Result<(), EndReason> {
+        if let Some((_, effect)) = self.unsent_effect.take()
+            && !self.queue_worker(ToWorker::SetVideoEffect { effect })?
+        {
+            self.unsent_effect = Some((Instant::now() + UNSENT_RETRY, effect));
+        }
+        Ok(())
+    }
+
+    /// Sends a waiting video effect before a camera-on, so the camera never
+    /// starts before an effect that was asked earlier (ADR-0068). When the
+    /// queue is still full, the call ends, as it does when the camera
+    /// command itself finds the queue full.
+    fn effect_before_camera(&mut self) -> Result<(), EndReason> {
+        self.send_effect()?;
+        if self.unsent_effect.is_some() {
+            return Err(EndReason::WorkerStopped);
         }
         Ok(())
     }
@@ -4730,6 +4762,7 @@ impl Call {
             let diagnostics_due = pending_diagnostics.map(|(at, _)| at);
             let stats_due = pending_stats.map(|(at, _)| at);
             let devices_due = pending_devices.as_ref().map(|(at, _)| *at);
+            let effect_due = self.unsent_effect.map(|(at, _)| at);
             tokio::select! {
                 _ = &mut *stop => return Ok(()),
                 () = wake.notified() => self.take_waiting_stop(inner, u64::MAX)?,
@@ -4764,6 +4797,25 @@ impl Call {
                     let own = *video_effect.borrow_and_update();
                     if let Some(own) = own {
                         self.video_effect_changed(inner, own)?;
+                    }
+                }
+                () = async {
+                    match effect_due {
+                        Some(at) => time::sleep_until(at.into()).await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    // `select!` picks a ready arm at random: a newer effect
+                    // that waits unread replaces the kept one first, so the
+                    // worker never gets an older one.
+                    let newer = if video_effect.has_changed().unwrap_or(false) {
+                        *video_effect.borrow_and_update()
+                    } else {
+                        None
+                    };
+                    match newer {
+                        Some(own) => self.video_effect_changed(inner, own)?,
+                        None => self.send_effect()?,
                     }
                 }
                 Ok(()) = devices.changed() => {
@@ -6266,7 +6318,7 @@ mod tests {
         assert_eq!(
             *calls.inner.test_effect.borrow(),
             warm,
-            "a camera test shows it without a call"
+            "a camera test asks for it without a call"
         );
         let guard = calls
             .claim(room_id!("!r:example.org"), calls.video_asked())
@@ -7210,6 +7262,7 @@ mod tests {
             remote: RemoteKeys::new(),
             unsent: BTreeMap::new(),
             unsent_retry: None,
+            unsent_effect: None,
             view: view().with_video_streams(video_streams),
             alone: Alone::default(),
             changes,
@@ -7528,6 +7581,127 @@ mod tests {
             call.apply_devices(&mut pending),
             Err(EndReason::WorkerStopped)
         ));
+    }
+
+    /// GIVEN a full worker queue WHEN the video effect and the mirror change
+    /// THEN the call goes on, the page sees the mirror at once and the effect
+    /// waits; WHEN a newer effect comes THEN it replaces the waiting one;
+    /// WHEN the queue has room THEN the worker gets only the newest; WHEN
+    /// the queue is closed THEN the call ends (ADR-0068).
+    #[tokio::test]
+    async fn given_a_full_queue_then_a_video_effect_waits() {
+        let fixture = test_call(
+            no_admission(),
+            Arc::new(Flags::default()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let inner = controller(FakeHost::new(true, None)).inner.clone();
+        let (mut call, mut to_worker) = (fixture.call, fixture.to_worker);
+        let warm = VideoEffect {
+            background: persephone_call_protocol::Background::None,
+            filter: persephone_call_protocol::ColourFilter::Warm,
+        };
+        let cool = VideoEffect {
+            filter: persephone_call_protocol::ColourFilter::Cool,
+            ..warm
+        };
+        let now = Instant::now();
+
+        fill_queue(&call, &mut to_worker, 0);
+        call.video_effect_changed(
+            &inner,
+            OwnVideo {
+                effect: warm,
+                mirror: false,
+            },
+        )
+        .unwrap();
+        assert!(!call.view.mirror, "the page sees the mirror at once");
+        let (retry, waiting) = call.unsent_effect.expect("the effect waits");
+        assert!(retry > now);
+        assert_eq!(waiting, warm);
+
+        call.video_effect_changed(
+            &inner,
+            OwnVideo {
+                effect: cool,
+                mirror: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            call.unsent_effect.map(|(_, effect)| effect),
+            Some(cool),
+            "the newer effect replaces the waiting one"
+        );
+
+        while to_worker.try_recv().is_ok() {}
+        call.send_effect().unwrap();
+        assert_eq!(call.unsent_effect, None);
+        assert_eq!(
+            to_worker.try_recv().unwrap(),
+            ToWorker::SetVideoEffect { effect: cool }
+        );
+        assert!(to_worker.try_recv().is_err(), "only the newest effect goes");
+
+        call.unsent_effect = Some((now, warm));
+        drop(to_worker);
+        assert!(matches!(call.send_effect(), Err(EndReason::WorkerStopped)));
+    }
+
+    /// GIVEN a video effect that waits for room in the worker queue WHEN the
+    /// camera turns on THEN the worker gets the effect before the camera
+    /// command; WHEN the queue has room for one command or none THEN the
+    /// call ends and no camera-on goes before the effect (ADR-0068).
+    #[tokio::test]
+    async fn given_a_waiting_effect_when_the_camera_turns_on_then_the_effect_goes_first() {
+        let fixture = test_call(
+            no_admission(),
+            Arc::new(Flags::default()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let inner = controller(FakeHost::new(true, None)).inner.clone();
+        let (mut call, mut to_worker) = (fixture.call, fixture.to_worker);
+        let warm = VideoEffect {
+            background: persephone_call_protocol::Background::None,
+            filter: persephone_call_protocol::ColourFilter::Warm,
+        };
+
+        call.unsent_effect = Some((Instant::now() + UNSENT_RETRY, warm));
+        call.camera_command(&inner, true, 1).unwrap();
+        assert_eq!(
+            to_worker.try_recv().unwrap(),
+            ToWorker::SetVideoEffect { effect: warm }
+        );
+        assert!(matches!(
+            to_worker.try_recv(),
+            Ok(ToWorker::SetCamera {
+                on: true,
+                remote: false
+            })
+        ));
+        assert_eq!(call.unsent_effect, None);
+
+        for (room, request) in [(0, 2), (1, 3)] {
+            call.unsent_effect = Some((Instant::now() + UNSENT_RETRY, warm));
+            fill_queue(&call, &mut to_worker, room);
+            assert!(matches!(
+                call.camera_command(&inner, true, request),
+                Err(EndReason::WorkerStopped)
+            ));
+            let sent: Vec<ToWorker> = std::iter::from_fn(|| to_worker.try_recv().ok()).collect();
+            assert!(
+                !sent
+                    .iter()
+                    .any(|message| matches!(message, ToWorker::SetCamera { .. })),
+                "no camera-on goes before the effect (room {room})"
+            );
+            assert_eq!(
+                sent.contains(&ToWorker::SetVideoEffect { effect: warm }),
+                room == 1,
+                "the effect goes when it fits (room {room})"
+            );
+        }
     }
 
     /// GIVEN a device choice kept for a retry and a newer choice not read
