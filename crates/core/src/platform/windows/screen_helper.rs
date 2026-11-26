@@ -193,7 +193,9 @@ mod tests {
 
     /// Reads pictures until the end item, then expects the pipe to close
     /// with nothing after it. Gives the number of pictures and the end, or
-    /// what went wrong: a bad or cut item, or bytes after the end.
+    /// what went wrong: a bad or cut item, or bytes after the end. Each read
+    /// blocks until bytes come or every write end is closed, so a write end
+    /// that outlives the helper holds it: the caller's timeout names that.
     fn drain_to_end(file: &mut File) -> Result<(usize, ScreenEnd), String> {
         let (mut buffer, mut pictures) = (Vec::new(), 0_usize);
         let end = loop {
@@ -260,20 +262,30 @@ mod tests {
         assert_eq!(helper.stop_and_join(), Some(EXIT_STOPPED));
         // The broker closed the core's copy of the write end at the start,
         // so the helper's exit closes the pipe and the reader ends: after
-        // the stop's end item, and with nothing after it.
+        // the stop's end item, and with nothing after it. The helper has
+        // exited here, so a reader still blocked means that another write
+        // end is open.
         let (more, end) = reader_done
             .recv_timeout(Duration::from_secs(10))
-            .expect("the reader ends when the helper's end closes")
+            .expect("the frame pipe did not close 10 s after the helper's exit: a write end is still open")
             .expect("pictures, the end item, then the close");
         assert_eq!(end, ScreenEnd::Stopped);
-        // The Job's memory cap is 512 MiB; this is the measured peak.
+        // The Job kills the helper at 512 MiB, so a bound at the cap could
+        // never fail. The helper holds a fixed part (the runtime, D3D and
+        // WinRT) and about four pictures (two pool buffers, the staging
+        // texture and the repacked picture). Measured: 84 to 88 MiB for
+        // 2560x1440 (14 MiB pictures), under the bound of 120 MiB there. A
+        // 4K monitor's bound is about 191 MiB; 4K is not measured.
+        let picture = frame.width as usize * frame.height as usize * 4;
+        let bound = (64 << 20) + 4 * picture;
         let peak = process.peak_memory();
         eprintln!(
-            "screen helper peak committed memory: {} MiB for a {}x{} picture, {more} more pictures read",
+            "screen helper peak committed memory: {} MiB for a {}x{} picture (bound {} MiB), {more} more pictures read",
             peak >> 20,
             frame.width,
-            frame.height
+            frame.height,
+            bound >> 20
         );
-        assert!(peak > 0 && peak < 512 << 20, "{peak}");
+        assert!(peak > 0 && peak < bound, "peak {peak} bytes, bound {bound}");
     }
 }

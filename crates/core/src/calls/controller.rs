@@ -2848,10 +2848,12 @@ struct ScreenControl {
     /// Wakes the call task for a waiting stop. A wake with no task waiting
     /// is kept until it waits.
     wake: Arc<Notify>,
-    /// The cancel flag of the newest pick, which the call task sets when it
-    /// begins one. An accepted stop sets it under this lock, before `Off`
-    /// shows: the pick's window closes, and a Yes given while the stop waits
-    /// for the call task starts no capture helper.
+    /// The cancel flag of the pick that runs: the call task sets it when it
+    /// begins one and clears it when that pick ends (`screen_picked`,
+    /// `stopped_pick_ended`), so it is `None` when no pick waits. An accepted
+    /// stop takes it and sets it under this lock, before `Off` shows: the
+    /// pick's window closes, and a Yes given while the stop waits for the
+    /// call task starts no capture helper.
     pick_cancel: Option<Arc<AtomicBool>>,
 }
 
@@ -3483,7 +3485,13 @@ impl Call {
     /// yet, ended the pick too: no pick begins for that start.
     fn stopped_pick_ended(&mut self, picked: Result<ScreenGrant, ScreenRefusal>) {
         drop(picked);
-        let stopped_since = plain(&self.screen_control).stops != self.screen_pick_stops;
+        let stopped_since = {
+            let mut control = plain(&self.screen_control);
+            // The pick has ended: a stop has no pick to cancel until the
+            // next one begins.
+            control.pick_cancel = None;
+            control.stops != self.screen_pick_stops
+        };
         if self.screen_wanted && !self.screen_sent && !stopped_since {
             self.begin_screen_pick();
         }
@@ -3504,6 +3512,9 @@ impl Call {
         // first and this lock second.
         let control = self.screen_control.clone();
         let mut accepted = plain(&control);
+        // The pick has ended, whatever it gave: a stop has no pick to cancel
+        // until the next one begins.
+        accepted.pick_cancel = None;
         let current = self.screen_wanted && self.screen_pick_stops == accepted.stops;
         let grant = match picked {
             Ok(grant) if current => grant,
@@ -8356,6 +8367,10 @@ mod tests {
             .clone();
         assert!(!Arc::ptr_eq(&first, &second));
         assert!(!second.load(Ordering::SeqCst), "it needs its own answer");
+        assert!(
+            names_pick(&fixture.call, &second),
+            "a stop now cancels the new pick"
+        );
         second.store(true, Ordering::SeqCst);
         let _ = screen_pick_done(&mut fixture.call.screen_pick).await;
         assert_eq!(source.picks.load(Ordering::SeqCst), 2);
@@ -8420,6 +8435,10 @@ mod tests {
         assert!(cancelled);
         fixture.call.stopped_pick_ended(picked);
         assert!(fixture.call.screen_pick.is_none());
+        assert!(
+            plain(&fixture.call.screen_control).pick_cancel.is_none(),
+            "the ended pick is not named"
+        );
         fixture.call.screen_command(&inner, false, 1).unwrap();
         assert!(fixture.to_worker.try_recv().is_err());
         assert_eq!(fixture.call.view.screen, CallScreen::Off);
@@ -8440,6 +8459,62 @@ mod tests {
         assert_eq!(source.picks.load(Ordering::SeqCst), 1);
         assert!(fixture.to_worker.try_recv().is_err());
         assert!(!fixture.call.screen_sent);
+    }
+
+    /// Whether the screen control names `flag` as the pick that a stop
+    /// cancels.
+    fn names_pick(call: &Call, flag: &Arc<AtomicBool>) -> bool {
+        plain(&call.screen_control)
+            .pick_cancel
+            .as_ref()
+            .is_some_and(|named| Arc::ptr_eq(named, flag))
+    }
+
+    /// GIVEN a pick that the screen control names WHEN it ends with a
+    /// refusal, or with a grant that starts the share THEN the control names
+    /// no pick any more, so a later stop has no ended pick to cancel.
+    #[tokio::test]
+    async fn given_a_pick_that_ended_then_the_control_names_no_pick() {
+        let (mut fixture, inner, _) = call_with_source(true);
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        let refused = fixture
+            .call
+            .screen_pick
+            .as_ref()
+            .expect("a pick")
+            .cancel
+            .clone();
+        assert!(names_pick(&fixture.call, &refused));
+        let _ = screen_pick_done(&mut fixture.call.screen_pick).await;
+        fixture
+            .call
+            .screen_picked(&inner, Err(ScreenRefusal::Refused))
+            .unwrap();
+        assert!(
+            plain(&fixture.call.screen_control).pick_cancel.is_none(),
+            "a refused pick is not named"
+        );
+
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        let granted = fixture
+            .call
+            .screen_pick
+            .as_ref()
+            .expect("a pick")
+            .cancel
+            .clone();
+        assert!(names_pick(&fixture.call, &granted));
+        let _ = screen_pick_done(&mut fixture.call.screen_pick).await;
+        let dropped = Arc::new(AtomicBool::new(false));
+        fixture
+            .call
+            .screen_picked(&inner, Ok(grant(&dropped)))
+            .unwrap();
+        assert!(fixture.call.screen_sent, "the share runs");
+        assert!(
+            plain(&fixture.call.screen_control).pick_cancel.is_none(),
+            "the pick that started the share is not named"
+        );
     }
 
     fn call_with_source(available: bool) -> (TestCall, Arc<Inner>, Arc<Scripted>) {
