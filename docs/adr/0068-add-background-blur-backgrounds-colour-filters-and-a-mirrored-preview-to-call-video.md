@@ -154,8 +154,12 @@ an embedded ONNX model as the later segmenter (owner choice).
   one, also when it was asked before the join took the call slot (for
   example during the proxy question). So no change is lost during a join.
 * A camera test starts with the saved effect in `TestDevice`, so the settings
-  preview never shows a picture without it. Later changes go as
-  `SetVideoEffect`.
+  preview never shows a picture without an effect that can run. Later
+  changes go as `SetVideoEffect`. When the worker refuses the saved effect
+  (it needs the person mask), the test shows the camera without an effect
+  and its status says why. A join keeps the camera off in that case, because
+  others would see the picture; the test sends no picture to anyone, and it
+  is there to check the camera.
 * The call status carries `effectRefused` (the worker refused the newest
   effect change of this call) and `mirror` (from the record at the join, then
   each change). The device test status carries `effectRefused` too, while a

@@ -565,8 +565,10 @@ pub enum ToWorker {
     /// when the test ends by itself or after `Leave`; `Failed` when the
     /// device cannot be used. `video_effect` is the effect that a camera test
     /// starts with (ADR-0068), so its first picture has it; the worker
-    /// answers with [`FromWorker::VideoEffect`] before the camera opens. A
-    /// sound test must send [`VideoEffect::NONE`]; another is refused.
+    /// answers with [`FromWorker::VideoEffect`] before the camera opens. An
+    /// effect that cannot run there is refused, and the test then shows the
+    /// camera without one. A sound test must send [`VideoEffect::NONE`];
+    /// another is refused.
     TestDevice {
         test: DeviceTest,
         device: Option<String>,

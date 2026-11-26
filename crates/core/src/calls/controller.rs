@@ -3396,6 +3396,9 @@ fn run_device_test(
     let mut leave_by: Option<std::time::Instant> = None;
     // Whether the `Leave` was the user's stop, not the limit.
     let mut user_stopped = false;
+    // The newest effect change that the worker's queue did not take yet; it
+    // is sent again on each pass until it goes or the test ends (ADR-0068).
+    let mut unsent_effect: Option<VideoEffect> = None;
     if sent.is_err() {
         state = CallDeviceTestState::Failed;
     }
@@ -3414,9 +3417,14 @@ fn run_device_test(
             let on = *diagnostics.borrow_and_update();
             let _ = link.send(ToWorker::SetDiagnostics { on });
         }
-        if camera && leave_by.is_none() && test_effect.has_changed().unwrap_or(false) {
-            let effect = *test_effect.borrow_and_update();
-            let _ = link.send(ToWorker::SetVideoEffect { effect });
+        if camera && test_effect.has_changed().unwrap_or(false) {
+            unsent_effect = Some(*test_effect.borrow_and_update());
+        }
+        if leave_by.is_none()
+            && let Some(effect) = unsent_effect
+            && link.send(ToWorker::SetVideoEffect { effect }).is_ok()
+        {
+            unsent_effect = None;
         }
         match link.events.try_recv() {
             // After the user's stop the meter shows nothing more.
@@ -6486,22 +6494,29 @@ mod tests {
         answers: Mutex<Option<mpsc::Sender<FromWorker>>>,
         /// Set during the start, as a stop that comes while it waits.
         stop_on_start: Mutex<Option<Arc<AtomicBool>>>,
+        /// The size of the worker's command queue; a small one fills up.
+        queue: usize,
     }
 
     impl ScriptHost {
         fn new(events: Vec<FromWorker>) -> Arc<Self> {
+            Self::with_queue(events, 8)
+        }
+
+        fn with_queue(events: Vec<FromWorker>, queue: usize) -> Arc<Self> {
             Arc::new(Self {
                 events: Mutex::new(events),
                 sent: Mutex::new(None),
                 answers: Mutex::new(None),
                 stop_on_start: Mutex::new(None),
+                queue,
             })
         }
     }
 
     impl CallHost for ScriptHost {
         fn start(&self, _: &WorkerAudio) -> Result<CallWorkerLink, StartError> {
-            let (commands, received) = mpsc::channel(8);
+            let (commands, received) = mpsc::channel(self.queue);
             let (answers, events) = mpsc::channel(8);
             for event in self.events.lock().unwrap().drain(..) {
                 answers.try_send(event).unwrap();
@@ -6642,6 +6657,72 @@ mod tests {
             })
         );
         assert_eq!(sent.try_recv(), Ok(ToWorker::Leave), "then only the close");
+    }
+
+    /// GIVEN a running camera test whose worker queue is full WHEN the
+    /// effect changes THEN the change waits and goes once the queue has room,
+    /// so the test never keeps an effect that the user replaced (ADR-0068).
+    #[test]
+    fn given_a_full_queue_when_the_test_effect_changes_then_it_is_sent_later() {
+        let warm = VideoEffect {
+            background: persephone_call_protocol::Background::None,
+            filter: persephone_call_protocol::ColourFilter::Warm,
+        };
+        // `SetDiagnostics` and `TestDevice` fill a queue of two.
+        let host = ScriptHost::with_queue(vec![FromWorker::Connected], 2);
+        let calls = controller(host.clone());
+        plain(&calls.inner.device_test).generation = 1;
+        let inner = calls.inner.clone();
+        let test = std::thread::spawn(move || {
+            run_device_test(
+                &inner,
+                1,
+                CallDeviceTestKind::Camera,
+                None,
+                &AtomicBool::new(false),
+                device_test::TEST_LIMIT,
+            );
+        });
+        let until = std::time::Instant::now() + Duration::from_secs(5);
+        while calls.device_test_status().state != CallDeviceTestState::Running {
+            assert!(std::time::Instant::now() < until, "the test runs");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        calls.set_test_effect(warm);
+        // Several passes of the test's loop find the queue full.
+        std::thread::sleep(device_test::POLL * 10);
+        let mut sent = host
+            .sent
+            .lock()
+            .unwrap()
+            .take()
+            .expect("the worker started");
+        assert!(matches!(
+            sent.try_recv(),
+            Ok(ToWorker::SetDiagnostics { .. })
+        ));
+        assert!(matches!(sent.try_recv(), Ok(ToWorker::TestDevice { .. })));
+        let until = std::time::Instant::now() + Duration::from_secs(5);
+        let next = loop {
+            match sent.try_recv() {
+                Ok(message) => break message,
+                Err(mpsc::error::TryRecvError::Empty) => {
+                    assert!(std::time::Instant::now() < until, "the change is sent");
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("the test ended early: {error:?}"),
+            }
+        };
+        assert_eq!(next, ToWorker::SetVideoEffect { effect: warm });
+        host.answers
+            .lock()
+            .unwrap()
+            .as_ref()
+            .expect("the worker's side")
+            .try_send(FromWorker::Left)
+            .unwrap();
+        test.join().unwrap();
+        assert_eq!(calls.device_test_status().state, CallDeviceTestState::Done);
     }
 
     /// GIVEN a test that never ran (a camera open that hangs) WHEN the

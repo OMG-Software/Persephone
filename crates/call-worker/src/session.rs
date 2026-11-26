@@ -957,7 +957,10 @@ async fn test_camera(
     let mut limiter = RateLimiter::default();
     // The test shows the effect as a call would (ADR-0068). It starts with
     // the one in `TestDevice`, set before the camera opens, so no picture is
-    // shown without it; `SetVideoEffect` changes it later.
+    // shown without it; `SetVideoEffect` changes it later. An effect that
+    // cannot run here is refused and the answer says so: the test then shows
+    // the camera without an effect. Unlike a call, the test sends no picture
+    // to anyone, and it is there to check the camera.
     let (mut effect, started) = TestEffect::starting(video_effect);
     if output.send(started).await.is_err() {
         return fail(output, FailureCode::Internal).await;
