@@ -119,6 +119,7 @@ fn first_item(
         // The share was stopped while it opened: the caller drops it.
         Wait::Stopped | Wait::Idle | Wait::Closed => return Err(ScreenState::Unavailable),
     }
+    pipe.begin_item();
     read_item_into(pipe, share, buffer).map_err(|_| ScreenState::Unavailable)
 }
 
@@ -203,6 +204,8 @@ pub fn capture<F, E>(
             Wait::Closed => break Ended::Failed,
             Wait::Data => {}
         }
+        // The whole item has `STALL_TIMEOUT`, however its bytes are spread.
+        pipe.begin_item();
         match read_item_into(&mut pipe, share, &mut buffer) {
             Ok(ScreenRead::Frame { width, height }) => {
                 // The newer picture takes the older one's place, also one
@@ -361,8 +364,9 @@ mod tests {
 
     /// GIVEN pictures that come faster than the worker's limit WHEN the
     /// screen then stays still THEN the newest of them still goes once its
-    /// time has come, the older ones never go, and none comes sooner than
-    /// the gap: the last picture of a burst is not lost.
+    /// time has come, no older one goes after a newer one, and none comes
+    /// sooner than the gap: the last picture of a burst is not lost. Which
+    /// pictures in between go depends on when the thread reads them.
     #[test]
     fn given_a_burst_of_pictures_when_the_screen_settles_then_the_newest_goes() {
         let (read, mut write) = pipe();
@@ -372,15 +376,29 @@ mod tests {
         for fill in [2, 3, 4] {
             write_picture(&mut write, 9, 4, 2, &[fill; 32]).expect("a picture");
         }
-        wait_for_fills(&seen, 2);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while seen.lock().unwrap().fills.last().map(|(fill, _)| *fill) != Some(4) {
+            assert!(Instant::now() < deadline, "the newest picture goes");
+            std::thread::sleep(Duration::from_millis(10));
+        }
         // Nothing else waits, so nothing else comes before the repeat.
         std::thread::sleep(PICTURE_GAP * 2);
         stop.store(true, Ordering::Release);
         thread.join().expect("the capture thread");
         let seen = seen.lock().unwrap();
         let fills: Vec<u8> = seen.fills.iter().map(|(fill, _)| *fill).collect();
-        assert_eq!(fills, [1, 4]);
-        assert!(seen.fills[1].1.duration_since(seen.fills[0].1) >= PICTURE_GAP);
+        assert_eq!(fills.first(), Some(&1));
+        assert_eq!(fills.last(), Some(&4), "the newest picture goes last");
+        assert!(
+            fills.windows(2).all(|pair| pair[0] < pair[1]),
+            "no older picture after a newer one: {fills:?}"
+        );
+        assert!(
+            seen.fills
+                .windows(2)
+                .all(|pair| pair[1].1.duration_since(pair[0].1) >= PICTURE_GAP),
+            "none sooner than the gap"
+        );
     }
 
     /// GIVEN one picture WHEN the screen then stays still THEN the picture

@@ -277,7 +277,19 @@ pub struct Capture {
     /// The newest frame that `admit` refused ([`take_next`]). It holds one
     /// of the pool's buffers until it is copied or a newer frame replaces
     /// it.
-    held: Option<Direct3D11CaptureFrame>,
+    held: Option<PoolFrame>,
+}
+
+/// A frame from the pool. Dropping it closes it, so its buffer goes back to
+/// the pool at once on every path: after its copy, when a newer frame
+/// replaces it, when the size changes and on an error.
+struct PoolFrame(Direct3D11CaptureFrame);
+
+impl Drop for PoolFrame {
+    fn drop(&mut self) {
+        // A failed close leaves the release of the last reference to do it.
+        let _ = self.0.Close();
+    }
 }
 
 /// What to copy now: a frame that just came when `admit` lets it through,
@@ -417,9 +429,9 @@ impl Capture {
         admit: &mut dyn FnMut() -> bool,
         deliver: &mut Deliver<'_>,
     ) -> Result<bool, Stage> {
-        let arrived = self.pool.TryGetNextFrame().ok();
+        let arrived = self.pool.TryGetNextFrame().ok().map(PoolFrame);
         let came = arrived.is_some();
-        if let Some(frame) = &arrived {
+        if let Some(PoolFrame(frame)) = &arrived {
             let content = frame
                 .ContentSize()
                 .map_err(|error| note(Stage::Texture, error))?;
@@ -442,9 +454,12 @@ impl Capture {
                 return Ok(true);
             }
         }
-        let Some(frame) = take_next(&mut self.held, arrived, admit) else {
+        // The frame is closed when it goes out of scope, after the surface
+        // and the texture made from it (declared later, dropped first).
+        let Some(pooled) = take_next(&mut self.held, arrived, admit) else {
             return Ok(came);
         };
+        let frame = &pooled.0;
         let content = frame
             .ContentSize()
             .map_err(|error| note(Stage::Texture, error))?;
@@ -519,9 +534,7 @@ impl Drop for Capture {
     fn drop(&mut self) {
         // Closing ends the capture and releases the screen. A failure here
         // leaves nothing more to do. A kept frame goes back first.
-        if let Some(frame) = self.held.take() {
-            let _ = frame.Close();
-        }
+        drop(self.held.take());
         let _ = self.session.Close();
         let _ = self.pool.Close();
         let _ = &self.item;

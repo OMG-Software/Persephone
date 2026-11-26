@@ -90,15 +90,18 @@ it as accepted.
   changed or went away ends the share.
 * A picture is BGRA, at most 3840x2160 pixels and 7680 on a side (the
   limits that the worker had). The helper copies at most 5 pictures a
-  second. Windows gives a frame only when the screen changed, so a frame
-  that comes too soon is not copied but kept, in place of an older kept
-  one, and copied when its time comes: the last change of a burst always
-  reaches the call. The worker does the same with the pictures it reads,
-  a little slower than its own limit and counted from the end of the last
-  hand-on, so its limiter never drops one. While the screen stays still,
-  the worker hands the newest picture on again once a second: pictures that
-  come before the track is published are dropped, and a still screen would
-  otherwise send nothing after that.
+  second. Windows gives a frame only when the screen changed, so the
+  helper is built to keep a frame that comes too soon, in place of an
+  older kept one, and to copy it when its time comes, so that the last
+  change of a burst reaches the call. The worker does the same with the
+  pictures it reads, a little slower than its own limit and counted from
+  the end of the last hand-on, so that its limiter does not drop one.
+  While the screen stays still, the worker hands the newest picture on
+  again once a second: pictures that come before the track is published
+  are dropped, and a still screen would otherwise send nothing after
+  that. The worker's side is covered by unit tests; the helper's kept
+  frame only by a unit test of its rule (`wgc::take_next`), see "Not
+  verified".
 
 ### How the helper starts
 
@@ -268,6 +271,12 @@ it as accepted.
   helper writes a real, non-black picture to a pipe under its full launch
   (ignored test `platform::windows::screen_helper`), and the worker's reader
   takes good frames and refuses bad ones (unit tests).
+* No run has read more than one picture from the real helper. Its kept
+  frame over the rate gap, whether a kept frame and a frame being copied
+  ever leave the two-buffer frame pool without a buffer, and the pacing of
+  the helper and the worker together over many pictures are designed and
+  unit tested, not measured. Each frame from the pool is closed when it is
+  dropped (`wgc::PoolFrame`), so its buffer goes back on every path.
 * Whether Persephone's windows are hidden from the helper's WGC picture
   (ADR-0045) was not measured. Until it is, the share question keeps its
   warning that the shared screen can show Persephone's messages.

@@ -3,9 +3,11 @@
 //! The core made the pipe, gave its write end to the helper and duplicated
 //! its read end into this process. The worker never trusts it: before it
 //! reads, it checks that the handle is a pipe end and not one of its own
-//! standard handles (`is_pipe`), and every read is bounded, so a helper that
-//! stalls cannot block the capture thread past a stop. The format is `persephone_call_protocol::screen_frame`; this
-//! module only moves bytes and keeps the waits short.
+//! standard handles (`is_pipe`), and every read is bounded: a stop ends it,
+//! and each item has one deadline ([`PipeReader::begin_item`]), so a helper
+//! that stalls or trickles its bytes cannot hold the capture thread. The
+//! format is `persephone_call_protocol::screen_frame`; this module only
+//! moves bytes and keeps the waits short.
 
 use std::fs::File;
 use std::io::{self, Read};
@@ -17,11 +19,17 @@ use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Storage::FileSystem::{FILE_TYPE_PIPE, GetFileType};
 use windows::Win32::System::Pipes::{GetNamedPipeInfo, PeekNamedPipe};
 
-/// How long a read waits for the next bytes of an item that has begun. A
-/// helper that stops writing inside an item is a failed helper.
+/// The longest time that one item may take, from [`PipeReader::begin_item`]
+/// to its last byte. A helper that stops writing inside an item, or writes
+/// it so slowly that it never ends, is a failed helper.
 pub const STALL_TIMEOUT: Duration = Duration::from_secs(3);
-/// How often a wait looks at the pipe and at the stop flag.
+/// How often a read inside an item looks at the pipe and at the stop flag.
+/// A picture fills the 1 MiB pipe many times, so this stays short.
 const POLL: Duration = Duration::from_millis(5);
+/// How often a wait between items looks at the pipe and at the stop flag.
+/// Pictures come at most 5 a second, so one seen 25 ms late costs nothing,
+/// and a still screen wakes the thread 40 times a second, not 200.
+const IDLE_POLL: Duration = Duration::from_millis(25);
 
 /// Whether `handle` is the end of a pipe and none of this process's
 /// standard handles. `GetFileType` also calls a socket a pipe;
@@ -80,6 +88,10 @@ pub enum Wait {
 pub struct PipeReader {
     file: File,
     stop: std::sync::Arc<AtomicBool>,
+    /// When the item being read must be complete ([`Self::begin_item`]).
+    deadline: Option<Instant>,
+    /// How long one item may take: [`STALL_TIMEOUT`], shorter in tests.
+    item_limit: Duration,
 }
 
 impl PipeReader {
@@ -93,7 +105,16 @@ impl PipeReader {
         Ok(Self {
             file: File::from(handle),
             stop,
+            deadline: None,
+            item_limit: STALL_TIMEOUT,
         })
+    }
+
+    /// Starts the time of the next item: all its reads together may take at
+    /// most [`STALL_TIMEOUT`], however the helper spreads its bytes. Call it
+    /// before each item. Without it, each read has that time on its own.
+    pub fn begin_item(&mut self) {
+        self.deadline = Some(Instant::now() + self.item_limit);
     }
 
     /// Bytes waiting, or `None` when the writer closed the pipe (or the
@@ -127,25 +148,30 @@ impl PipeReader {
                 Some(0) => {}
                 Some(_) => return Wait::Data,
             }
-            if started.elapsed() >= limit {
+            let waited = started.elapsed();
+            if waited >= limit {
                 return Wait::Idle;
             }
-            std::thread::sleep(POLL);
+            std::thread::sleep(IDLE_POLL.min(limit - waited));
         }
     }
 }
 
 impl Read for PipeReader {
-    /// Reads what is waiting, at most `buf.len()`. Waits up to
-    /// [`STALL_TIMEOUT`] for bytes; a set stop flag or a stall ends the wait
-    /// with `TimedOut`. A closed pipe is the end of the input.
+    /// Reads what is waiting, at most `buf.len()`, until the item's deadline
+    /// ([`PipeReader::begin_item`]; without one, [`STALL_TIMEOUT`] from this
+    /// call). A set stop flag or a passed deadline ends the read with
+    /// `TimedOut`, also when bytes are waiting. A closed pipe is the end of
+    /// the input.
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if buf.is_empty() {
             return Ok(0);
         }
-        let started = Instant::now();
+        let deadline = self
+            .deadline
+            .unwrap_or_else(|| Instant::now() + self.item_limit);
         loop {
-            if self.stop.load(Ordering::Acquire) {
+            if self.stop.load(Ordering::Acquire) || Instant::now() >= deadline {
                 return Err(io::ErrorKind::TimedOut.into());
             }
             match self.available() {
@@ -155,9 +181,6 @@ impl Read for PipeReader {
                     let take = buf.len().min(waiting as usize);
                     return self.file.read(&mut buf[..take]);
                 }
-            }
-            if started.elapsed() >= STALL_TIMEOUT {
-                return Err(io::ErrorKind::TimedOut.into());
             }
             std::thread::sleep(POLL);
         }
@@ -319,5 +342,35 @@ mod tests {
         stopper.join().expect("the stopper");
         assert_eq!(result, Err(ScreenFrameError::Io(io::ErrorKind::TimedOut)));
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    /// GIVEN a helper that writes an item one byte at a time, each byte
+    /// well within the limit WHEN the item is read THEN the read ends when
+    /// the item's own time is up, not after the last byte: a slow helper
+    /// cannot hold the capture thread.
+    #[test]
+    fn given_an_item_that_trickles_when_read_then_its_whole_time_is_bounded() {
+        let (mut reader, mut write, _stop) = reader();
+        reader.item_limit = Duration::from_millis(300);
+        let mut wire = Vec::new();
+        write_picture(&mut wire, 3, 4, 2, &[0; 32]).expect("a picture");
+        let writer = std::thread::spawn(move || {
+            for byte in wire {
+                if write.write_all(&[byte]).is_err() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(40));
+            }
+        });
+        let started = Instant::now();
+        reader.begin_item();
+        let result = read_item(&mut reader, 3);
+        let took = started.elapsed();
+        drop(reader);
+        writer.join().expect("the writer");
+        assert_eq!(result, Err(ScreenFrameError::Io(io::ErrorKind::TimedOut)));
+        // The whole item would take about 2 s; each byte came in 40 ms.
+        assert!(took >= Duration::from_millis(300), "{took:?}");
+        assert!(took < Duration::from_millis(1500), "{took:?}");
     }
 }
