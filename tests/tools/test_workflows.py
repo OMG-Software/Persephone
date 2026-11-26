@@ -276,6 +276,16 @@ class RepositoryWorkflows(unittest.TestCase):
         requirements = (ROOT / "tools/ci-requirements.txt").read_text(encoding="utf-8")
         self.assertRegex(requirements, r"--hash=sha256:[0-9a-f]{64}")
 
+    def test_the_arch_package_uses_the_checked_arch_image(self):
+        """GIVEN release.yml and check.yml
+        WHEN the arch-package job and the arch check name their containers
+        THEN both use the same archlinux:base-devel image, pinned by digest
+        (ADR-0069)."""
+        package = load(WORKFLOWS / "release.yml")["jobs"]["arch-package"]["container"]["image"]
+        checked = load(WORKFLOWS / REQUIRED_WORKFLOW)["jobs"]["arch"]["container"]["image"]
+        self.assertRegex(package, r"^archlinux:base-devel@sha256:[0-9a-f]{64}$")
+        self.assertEqual(package, checked)
+
 
 MINIMAL = """
 on:

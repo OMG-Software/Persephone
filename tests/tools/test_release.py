@@ -1,4 +1,5 @@
 import contextlib
+import hashlib
 import io
 import json
 from pathlib import Path
@@ -184,6 +185,104 @@ class VersionParsingTests(unittest.TestCase):
     def test_tag_must_start_with_v(self):
         with self.assertRaises(release.ReleaseError):
             release.parse_tag("0.1.0")
+
+
+class ArchVersionTests(TempTree):
+    def test_release_and_word_numbered_prereleases_drop_the_hyphen(self):
+        # GIVEN versions that pacman can order WHEN mapped to an Arch pkgver
+        # THEN the release stays as it is and a pre-release loses only its hyphen,
+        # so pacman sorts it before the release (0.1.0alpha.1 < 0.1.0).
+        self.assertEqual(release.arch_pkgver("0.3.0"), "0.3.0")
+        self.assertEqual(release.arch_pkgver("0.1.0-alpha.1"), "0.1.0alpha.1")
+        self.assertEqual(release.arch_pkgver("1.2.3-rc.10"), "1.2.3rc.10")
+        self.assertEqual(release.arch_pkgver("0.1.0-beta.1.2"), "0.1.0beta.1.2")
+
+    def test_prereleases_that_pacman_would_misorder_are_refused(self):
+        # GIVEN pre-releases that are valid MSI versions but that pacman would sort
+        # differently from Semantic Versioning (0.1.07 is newer than 0.1.0; vercmp
+        # puts a number after a word) WHEN mapped THEN each one is refused.
+        for text in ("0.1.0-7", "0.1.0-alpha.beta.1", "0.1.0-x1.2", "0.1.0-alpha-x.1"):
+            with self.subTest(text=text), self.assertRaises(release.ReleaseError):
+                release.arch_pkgver(text)
+
+    def test_version_and_check_tag_refuse_such_a_prerelease_before_any_change(self):
+        # GIVEN a tree WHEN `version` or `check-tag` gets a pre-release that the
+        # Arch package cannot carry THEN both fail with exit code 2 and no file changes.
+        write_tree(self.root)
+        before = snapshot(self.root)
+        code, _, stderr = run_main_without_cargo(["version", "0.1.0-7"], self.root)
+        self.assertEqual(code, 2)
+        self.assertIn("Arch Linux", stderr)
+        self.assertEqual(snapshot(self.root), before)
+        code, _, stderr = run_main(["check-tag", "v0.1.0-7"], self.root)
+        self.assertEqual(code, 2)
+        self.assertIn("Arch Linux", stderr)
+
+
+class ArchPkgbuildTests(TempTree):
+    VERSION = "0.1.0-alpha.1"
+    DEB = f"Persephone_{VERSION}_amd64-unsigned.deb"
+
+    def setUp(self):
+        super().setUp()
+        conf = self.root / "src-tauri/tauri.conf.json"
+        conf.parent.mkdir(parents=True)
+        conf.write_text(TAURI_CONF.replace('"version": "0.0.0"', f'"version": "{self.VERSION}"', 1), encoding="utf-8")
+        self.template = self.root / release.ARCH_TEMPLATE
+        self.template.parent.mkdir(parents=True)
+        shutil.copyfile(release.ROOT / release.ARCH_TEMPLATE, self.template)
+        self.debs = self.root / "in"
+        self.debs.mkdir()
+        self.output = self.root / "build"
+
+    def write_pkgbuild(self, name=DEB, content=b"deb contents"):
+        deb = self.debs / name
+        if content is not None:
+            deb.write_bytes(content)
+        return run_main(["arch-pkgbuild", "--deb", str(deb), "--output", str(self.output)], self.root)
+
+    def test_pkgbuild_names_the_arch_version_the_deb_and_its_sha256(self):
+        # GIVEN the repository template and the x86_64 .deb of the app version
+        # WHEN the PKGBUILD is written
+        code, _, stderr = self.write_pkgbuild()
+        # THEN it carries the Arch version, the .deb's name and SHA-256 and no
+        # placeholder, and the .deb is copied beside it for makepkg.
+        self.assertEqual(code, 0, stderr)
+        text = (self.output / "PKGBUILD").read_text(encoding="utf-8")
+        digest = hashlib.sha256(b"deb contents").hexdigest()
+        self.assertIn("\npkgver=0.1.0alpha.1\n", text)
+        self.assertIn(f"\nsource=('{self.DEB}')\n", text)
+        self.assertIn(f"\nsha256sums=('{digest}')\n", text)
+        self.assertNotRegex(text, r"@[A-Z0-9_]+@")
+        self.assertEqual((self.output / self.DEB).read_bytes(), b"deb contents")
+
+    def test_a_deb_of_another_version_or_architecture_is_refused(self):
+        # GIVEN a .deb whose name is not the x86_64 .deb of the app version
+        # WHEN the PKGBUILD is written THEN it fails with exit code 2 and writes nothing.
+        for name in ("Persephone_0.0.9_amd64.deb", f"Persephone_{self.VERSION}_arm64.deb",
+                     f"Persephone_{self.VERSION}_amd64.AppImage", f"Persephone_{self.VERSION}_amd64-signed.deb"):
+            with self.subTest(name=name):
+                code, _, stderr = self.write_pkgbuild(name)
+                self.assertEqual(code, 2)
+                self.assertIn("is not the x86_64 .deb", stderr)
+                self.assertFalse(self.output.exists())
+
+    def test_a_missing_deb_is_refused(self):
+        # GIVEN no file at the .deb's path WHEN the PKGBUILD is written THEN it fails.
+        code, _, stderr = self.write_pkgbuild(content=None)
+        self.assertEqual(code, 2)
+        self.assertIn("is not a regular file", stderr)
+        self.assertFalse(self.output.exists())
+
+    def test_a_template_without_the_checksum_is_refused(self):
+        # GIVEN a template that has lost its SHA-256 placeholder WHEN the PKGBUILD
+        # is written THEN it fails, so makepkg never runs without the .deb's checksum.
+        text = self.template.read_text(encoding="utf-8")
+        self.template.write_text(text.replace("@SHA256@", "SKIP"), encoding="utf-8")
+        code, _, stderr = self.write_pkgbuild()
+        self.assertEqual(code, 2)
+        self.assertIn("has no @SHA256@", stderr)
+        self.assertFalse(self.output.exists())
 
 
 class SetVersionTests(TempTree):

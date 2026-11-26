@@ -1,0 +1,52 @@
+# Arch Linux package for Persephone (ADR-0069).
+#
+# `python tools/release.py arch-pkgbuild` writes PKGBUILD from this template.
+# It fills in the Arch version and the name and SHA-256 of the x86_64 .deb
+# that the release workflow built on Ubuntu 22.04. The package holds exactly
+# the files of that .deb, unchanged, so it has the same programs as the other
+# Linux packages. Do not run makepkg on this template.
+pkgname=persephone
+pkgver=@PKGVER@
+pkgrel=1
+pkgdesc='Matrix desktop client (pre-release; not for high-risk use)'
+arch=('x86_64')
+url='https://github.com/OMG-Software/Persephone'
+license=('GPL-3.0-only')
+# The libraries that the four programs link (their ELF NEEDED entries), the
+# tray library that persephone-ui loads at run time, the icon theme that holds
+# the icons, and a Secret Service provider: the core keeps the profile key
+# there and does not open a profile without one (ADR-0010). The release
+# workflow fails if a linked library belongs to a package not listed here.
+depends=(
+    'cairo'
+    'gdk-pixbuf2'
+    'glib2'
+    'glibc'
+    'gtk3'
+    'hicolor-icon-theme'
+    'libayatana-appindicator'
+    'libgcc'
+    'libpipewire'
+    'libsoup3'
+    'org.freedesktop.secrets'
+    'webkit2gtk-4.1'
+)
+optdepends=(
+    'pipewire: sound, video and screen sharing in calls'
+    'xdg-desktop-portal: open links, sign in through the browser and share the screen (with a portal backend)'
+)
+# Keep the programs byte for byte as in the .deb: no stripping and no
+# separate debug package.
+options=('!strip' '!debug')
+source=('@DEB@')
+sha256sums=('@SHA256@')
+
+package() {
+    # makepkg has extracted the .deb (an ar archive) into $srcdir.
+    local data=(data.tar.*)
+    if [[ ${#data[@]} -ne 1 || ! -f ${data[0]} ]]; then
+        echo 'The .deb does not hold exactly one data.tar archive.' >&2
+        return 1
+    fi
+    bsdtar -xf "${data[0]}" -C "$pkgdir"
+}
