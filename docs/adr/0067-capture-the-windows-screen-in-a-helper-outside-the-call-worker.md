@@ -157,8 +157,10 @@ it as accepted.
   version 13, because version 12 (ADR-0064) is on `main` without this
   message: a core and a call worker of different builds then refuse each
   other at the first message, not when a share starts.
-* The worker checks that the handle is a pipe (`GetFileType`) before it
-  reads, and never closes a handle that is not a pipe.
+* The worker takes the handle only when it is a pipe end (`GetFileType`
+  reports a pipe and `GetNamedPipeInfo` accepts it, which refuses a socket)
+  and none of its own standard handles, before it reads. It never closes a
+  handle that it refuses.
 * The pipe carries the bounded frames of `crates/media-protocol`: one
   `Control` frame with a 23-byte message (version, tag, share, format,
   width, height, stride, length), then one pixel frame. The reader checks

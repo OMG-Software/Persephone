@@ -398,7 +398,8 @@ above stays as it was.
   uncommitted changes of the commit that adds this section. Those changes
   touch no source of the helper (`crates/screen-helper/src`), of its launch
   (`crates/media-broker/src`) or of the core's helper code
-  (`calls/screen_helper.rs`, `platform/windows/screen_helper.rs`), so the run
+  (`crates/core/src/calls/screen_helper.rs`,
+  `crates/core/src/platform/windows/screen_helper.rs`), so the run
   covers the helper of `8b9d75e`, with every review commit named above.
 * Command: as above, `cargo build --locked --offline -p
   persephone-screen-helper`, then `cargo test --locked --offline -p

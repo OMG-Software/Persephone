@@ -129,9 +129,11 @@ pub(crate) fn start_detached(command: &mut std::process::Command) -> std::io::Re
 }
 
 /// Starts a test's child process under the media broker's process-start
-/// lock, as every start of the core does. The test binary also holds the
-/// ignored tests that launch a real call worker or screen helper, and a start
-/// without the lock can inherit their pipe ends.
+/// lock, as every other start in the core does (the `ShellExecuteW` link
+/// opener aside). Every test start of the library on Windows goes through
+/// it: the test binary also holds the ignored tests that launch a real call
+/// worker or screen helper, and a start without the lock can inherit their
+/// pipe ends.
 #[cfg(test)]
 pub(crate) fn spawn_for_test(
     command: &mut std::process::Command,
