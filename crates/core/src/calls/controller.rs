@@ -978,10 +978,11 @@ async fn finish_worker(link: CallWorkerLink) {
 
 /// Ends the screen pick and the capture helpers of a call (ADR-0067). A pick
 /// that still runs is cancelled. On Windows its task is waited for, at most
-/// [`PICK_END_WAIT`], because it may start a helper: that helper is stopped
-/// and joined with the running share's one. Then the wait goes on until no
-/// helper is active, at most [`REAPED_HELPER_WAIT`], so a helper that an
-/// earlier stop left to its reaper has ended too. A launch under way counts
+/// [`PICK_END_WAIT`], because it may start a helper: a helper that it returns
+/// within that wait is stopped and joined with the running share's one; a
+/// pick that outlives the wait is not joined here. Then the wait goes on
+/// until no helper is active, at most [`REAPED_HELPER_WAIT`], so a helper
+/// that an earlier stop left to its reaper has ended too. A launch under way counts
 /// as active (`LaunchGuard`): a pick that outlived [`PICK_END_WAIT`] after
 /// its last cancel check is waited for here, and it stops its helper
 /// itself when it sees the cancel. Both waits are bounded, so a stuck launch
@@ -1000,9 +1001,10 @@ async fn finish_worker(link: CallWorkerLink) {
 /// before it starts one. A call that the end of the session stops waits
 /// even then, so a helper that outlived an earlier call's bounded waits gets
 /// one more wait. A session that ends with no call running has no call task
-/// to wait in, and `stop_for_session_end` must not block: such a helper is
-/// still stopped by its reaper, and its Job's kill-on-close ends it when the
-/// core exits.
+/// to wait in, and `stop_for_session_end` must not block: a helper that an
+/// earlier call left can then still be active, until its reaper's stop ends
+/// it or, when no exit shows, until the core exits and its Job's
+/// kill-on-close ends it.
 async fn end_screen_helpers(
     pick: Option<ScreenPick>,
     helper: Option<HelperShare>,

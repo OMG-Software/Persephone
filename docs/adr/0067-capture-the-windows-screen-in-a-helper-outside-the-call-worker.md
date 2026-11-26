@@ -196,9 +196,12 @@ it as accepted.
   a kill when the session ended), so the microphone, the camera and the
   room never wait for a helper, and then do this before the call is gone.
   They also cancel a share pick that still runs and wait for it (at most
-  2 seconds), so a helper that it started is stopped and joined too. Then
-  they wait until no helper that an earlier stop left to its reaper is
-  active (at most 5 seconds). When the user leaves a call that began no
+  2 seconds); a helper that the pick returns within that wait is stopped
+  and joined with the share's own. A pick that outlives the wait is not
+  joined: it reads the cancel after its launch and drops its helper, whose
+  reaper stops it. Then they wait until no helper that was left to a
+  reaper is active (at most 5 seconds), such a pick's helper included.
+  When the user leaves a call that began no
   pick and held no helper, its end skips this wait: a helper comes only
   from a call that began a pick, whose own end waited for it (bounded), so
   none of this call's can be active, and the next share waits until none
@@ -206,9 +209,10 @@ it as accepted.
   that call's end always waits, so a helper that outlived an earlier
   call's bounded waits gets one more wait. A session that ends with no
   call running does not wait for a helper, because the end of the session
-  must not block: a helper left then is still stopped by its reaper, the
-  Job's kill-on-close ends it when the core exits, and the next share
-  waits until none is active. A pick looks at the cancel again just before
+  must not block. A helper that an earlier call left can then still be
+  active: it stays active until its reaper's stop ends it, or, when no
+  exit shows, until the core exits and the Job's kill-on-close ends it.
+  The next share waits until none is active. A pick looks at the cancel again just before
   it starts the helper, and from that look until the helper counts as
   active the launch counts as active too, in the same count, so the end of
   the call also waits for a launch that passed the look. Both waits are
