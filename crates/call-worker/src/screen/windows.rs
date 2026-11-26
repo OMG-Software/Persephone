@@ -388,13 +388,21 @@ mod tests {
         write_picture(&mut write, 9, 4, 2, &[2; 32]).expect("a picture");
         // An end item ends the share at once, also before a waiting
         // picture is due, so it goes only after picture 2 was seen.
-        wait_for_fills(&seen, 2);
+        wait_until(
+            &seen,
+            |seen| seen.fills.iter().any(|(fill, _)| *fill == 2),
+            "picture 2 goes",
+        );
         write_end(&mut write, 9, ScreenEnd::NotFound).expect("an end");
         thread.join().expect("the capture thread");
         let seen = seen.lock().unwrap();
-        assert_eq!(seen.frames, vec![(4, 2, 32); 2]);
-        let fills: Vec<u8> = seen.fills.iter().map(|(fill, _)| *fill).collect();
-        assert_eq!(fills, [1, 2]);
+        // A paused test thread can let a picture go again after the repeat
+        // gap: picture 1 before picture 2 is written, picture 2 before the
+        // end item.
+        assert!(seen.frames.iter().all(|frame| *frame == (4, 2, 32)));
+        let mut order: Vec<u8> = seen.fills.iter().map(|(fill, _)| *fill).collect();
+        order.dedup();
+        assert_eq!(order, [1, 2]);
         assert_eq!(seen.ended, Some(Ended::NotFound));
     }
 

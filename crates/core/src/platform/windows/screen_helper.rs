@@ -130,7 +130,7 @@ impl HelperLaunch for BrokerHelper {
 mod tests {
     use super::*;
     use crate::calls::screen_helper::HelperShare;
-    use persephone_call_protocol::screen_frame::{ScreenItem, read_item};
+    use persephone_call_protocol::screen_frame::{ScreenItem, read_item, read_item_into};
     use persephone_call_protocol::screen_helper::EXIT_STOPPED;
     use persephone_call_protocol::{DesktopRect, MonitorName};
     use std::sync::mpsc;
@@ -205,15 +205,22 @@ mod tests {
         let helper = HelperShare::start(1, launched.process).expect("a helper share");
         let frames = launched.frames;
         let (sender, receiver) = mpsc::channel();
-        // The read end comes back with the item and stays open until the
-        // helper was stopped: with no reader, its next write would end it
-        // with "frame pipe closed" (13) instead of a stop.
+        let (drained, reader_done) = mpsc::channel();
+        // The reader hands on the first item, then reads on until the
+        // helper's end of the pipe closes. A closed read end would end the
+        // helper with "frame pipe closed" (13), and a picture left unread
+        // would hold it in its write until the stop terminates it: either
+        // way not a stop.
         std::thread::spawn(move || {
             let mut file = File::from(frames);
-            let item = read_item(&mut file, 1);
-            let _ = sender.send((item, file));
+            let _ = sender.send(read_item(&mut file, 1));
+            let (mut buffer, mut more) = (Vec::new(), 0_usize);
+            while read_item_into(&mut file, 1, &mut buffer).is_ok() {
+                more += 1;
+            }
+            let _ = drained.send(more);
         });
-        let (item, read_end) = receiver
+        let item = receiver
             .recv_timeout(Duration::from_secs(30))
             .expect("an item in 30 s");
         let Ok(ScreenItem::Frame(frame)) = item else {
@@ -232,11 +239,15 @@ mod tests {
             .count();
         assert!(lit > 0, "the picture is black");
         assert_eq!(helper.stop_and_join(), Some(EXIT_STOPPED));
-        drop(read_end);
+        // The broker closed the core's copy of the write end at the start,
+        // so the helper's exit closes the pipe and the reader ends.
+        let more = reader_done
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the reader ends when the helper's end closes");
         // The Job's memory cap is 512 MiB; this is the measured peak.
         let peak = process.peak_memory();
         eprintln!(
-            "screen helper peak committed memory: {} MiB for a {}x{} picture",
+            "screen helper peak committed memory: {} MiB for a {}x{} picture, {more} more items read",
             peak >> 20,
             frame.width,
             frame.height
