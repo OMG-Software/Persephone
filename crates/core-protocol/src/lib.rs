@@ -1202,9 +1202,11 @@ fn call_stats_content<'de, D: serde::Deserializer<'de>>(
             }
             let mut stats = None;
             while let Some(Field::Stats) = map.next_key::<Field>()? {
-                if stats.replace(map.next_value::<WireStatsValue>()?).is_some() {
+                // The key alone refuses a repeat: its value is not read.
+                if stats.is_some() {
                     return Err(A::Error::duplicate_field("stats"));
                 }
+                stats = Some(map.next_value::<WireStatsValue>()?);
             }
             stats
                 .map(|stats| stats.0)
@@ -1293,38 +1295,47 @@ impl<'de> serde::de::Visitor<'de> for WireStats {
         }
         let (mut microphone, mut camera, mut screen) = (None, None, None);
         let (mut participants, mut connections) = (None, None);
+        // A repeated key is refused before its value is read. A key seen with
+        // the value `null` still counts as seen, so `Option<Option<_>>`.
         while let Some(field) = map.next_key::<Field>()? {
-            let fresh = match field {
-                Field::Microphone => microphone
-                    .replace(
+            let seen = match field {
+                Field::Microphone => microphone.is_some(),
+                Field::Camera => camera.is_some(),
+                Field::Screen => screen.is_some(),
+                Field::Participants => participants.is_some(),
+                Field::Connections => connections.is_some(),
+            };
+            if seen {
+                return Err(A::Error::custom("duplicate call statistics field"));
+            }
+            match field {
+                Field::Microphone => {
+                    microphone = Some(
                         map.next_value::<Option<MapOnly<persephone_contracts::CallStatsAudioSent>>>()?,
-                    )
-                    .is_none(),
-                Field::Camera => camera
-                    .replace(
+                    );
+                }
+                Field::Camera => {
+                    camera = Some(
                         map.next_value::<Option<MapOnly<persephone_contracts::CallStatsVideoSent>>>()?,
-                    )
-                    .is_none(),
-                Field::Screen => screen
-                    .replace(
+                    );
+                }
+                Field::Screen => {
+                    screen = Some(
                         map.next_value::<Option<MapOnly<persephone_contracts::CallStatsVideoSent>>>()?,
-                    )
-                    .is_none(),
-                Field::Participants => participants
-                    .replace(map.next_value::<BoundedList<
+                    );
+                }
+                Field::Participants => {
+                    participants = Some(map.next_value::<BoundedList<
                         WireParticipant,
                         { persephone_contracts::CALL_PARTICIPANTS_MAX },
-                    >>()?)
-                    .is_none(),
-                Field::Connections => connections
-                    .replace(map.next_value::<BoundedList<
+                    >>()?);
+                }
+                Field::Connections => {
+                    connections = Some(map.next_value::<BoundedList<
                         MapOnly<persephone_contracts::CallStatsConnection>,
                         { persephone_contracts::CALL_STATS_CONNECTIONS_MAX },
-                    >>()?)
-                    .is_none(),
-            };
-            if !fresh {
-                return Err(A::Error::custom("duplicate call statistics field"));
+                    >>()?);
+                }
             }
         }
         let participants = participants.ok_or_else(|| A::Error::missing_field("participants"))?;
@@ -1392,14 +1403,21 @@ impl<'de> Deserialize<'de> for WireParticipant {
                 use serde::de::Error;
                 let (mut user_id, mut device_id, mut audio, mut video) = (None, None, None, None);
                 while let Some(field) = map.next_key::<Field>()? {
-                    let fresh = match field {
-                        Field::UserId => user_id.replace(map.next_value()?).is_none(),
-                        Field::DeviceId => device_id.replace(map.next_value()?).is_none(),
-                        Field::Audio => audio.replace(map.next_value()?).is_none(),
-                        Field::Video => video.replace(map.next_value()?).is_none(),
+                    // A repeated key is refused before its value is read.
+                    let seen = match field {
+                        Field::UserId => user_id.is_some(),
+                        Field::DeviceId => device_id.is_some(),
+                        Field::Audio => audio.is_some(),
+                        Field::Video => video.is_some(),
                     };
-                    if !fresh {
+                    if seen {
                         return Err(A::Error::custom("duplicate call statistics field"));
+                    }
+                    match field {
+                        Field::UserId => user_id = Some(map.next_value()?),
+                        Field::DeviceId => device_id = Some(map.next_value()?),
+                        Field::Audio => audio = Some(map.next_value()?),
+                        Field::Video => video = Some(map.next_value()?),
                     }
                 }
                 Ok(WireParticipant {
@@ -4614,6 +4632,57 @@ mod timeline_events_wire_tests {
             ))
             .is_ok()
         );
+    }
+
+    /// GIVEN a repeated key whose second value is invalid WHEN read THEN the
+    /// repeat is refused by the key, not by the value: the error names the
+    /// duplicate, so the second value was never decoded.
+    #[test]
+    fn given_a_repeated_call_stats_key_with_a_bad_second_value_then_the_key_is_refused() {
+        let read = |json: &str| {
+            serde_json::from_str::<CoreMessage>(json)
+                .unwrap_err()
+                .to_string()
+        };
+        let content = |stats: &str| format!(r#"{{"event":{{"call_stats":{stats}}}}}"#);
+        let valid =
+            r#"{"microphone":null,"camera":null,"screen":null,"participants":[],"connections":[]}"#;
+        // The content key `stats`.
+        let error = read(&content(&format!(r#"{{"stats":{valid},"stats":"bad"}}"#)));
+        assert!(error.contains("duplicate field `stats`"), "{error}");
+        // An aggregate key.
+        let error = read(&content(
+            r#"{"stats":{"microphone":null,"microphone":"bad","camera":null,"screen":null,"participants":[],"connections":[]}}"#,
+        ));
+        assert!(error.contains("duplicate call statistics field"), "{error}");
+        // A participant key.
+        let error = read(&content(
+            r#"{"stats":{"microphone":null,"camera":null,"screen":null,"connections":[],
+                "participants":[{"userId":"@a:example.org","userId":5,"deviceId":"D","audio":null,"video":null}]}}"#,
+        ));
+        assert!(error.contains("duplicate call statistics field"), "{error}");
+    }
+
+    /// GIVEN a key first read as `null` and then repeated WHEN read THEN it is
+    /// refused as a repeat: `null` is a value, not an unseen key.
+    #[test]
+    fn given_a_repeated_call_stats_key_after_null_then_it_is_refused_as_a_repeat() {
+        let read = |json: &str| {
+            serde_json::from_str::<CoreMessage>(json)
+                .unwrap_err()
+                .to_string()
+        };
+        let error = read(
+            r#"{"event":{"call_stats":{"stats":{"microphone":null,"microphone":null,"camera":null,
+                "screen":null,"participants":[],"connections":[]}}}}"#,
+        );
+        assert!(error.contains("duplicate call statistics field"), "{error}");
+        let error = read(
+            r#"{"event":{"call_stats":{"stats":{"microphone":null,"camera":null,"screen":null,
+                "connections":[],"participants":[{"userId":"@a:example.org","deviceId":"D",
+                "audio":null,"audio":null,"video":null}]}}}}"#,
+        );
+        assert!(error.contains("duplicate call statistics field"), "{error}");
     }
 
     /// GIVEN call level events WHEN read THEN bounded ones are kept, and a

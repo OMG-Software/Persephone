@@ -7100,7 +7100,8 @@ mod tests {
     }
 
     /// GIVEN a running call WHEN its task runs THEN a switch of the statistics
-    /// reaches the worker once, and the same value is not sent again.
+    /// reaches the worker once, and the same value is not sent again. The
+    /// test reads what the worker gets, not only the `sent` flag.
     #[test]
     fn given_the_statistics_switch_when_applied_then_the_worker_gets_each_change_once() {
         let mut fixture = test_call(
@@ -7108,17 +7109,31 @@ mod tests {
             Arc::new(Flags::default()),
             Arc::new(AtomicBool::new(false)),
         );
-        let call = &mut fixture.call;
+        let (call, to_worker) = (&mut fixture.call, &mut fixture.to_worker);
         let mut sent = false;
         let mut pending = Some((Instant::now(), false));
         assert_eq!(call.apply_stats(&mut pending, &mut sent), Ok(()));
-        assert!(pending.is_none() && !sent, "off to off is not sent");
+        assert!(pending.is_none() && !sent);
+        assert!(to_worker.try_recv().is_err(), "off to off is not sent");
         pending = Some((Instant::now(), true));
         assert_eq!(call.apply_stats(&mut pending, &mut sent), Ok(()));
         assert!(pending.is_none() && sent);
+        assert!(matches!(
+            to_worker.try_recv(),
+            Ok(ToWorker::SetStats { on: true })
+        ));
         pending = Some((Instant::now(), true));
         assert_eq!(call.apply_stats(&mut pending, &mut sent), Ok(()));
-        assert!(sent, "on to on is not sent again");
+        assert!(pending.is_none() && sent);
+        assert!(to_worker.try_recv().is_err(), "on to on is not sent again");
+        pending = Some((Instant::now(), false));
+        assert_eq!(call.apply_stats(&mut pending, &mut sent), Ok(()));
+        assert!(pending.is_none() && !sent);
+        assert!(matches!(
+            to_worker.try_recv(),
+            Ok(ToWorker::SetStats { on: false })
+        ));
+        assert!(to_worker.try_recv().is_err(), "the off goes once");
     }
 
     /// GIVEN a call alone for 30 seconds with a join that waits unread

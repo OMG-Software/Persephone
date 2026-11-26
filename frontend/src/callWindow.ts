@@ -3,7 +3,7 @@
 // names the video tile that shows its camera, or none, and then the window
 // shows a placeholder. User IDs are untrusted text for text rendering only.
 import type { CallStatus } from '../../crates/contracts/generated/contracts';
-import { deviceKey } from './calls.ts';
+import { deviceKey, inCall } from './calls.ts';
 import { SCREEN_TILE } from './video.ts';
 
 /** The heading of the participant list. */
@@ -64,6 +64,16 @@ export class SelfClose {
     clearTimeout(this.#timer);
     this.#timer = undefined;
   }
+}
+
+/**
+ * Whether the technical details panel stays open when `next` replaces
+ * `previous` (ADR-0066). It stays only while the same room's call goes on.
+ * The panel reads once, when it opens, so a call in another room must close
+ * it: it would keep the old call's last reading.
+ */
+export function statsStayOpen(previous: CallStatus, next: CallStatus): boolean {
+  return inCall(next) && next.roomId === previous.roomId;
 }
 
 /** Shown in the main window when the call window cannot open. */

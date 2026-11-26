@@ -37,9 +37,13 @@ Facts from the source on 25 November 2026:
 * The worker sends numbers only, with bounds that the receiver checks
   (ADR-0043). No free text, address or identifier beyond those that other
   messages already carry.
-* Statistics never delay a control message or a picture, and never run in
-  the worker's event loop.
-* The call window gets one new command and nothing else (ADR-0060).
+* In each round of the worker's writer, statistics go after the control
+  messages and the waiting picture, and they never run in the worker's event
+  loop. A control message that comes while a reading is being written waits
+  for that one bounded write.
+* The call window gets two new commands and nothing else (ADR-0060):
+  `call_stats`, the switch that reaches the core, and `call_stats_read`,
+  which only tells the host that the page handled a reading.
 
 ## Considered Options
 
@@ -70,6 +74,15 @@ for the answer, and a reading is old when the page asks for it.
 * The core sends `ToWorker::SetStats { on }` to the worker on each change.
   The worker starts with them off. A full worker queue keeps the newest value
   for a retry, like the diagnostic switch (ADR-0058).
+* The core sends a change only. When the page turns the details off and on
+  again while the call task is busy, the task can see only the newest value,
+  "on", and sends nothing: the worker never stopped, so its series and its
+  rates go on. When both changes reach the worker, it starts a new series,
+  whose first reading has no rates. A reading that the worker's writer took
+  before the off can still arrive after the on, and the core then shows it
+  once. It is a reading of the same call, taken before the off, and the next
+  reading replaces it. A series number in `SetStats` and `Stats` would let
+  the core drop it; this record does not add one.
 
 ### Worker
 
@@ -109,7 +122,8 @@ for the answer, and a reading is old when the page asks for it.
 * The reading goes to `Output::offer_stats`. It never waits, it replaces a
   reading that has not gone out, and the writer writes it after the control
   messages and the waiting picture of its round. So at most one reading
-  waits, and it delays no control message.
+  waits. A control message that comes while the reading is being written
+  waits for that write, which the message limits bound.
 
 ### Message
 
@@ -154,14 +168,20 @@ candidate type, SSRC, codec or other text.
   count. The page sends the count with each `call_stats`, and the host takes
   a start or stop only with the count of the page the window shows now. A
   request of a page that is gone fails and changes nothing.
-* The capability `call` gains `allow-call-stats`, and nothing else. The
-  main window does not have it.
+* The capability `call` gains `allow-call-stats` (the switch, which reaches
+  the core) and `allow-call-stats-read` (the page's acknowledgment, which
+  stays in the host and reaches no core), and nothing else. The main
+  window has neither.
 
 ### Page
 
 * A button "Technical details" (an icon button) in the call window controls
   opens a panel. The panel turns the details on when it opens and off when
   it closes, so closing, a closed window and an ended call all stop them.
+  The window closes the panel when the call ends and when a call in another
+  room replaces it (`statsStayOpen`), so the panel never shows a reading of
+  an earlier call. The call status has no call ID, so a new call in the
+  same room is told apart only by the end status between the two.
   Escape closes it. The bridge keeps the page's count from `watch_session`
   and sends it with each start and stop; with none, a start fails and a stop
   asks nothing. It sends the starts and stops one at a time, in the order
@@ -178,12 +198,18 @@ candidate type, SSRC, codec or other text.
 * No cost while the panel is closed: no read, no message, no timer work.
 * The numbers cannot carry anything but numbers, and the page never sees an
   address.
-* Control messages and pictures are not delayed.
+* A reading goes after the control messages and the waiting picture of each
+  writer round, so it delays a control message by at most one bounded write.
 
 ### Negative Consequences
 
 * The reading takes up to a second to appear, and rates show as unknown
   until the second reading.
+* Each read starts from LiveKit's copy of each room's participant map
+  (`Room::remote_participants`, one identity and two shared handles per
+  participant), and the limit of 32 applies after that copy. The level
+  meters take the same copy ten times a second. A bounded participant index
+  kept from room events would bound both; it is not part of this record.
 * An entry whose track has no statistics (a slow or failed read) is missing
   for that second.
 * A connection that has no track shows no numbers, because the worker reads

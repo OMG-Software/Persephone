@@ -1376,8 +1376,22 @@ fn given_call_statistics_then_only_the_call_window_may_open_them_and_only_while_
         (at_core, release)
     };
 
-    // The main window has no permission, so nothing reaches the core.
-    assert!(invoke_on(&main, "call_stats", app_origin(), stats_on(true, 0)).is_err());
+    // The main window has no permission, so nothing reaches the core. Its
+    // page is counted first, so the request is valid apart from the window:
+    // only the capability can refuse it.
+    let main_page = invoke_on(
+        &main,
+        "watch_session",
+        app_origin(),
+        serde_json::json!({"onChange": "__CHANNEL__:13", "onSoundLevel": "__CHANNEL__:14",
+                           "onLevels": "__CHANNEL__:15"}),
+    )
+    .unwrap()
+    .as_u64()
+    .expect("watch_session gives the main page its count");
+    let refused = invoke_on(&main, "call_stats", app_origin(), stats_on(true, main_page));
+    assert!(refused.is_err());
+    assert_ne!(refused, Err(serde_json::json!("invalid_argument")));
     assert!(switches().is_empty());
 
     // Not asked for: no channel, nothing is delivered.
@@ -1533,16 +1547,17 @@ fn given_call_statistics_then_only_the_call_window_may_open_them_and_only_while_
     subscriptions.dispatch(Event::CallStats { stats: reading(13) });
     assert_eq!(sent(13), 1);
     // A read of a page that is gone, or from the main window, changes nothing.
+    // The main window's read names its own counted page, so only the
+    // capability can refuse it.
     assert_eq!(read(page - 1), Err(serde_json::json!("invalid_argument")));
-    assert!(
-        invoke_on(
-            &main,
-            "call_stats_read",
-            app_origin(),
-            serde_json::json!({"page": page})
-        )
-        .is_err()
+    let refused = invoke_on(
+        &main,
+        "call_stats_read",
+        app_origin(),
+        serde_json::json!({"page": main_page}),
     );
+    assert!(refused.is_err());
+    assert_ne!(refused, Err(serde_json::json!("invalid_argument")));
     subscriptions.dispatch(Event::CallStats { stats: reading(14) });
     assert_eq!(sent(14), 0, "the stale read did not free the page");
     // With no statistics channel a read is fine and does nothing.

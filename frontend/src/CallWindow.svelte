@@ -53,7 +53,7 @@
     volumeText,
     volumeValue
   } from './calls';
-  import { callGrid, ROSTER_LABEL, SelfClose, type CallCell } from './callWindow';
+  import { callGrid, ROSTER_LABEL, SelfClose, statsStayOpen, type CallCell } from './callWindow';
   import { AUTO_PICK, feedKeys, keepPick, largeKey, selectFeed, showAll, splitFeeds, type ViewPick } from './callView';
   import CallWindowDevices from './CallWindowDevices.svelte';
   import CallStatsPanel from './CallStats.svelte';
@@ -93,9 +93,9 @@
   const selfClose = new SelfClose(() => void closeCallWindow().catch(() => {}));
 
   function take(next: CallStatus) {
+    if (!statsStayOpen(status, next)) statsOpen = false;
     status = next;
     selfClose.status(inCall(next), next.phase === 'ended');
-    if (!inCall(next)) statsOpen = false;
     if (next.phase !== 'active') {
       ownLevel = 0;
       levels = new Map();
