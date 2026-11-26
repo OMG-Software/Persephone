@@ -34,9 +34,19 @@
   // core's codes show as fixed texts from calls.ts. The live region stays in
   // the page so that a change in it is announced. Speaking changes are not
   // announced: each participant's mark is read in place only.
+  //
+  // The call window holds the call's controls (ADR-0060). Unless it failed
+  // to open or its page did not say it is ready, the bar shows only the room, the phase, a "Call window" button, a "Leave"
+  // button, which works even when the call page stops working, the
+  // "Declined" note, which the call window does not show, and the camera,
+  // screen share and device change notes, which must be seen while the call
+  // window is closed. When it failed (`full`), the bar shows every control,
+  // so the call can still be muted or left here.
   let {
     status,
     dismissed,
+    full,
+    opening = false,
     roomName,
     names,
     busy,
@@ -55,6 +65,10 @@
   }: {
     status: CallStatus;
     dismissed: boolean;
+    // The call window could not open: show the controls here.
+    full: boolean;
+    // An open waits for the call page: the button is off meanwhile.
+    opening?: boolean;
     roomName: string;
     // Display names from the call room's members, by user ID.
     names: ReadonlyMap<string, string>;
@@ -89,6 +103,17 @@
   const screenText = $derived(SCREEN_TEXT[status.screen]);
 </script>
 
+{#snippet callWindowButton()}
+  <button type="button" class="secondary call-window-open" disabled={opening} onclick={onwindow}>
+    <Icon name="video" />
+    {opening ? 'Opening the call window…' : 'Call window'}
+  </button>
+{/snippet}
+
+{#snippet leaveButton()}
+  <button type="button" class="secondary call-leave" onclick={onleave}>Leave</button>
+{/snippet}
+
 <div class="visually-hidden" aria-live="polite" aria-atomic="true">
   {callAnnouncement(status, dismissed)}
 </div>
@@ -101,6 +126,9 @@
       <span class="call-controls">
         {#if ended}
           <button type="button" class="secondary call-dismiss" onclick={ondismiss}>Dismiss</button>
+        {:else if !full}
+          {@render callWindowButton()}
+          {@render leaveButton()}
         {:else}
           <button
             type="button"
@@ -143,18 +171,15 @@
             <Icon name="screen" />
             {screen.label}
           </button>
-          <button type="button" class="secondary call-window-open" onclick={onwindow}>
-            <Icon name="video" />
-            Call window
-          </button>
-          <button type="button" class="secondary call-leave" onclick={onleave}>Leave</button>
+          {@render callWindowButton()}
+          {@render leaveButton()}
         {/if}
       </span>
     </div>
     {#if !ended && status.ringDeclined}
       <p class="call-declined note" role="status">{RING_DECLINED_TEXT}</p>
     {/if}
-    {#if !ended}
+    {#if !ended && full}
       <span id="call-deafen-text" class="visually-hidden">{DEAFEN_TEXT}</span>
       <label class="call-volume">
         <Icon name="volume" />
@@ -196,7 +221,7 @@
     {/if}
     {#if ended}
       <p class="call-end">{status.ended === null ? END_TEXT.internal : END_TEXT[status.ended]}</p>
-    {:else if status.participants.length > 0}
+    {:else if full && status.participants.length > 0}
       <ul class="call-people" aria-label="Call participants">
         {#each status.participants as person (person.userId + '/' + person.deviceId)}
           <li>

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import AccountPage from './AccountPage.svelte';
   import BrandMark from './BrandMark.svelte';
   import Accounts from './Accounts.svelte';
@@ -30,7 +30,7 @@
     VOLUME_SAVE_TEXT,
     type ShownRing
   } from './calls';
-  import { CALL_WINDOW_UNAVAILABLE_TEXT } from './callWindow';
+  import { CALL_WINDOW_UNAVAILABLE_TEXT, CallWindowOpener } from './callWindow.ts';
   import { resettable, storeText, unlockable } from './storeText.ts';
   import RoomTools from './RoomTools.svelte';
   import ConnectionHealth from './ConnectionHealth.svelte';
@@ -775,11 +775,43 @@
   // once per call: closing it during the call keeps it closed until the call
   // bar's "Call window" button.
   let callWindowFor = false;
+  // The call window could not open for this call, or its page did not say
+  // in time that it is ready. The main window then shows the call's controls
+  // and video itself; otherwise only the call window does, and the short bar
+  // keeps Leave. A later open that works hides them again.
+  let callWindowFailed = $state(false);
+  // Which open replies count is decided in callWindow.ts.
+  const callWindowOpener = new CallWindowOpener(
+    () => openCallWindow(),
+    (failed) => {
+      callWindowOpening = false;
+      callWindowFailed = failed;
+      // A window that cannot open leaves the call here; say so, so no
+      // window is missed without a reason.
+      if (failed) error = CALL_WINDOW_UNAVAILABLE_TEXT;
+      else if (error === CALL_WINDOW_UNAVAILABLE_TEXT) error = null;
+    }
+  );
+  // An open waits for the call page, up to ten seconds; the button says so
+  // and takes no more clicks meanwhile.
+  let callWindowOpening = $state(false);
+  function showCallWindow() {
+    callWindowOpening = true;
+    callWindowOpener.open();
+  }
+  // Ends the call window state of a call that is over: no fallback, no
+  // "could not open" message, and no reply from an open still waiting.
+  function forgetCallWindow() {
+    callWindowOpener.forget();
+    callWindowOpening = false;
+    callWindowFailed = false;
+    if (error === CALL_WINDOW_UNAVAILABLE_TEXT) error = null;
+  }
   $effect(() => {
     const joined = inCall(callState);
-    // A window that cannot open leaves the call here; say so, so no window
-    // is missed without a reason.
-    if (joined && !callWindowFor) void openCallWindow().catch(() => (error = CALL_WINDOW_UNAVAILABLE_TEXT));
+    if (joined && !callWindowFor) showCallWindow();
+    // Not read: an error change must not run this again.
+    else if (!joined && callWindowFor) untrack(forgetCallWindow);
     callWindowFor = joined;
   });
   let callJoinText = $state<string | null>(null);
@@ -1204,6 +1236,10 @@
     screenText = null;
     screenRequest += 1;
     callDismissed = false;
+    // The next call status opens the call window again if a call still
+    // runs, so the fallback follows that open, not the old session's.
+    forgetCallWindow();
+    callWindowFor = false;
     callNames = new Map();
     callNamesFor = null;
     callRefresher.request();
@@ -3177,6 +3213,8 @@
         <CallBar
           status={callState}
           dismissed={callDismissed}
+          full={callWindowFailed}
+          opening={callWindowOpening}
           roomName={callRoomName}
           names={callNames}
           busy={callBusy}
@@ -3191,7 +3229,7 @@
           onscreen={toggleScreen}
           onleave={leaveCall}
           ondismiss={dismissCall}
-          onwindow={() => void openCallWindow().catch(() => (error = CALL_WINDOW_UNAVAILABLE_TEXT))}
+          onwindow={showCallWindow}
         />
         {#if cameraText}
           <p class="call-notice camera-notice error" role="alert">
@@ -3211,7 +3249,7 @@
             <button type="button" class="secondary" onclick={() => (screenText = null)}>Dismiss</button>
           </p>
         {/if}
-        {#if hasVideo(callState)}
+        {#if callWindowFailed && hasVideo(callState)}
           <CallVideo tiles={callState.video} names={callNames} ticks={callVideoTicks} />
         {/if}
         {#if selectedRoom}

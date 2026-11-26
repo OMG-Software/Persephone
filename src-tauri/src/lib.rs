@@ -68,9 +68,10 @@ use serde::de::DeserializeOwned;
 use std::{
     collections::HashMap,
     sync::{
-        Arc, Mutex, MutexGuard,
+        Arc, Condvar, Mutex, MutexGuard,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
+    time::Duration,
 };
 use tauri::{
     AppHandle, Manager, Runtime, State, Url, Webview, WebviewUrl, WebviewWindowBuilder,
@@ -1753,19 +1754,124 @@ async fn call_device_test_status(
     relay(core.inner(), Call::CallDeviceTestStatus {}).await
 }
 
-/// Opens the call window (ADR-0060), or brings it to the front. It shows
-/// the bundled call page only.
+/// How long `open_call_window` waits for the call page to say it is ready.
+const CALL_WINDOW_READY_WAIT: Duration = Duration::from_secs(10);
+/// At most this many `open_call_window` calls wait at once; each holds a
+/// blocking thread until the page is ready or the wait ends.
+const MAX_CALL_WINDOW_WAITS: usize = 4;
+
+/// Whether the call page has said that it reaches the core and shows the
+/// call (ADR-0060). A new call window or a call page that loads again is not
+/// ready until it says so again.
+struct CallWindowReady {
+    state: Mutex<ReadyState>,
+    changed: Condvar,
+    wait: Duration,
+}
+
+#[derive(Default)]
+struct ReadyState {
+    ready: bool,
+    waiting: usize,
+}
+
+impl Default for CallWindowReady {
+    fn default() -> Self {
+        Self::waiting_for(CALL_WINDOW_READY_WAIT)
+    }
+}
+
+impl CallWindowReady {
+    /// A state whose waits end after `wait`.
+    fn waiting_for(wait: Duration) -> Self {
+        Self {
+            state: Mutex::default(),
+            changed: Condvar::new(),
+            wait,
+        }
+    }
+
+    fn state(&self) -> MutexGuard<'_, ReadyState> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn set(&self, ready: bool) {
+        self.state().ready = ready;
+        self.changed.notify_all();
+    }
+
+    /// Waits until the page is ready, for at most the set time. False when
+    /// the wait ends first, or when too many calls wait already.
+    fn wait(&self) -> bool {
+        let mut state = self.state();
+        if state.ready {
+            return true;
+        }
+        if state.waiting >= MAX_CALL_WINDOW_WAITS {
+            return false;
+        }
+        state.waiting += 1;
+        let (mut state, _) = self
+            .changed
+            .wait_timeout_while(state, self.wait, |state| !state.ready)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.waiting -= 1;
+        state.ready
+    }
+}
+
+/// Opens the call window (ADR-0060), or brings it to the front, and returns
+/// when its page says it is ready. It shows the bundled call page only. A
+/// window that cannot be shown, or whose page does not say it is ready in
+/// time, is an error, because the main window then shows the call's
+/// controls itself. Focus is only a request, as is unminimise: the desktop
+/// may refuse either while the window shows.
 #[tauri::command]
-async fn open_call_window<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+async fn open_call_window<R: Runtime>(
+    app: AppHandle<R>,
+    ready: State<'_, Arc<CallWindowReady>>,
+) -> Result<(), String> {
     if let Some(window) = app.get_webview_window(CALL_WINDOW) {
         let _ = window.unminimize();
-        let _ = window.show();
+        window.show().map_err(|error| {
+            eprintln!("persephone-ui: cannot show the call window: {error}");
+            UNAVAILABLE.to_string()
+        })?;
         let _ = window.set_focus();
-        return Ok(());
+    } else {
+        ready.set(false);
+        create_call_window(&app).map_err(|_| UNAVAILABLE.to_string())?;
     }
-    create_call_window(&app)
-        .map(drop)
-        .map_err(|_| UNAVAILABLE.to_string())
+    let ready = Arc::clone(ready.inner());
+    match tauri::async_runtime::spawn_blocking(move || ready.wait()).await {
+        Ok(true) => Ok(()),
+        _ => {
+            eprintln!("persephone-ui: the call page did not say it is ready");
+            Err(UNAVAILABLE.to_string())
+        }
+    }
+}
+
+/// The call page reaches the core and shows the call (ADR-0060). Only the
+/// call window may say so.
+#[tauri::command]
+async fn call_window_ready<R: Runtime>(
+    webview: Webview<R>,
+    ready: State<'_, Arc<CallWindowReady>>,
+) -> Result<(), String> {
+    take_ready(webview.label(), &ready)
+}
+
+/// Marks the call page ready when the call window said so. The capability
+/// already limits the command to that window; this checks again.
+fn take_ready(label: &str, ready: &CallWindowReady) -> Result<(), String> {
+    if label != CALL_WINDOW {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    ready.set(true);
+    Ok(())
 }
 
 /// Closes the call window, if it is open (ADR-0060).
@@ -2137,6 +2243,7 @@ pub fn configure<R: Runtime>(
         .manage(BandsInFlight::default())
         .manage(VideoInFlight::default())
         .manage(PasteInFlight::default())
+        .manage(Arc::new(CallWindowReady::default()))
         // One handler for the tray menu, for the life of the app: a handler
         // given to each new tray icon would stay after the icon goes.
         .on_menu_event(|app, event| {
@@ -2276,10 +2383,16 @@ pub fn configure<R: Runtime>(
             call_device_test_stop,
             call_device_test_status,
             open_call_window,
-            close_call_window
+            close_call_window,
+            call_window_ready
         ])
         .on_page_load(|webview, payload| {
             if payload.event() == PageLoadEvent::Started {
+                // A call page that loads again must say again that it is
+                // ready (ADR-0060).
+                if webview.label() == CALL_WINDOW {
+                    webview.state::<Arc<CallWindowReady>>().set(false);
+                }
                 reset_subscriptions(
                     webview.state::<CoreLink>().inner(),
                     webview.state::<Arc<Subscriptions>>().inner(),
@@ -2484,6 +2597,58 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// GIVEN a call page that has not said it is ready WHEN an open waits
+    /// THEN the wait ends false; WHEN the page says so THEN it is true;
+    /// WHEN the page loads again THEN it is false again.
+    #[test]
+    fn given_a_call_page_then_an_open_waits_until_it_is_ready() {
+        let ready = CallWindowReady::waiting_for(Duration::from_millis(20));
+        assert!(!ready.wait());
+        ready.set(true);
+        assert!(ready.wait());
+        ready.set(false);
+        assert!(!ready.wait());
+    }
+
+    /// GIVEN a ready signal WHEN it comes from a window other than the call
+    /// window THEN it is refused and the page stays unready; WHEN it comes
+    /// from the call window THEN the page is ready.
+    #[test]
+    fn given_a_ready_signal_then_only_the_call_window_counts() {
+        let ready = CallWindowReady::waiting_for(Duration::from_millis(20));
+        assert_eq!(
+            take_ready(MAIN_WINDOW, &ready),
+            Err(INVALID_ARGUMENT.to_string())
+        );
+        assert!(!ready.wait());
+        assert_eq!(take_ready(CALL_WINDOW, &ready), Ok(()));
+        assert!(ready.wait());
+    }
+
+    /// GIVEN `MAX_CALL_WINDOW_WAITS` opens that wait WHEN another starts
+    /// THEN it fails at once; WHEN the page says it is ready THEN every
+    /// waiting open returns true.
+    #[test]
+    fn given_waiting_opens_then_only_a_bounded_number_wait() {
+        let ready = Arc::new(CallWindowReady::waiting_for(Duration::from_secs(30)));
+        let waits: Vec<_> = (0..MAX_CALL_WINDOW_WAITS)
+            .map(|_| {
+                let ready = Arc::clone(&ready);
+                std::thread::spawn(move || ready.wait())
+            })
+            .collect();
+        while ready.state().waiting < MAX_CALL_WINDOW_WAITS {
+            std::thread::yield_now();
+        }
+        let started = std::time::Instant::now();
+        assert!(!ready.wait());
+        assert!(started.elapsed() < Duration::from_secs(5));
+        ready.set(true);
+        for wait in waits {
+            assert!(wait.join().unwrap());
+        }
+    }
 
     /// GIVEN `MAX_BANDS_IN_FLIGHT` running band calls WHEN another starts
     /// THEN it gets no slot; WHEN exactly one running call ends THEN exactly

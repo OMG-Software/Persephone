@@ -510,6 +510,7 @@ test('GIVEN each camera state WHEN the call bar is rendered THEN failures say so
       props: {
         status: { ...base, camera },
         dismissed: false,
+        full: true,
         roomName: 'Plans',
         names: new Map(),
         busy: false,
@@ -553,6 +554,7 @@ test('GIVEN a call WHEN the call bar is rendered THEN deafen is a toggle that sa
           ...over
         },
         dismissed: false,
+        full: true,
         roomName: 'Plans',
         names: new Map(),
         busy: false,
@@ -645,6 +647,7 @@ test('GIVEN each screen state WHEN the call bar is rendered THEN the button and 
       props: {
         status: { ...base, screen },
         dismissed: false,
+        full: true,
         roomName: 'Plans',
         names: new Map(),
         busy: false,
@@ -697,6 +700,7 @@ test('GIVEN a participant that shares WHEN the call bar is rendered THEN the mar
           video: []
         },
         dismissed: false,
+        full: true,
         roomName: 'Plans',
         names: new Map([['@a:s', name]]),
         busy: false,
