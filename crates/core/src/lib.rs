@@ -2802,17 +2802,20 @@ impl Core {
     /// changes.
     fn call_video_effect(
         &self,
-        effect: persephone_contracts::CallVideoEffect,
-        mirror: bool,
+        effect: Option<persephone_contracts::CallVideoEffect>,
+        mirror: Option<bool>,
     ) -> Outcome {
         if let Err(code) = self.calls_open() {
             return Outcome::Error(code);
         }
-        // The dispatch checked the blur, so this has a worker form.
-        let Some(worker_effect) = calls::devices::worker_effect(effect) else {
+        // The dispatch checked the blur, so a sent effect has a worker form.
+        if effect.is_some_and(|effect| calls::devices::worker_effect(effect).is_none()) {
             return Outcome::Error(ErrorCode::InvalidArgument);
-        };
-        if self.session.is_configured() {
+        }
+        // A field that was not sent keeps its saved value, so a window with
+        // an old copy of it does not undo a change made in the other window.
+        // Both then apply, from the record as saved.
+        let (worker_effect, mirror) = if self.session.is_configured() {
             let lease = match self.session.admit() {
                 Ok(lease) => lease,
                 Err(session::AdmissionError::Locked) => return Outcome::Error(ErrorCode::Locked),
@@ -2825,18 +2828,36 @@ impl Core {
                 let Ok(mut selection) = calls::devices::load(stores).await else {
                     return Err(ErrorCode::Unavailable);
                 };
-                selection.effect = Some(effect);
-                selection.mirror = Some(mirror);
+                if effect.is_some() {
+                    selection.effect = effect;
+                }
+                if mirror.is_some() {
+                    selection.mirror = mirror;
+                }
                 if calls::devices::save(stores, &selection).await {
-                    Ok(())
+                    Ok((selection.video_effect(), selection.mirror()))
                 } else {
                     Err(ErrorCode::Internal)
                 }
             });
-            if let Err(code) = saved {
-                return Outcome::Error(code);
+            match saved {
+                Ok(both) => both,
+                Err(code) => return Outcome::Error(code),
             }
-        }
+        } else {
+            // Without a profile nothing is saved: a field that was not sent
+            // keeps the value asked last, else none and a mirrored preview.
+            let (last_effect, last_mirror) = self
+                .calls
+                .asked_video()
+                .unwrap_or((persephone_call_protocol::VideoEffect::NONE, true));
+            (
+                effect
+                    .and_then(calls::devices::worker_effect)
+                    .unwrap_or(last_effect),
+                mirror.unwrap_or(last_mirror),
+            )
+        };
         // `NotInCall` is no failure: the saved effect is for the next call.
         let _ = self.calls.set_video_effect(worker_effect, mirror);
         ok(&calls::status::status(&self.calls.state()))

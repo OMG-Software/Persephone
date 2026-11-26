@@ -5,7 +5,9 @@ import {
   EFFECT_SAVE_TEXT,
   deviceChoice,
   deviceValue,
-  plainEffect
+  plainEffect,
+  withVideoEffectChange,
+  type VideoEffectChange
 } from './calls.ts';
 
 /** The three menus of the device panel; `''` is the system default. */
@@ -37,7 +39,7 @@ export interface EffectState {
 export interface DevicePanelBridge {
   list: () => Promise<CallDevices>;
   save: (recording: string | null, playout: string | null, camera: string | null) => Promise<unknown>;
-  effect: (effect: CallVideoEffect, mirror: boolean) => Promise<unknown>;
+  effect: (change: VideoEffectChange) => Promise<unknown>;
 }
 
 const failureText = (reason: unknown, fallback: string) => DEVICE_FAILURE_TEXT[String(reason)] ?? fallback;
@@ -53,9 +55,13 @@ const failureText = (reason: unknown, fallback: string) => DEVICE_FAILURE_TEXT[S
  *   save sends the three menus as they were when it was asked, so the last
  *   one holds every change. Only the newest save sets the result line.
  * - The video effect (ADR-0068) goes into the same queue, as each save
- *   changes the same device record. Its newest answer sets its own result.
- *   The reply comes before the worker has answered, so whether the worker
- *   refused the effect is read from the call status, not from the reply.
+ *   changes the same device record. Each change sends only the part the
+ *   user changed, the effect or the mirror, so this panel's copy of the
+ *   other part, which the main window may have changed, is never sent. Its
+ *   newest answer sets its own result; when that one failed, the controls
+ *   go back to the saved values, as in the main window. The reply comes
+ *   before the worker has answered, so whether the worker refused the
+ *   effect is read from the call status, not from the reply.
  * - After `close`, no answer changes the panel.
  */
 export class DevicePanel {
@@ -63,6 +69,7 @@ export class DevicePanel {
   readonly #onstate: (state: DevicePanelState) => void;
   readonly #onmenus: (menus: DeviceMenus) => void;
   readonly #oneffect: (state: EffectState) => void;
+  readonly #oncontrols: (effect: CallVideoEffect, mirror: boolean) => void;
   #state: DevicePanelState = { devices: null, loading: false, saving: false, saved: false, failure: null };
   #effect: EffectState = { saving: false, failure: null };
   #queue: Promise<unknown> = Promise.resolve();
@@ -76,12 +83,14 @@ export class DevicePanel {
     bridge: DevicePanelBridge,
     onstate: (state: DevicePanelState) => void,
     onmenus: (menus: DeviceMenus) => void,
-    oneffect: (state: EffectState) => void = () => {}
+    oneffect: (state: EffectState) => void = () => {},
+    oncontrols: (effect: CallVideoEffect, mirror: boolean) => void = () => {}
   ) {
     this.#bridge = bridge;
     this.#onstate = onstate;
     this.#onmenus = onmenus;
     this.#oneffect = oneffect;
+    this.#oncontrols = oncontrols;
   }
 
   get state(): DevicePanelState {
@@ -144,21 +153,27 @@ export class DevicePanel {
   }
 
   /**
-   * Sets the video effect and the mirror (ADR-0068) after the saves before
-   * it. The controls keep their values on failure.
+   * Sends one change of the video effect controls (ADR-0068), the effect or
+   * the mirror, after the saves before it. A saved change goes into the
+   * panel's copy of the record. When the newest change fails, the controls
+   * go back to that copy (`oncontrols`).
    */
-  async saveEffect(effect: CallVideoEffect, mirror: boolean): Promise<void> {
+  async saveEffect(change: VideoEffectChange): Promise<void> {
     if (!this.#open) return;
     const mine = ++this.#newestEffect;
     this.#effectSaves += 1;
     this.#setEffect({ saving: true, failure: null });
-    const wanted = plainEffect(effect);
-    const run = () => this.#bridge.effect(wanted, mirror);
+    const wanted: VideoEffectChange = {};
+    if (change.effect) wanted.effect = plainEffect(change.effect);
+    if (typeof change.mirror === 'boolean') wanted.mirror = change.mirror;
+    const run = () => this.#bridge.effect(wanted);
     const turn = this.#queue.then(run, run);
     this.#queue = turn.catch(() => undefined);
     let failure: string | null = null;
     try {
       await turn;
+      const devices = this.#state.devices;
+      if (this.#open && devices) this.#set({ devices: withVideoEffectChange(devices, wanted) });
     } catch (reason) {
       failure = failureText(reason, EFFECT_SAVE_TEXT);
     }
@@ -166,6 +181,8 @@ export class DevicePanel {
     if (!this.#open) return;
     if (mine === this.#newestEffect) {
       this.#setEffect({ saving: this.#effectSaves > 0, failure });
+      const saved = this.#state.devices;
+      if (failure !== null && saved) this.#oncontrols(saved.effect, saved.mirror);
     } else {
       this.#setEffect({ saving: this.#effectSaves > 0 });
     }

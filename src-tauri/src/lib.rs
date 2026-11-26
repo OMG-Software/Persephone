@@ -943,16 +943,17 @@ async fn call_microphone(
     relay(core.inner(), call).await
 }
 
-/// Sets the own camera's video effect and whether the own preview is
-/// mirrored (ADR-0068), for a camera test, the running call and later ones.
-/// The effect is one of a closed set; the blur strength is 10 to 100 percent
-/// in steps of 10. The core checks it again, and the worker refuses an
-/// effect that it cannot run.
+/// Sets the own camera's video effect, whether the own preview is
+/// mirrored, or both (ADR-0068), for a camera test, the running call and
+/// later ones. A field that is not sent keeps its saved value; at least one
+/// is needed. The effect is one of a closed set; the blur strength is 10 to
+/// 100 percent in steps of 10. The core checks it again, and the worker
+/// refuses an effect that it cannot run.
 #[tauri::command]
 async fn call_video_effect(
     core: State<'_, CoreLink>,
-    effect: persephone_contracts::CallVideoEffect,
-    mirror: bool,
+    effect: Option<persephone_contracts::CallVideoEffect>,
+    mirror: Option<bool>,
 ) -> Result<CallStatus, String> {
     let call = Call::CallVideoEffect { effect, mirror };
     if !call_video_within_limits(&call) {

@@ -670,9 +670,10 @@ fn given_a_profile_when_the_call_volume_is_set_then_it_is_saved_with_the_devices
 
 /// GIVEN an open profile WHEN the page sets the video effect and the mirror
 /// THEN both are saved in the call device record, kept when the devices are
-/// saved again, and the effect keeps the devices; no call is not an error,
-/// and a blur off the 10 percent steps is refused before anything is saved
-/// (ADR-0068).
+/// saved again, and the effect keeps the devices; WHEN it sends only one of
+/// them THEN the other keeps its saved value; no call is not an error, and
+/// a blur off the 10 percent steps or a command with neither is refused
+/// before anything is saved (ADR-0068).
 #[test]
 fn given_a_profile_when_the_video_effect_is_set_then_it_is_saved_with_the_devices() {
     use persephone_contracts::{CallBackground, CallColourFilter, CallStatus, CallVideoEffect};
@@ -697,8 +698,8 @@ fn given_a_profile_when_the_video_effect_is_set_then_it_is_saved_with_the_device
         answer::<CallStatus>(
             &core,
             Call::CallVideoEffect {
-                effect: sea,
-                mirror: true,
+                effect: Some(sea),
+                mirror: Some(true),
             },
         ),
         Ok(CallStatus::idle())
@@ -729,8 +730,8 @@ fn given_a_profile_when_the_video_effect_is_set_then_it_is_saved_with_the_device
         answer::<CallStatus>(
             &core,
             Call::CallVideoEffect {
-                effect: plain,
-                mirror: false,
+                effect: Some(plain),
+                mirror: Some(false),
             },
         ),
         Ok(CallStatus::idle())
@@ -742,17 +743,60 @@ fn given_a_profile_when_the_video_effect_is_set_then_it_is_saved_with_the_device
         Some("mic"),
         "the effect keeps the devices"
     );
+    // One window changes the effect, the other then only the mirror: the
+    // mirror change does not bring back that window's old effect.
+    assert_eq!(
+        answer::<CallStatus>(
+            &core,
+            Call::CallVideoEffect {
+                effect: Some(sea),
+                mirror: None,
+            },
+        ),
+        Ok(CallStatus::idle())
+    );
+    assert_eq!(
+        (saved(&core).effect, saved(&core).mirror),
+        (Some(sea), Some(false)),
+        "an effect alone keeps the mirror"
+    );
+    assert_eq!(
+        answer::<CallStatus>(
+            &core,
+            Call::CallVideoEffect {
+                effect: None,
+                mirror: Some(true),
+            },
+        ),
+        Ok(CallStatus::idle())
+    );
+    assert_eq!(
+        (saved(&core).effect, saved(&core).mirror),
+        (Some(sea), Some(true)),
+        "a mirror alone keeps the effect"
+    );
+    assert_eq!(
+        answer::<CallStatus>(
+            &core,
+            Call::CallVideoEffect {
+                effect: None,
+                mirror: None,
+            },
+        ),
+        Err(ErrorCode::InvalidArgument),
+        "a command that changes nothing is refused"
+    );
     for blur in [0, 55, 110] {
         assert_eq!(
             answer::<CallStatus>(
                 &core,
                 Call::CallVideoEffect {
-                    effect: CallVideoEffect {
+                    effect: Some(CallVideoEffect {
                         background: CallBackground::Blur,
                         blur,
                         filter: CallColourFilter::None,
-                    },
-                    mirror: true,
+                    }),
+                    mirror: Some(false),
                 },
             ),
             Err(ErrorCode::InvalidArgument),
@@ -760,8 +804,8 @@ fn given_a_profile_when_the_video_effect_is_set_then_it_is_saved_with_the_device
         );
     }
     assert_eq!(
-        saved(&core).mirror,
-        Some(false),
+        (saved(&core).effect, saved(&core).mirror),
+        (Some(sea), Some(true)),
         "a refused effect saves nothing"
     );
 }
@@ -868,8 +912,8 @@ fn given_a_profile_then_call_commands_follow_the_session() {
         Call::CallDeafen { deafened: true },
         Call::CallVolume { percent: 50 },
         Call::CallVideoEffect {
-            effect: persephone_contracts::CallVideoEffect::default(),
-            mirror: false,
+            effect: Some(persephone_contracts::CallVideoEffect::default()),
+            mirror: Some(false),
         },
         Call::CallReadiness {
             room_id: room.into(),

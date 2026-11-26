@@ -768,14 +768,19 @@ pub enum Call {
         auto_level: bool,
         gain: u16,
     },
-    /// Set the own camera's video effect and whether its preview is shown
-    /// mirrored (ADR-0068). Both are saved for later calls; the effect
-    /// applies at once to a running or joining call and to a camera test.
-    /// The blur strength is checked by the type and again by
-    /// [`call_video_within_limits`]. Replies `CallStatus`.
+    /// Set the own camera's video effect, whether its preview is shown
+    /// mirrored, or both (ADR-0068). A field that is not sent keeps its
+    /// saved value, so a window that changes one never sends its own,
+    /// possibly old, copy of the other; at least one is needed. Both are
+    /// saved for later calls; the effect applies at once to a running or
+    /// joining call and to a camera test. The blur strength is checked by
+    /// the type and again by [`call_video_within_limits`]. Replies
+    /// `CallStatus`.
     CallVideoEffect {
-        effect: persephone_contracts::CallVideoEffect,
-        mirror: bool,
+        #[serde(default)]
+        effect: Option<persephone_contracts::CallVideoEffect>,
+        #[serde(default)]
+        mirror: Option<bool>,
     },
     /// Start or stop the call statistics (ADR-0066). While on, the core
     /// asks the worker to read them and sends [`Event::CallStats`], at most
@@ -1800,7 +1805,8 @@ pub struct VideoPicture {
 /// control characters; [`Call::CallVolume`] is at most
 /// [`MAX_CALL_VOLUME_PERCENT`]; [`Call::CallMicrophone`] has a gain of at most
 /// [`MAX_CALL_MIC_GAIN_PERCENT`] on a step of [`CALL_MIC_GAIN_STEP_PERCENT`];
-/// [`Call::CallVideoEffect`] has a blur strength that
+/// [`Call::CallVideoEffect`] has an effect, a mirror or both, and an
+/// effect's blur strength is one that
 /// [`persephone_contracts::call_blur_valid`] accepts.
 /// Any other call is not constrained here and
 /// gives `true`.
@@ -1829,7 +1835,10 @@ pub fn call_video_within_limits(call: &Call) -> bool {
         Call::CallMicrophone { gain, .. } => {
             *gain <= MAX_CALL_MIC_GAIN_PERCENT && gain.is_multiple_of(CALL_MIC_GAIN_STEP_PERCENT)
         }
-        Call::CallVideoEffect { effect, .. } => persephone_contracts::call_blur_valid(effect.blur),
+        Call::CallVideoEffect { effect, mirror } => {
+            (effect.is_some() || mirror.is_some())
+                && effect.is_none_or(|effect| persephone_contracts::call_blur_valid(effect.blur))
+        }
         _ => true,
     }
 }
@@ -2687,14 +2696,21 @@ mod tests {
             ),
             (
                 Call::CallVideoEffect {
-                    effect: persephone_contracts::CallVideoEffect {
+                    effect: Some(persephone_contracts::CallVideoEffect {
                         background: persephone_contracts::CallBackground::Sea,
                         blur: 30,
                         filter: persephone_contracts::CallColourFilter::Cool,
-                    },
-                    mirror: true,
+                    }),
+                    mirror: Some(true),
                 },
                 r#"{"id":1,"call":{"command":"call_video_effect","effect":{"background":"sea","blur":30,"filter":"cool"},"mirror":true}}"#,
+            ),
+            (
+                Call::CallVideoEffect {
+                    effect: None,
+                    mirror: Some(false),
+                },
+                r#"{"id":1,"call":{"command":"call_video_effect","effect":null,"mirror":false}}"#,
             ),
             (
                 Call::CallStatus {},
@@ -3111,6 +3127,47 @@ mod tests {
     }
 
     #[test]
+    fn given_a_video_effect_command_with_one_field_then_it_decodes_and_no_field_is_refused() {
+        // GIVEN the effect command with one field, none, or nulls WHEN it is
+        // read THEN a missing field is `None`, and the limits refuse a
+        // command that changes nothing (ADR-0068).
+        let budgets = ResourceBudgets::default();
+        let call = |body: &[u8]| {
+            let mut reader = Cursor::new(frame(FrameKind::Control, body));
+            receive::<_, Request>(&mut reader, &budgets).unwrap().call
+        };
+        assert_eq!(
+            call(br#"{"id":1,"call":{"command":"call_video_effect","mirror":false}}"#),
+            Call::CallVideoEffect {
+                effect: None,
+                mirror: Some(false)
+            }
+        );
+        let plain = persephone_contracts::CallVideoEffect::default();
+        assert_eq!(
+            call(br#"{"id":1,"call":{"command":"call_video_effect","effect":{"background":"none","blur":50,"filter":"none"}}}"#),
+            Call::CallVideoEffect {
+                effect: Some(plain),
+                mirror: None
+            }
+        );
+        for body in [
+            &br#"{"id":1,"call":{"command":"call_video_effect"}}"#[..],
+            br#"{"id":1,"call":{"command":"call_video_effect","effect":null,"mirror":null}}"#,
+        ] {
+            let decoded = call(body);
+            assert_eq!(
+                decoded,
+                Call::CallVideoEffect {
+                    effect: None,
+                    mirror: None
+                }
+            );
+            assert!(!call_video_within_limits(&decoded));
+        }
+    }
+
+    #[test]
     fn given_unknown_command_field_or_kind_then_receive_refuses() {
         let budgets = ResourceBudgets::default();
         for body in [
@@ -3179,9 +3236,6 @@ mod tests {
             br#"{"id":1,"call":{"command":"call_microphone","auto_level":true,"gain":50.5}}"#,
             br#"{"id":1,"call":{"command":"call_microphone","auto_level":true,"gain":"100"}}"#,
             br#"{"id":1,"call":{"command":"call_microphone","auto_level":true,"gain":100,"x":1}}"#,
-            br#"{"id":1,"call":{"command":"call_video_effect"}}"#,
-            br#"{"id":1,"call":{"command":"call_video_effect","mirror":false}}"#,
-            br#"{"id":1,"call":{"command":"call_video_effect","effect":{"background":"none","blur":50,"filter":"none"}}}"#,
             br#"{"id":1,"call":{"command":"call_video_effect","effect":{"background":"blur","blur":55,"filter":"none"},"mirror":false}}"#,
             br#"{"id":1,"call":{"command":"call_video_effect","effect":{"background":"blur","blur":0,"filter":"none"},"mirror":false}}"#,
             br#"{"id":1,"call":{"command":"call_video_effect","effect":{"background":"photo","blur":50,"filter":"none"},"mirror":false}}"#,
@@ -3966,20 +4020,36 @@ mod tests {
         }
         // The blur strength is 10 to 100 percent in steps of 10 (ADR-0068),
         // also for a value made in Rust rather than read from JSON.
-        let blur = |blur| Call::CallVideoEffect {
-            effect: persephone_contracts::CallVideoEffect {
+        let blur = |blur, mirror| Call::CallVideoEffect {
+            effect: Some(persephone_contracts::CallVideoEffect {
                 background: persephone_contracts::CallBackground::Blur,
                 blur,
                 filter: persephone_contracts::CallColourFilter::None,
-            },
-            mirror: false,
+            }),
+            mirror,
         };
         for accepted in [10, 50, 100] {
-            assert!(call_video_within_limits(&blur(accepted)), "{accepted}");
+            assert!(
+                call_video_within_limits(&blur(accepted, Some(false))),
+                "{accepted}"
+            );
+            assert!(
+                call_video_within_limits(&blur(accepted, None)),
+                "{accepted}"
+            );
         }
         for refused in [0, 5, 55, 110, u8::MAX] {
-            assert!(!call_video_within_limits(&blur(refused)), "{refused}");
+            assert!(
+                !call_video_within_limits(&blur(refused, Some(false))),
+                "{refused}"
+            );
+            assert!(!call_video_within_limits(&blur(refused, None)), "{refused}");
         }
+        // A change of the mirror alone keeps the saved effect; a command
+        // that changes nothing is refused.
+        let only = |effect, mirror| Call::CallVideoEffect { effect, mirror };
+        assert!(call_video_within_limits(&only(None, Some(true))));
+        assert!(!call_video_within_limits(&only(None, None)));
     }
 
     /// GIVEN video replies of many sizes on camera tiles and the screen tile

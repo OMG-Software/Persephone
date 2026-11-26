@@ -152,10 +152,15 @@ an embedded ONNX model as the later segmenter (owner choice).
 * The effect and the mirror choice are part of the call device record
   (`persephone.call_devices.v1`, fields `effect` and `mirror`). A record
   without them reads as no effect and a mirrored preview.
-* The command `call_video_effect` sets both. It saves both for later calls,
-  then applies the effect to a running or joining call and to a running
-  camera test. It refuses a value outside the closed sets, and a failed save
-  changes nothing. The main window and the call window may call it; the call
+* The command `call_video_effect` sets the effect, the mirror, or both. A
+  field that is not sent keeps its saved value. Each window sends only the
+  part that the user changed, so its own copy of the other part, which the
+  other window may have changed since, is never sent. The core saves the
+  change for later calls, then applies the saved effect and mirror to a
+  running or joining call and to a running camera test. It refuses a value
+  outside the closed sets and a command with neither field, and a failed
+  save changes nothing; both windows then put their controls back to the
+  saved values. The main window and the call window may call it; the call
   window's device panel (ADR-0065) shows the same controls as the settings.
 * The core numbers each effect request. A join reads that number before it
   reads the record, and an effect asked after that read replaces the saved

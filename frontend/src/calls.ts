@@ -622,6 +622,30 @@ export function plainEffect(effect: CallVideoEffect): CallVideoEffect {
   return { background: effect.background, blur: blurValue(effect.blur), filter: effect.filter };
 }
 
+/** The part of the video effect controls that a change touched (ADR-0068). */
+export type VideoEffectPart = 'effect' | 'mirror';
+
+/**
+ * One change of the own video effect or the preview's mirror (ADR-0068).
+ * The core saves only the parts that are sent and keeps the other as saved,
+ * so a window whose copy of it is old does not undo a change that the other
+ * window made.
+ */
+export interface VideoEffectChange {
+  effect?: CallVideoEffect;
+  mirror?: boolean;
+}
+
+/** The command for a change of `part`: only that part, the effect made plain. */
+export function videoEffectChange(part: VideoEffectPart, effect: CallVideoEffect, mirror: boolean): VideoEffectChange {
+  return part === 'effect' ? { effect: plainEffect(effect) } : { mirror };
+}
+
+/** The device record after a saved change: the parts it sent, the rest as before. */
+export function withVideoEffectChange(devices: CallDevices, change: VideoEffectChange): CallDevices {
+  return { ...devices, effect: change.effect ?? devices.effect, mirror: change.mirror ?? devices.mirror };
+}
+
 /**
  * The label of the own microphone's level meter (ADR-0055, ADR-0059): it
  * shows what the microphone picks up, so a silent meter means the call does

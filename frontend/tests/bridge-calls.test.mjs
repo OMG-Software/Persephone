@@ -11,6 +11,8 @@ import { mockIPC } from '@tauri-apps/api/mocks';
 let bridge;
 let registered;
 let hostArguments;
+// The arguments of each host command that are `Option`s.
+let optionalArguments;
 
 const camel = (name) => name.replace(/_([a-z])/g, (_, letter) => letter.toUpperCase());
 
@@ -23,11 +25,16 @@ before(async () => {
   // arguments the page sends, without Tauri's own State, Window and Channel.
   const host = await readFile(new URL('../../src-tauri/src/lib.rs', import.meta.url), 'utf8');
   hostArguments = new Map();
+  optionalArguments = new Map();
   for (const [, name, parameters] of host.matchAll(/(?:async )?fn ([a-z_]+)(?:<[^>]*>)?\(([^)]*)\)/g)) {
-    const names = [...parameters.matchAll(/([a-z_]+):\s*([A-Za-z]+)/g)]
-      .filter(([, , type]) => !['State', 'Window', 'Webview', 'WebviewWindow', 'AppHandle'].includes(type))
-      .map(([, parameter]) => camel(parameter));
-    hostArguments.set(name, names.sort());
+    const page = [...parameters.matchAll(/([a-z_]+):\s*([A-Za-z]+)/g)].filter(
+      ([, , type]) => !['State', 'Window', 'Webview', 'WebviewWindow', 'AppHandle'].includes(type)
+    );
+    hostArguments.set(name, page.map(([, parameter]) => camel(parameter)).sort());
+    optionalArguments.set(
+      name,
+      new Set(page.filter(([, , type]) => type === 'Option').map(([, parameter]) => camel(parameter)))
+    );
   }
 
   // The bridge's invoke goes through window.__TAURI_INTERNALS__.
@@ -233,9 +240,16 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
     [() => bridge.callVolume(35), 'call_volume', { percent: 35 }],
     [() => bridge.callMicrophone(false, 250), 'call_microphone', { autoLevel: false, gain: 250 }],
     [
-      () => bridge.callVideoEffect({ background: 'sea', blur: 30, filter: 'cool', url: 'https://x' }, false),
+      () => bridge.callVideoEffect({ effect: { background: 'sea', blur: 30, filter: 'cool', url: 'https://x' } }),
       'call_video_effect',
-      { effect: { background: 'sea', blur: 30, filter: 'cool' }, mirror: false }
+      { effect: { background: 'sea', blur: 30, filter: 'cool' } },
+      { partial: true }
+    ],
+    [() => bridge.callVideoEffect({ mirror: false }), 'call_video_effect', { mirror: false }, { partial: true }],
+    [
+      () => bridge.callVideoEffect({ effect: { background: 'none', blur: 50, filter: 'warm' }, mirror: true }),
+      'call_video_effect',
+      { effect: { background: 'none', blur: 50, filter: 'warm' }, mirror: true }
     ],
     [() => bridge.callStatus(), 'call_status', {}],
     [() => bridge.callRings(), 'call_rings', {}],
@@ -258,13 +272,28 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
       { roomId: '!r:s', change: { kind: 'join_rule', rule: 'knock' } }
     ]
   ];
-  for (const [call, command, args] of cases) {
+  for (const [call, command, args, { partial = false } = {}] of cases) {
     const made = await sent(call);
     assert.equal(made.command, command);
     assert.deepEqual(made.args, args, command);
     assert.ok(registered.has(command), `${command} is registered in build.rs`);
-    assert.deepEqual(Object.keys(args).sort(), hostArguments.get(command), `${command} arguments`);
+    const keys = Object.keys(args).sort();
+    const host = hostArguments.get(command) ?? [];
+    if (partial) {
+      // A call that sends only some arguments: each is one of the host's,
+      // and only an `Option` argument of the host is left out.
+      const optional = optionalArguments.get(command) ?? new Set();
+      assert.deepEqual(keys.filter((key) => !host.includes(key)), [], `${command} arguments`);
+      assert.deepEqual(host.filter((name) => !keys.includes(name) && !optional.has(name)), [], `${command} needs`);
+    } else {
+      assert.deepEqual(keys, host, `${command} arguments`);
+    }
   }
+  assert.deepEqual(
+    [...optionalArguments.get('call_video_effect')].sort(),
+    ['effect', 'mirror'],
+    'the effect command takes either part alone'
+  );
 });
 
 test('GIVEN account settings WHEN saved THEN only the known settings cross, never extra fields', async () => {

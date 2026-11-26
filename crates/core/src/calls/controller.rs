@@ -2333,6 +2333,15 @@ impl CallController {
         plain(&self.inner.asked_video).number
     }
 
+    /// The newest video effect and mirror asked for (ADR-0068), if any.
+    /// Without a profile nothing is saved, so a change of one of them keeps
+    /// the other from here.
+    pub fn asked_video(&self) -> Option<(VideoEffect, bool)> {
+        plain(&self.inner.asked_video)
+            .own
+            .map(|own| (own.effect, own.mirror))
+    }
+
     /// The video effect that the next camera test asks the worker for: the
     /// saved one (ADR-0068). The worker can refuse it.
     pub fn set_test_effect(&self, effect: VideoEffect) {

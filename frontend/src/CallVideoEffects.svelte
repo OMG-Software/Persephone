@@ -17,7 +17,8 @@
     blurText,
     blurValue,
     filterOptions,
-    filterValue
+    filterValue,
+    type VideoEffectPart
   } from './calls';
 
   // The own camera's video effect and the preview's mirror (ADR-0068), for
@@ -26,8 +27,8 @@
   // the worker refuses an effect that cannot run. Blur and the pictures need
   // the person mask: without it (`available` false) they cannot be chosen.
   // `onsave` runs after each change the user makes: a menu choice, a
-  // released slider, a switched box. The parent sends it and shows the
-  // result.
+  // released slider, a switched box, with the part it changed (the effect
+  // or the mirror). The parent sends only that part and shows the result.
   let {
     effect = $bindable(),
     mirror = $bindable(),
@@ -44,7 +45,7 @@
     // Makes the control IDs unique on the page.
     prefix: string;
     heading?: 'h3' | 'h4';
-    onsave: () => void;
+    onsave: (part: VideoEffectPart) => void;
   } = $props();
 
   const backgrounds = $derived(backgroundOptions(available, effect.background));
@@ -60,7 +61,7 @@
   value={effect.background}
   onchange={(event) => {
     effect = { ...effect, background: backgroundValue(event.currentTarget.value, effect.background) };
-    onsave();
+    onsave('effect');
   }}
 >
   {#each backgrounds as option (option.value)}
@@ -82,7 +83,7 @@
     value={effect.blur}
     aria-valuetext={blurText(effect.blur)}
     oninput={(event) => (effect = { ...effect, blur: blurValue(Number(event.currentTarget.value)) })}
-    onchange={onsave}
+    onchange={() => onsave('effect')}
   />
 {/if}
 <label for="{prefix}-filter">{FILTER_LABEL}</label>
@@ -93,7 +94,7 @@
   value={effect.filter}
   onchange={(event) => {
     effect = { ...effect, filter: filterValue(event.currentTarget.value, effect.filter) };
-    onsave();
+    onsave('effect');
   }}
 >
   {#each filters as option (option.value)}
@@ -109,7 +110,7 @@
     checked={mirror}
     onchange={(event) => {
       mirror = event.currentTarget.checked;
-      onsave();
+      onsave('mirror');
     }}
   />
   <span>{MIRROR_LABEL}</span>

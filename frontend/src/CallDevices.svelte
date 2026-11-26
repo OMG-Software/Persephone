@@ -50,7 +50,10 @@
     VOLUME_MAX,
     VOLUME_SAVE_TEXT,
     volumeText,
-    volumeValue
+    volumeValue,
+    videoEffectChange,
+    withVideoEffectChange,
+    type VideoEffectPart
   } from './calls';
   import { DeviceTests, testLevel, testLive, testTiles } from './deviceTests';
 
@@ -218,19 +221,19 @@
     }
   }
 
-  // Saves the video effect and the mirror after each change, then the effect
-  // applies to a camera test and to a call that runs; their worker may refuse
-  // it later (ADR-0068). On failure nothing changed, so both go back to the
-  // saved values.
-  async function saveEffect() {
+  // Saves the part of the video effect controls that changed, the effect or
+  // the mirror, and never this window's copy of the other part: the call
+  // window may have changed it since (ADR-0068). The effect then applies to
+  // a camera test and to a call that runs; their worker may refuse it later.
+  // On failure nothing changed, so both go back to the saved values.
+  async function saveEffect(part: VideoEffectPart) {
     if (busy || !devices) return;
     effectSaving = true;
     failure = null;
-    const wanted = videoEffect;
-    const wantedMirror = mirror;
+    const change = videoEffectChange(part, videoEffect, mirror);
     try {
-      await callVideoEffect(wanted, wantedMirror);
-      if (devices) devices = { ...devices, effect: wanted, mirror: wantedMirror };
+      await callVideoEffect(change);
+      if (devices) devices = withVideoEffectChange(devices, change);
     } catch (reason) {
       failure = failures[String(reason)] ?? EFFECT_SAVE_TEXT;
       if (devices) {

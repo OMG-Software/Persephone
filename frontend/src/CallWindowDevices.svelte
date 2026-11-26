@@ -11,7 +11,9 @@
     deviceChoice,
     deviceOptions,
     deviceSwitchText,
-    devicesNote
+    devicesNote,
+    videoEffectChange,
+    type VideoEffectPart
   } from './calls';
 
   // The microphone, speaker and camera of the running call (ADR-0065),
@@ -24,8 +26,10 @@
   // order rules: saves go one at a time and none is dropped, and a closed
   // panel takes no late answer. The own video effect and the preview's
   // mirror (ADR-0068) go through the same queue, as each save changes the
-  // same device record. `effectRefused` is the call status's: the worker
-  // answers after the save's reply, so only the status has its refusal.
+  // same device record; each sends only the part the user changed, and a
+  // failed one puts both controls back to the saved values. `effectRefused`
+  // is the call status's: the worker answers after the save's reply, so
+  // only the status has its refusal.
   let {
     change = null,
     effectRefused = false
@@ -49,7 +53,11 @@
         mirror = listed.mirror;
       }
     },
-    (next) => (effectView = next)
+    (next) => (effectView = next),
+    (effect, savedMirror) => {
+      videoEffect = effect;
+      mirror = savedMirror;
+    }
   );
   let view = $state(panel.state);
   let effectView = $state(panel.effect);
@@ -62,7 +70,7 @@
   // Saves the three menus together; they keep their values on failure. The
   // menus stay usable while a save runs, so the focus stays on them.
   const save = () => void panel.save({ recording, playout, camera });
-  const saveEffect = () => void panel.saveEffect(videoEffect, mirror);
+  const saveEffect = (part: VideoEffectPart) => void panel.saveEffect(videoEffectChange(part, videoEffect, mirror));
 
   const devices = $derived(view.devices);
   const recordingOptions = $derived(deviceOptions(devices?.recording ?? [], deviceChoice(recording)));
