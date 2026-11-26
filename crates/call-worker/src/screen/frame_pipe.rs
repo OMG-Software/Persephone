@@ -226,19 +226,23 @@ mod tests {
     /// stays open: it is not the worker's to close.
     #[test]
     fn given_a_handle_that_is_not_a_pipe_when_taken_then_it_is_refused_and_kept() {
-        let file = File::open(std::env::current_exe().expect("this program")).expect("a file");
-        let raw = file.as_raw_handle();
-        // SAFETY: a second owner of the same handle; its `into_raw_handle`
-        // below gives it back without closing it.
-        let owned = unsafe { OwnedHandle::from_raw_handle(raw) };
-        assert!(PipeReader::new(owned, Arc::new(AtomicBool::new(false))).is_err());
-        // The file is still open and readable.
+        // The handle goes to the reader, its only owner; a refused handle
+        // comes back to the test, which owns it again and closes it.
+        let refused = |file: File| {
+            let owned = OwnedHandle::from(file);
+            let raw = owned.as_raw_handle();
+            assert!(PipeReader::new(owned, Arc::new(AtomicBool::new(false))).is_err());
+            // SAFETY: `PipeReader::new` gave the refused handle up without
+            // closing it (`into_raw_handle`), and nothing else owns it.
+            unsafe { File::from_raw_handle(raw) }
+        };
+        let file =
+            refused(File::open(std::env::current_exe().expect("this program")).expect("a file"));
+        let null = refused(File::open("NUL").expect("the null device"));
+        // Both are still open: the file gives a byte, the null device its end.
         let mut byte = [0_u8; 1];
         assert_eq!((&file).read(&mut byte).expect("still open"), 1);
-        let null = File::open("NUL").expect("the null device");
-        // SAFETY: as above, for the null device.
-        let owned = unsafe { OwnedHandle::from_raw_handle(null.as_raw_handle()) };
-        assert!(PipeReader::new(owned, Arc::new(AtomicBool::new(false))).is_err());
+        assert_eq!((&null).read(&mut byte).expect("still open"), 0);
         assert!(!is_pipe(HANDLE(file.as_raw_handle())));
         assert!(!is_pipe(HANDLE(null.as_raw_handle())));
     }
@@ -265,13 +269,21 @@ mod tests {
     fn given_handle_values_when_adopted_then_only_a_pipe_is_taken() {
         assert!(adopt(0x00ff_fff0).is_none());
         assert!(adopt(0).is_none());
+        // The file's handle goes to `adopt` as a value, as the core's does.
+        // `adopt` refuses it and does not close it, so the test owns it
+        // again.
         let file = File::open(std::env::current_exe().expect("this program")).expect("a file");
-        assert!(adopt(file.as_raw_handle() as usize as u32).is_none());
+        let raw = file.into_raw_handle();
+        assert!(adopt(raw as usize as u32).is_none());
+        // SAFETY: `adopt` did not take the refused handle, and nothing else
+        // owns it.
+        let file = unsafe { File::from_raw_handle(raw) };
+        assert!(file.metadata().is_ok(), "a refused handle is not closed");
+        // The pipe's read end goes to `adopt`, which owns it from then on.
         let (read, _write) = pipe();
-        let value = read.as_raw_handle() as usize as u32;
+        let value = read.into_raw_handle() as usize as u32;
         let adopted = adopt(value).expect("a pipe");
-        // Two owners of one handle: give one back without closing it.
-        let _ = adopted.into_raw_handle();
+        assert_eq!(adopted.as_raw_handle() as usize as u32, value);
     }
 
     /// GIVEN good pictures and an end item on the pipe WHEN read THEN the

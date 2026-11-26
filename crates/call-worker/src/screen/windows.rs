@@ -286,8 +286,6 @@ mod tests {
     /// Everything a capture reported.
     #[derive(Default)]
     struct Seen {
-        /// How many callbacks have started (a slow one counts at once).
-        entered: usize,
         frames: Vec<(u32, u32, usize)>,
         /// The first byte of each picture, and when it came.
         fills: Vec<(u8, Instant)>,
@@ -305,24 +303,32 @@ mod tests {
     /// Runs `capture` on its own thread over a pipe and gives the open
     /// result, what was seen, and the write end.
     fn run(share: u32, frames: Option<OwnedHandle>, target: ScreenTarget) -> Started {
-        run_slow(share, frames, target, 0, Duration::ZERO)
+        run_held(share, frames, target, None)
     }
 
-    /// As [`run`], but callback number `slow_one` (from 0) waits `slow`
-    /// before it notes its picture, as a callback whose thread paused before
-    /// the feed's limiter.
-    fn run_slow(
+    /// One callback that waits, as a callback whose thread paused before the
+    /// feed's limiter: the first callback for the picture whose bytes are
+    /// all `fill` says so on `entered`, waits until the test sends on
+    /// `release` (at most 10 s), then waits `slow` more before it notes its
+    /// picture.
+    struct Hold {
+        fill: u8,
+        entered: mpsc::SyncSender<()>,
+        release: mpsc::Receiver<()>,
+        slow: Duration,
+    }
+
+    /// As [`run`], with one callback held by `hold`.
+    fn run_held(
         share: u32,
         frames: Option<OwnedHandle>,
         target: ScreenTarget,
-        slow_one: usize,
-        slow: Duration,
+        mut hold: Option<Hold>,
     ) -> Started {
         let (open_tx, open_rx) = mpsc::channel();
         let seen = Arc::new(Mutex::new(Seen::default()));
         let stop = Arc::new(AtomicBool::new(false));
         let (frame_seen, end_seen, flag) = (seen.clone(), seen.clone(), stop.clone());
-        let mut calls = 0_usize;
         let thread = std::thread::spawn(move || {
             capture(
                 target,
@@ -330,11 +336,12 @@ mod tests {
                 &flag,
                 open_tx,
                 move |frame| {
-                    frame_seen.lock().unwrap().entered += 1;
-                    if calls == slow_one {
-                        std::thread::sleep(slow);
+                    if hold.as_ref().is_some_and(|hold| hold.fill == frame.data[0]) {
+                        let hold = hold.take().expect("a hold");
+                        let _ = hold.entered.send(());
+                        let _ = hold.release.recv_timeout(Duration::from_secs(10));
+                        std::thread::sleep(hold.slow);
                     }
-                    calls += 1;
                     let mut seen = frame_seen.lock().unwrap();
                     seen.frames
                         .push((frame.width, frame.height, frame.data.len()));
@@ -456,26 +463,51 @@ mod tests {
     #[test]
     fn given_a_slow_callback_when_the_next_picture_waits_then_the_limiter_gap_holds() {
         let limit = Duration::from_millis(1000 / u64::from(MAX_SCREEN_FPS));
-        let slow = Duration::from_millis(80);
+        let (entered, picture_2_entered) = mpsc::sync_channel(1);
+        let (release_picture_2, release) = mpsc::channel();
+        // The hold is longer than the 20 ms by which the gap exceeds the
+        // limit, so a gap counted from the start of the callback would fail.
+        let hold = Hold {
+            fill: 2,
+            entered,
+            release,
+            slow: Duration::from_millis(80),
+        };
         let (read, mut write) = pipe();
-        let (open, seen, stop, thread) = run_slow(9, Some(read), monitor(), 1, slow);
+        let (open, seen, stop, thread) = run_held(9, Some(read), monitor(), Some(hold));
         write_picture(&mut write, 9, 4, 2, &[1; 32]).expect("a picture");
         assert_eq!(open_result(&open), Ok(()));
         wait_for_fills(&seen, 1);
-        std::thread::sleep(PICTURE_GAP + Duration::from_millis(50));
-        // Picture 2 goes at once and its callback is slow. Picture 3 is
-        // written while that callback waits, so it cannot take picture 2's
-        // place, and it waits for the gap.
+        // Picture 2 goes when it is due, and its callback waits. Picture 3
+        // is written while that callback waits, so it cannot take picture
+        // 2's place, and it waits for the gap after the callback.
         write_picture(&mut write, 9, 4, 2, &[2; 32]).expect("a picture");
-        wait_until(&seen, |seen| seen.entered >= 2, "picture 2 is handed on");
+        picture_2_entered
+            .recv_timeout(Duration::from_secs(5))
+            .expect("picture 2 is handed on");
         write_picture(&mut write, 9, 4, 2, &[3; 32]).expect("a picture");
-        wait_for_fills(&seen, 3);
+        release_picture_2.send(()).expect("the held callback");
+        wait_until(
+            &seen,
+            |seen| seen.fills.iter().any(|(fill, _)| *fill == 3),
+            "picture 3 goes",
+        );
         stop.store(true, Ordering::Release);
         thread.join().expect("the capture thread");
         let seen = seen.lock().unwrap();
-        let fills: Vec<u8> = seen.fills.iter().map(|(fill, _)| *fill).collect();
-        assert_eq!(fills, [1, 2, 3]);
-        assert!(seen.fills[2].1.duration_since(seen.fills[1].1) >= limit);
+        // A paused test thread can let picture 1 go again before picture 2
+        // is written, and picture 3 again before the stop.
+        let mut order: Vec<u8> = seen.fills.iter().map(|(fill, _)| *fill).collect();
+        order.dedup();
+        assert_eq!(order, [1, 2, 3]);
+        let second = seen
+            .fills
+            .iter()
+            .position(|(fill, _)| *fill == 2)
+            .expect("picture 2");
+        let (after, at) = (seen.fills[second + 1], seen.fills[second].1);
+        assert_eq!(after.0, 3, "picture 2 goes once, and picture 3 next");
+        assert!(after.1.duration_since(at) >= limit);
     }
 
     /// GIVEN no pipe, a handle that is not a pipe or a target of another
