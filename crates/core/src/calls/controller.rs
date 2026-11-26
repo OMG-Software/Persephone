@@ -6589,8 +6589,8 @@ mod tests {
 
     /// GIVEN a saved video effect WHEN a camera test starts THEN `TestDevice`
     /// carries it (ADR-0068), so the worker has it before the camera opens
-    /// and the first shown picture has it; nothing else is sent before the
-    /// close. WHEN the worker answers that it refused the effect THEN the
+    /// and, when the worker accepts it, the first shown picture has it;
+    /// nothing else is sent before the close. WHEN the worker answers that it refused the effect THEN the
     /// test status says so while the test runs, and the answer does not end
     /// the test; WHEN the test ends THEN the status no longer says so.
     #[test]
