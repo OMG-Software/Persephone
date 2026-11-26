@@ -3368,9 +3368,10 @@ fn run_device_test(
     // reads `Leave`.
     let stopped_early = stop.load(Ordering::SeqCst);
     // A camera test starts with the saved video effect, in `TestDevice`, so
-    // its first picture has it; each change follows as `SetVideoEffect`
-    // (ADR-0068). The worker answers each with the effect in use. A sound
-    // test shows no picture and sends none.
+    // its first picture has it when the worker accepts it; a refused one
+    // leaves the test without an effect. Each change follows as
+    // `SetVideoEffect` (ADR-0068). The worker answers each with the effect
+    // in use. A sound test shows no picture and sends none.
     let mut test_effect = inner.test_effect.subscribe();
     let video_effect = if camera {
         *test_effect.borrow_and_update()

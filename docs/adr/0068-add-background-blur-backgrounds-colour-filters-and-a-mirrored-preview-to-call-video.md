@@ -130,9 +130,11 @@ an embedded ONNX model as the later segmenter (owner choice).
   number 1 to 4) and the filter (0 to 4). Decoding refuses any other value.
 * `Join` ends with the video effect.
 * `ToWorker::TestDevice` ends with the video effect that a camera test starts
-  with. The worker sets it before the camera opens, so the first picture has
-  it, and answers `FromWorker::VideoEffect` before the camera opens. A sound
-  test must send no effect; decoding refuses another.
+  with. The worker sets it before the camera opens and answers
+  `FromWorker::VideoEffect` then. When the worker accepts it, the first
+  picture has it; when the worker refuses it, the test starts without an
+  effect (see below). A sound test must send no effect; decoding refuses
+  another.
 * `ToWorker::SetVideoEffect` (tag 19) changes it in a running call or in a
   camera test. The worker answers `FromWorker::VideoEffect` (tag 24) with the
   effect in use and whether the request was refused.
