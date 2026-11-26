@@ -36,7 +36,8 @@
     | 'volume'
     | 'video'
     | 'video-off'
-    | 'screen';
+    | 'screen'
+    | 'activity';
 </script>
 
 <script lang="ts">
@@ -148,5 +149,7 @@
   {:else if name === 'shield-off'}
     <path d="M12 3 4 6v6c0 4.5 3.4 8 8 9 4.6-1 8-4.5 8-9V6Z" />
     <path d="M9 12h6" />
+  {:else if name === 'activity'}
+    <path d="M3 12h4l3-8 4 16 3-8h4" />
   {/if}
 </svg>

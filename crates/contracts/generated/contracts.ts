@@ -117,6 +117,74 @@ muted: boolean, };
 
 export type CallParticipantLevel = { userId: string, deviceId: string, level: number, };
 
+export type CallStatsLimit = "none" | "cpu" | "bandwidth" | "other";
+
+export type CallStatsAudioSent = { 
+/**
+ * 0 to [`CALL_SOUND_LEVEL_MAX`].
+ */
+level: number, 
+/**
+ * Kbit/s, at most [`CALL_STATS_KBPS_MAX`].
+ */
+bitrateKbps: number | null, packetsSent: number, 
+/**
+ * Packets the far end reports lost.
+ */
+packetsLost: number | null, 
+/**
+ * Milliseconds, at most [`CALL_STATS_MS_MAX`].
+ */
+jitterMs: number | null, rttMs: number | null, };
+
+export type CallStatsVideoSent = { 
+/**
+ * At most [`CALL_STATS_FPS_MAX`].
+ */
+fps: number, 
+/**
+ * At most [`CALL_STATS_SIDE_MAX`] each.
+ */
+width: number, height: number, bitrateKbps: number | null, limit: CallStatsLimit, packetsLost: number | null, };
+
+export type CallStatsAudioReceived = { 
+/**
+ * 0 to [`CALL_SOUND_LEVEL_MAX`].
+ */
+level: number, bitrateKbps: number | null, packetsReceived: number, packetsLost: number, jitterMs: number, 
+/**
+ * The share of the last second's samples that WebRTC made up, 0 to 100.
+ */
+concealedPercent: number | null, };
+
+export type CallStatsVideoReceived = { fps: number, width: number, height: number, bitrateKbps: number | null, 
+/**
+ * Frames dropped each second, at most [`CALL_STATS_FPS_MAX`].
+ */
+droppedFps: number | null, packetsLost: number, };
+
+export type CallStatsParticipant = { userId: string, deviceId: string, audio: CallStatsAudioReceived | null, video: CallStatsVideoReceived | null, };
+
+export type CallStatsConnection = { connection: number, 
+/**
+ * The bandwidth that WebRTC estimates for sending, kbit/s.
+ */
+outgoingKbps: number | null, 
+/**
+ * Everything sent and received on the connection, kbit/s.
+ */
+sendKbps: number | null, receiveKbps: number | null, rttMs: number | null, };
+
+export type CallStats = { microphone: CallStatsAudioSent | null, camera: CallStatsVideoSent | null, screen: CallStatsVideoSent | null, 
+/**
+ * At most [`CALL_PARTICIPANTS_MAX`], each device once.
+ */
+participants: Array<CallStatsParticipant>, 
+/**
+ * At most [`CALL_STATS_CONNECTIONS_MAX`], each connection once.
+ */
+connections: Array<CallStatsConnection>, };
+
 export type CallDeviceTestKind = "microphone" | "speaker" | "camera";
 
 export type CallDeviceTestState = "idle" | "starting" | "running" | "done" | "not_found" | "denied" | "unsupported" | "unavailable" | "in_call" | "failed";
@@ -946,3 +1014,18 @@ export const CALL_DEVICE_ID_BYTES_MAX = 255;
 
 /** The top of a call sound level meter. */
 export const CALL_SOUND_LEVEL_MAX = 100;
+
+/** The highest call statistic bitrate, in kbit/s. */
+export const CALL_STATS_KBPS_MAX = 1000000;
+
+/** The longest call statistic time, in milliseconds. */
+export const CALL_STATS_MS_MAX = 60000;
+
+/** The highest call statistic frame rate. */
+export const CALL_STATS_FPS_MAX = 120;
+
+/** The longest call statistic picture side, in pixels. */
+export const CALL_STATS_SIDE_MAX = 16384;
+
+/** The most connections in one call statistics reading. */
+export const CALL_STATS_CONNECTIONS_MAX = 4;

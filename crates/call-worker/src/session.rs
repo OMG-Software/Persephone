@@ -20,8 +20,8 @@ use livekit::{
     prelude::{
         AudioProcessingOptions, LocalAudioTrack, LocalTrack, LocalTrackPublication,
         LocalVideoTrack, Participant, PlatformAudio, PlayoutDeviceId, RecordingDeviceId,
-        RemoteAudioTrack, RemoteParticipant, RemoteTrack, RemoteTrackPublication, TrackKind,
-        TrackSid, TrackSource,
+        RemoteAudioTrack, RemoteParticipant, RemoteTrack, RemoteTrackPublication, RemoteVideoTrack,
+        TrackKind, TrackSid, TrackSource,
     },
     rtc_engine::EngineError,
     webrtc::{
@@ -49,6 +49,8 @@ use tokio::time::{Instant, MissedTickBehavior, interval};
 use tokio_stream::StreamExt;
 use zeroize::Zeroizing;
 
+mod stats_probe;
+
 use crate::camera::{self, CapturedFrame, Format};
 use crate::containment;
 use crate::mapping::{
@@ -67,6 +69,7 @@ use crate::video::{
     fit_within_box, quarter_turns, rgba_len,
 };
 use crate::{EXIT_DONE, EXIT_FAILED, Input};
+use stats_probe::{Sources, StatsProbe};
 
 /// Element Call's key ring size (livekit-client keyringSize).
 const KEY_RING_SIZE: i32 = 256;
@@ -259,6 +262,8 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
     let (connect_tx, connect_done) = mpsc::channel::<Connected>(usize::from(MAX_OTHER_CONNECTIONS));
     // At most one sound level measurement runs, so one result can wait.
     let (sound_tx, mut sound_done) = mpsc::channel::<Option<Levels>>(1);
+    // The same for the statistics read (ADR-0066).
+    let (stats_tx, mut stats_done) = mpsc::channel(1);
     let mut others_inbox = OtherInbox {
         events: OtherEvents::default(),
         connected: connect_done,
@@ -295,6 +300,7 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
         playout: Playout::new(volume),
         microphone,
         sound: SoundProbe::new(sound_tx),
+        stats: StatsProbe::new(stats_tx),
     };
     // Tracks subscribed during the connect get the volume now; later ones
     // when their subscription is handled.
@@ -320,6 +326,7 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
                 &mut others_inbox,
                 &mut tracker,
                 &mut sound_done,
+                &mut stats_done,
             )
             .await
         }
@@ -1066,6 +1073,8 @@ struct Call<'a> {
     /// The level meters' measurement of the own and received sound
     /// (ADR-0055, ADR-0059).
     sound: SoundProbe,
+    /// The statistics read while the core asks for them (ADR-0066).
+    stats: StatsProbe,
 }
 
 /// Measures the own and the received sound for the level meters (ADR-0055,
@@ -2012,6 +2021,7 @@ impl Call<'_> {
         if let Some(task) = self.sound.task.take() {
             task.abort();
         }
+        self.stats.shutdown();
         open_done.close();
         while let Ok(done) = open_done.try_recv() {
             if let Ok(opened) = done.result {
@@ -2587,6 +2597,88 @@ impl Call<'_> {
         );
     }
 
+    /// Starts a read of the statistics when they are on and one is due.
+    fn measure_stats(&mut self) {
+        let Self {
+            stats,
+            room,
+            others,
+            publication,
+            ..
+        } = self;
+        stats.tick(Instant::now(), || {
+            let mut sources = Sources {
+                one_connection: room.is_single_peer_connection_active(),
+                microphone: match publication.track() {
+                    Some(LocalTrack::Audio(track)) => Some(track),
+                    _ => None,
+                },
+                ..Sources::default()
+            };
+            for local in room.local_participant().track_publications().values() {
+                let Some(LocalTrack::Video(track)) = local.track() else {
+                    continue;
+                };
+                match local.source() {
+                    TrackSource::Camera => sources.camera = Some(track),
+                    TrackSource::Screenshare => sources.screen = Some(track),
+                    _ => {}
+                }
+            }
+            let rooms = std::iter::once((0, &**room)).chain(others.open_indexed());
+            let mut participants = 0;
+            for (connection, remote_room) in rooms {
+                for (identity, participant) in remote_room.remote_participants() {
+                    if participants >= MAX_PARTICIPANTS {
+                        return sources;
+                    }
+                    let identity = identity.to_string();
+                    if !valid_identity(&identity) {
+                        continue;
+                    }
+                    participants += 1;
+                    // One microphone, and the camera before a screen share.
+                    // The smallest track id breaks a tie, so the reads
+                    // follow one track while it stays. When the choice
+                    // moves to another track, the book keys counters by
+                    // track ID, so the new track starts without a rate.
+                    let mut audio: Option<(TrackSid, RemoteAudioTrack)> = None;
+                    let mut video: Option<(bool, TrackSid, RemoteVideoTrack)> = None;
+                    for publication in participant.track_publications().values() {
+                        let sid = publication.sid();
+                        match (publication.track(), publication.source()) {
+                            (Some(RemoteTrack::Audio(track)), TrackSource::Microphone) => {
+                                if audio.as_ref().is_none_or(|(have, _)| sid < *have) {
+                                    audio = Some((sid, track));
+                                }
+                            }
+                            (Some(RemoteTrack::Video(track)), source) => {
+                                let camera = source == TrackSource::Camera;
+                                let better = video.as_ref().is_none_or(|(have_camera, have, _)| {
+                                    (camera, std::cmp::Reverse(&sid))
+                                        > (*have_camera, std::cmp::Reverse(have))
+                                });
+                                if better {
+                                    video = Some((camera, sid, track));
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    if let Some((_, track)) = audio {
+                        sources
+                            .remote_audio
+                            .push((connection, identity.clone(), track));
+                    }
+                    if let Some((_, _, track)) = video {
+                        sources.remote_video.push((connection, identity, track));
+                    }
+                }
+            }
+            sources
+        });
+    }
+
     /// Tells the core whether a remote participant's microphone is muted.
     async fn send_muted(
         &self,
@@ -2843,6 +2935,10 @@ impl Call<'_> {
             }
             ToWorker::SetDiagnostics { on } => {
                 crate::diagnostics::global().set_on(on);
+                Ok(Vec::new())
+            }
+            ToWorker::SetStats { on } => {
+                self.stats.set(on);
                 Ok(Vec::new())
             }
             ToWorker::SetCamera { on: true, remote } => {
@@ -3124,6 +3220,7 @@ async fn event_loop(
     others: &mut OtherInbox,
     tracker: &mut SpeakingTracker,
     sound_done: &mut Receiver<Option<Levels>>,
+    stats_done: &mut Receiver<(u64, Option<crate::mapping::stats::RawStats>)>,
 ) -> End {
     let mut tick = interval(SPEAKING_TICK);
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -3178,9 +3275,17 @@ async fn event_loop(
                     return End::Left;
                 }
                 Some(Input::Message(message)) => {
+                    // The off also drops a reading that waits in the output
+                    // slot. A reading that the writer took already can still
+                    // be written after the off; the core drops it, because
+                    // its switch is off then (ADR-0066).
+                    let stats_off = matches!(message, ToWorker::SetStats { on: false });
                     match call.handle_command(message).await {
                         Ok(reply) => outgoing.extend(reply),
                         Err(code) => return End::Failed(code),
+                    }
+                    if stats_off {
+                        output.clear_stats();
                     }
                 }
                 Some(Input::Bad) => return End::Failed(FailureCode::Protocol),
@@ -3208,7 +3313,17 @@ async fn event_loop(
             Some(levels) = sound_done.recv() => {
                 outgoing.extend(call.sound.end(levels));
             }
-            _ = tick.tick() => call.measure_sound(),
+            Some((generation, raw)) = stats_done.recv() => {
+                // Never queued: the newest reading waits in a slot, and the
+                // control messages go out before it.
+                if let Some(FromWorker::Stats(stats)) = call.stats.end(generation, raw) {
+                    output.offer_stats(stats);
+                }
+            }
+            _ = tick.tick() => {
+                call.measure_sound();
+                call.measure_stats();
+            }
         }
         outgoing.extend(tracker.poll(Instant::now().into_std()));
         let disconnected = outgoing.iter().any(|message| {

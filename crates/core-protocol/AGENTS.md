@@ -5,6 +5,7 @@ This crate defines bounded commands, replies, and change events between the keyl
 - Use `persephone-media-protocol` framing and resource budgets. Reject invalid headers before allocating a body.
 - Keep command and payload schemas strict. Preserve unknown-command and unknown-field rejection, including empty command objects. Serde unit variants do not provide the same field rejection as struct variants.
 - Distinguish a required nullable field from a missing field. Test the actual Serde wire representation.
+- Sonar's rule `rust:S9334` is off for `src/lib.rs` (`sonar-project.properties`), so review does its check: an `Option` field with its own `deserialize_with` is required-nullable (`Option::deserialize`), or it has `#[serde(default)]` so that a missing key reads as `None`.
 - Preserve request/reply correlation and distinguish pushed events from replies. Keep events small; message content belongs in bounded view calls.
 - Keep IDs, cursors, subscription counts, and error codes bounded and explicit. Coordinate any limit change with the receiving core, Tauri relay, and frontend consumers.
 - Test malformed frames, unexpected kinds, truncated input, extra fields, invalid variants, and oversized messages. Preserve fail-closed behavior.

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { CallWindowOpener, callGrid, SelfClose } from '../src/callWindow.ts';
+import { CallWindowOpener, callGrid, SelfClose, statsStayOpen } from '../src/callWindow.ts';
 import {
   DEVICE_CHANGE_TEXT,
   DEVICE_TEST_LABEL,
@@ -287,4 +287,29 @@ test('GIVEN an open that throws at once WHEN it is asked THEN that is a failed o
   calls.open();
   await settled();
   assert.deepEqual(reports, [true]);
+});
+
+const inRoom = (roomId, phase) => ({ ...IDLE_CALL, phase, roomId });
+
+for (const phase of ['joining', 'active']) {
+  test(`GIVEN details open for a call in room A WHEN a ${phase} status for room B comes THEN the panel closes`, () => {
+    assert.equal(statsStayOpen(inRoom('!a:s', 'active'), inRoom('!b:s', phase)), false);
+  });
+}
+
+test('GIVEN details open for a call in room A WHEN its status changes within the same call THEN the panel stays open', () => {
+  assert.equal(statsStayOpen(inRoom('!a:s', 'joining'), inRoom('!a:s', 'active')), true);
+  assert.equal(statsStayOpen(inRoom('!a:s', 'active'), inRoom('!a:s', 'active')), true);
+});
+
+test('GIVEN details open WHEN the call ends or goes idle THEN the panel closes', () => {
+  assert.equal(statsStayOpen(inRoom('!a:s', 'active'), { ...inRoom('!a:s', 'ended') }), false);
+  assert.equal(statsStayOpen(inRoom('!a:s', 'active'), IDLE_CALL), false);
+});
+
+test('GIVEN an ended call in room A WHEN a new call in room A comes THEN the panel closes', () => {
+  for (const phase of ['joining', 'active']) {
+    assert.equal(statsStayOpen(inRoom('!a:s', 'ended'), inRoom('!a:s', phase)), false);
+  }
+  assert.equal(statsStayOpen(IDLE_CALL, inRoom('!a:s', 'joining')), false);
 });

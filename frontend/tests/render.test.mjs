@@ -340,7 +340,42 @@ test('GIVEN a call with a camera on and one off WHEN the call window renders THE
   assert.doesNotMatch(html, /<img\b/i);
   assert.match(html, />Leave</);
 
+  // One icon button opens the technical details; the panel is closed.
+  assert.equal((html.match(/aria-label="Technical details"/g) ?? []).length, 1);
+  assert.match(html, /class="secondary call-stats-button"[^>]*aria-expanded="false"[^>]*aria-controls="call-window-stats"/);
+  assert.doesNotMatch(html, /class="call-stats"/);
+
   const { body: idle } = render(CallWindow, { props: {} });
   assert.match(idle, /No call is running\./);
   assert.doesNotMatch(idle, /role="meter"|class="video-tile/);
+});
+
+test('GIVEN the technical details panel WHEN it renders before a reading THEN it waits, has a close button and shows no table', async () => {
+  const { default: CallStats } = await vite.ssrLoadModule('/src/CallStats.svelte');
+  const { body } = render(CallStats, { props: { onclose() {} } });
+  assert.match(body, /id="call-window-stats" class="call-stats" role="dialog" aria-label="Technical details"/);
+  assert.match(body, /aria-label="Close technical details"/);
+  assert.match(body, /Waiting for the first reading\./);
+  assert.doesNotMatch(body, /<table/);
+});
+
+test('GIVEN statistics tables WHEN their captions render THEN a device shows its user ID and its own isolated device ID, a hostile device ID stays inert, and a part of the call shows its title', async () => {
+  const { default: CallStatsCaption } = await vite.ssrLoadModule('/src/CallStatsCaption.svelte');
+  const section = (more) => ({ key: 'k', title: '', userId: null, deviceId: null, rows: [], ...more });
+  const caption = (more) => render(CallStatsCaption, { props: { section: section(more) } }).body;
+
+  const device = caption({ userId: '@bob:s', deviceId: 'PHONE' });
+  assert.match(device, /<bdi>@bob:s<\/bdi>/);
+  assert.match(device, /class="call-stats-device">\(<span class="visually-hidden">device <\/span><bdi>PHONE<\/bdi>\)<\/span>/);
+
+  // A device ID with a right-to-left override and markup is escaped text in
+  // its own <bdi>. The markup shows the escaping and the wrapper only, not how
+  // a browser draws the override.
+  const hostile = caption({ userId: '@eve:s', deviceId: '\u202e<img src=x onerror=alert(1)>' });
+  assert.match(hostile, /<bdi>\u202e&lt;img src=x onerror=alert\(1\)(?:>|&gt;)<\/bdi>\)<\/span>/);
+  assert.doesNotMatch(hostile, /<img/);
+
+  const own = caption({ title: 'Your microphone' });
+  assert.match(own, /Your microphone/);
+  assert.doesNotMatch(own, /<bdi>|call-stats-device/);
 });

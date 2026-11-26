@@ -768,6 +768,13 @@ pub enum Call {
         auto_level: bool,
         gain: u16,
     },
+    /// Start or stop the call statistics (ADR-0066). While on, the core
+    /// asks the worker to read them and sends [`Event::CallStats`], at most
+    /// about once a second. Only the call window may send it. Off at every
+    /// call start, and off again when the call ends. Replies `null`.
+    CallStats {
+        on: bool,
+    },
     /// Turn the camera on or off during a call. Replies `CallStatus`, with the
     /// camera `starting` when turned on; the worker's answer arrives as
     /// [`Event::CallChanged`]. Refused when no call is connected.
@@ -1117,6 +1124,14 @@ pub enum Event {
         #[serde(deserialize_with = "bounded_levels")]
         levels: Vec<persephone_contracts::CallParticipantLevel>,
     },
+    /// The call's technical details (ADR-0066), sent only while
+    /// [`Call::CallStats`] is on: numbers with units, and the validated IDs
+    /// of the devices. Coalesced: only the newest waits. A reading that is
+    /// out of bounds is refused whole.
+    #[serde(deserialize_with = "call_stats_content")]
+    CallStats {
+        stats: persephone_contracts::CallStats,
+    },
     /// A device test started, changed or ended (ADR-0059): ask for
     /// `call_device_test_status`. Content-free and coalesced.
     CallDeviceTestChanged {},
@@ -1161,48 +1176,322 @@ pub fn levels_within_limits(levels: &[persephone_contracts::CallParticipantLevel
         })
 }
 
-/// Reads a level list and refuses an entry past [`MAX_CALL_LEVELS`], an
-/// overlong ID or a level out of range before it keeps it, so a hostile list
-/// allocates at most the limits.
+/// Reads the content of [`Event::CallStats`]. Only a JSON object with the one
+/// key `stats` is read: the derived reader would also take a positional
+/// array. A repeated or unknown key is an error.
+fn call_stats_content<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<persephone_contracts::CallStats, D::Error> {
+    struct Content;
+    impl<'de> serde::de::Visitor<'de> for Content {
+        type Value = persephone_contracts::CallStats;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("an object with the key `stats`")
+        }
+
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut map: A,
+        ) -> Result<Self::Value, A::Error> {
+            use serde::de::Error;
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            enum Field {
+                Stats,
+            }
+            let mut stats = None;
+            while let Some(Field::Stats) = map.next_key::<Field>()? {
+                // The key alone refuses a repeat: its value is not read.
+                if stats.is_some() {
+                    return Err(A::Error::duplicate_field("stats"));
+                }
+                stats = Some(map.next_value::<WireStatsValue>()?);
+            }
+            stats
+                .map(|stats| stats.0)
+                .ok_or_else(|| A::Error::missing_field("stats"))
+        }
+    }
+    deserializer.deserialize_map(Content)
+}
+
+/// A statistics reading, read by [`bounded_stats`].
+struct WireStatsValue(persephone_contracts::CallStats);
+
+impl<'de> Deserialize<'de> for WireStatsValue {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        bounded_stats(deserializer).map(WireStatsValue)
+    }
+}
+
+/// Wraps a deserializer so that a struct reads only from a JSON object. A
+/// derived struct reader also takes a positional array, which is not the
+/// contract.
+struct MapOnlyDeserializer<D>(D);
+
+impl<'de, D: serde::Deserializer<'de>> serde::Deserializer<'de> for MapOnlyDeserializer<D> {
+    type Error = D::Error;
+
+    fn deserialize_any<V: serde::de::Visitor<'de>>(
+        self,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        self.0.deserialize_map(visitor)
+    }
+
+    serde::forward_to_deserialize_any! {
+        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+        bytes byte_buf option unit unit_struct newtype_struct seq tuple
+        tuple_struct map struct enum identifier ignored_any
+    }
+}
+
+/// A value read through [`MapOnlyDeserializer`].
+struct MapOnly<T>(T);
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for MapOnly<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        T::deserialize(MapOnlyDeserializer(deserializer)).map(MapOnly)
+    }
+}
+
+/// Reads a statistics reading. Only a JSON object is read, each list stops
+/// at its limit before it builds one more entry, and each ID is bounded
+/// before it is copied. `CallStats::within_limits` then checks the numbers
+/// and repeats: a reading that fails is refused whole.
+fn bounded_stats<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<persephone_contracts::CallStats, D::Error> {
+    let stats = deserializer.deserialize_map(WireStats)?;
+    if stats.within_limits() {
+        Ok(stats)
+    } else {
+        Err(serde::de::Error::custom("call statistics out of bounds"))
+    }
+}
+
+/// The map-only reader of a statistics reading. Every key is required, and
+/// the keys of the parts that may be null take `null`.
+struct WireStats;
+
+impl<'de> serde::de::Visitor<'de> for WireStats {
+    type Value = persephone_contracts::CallStats;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a call statistics object")
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        use serde::de::Error;
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        enum Field {
+            Microphone,
+            Camera,
+            Screen,
+            Participants,
+            Connections,
+        }
+        let (mut microphone, mut camera, mut screen) = (None, None, None);
+        let (mut participants, mut connections) = (None, None);
+        // A repeated key is refused before its value is read. A key seen with
+        // the value `null` still counts as seen, so `Option<Option<_>>`.
+        while let Some(field) = map.next_key::<Field>()? {
+            let seen = match field {
+                Field::Microphone => microphone.is_some(),
+                Field::Camera => camera.is_some(),
+                Field::Screen => screen.is_some(),
+                Field::Participants => participants.is_some(),
+                Field::Connections => connections.is_some(),
+            };
+            if seen {
+                return Err(A::Error::custom("duplicate call statistics field"));
+            }
+            match field {
+                Field::Microphone => {
+                    microphone = Some(
+                        map.next_value::<Option<MapOnly<persephone_contracts::CallStatsAudioSent>>>()?,
+                    );
+                }
+                Field::Camera => {
+                    camera = Some(
+                        map.next_value::<Option<MapOnly<persephone_contracts::CallStatsVideoSent>>>()?,
+                    );
+                }
+                Field::Screen => {
+                    screen = Some(
+                        map.next_value::<Option<MapOnly<persephone_contracts::CallStatsVideoSent>>>()?,
+                    );
+                }
+                Field::Participants => {
+                    participants = Some(map.next_value::<BoundedList<
+                        WireParticipant,
+                        { persephone_contracts::CALL_PARTICIPANTS_MAX },
+                    >>()?);
+                }
+                Field::Connections => {
+                    connections = Some(map.next_value::<BoundedList<
+                        MapOnly<persephone_contracts::CallStatsConnection>,
+                        { persephone_contracts::CALL_STATS_CONNECTIONS_MAX },
+                    >>()?);
+                }
+            }
+        }
+        let participants = participants.ok_or_else(|| A::Error::missing_field("participants"))?;
+        Ok(persephone_contracts::CallStats {
+            microphone: microphone
+                .ok_or_else(|| A::Error::missing_field("microphone"))?
+                .map(|audio| audio.0),
+            camera: camera
+                .ok_or_else(|| A::Error::missing_field("camera"))?
+                .map(|video| video.0),
+            screen: screen
+                .ok_or_else(|| A::Error::missing_field("screen"))?
+                .map(|video| video.0),
+            participants: participants
+                .0
+                .into_iter()
+                .map(|participant| persephone_contracts::CallStatsParticipant {
+                    user_id: participant.user_id.0,
+                    device_id: participant.device_id.0,
+                    audio: participant.audio.map(|audio| audio.0),
+                    video: participant.video.map(|video| video.0),
+                })
+                .collect(),
+            connections: connections
+                .ok_or_else(|| A::Error::missing_field("connections"))?
+                .0
+                .into_iter()
+                .map(|connection| connection.0)
+                .collect(),
+        })
+    }
+}
+
+/// One device of a statistics reading as it crosses, with its IDs bounded.
+/// Only a JSON object is read, and every key is required.
+struct WireParticipant {
+    user_id: BoundedText<MAX_USER_ID_BYTES>,
+    device_id: BoundedText<MAX_DEVICE_ID_BYTES>,
+    audio: Option<MapOnly<persephone_contracts::CallStatsAudioReceived>>,
+    video: Option<MapOnly<persephone_contracts::CallStatsVideoReceived>>,
+}
+
+impl<'de> Deserialize<'de> for WireParticipant {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        enum Field {
+            UserId,
+            DeviceId,
+            Audio,
+            Video,
+        }
+        struct Entry;
+        impl<'de> serde::de::Visitor<'de> for Entry {
+            type Value = WireParticipant;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a call statistics participant object")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
+                use serde::de::Error;
+                let (mut user_id, mut device_id, mut audio, mut video) = (None, None, None, None);
+                while let Some(field) = map.next_key::<Field>()? {
+                    // A repeated key is refused before its value is read.
+                    let seen = match field {
+                        Field::UserId => user_id.is_some(),
+                        Field::DeviceId => device_id.is_some(),
+                        Field::Audio => audio.is_some(),
+                        Field::Video => video.is_some(),
+                    };
+                    if seen {
+                        return Err(A::Error::custom("duplicate call statistics field"));
+                    }
+                    match field {
+                        Field::UserId => user_id = Some(map.next_value()?),
+                        Field::DeviceId => device_id = Some(map.next_value()?),
+                        Field::Audio => audio = Some(map.next_value()?),
+                        Field::Video => video = Some(map.next_value()?),
+                    }
+                }
+                Ok(WireParticipant {
+                    user_id: user_id.ok_or_else(|| A::Error::missing_field("userId"))?,
+                    device_id: device_id.ok_or_else(|| A::Error::missing_field("deviceId"))?,
+                    audio: audio.ok_or_else(|| A::Error::missing_field("audio"))?,
+                    video: video.ok_or_else(|| A::Error::missing_field("video"))?,
+                })
+            }
+        }
+        deserializer.deserialize_map(Entry)
+    }
+}
+
+/// Reads a level list and refuses an entry past [`MAX_CALL_LEVELS`] or an
+/// overlong ID before it keeps it, so a hostile list allocates at most the
+/// limits, and then a level out of range.
 fn bounded_levels<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Vec<persephone_contracts::CallParticipantLevel>, D::Error> {
-    struct Levels;
-    impl<'de> serde::de::Visitor<'de> for Levels {
-        type Value = Vec<persephone_contracts::CallParticipantLevel>;
+    let BoundedList(levels) = BoundedList::<WireLevel, MAX_CALL_LEVELS>::deserialize(deserializer)?;
+    if levels
+        .iter()
+        .any(|level| level.level > MAX_CALL_SOUND_LEVEL)
+    {
+        return Err(serde::de::Error::custom("call levels out of bounds"));
+    }
+    Ok(levels
+        .into_iter()
+        .map(|level| persephone_contracts::CallParticipantLevel {
+            user_id: level.user_id.0,
+            device_id: level.device_id.0,
+            level: level.level,
+        })
+        .collect())
+}
 
-        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "at most {MAX_CALL_LEVELS} call levels")
-        }
+/// A list of at most `N` entries. The entry past the limit is refused
+/// before it is built: a full list only checks for one more, unbuilt.
+struct BoundedList<T, const N: usize>(Vec<T>);
 
-        fn visit_seq<A: serde::de::SeqAccess<'de>>(
-            self,
-            mut seq: A,
-        ) -> Result<Self::Value, A::Error> {
-            let mut levels = Vec::new();
-            loop {
-                // A full list only checks for one more entry, unbuilt.
-                if levels.len() == MAX_CALL_LEVELS {
-                    if seq.next_element::<serde::de::IgnoredAny>()?.is_some() {
-                        return Err(serde::de::Error::custom("call levels out of bounds"));
+impl<'de, T: Deserialize<'de>, const N: usize> Deserialize<'de> for BoundedList<T, N> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct List<T, const N: usize>(std::marker::PhantomData<T>);
+        impl<'de, T: Deserialize<'de>, const N: usize> serde::de::Visitor<'de> for List<T, N> {
+            type Value = BoundedList<T, N>;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "a list of at most {N} entries")
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut entries = Vec::new();
+                loop {
+                    if entries.len() == N {
+                        if seq.next_element::<serde::de::IgnoredAny>()?.is_some() {
+                            return Err(serde::de::Error::custom(format_args!(
+                                "list over its limit of {N} entries"
+                            )));
+                        }
+                        return Ok(BoundedList(entries));
                     }
-                    return Ok(levels);
+                    let Some(entry) = seq.next_element()? else {
+                        return Ok(BoundedList(entries));
+                    };
+                    entries.push(entry);
                 }
-                let Some(level) = seq.next_element::<WireLevel>()? else {
-                    return Ok(levels);
-                };
-                if level.level > MAX_CALL_SOUND_LEVEL {
-                    return Err(serde::de::Error::custom("call levels out of bounds"));
-                }
-                levels.push(persephone_contracts::CallParticipantLevel {
-                    user_id: level.user_id.0,
-                    device_id: level.device_id.0,
-                    level: level.level,
-                });
             }
         }
+        deserializer.deserialize_seq(List(std::marker::PhantomData))
     }
-    deserializer.deserialize_seq(Levels)
 }
 
 /// One entry of a level list as it crosses, with its IDs bounded. Only a
@@ -2348,6 +2637,10 @@ mod tests {
             (
                 Call::CallScreen { on: true },
                 r#"{"id":1,"call":{"command":"call_screen","on":true}}"#,
+            ),
+            (
+                Call::CallStats { on: true },
+                r#"{"id":1,"call":{"command":"call_stats","on":true}}"#,
             ),
             (
                 Call::CallVideoFrame {
@@ -4151,6 +4444,247 @@ mod timeline_events_wire_tests {
         );
     }
 
+    /// GIVEN the statistics command WHEN it is decoded THEN it carries only
+    /// the flag.
+    #[test]
+    fn given_the_stats_command_then_it_carries_only_the_flag() {
+        let decoded = |json: &[u8]| serde_json::from_slice::<Request>(json);
+        assert!(decoded(br#"{"id":1,"call":{"command":"call_stats","on":true}}"#).is_ok());
+        assert!(decoded(br#"{"id":1,"call":{"command":"call_stats","on":false}}"#).is_ok());
+        for json in [
+            &br#"{"id":1,"call":{"command":"call_stats"}}"#[..],
+            br#"{"id":1,"call":{"command":"call_stats","on":1}}"#,
+            br#"{"id":1,"call":{"command":"call_stats","on":true,"interval":1}}"#,
+        ] {
+            assert!(decoded(json).is_err(), "{}", String::from_utf8_lossy(json));
+        }
+    }
+
+    /// GIVEN statistics events WHEN read THEN a reading inside its bounds
+    /// is kept, and one with a number over its bound, an overlong ID, a
+    /// repeated device or an unknown field is refused whole.
+    #[test]
+    fn given_call_stats_events_then_only_bounded_readings_are_read() {
+        let event = |stats: serde_json::Value| {
+            serde_json::from_value::<CoreMessage>(
+                serde_json::json!({"event": {"call_stats": {"stats": stats}}}),
+            )
+        };
+        let reading = |fps: u32, user: &str| {
+            serde_json::json!({
+                "microphone": null,
+                "camera": {"fps": fps, "width": 640, "height": 360, "bitrateKbps": null,
+                           "limit": "none", "packetsLost": null},
+                "screen": null,
+                "participants": [{"userId": user, "deviceId": "D", "audio": null, "video": null}],
+                "connections": [],
+            })
+        };
+        assert!(event(reading(120, "@a:example.org")).is_ok());
+        assert!(event(reading(121, "@a:example.org")).is_err());
+        assert!(event(reading(1, &"a".repeat(MAX_USER_ID_BYTES + 1))).is_err());
+        let mut twice = reading(1, "@a:example.org");
+        let again = twice["participants"][0].clone();
+        twice["participants"].as_array_mut().unwrap().push(again);
+        assert!(event(twice).is_err());
+        let mut extra = reading(1, "@a:example.org");
+        extra["address"] = "10.0.0.1".into();
+        assert!(event(extra).is_err());
+        for key in ["microphone", "screen", "participants", "connections"] {
+            let mut missing = reading(1, "@a:example.org");
+            missing.as_object_mut().unwrap().remove(key);
+            assert!(event(missing).is_err(), "{key}");
+        }
+        for key in ["audio", "deviceId"] {
+            let mut missing = reading(1, "@a:example.org");
+            missing["participants"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove(key);
+            assert!(event(missing).is_err(), "{key}");
+        }
+        let mut no_rate = reading(1, "@a:example.org");
+        no_rate["camera"]
+            .as_object_mut()
+            .unwrap()
+            .remove("bitrateKbps");
+        assert!(event(no_rate).is_err());
+        let wire = serde_json::to_string(&CoreMessage::Event(Event::CallStats {
+            stats: persephone_contracts::CallStats::default(),
+        }))
+        .unwrap();
+        assert!(wire.starts_with(r#"{"event":{"call_stats":{"stats":{"microphone":null"#));
+        assert!(serde_json::from_str::<CoreMessage>(&wire).is_ok());
+    }
+
+    /// GIVEN statistics events with a list past its limit, a positional
+    /// array or a repeated key WHEN read THEN each is refused: the reader
+    /// takes objects only and stops a list at its limit as it reads.
+    #[test]
+    fn given_call_stats_past_their_limits_or_in_arrays_then_they_are_refused() {
+        let event = |stats: serde_json::Value| {
+            serde_json::from_value::<CoreMessage>(
+                serde_json::json!({"event": {"call_stats": {"stats": stats}}}),
+            )
+        };
+        let participant = |index: usize| {
+            serde_json::json!({"userId": format!("@u{index}:example.org"), "deviceId": "D",
+                               "audio": null, "video": null})
+        };
+        let connection = |index: usize| {
+            serde_json::json!({"connection": index, "outgoingKbps": null, "sendKbps": null,
+                               "receiveKbps": null, "rttMs": null})
+        };
+        let reading = |participants: usize, connections: usize| {
+            serde_json::json!({
+                "microphone": null, "camera": null, "screen": null,
+                "participants": (0..participants).map(participant).collect::<Vec<_>>(),
+                "connections": (0..connections).map(connection).collect::<Vec<_>>(),
+            })
+        };
+        let full = persephone_contracts::CALL_STATS_CONNECTIONS_MAX;
+        let people = persephone_contracts::CALL_PARTICIPANTS_MAX;
+        assert!(event(reading(people, full)).is_ok());
+        assert!(event(reading(people + 1, 0)).is_err());
+        // An entry past the limit is refused unbuilt, whatever it holds.
+        let mut over = reading(people, 0);
+        over["participants"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"anything": [1, 2, 3]}));
+        let error = event(over).unwrap_err();
+        assert!(error.to_string().contains("over its limit"), "{error}");
+        // The entry past the limit cannot be a connection, so only the early
+        // limit can refuse it.
+        let mut too_many = reading(0, full);
+        too_many["connections"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!("x"));
+        let error = event(too_many).unwrap_err();
+        assert!(error.to_string().contains("over its limit"), "{error}");
+        assert!(event(serde_json::json!([null, null, null, [], []])).is_err());
+        let mut positional = reading(0, 0);
+        positional["participants"] = serde_json::json!([["@a:example.org", "D", null, null]]);
+        assert!(event(positional).is_err());
+        let twice = r#"{"event":{"call_stats":{"stats":{"microphone":null,"microphone":null,
+            "camera":null,"screen":null,"participants":[],"connections":[]}}}}"#;
+        assert!(serde_json::from_str::<CoreMessage>(twice).is_err());
+    }
+
+    /// GIVEN statistics events on the byte path WHEN the content or a part is
+    /// positional THEN it is refused, and an object with null parts is kept.
+    #[test]
+    fn given_call_stats_bytes_with_positional_parts_then_they_are_refused() {
+        let read = |json: &str| serde_json::from_slice::<CoreMessage>(json.as_bytes());
+        let content = |stats: &str| format!(r#"{{"event":{{"call_stats":{stats}}}}}"#);
+        let reading = |microphone: &str, participants: &str, connections: &str| {
+            format!(
+                r#"{{"microphone":{microphone},"camera":null,"screen":null,"participants":{participants},"connections":{connections}}}"#
+            )
+        };
+        let valid = reading("null", "[]", "[]");
+        assert!(read(&content(&format!(r#"{{"stats":{valid}}}"#))).is_ok());
+        // The content is an object with the key `stats`, and no other key.
+        assert!(read(&content(&format!("[{valid}]"))).is_err());
+        assert!(read(&content("{}")).is_err());
+        assert!(read(&content(&format!(r#"{{"stats":{valid},"stats":{valid}}}"#))).is_err());
+        assert!(read(&content(&format!(r#"{{"stats":{valid},"extra":1}}"#))).is_err());
+        // Each nested record is an object too.
+        let with = |microphone: &str, participants: &str, connections: &str| {
+            content(&format!(
+                r#"{{"stats":{}}}"#,
+                reading(microphone, participants, connections)
+            ))
+        };
+        // Each array is a complete record that the derived reader of the
+        // contract type takes, so only the map-only reader refuses it here.
+        let microphone = "[1,null,0,null,null,null]";
+        let heard = "[1,null,0,0,0,null]";
+        let connection = "[0,null,null,null,null]";
+        assert!(
+            serde_json::from_str::<persephone_contracts::CallStatsAudioSent>(microphone).is_ok()
+        );
+        assert!(
+            serde_json::from_str::<persephone_contracts::CallStatsAudioReceived>(heard).is_ok()
+        );
+        assert!(
+            serde_json::from_str::<persephone_contracts::CallStatsConnection>(connection).is_ok()
+        );
+        assert!(read(&with(microphone, "[]", "[]")).is_err());
+        assert!(read(&with("null", "[]", &format!("[{connection}]"))).is_err());
+        assert!(
+            read(&with(
+                "null",
+                &format!(
+                    r#"[{{"userId":"@a:example.org","deviceId":"D","audio":{heard},"video":null}}]"#
+                ),
+                "[]"
+            ))
+            .is_err()
+        );
+        // GIVEN objects with null parts THEN they are kept.
+        assert!(
+            read(&with(
+                r#"{"level":1,"bitrateKbps":null,"packetsSent":0,"packetsLost":null,"jitterMs":null,"rttMs":null}"#,
+                r#"[{"userId":"@a:example.org","deviceId":"D","audio":null,"video":null}]"#,
+                r#"[{"connection":0,"outgoingKbps":null,"sendKbps":null,"receiveKbps":null,"rttMs":null}]"#
+            ))
+            .is_ok()
+        );
+    }
+
+    /// GIVEN a repeated key whose second value is invalid WHEN read THEN the
+    /// repeat is refused by the key, not by the value: the error names the
+    /// duplicate, so the second value was never decoded.
+    #[test]
+    fn given_a_repeated_call_stats_key_with_a_bad_second_value_then_the_key_is_refused() {
+        let read = |json: &str| {
+            serde_json::from_str::<CoreMessage>(json)
+                .unwrap_err()
+                .to_string()
+        };
+        let content = |stats: &str| format!(r#"{{"event":{{"call_stats":{stats}}}}}"#);
+        let valid =
+            r#"{"microphone":null,"camera":null,"screen":null,"participants":[],"connections":[]}"#;
+        // The content key `stats`.
+        let error = read(&content(&format!(r#"{{"stats":{valid},"stats":"bad"}}"#)));
+        assert!(error.contains("duplicate field `stats`"), "{error}");
+        // An aggregate key.
+        let error = read(&content(
+            r#"{"stats":{"microphone":null,"microphone":"bad","camera":null,"screen":null,"participants":[],"connections":[]}}"#,
+        ));
+        assert!(error.contains("duplicate call statistics field"), "{error}");
+        // A participant key.
+        let error = read(&content(
+            r#"{"stats":{"microphone":null,"camera":null,"screen":null,"connections":[],
+                "participants":[{"userId":"@a:example.org","userId":5,"deviceId":"D","audio":null,"video":null}]}}"#,
+        ));
+        assert!(error.contains("duplicate call statistics field"), "{error}");
+    }
+
+    /// GIVEN a key first read as `null` and then repeated WHEN read THEN it is
+    /// refused as a repeat: `null` is a value, not an unseen key.
+    #[test]
+    fn given_a_repeated_call_stats_key_after_null_then_it_is_refused_as_a_repeat() {
+        let read = |json: &str| {
+            serde_json::from_str::<CoreMessage>(json)
+                .unwrap_err()
+                .to_string()
+        };
+        let error = read(
+            r#"{"event":{"call_stats":{"stats":{"microphone":null,"microphone":null,"camera":null,
+                "screen":null,"participants":[],"connections":[]}}}}"#,
+        );
+        assert!(error.contains("duplicate call statistics field"), "{error}");
+        let error = read(
+            r#"{"event":{"call_stats":{"stats":{"microphone":null,"camera":null,"screen":null,
+                "connections":[],"participants":[{"userId":"@a:example.org","deviceId":"D",
+                "audio":null,"audio":null,"video":null}]}}}}"#,
+        );
+        assert!(error.contains("duplicate call statistics field"), "{error}");
+    }
+
     /// GIVEN call level events WHEN read THEN bounded ones are kept, and a
     /// level over the top, too many devices or an overlong ID is refused.
     #[test]
@@ -4195,10 +4729,7 @@ mod timeline_events_wire_tests {
         let missing =
             br#"{"event":{"call_levels":{"levels":[{"userId":"@a:example.org","deviceId":"D"}]}}}"#;
         assert!(serde_json::from_slice::<CoreMessage>(missing).is_err());
-        assert!(
-            error.to_string().contains("call levels out of bounds"),
-            "{error}"
-        );
+        assert!(error.to_string().contains("over its limit"), "{error}");
         let longest = "a".repeat(MAX_USER_ID_BYTES);
         assert!(event(serde_json::json!([one(1, &longest)])).is_ok());
         let device = "D".repeat(MAX_DEVICE_ID_BYTES + 1);

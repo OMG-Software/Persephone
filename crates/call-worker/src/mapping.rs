@@ -1,5 +1,7 @@
 //! The pure parts of the worker: no LiveKit types, no I/O, no clock reads.
 
+pub mod stats;
+
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
