@@ -207,3 +207,109 @@ keeps the choice in the process that owns authority.
 * [ADR-0045](0045-exclude-the-main-window-from-screen-capture-by-default.md)
 * [ADR-0048](0048-add-camera-video-to-calls-in-the-call-worker.md)
 * [ADR-0049](0049-contain-the-call-worker-on-linux-and-macos.md)
+
+## Amendment of 2026-11-25: Windows captures with GDI
+
+Status of this amendment: proposed, needs owner approval.
+
+The measurement of 19 November tried only Windows.Graphics.Capture. On
+25 November the gate also measured DXGI Desktop Duplication and GDI `BitBlt`
+inside the call AppContainer, with the call launcher's own capabilities
+(`internetClient`, `microphone`, `webcam`) and mitigations
+([evidence](../evidence/screen-share-windows.md#measurement-of-25-november-2026-dxgi-and-gdi)):
+
+* WGC `CreateForMonitor` and DXGI `DuplicateOutput` fail with
+  `E_ACCESSDENIED`.
+* GDI `GetDC(NULL)` and `BitBlt` copy a real picture (its mean colour equals
+  the control's, so it is not a blank copy).
+
+Decision:
+
+* The worker captures a monitor with GDI (`screen/gdi.rs`). It adds no
+  capability and relaxes no mitigation. The "Windows capture" rules above
+  that say Windows reports screen sharing as unavailable no longer apply.
+  The WGC code stays, because the gate measures it.
+* The core shows its own window for each monitor (a message box per monitor:
+  Yes shares, No shows the next one, Cancel stops; No is the default), as the
+  "Starting and stopping" section says. When the call ends while a box is
+  open, a thread timer on the asking thread ends the box's loop within about
+  100 ms (a quit message, the way Windows documents to time out a message
+  box), and the pick is cancelled
+  ([measured](../evidence/screen-share-windows.md#message-box-cancel-25-november-2026)).
+  When that timer cannot start, no box
+  opens and the pick is cancelled: a box that the end of the call cannot
+  close is never shown.
+* The target is no longer the index in display order. It is
+  `ScreenTarget::Monitor { name, width, height, rect }`: the monitor's GDI device
+  name (`MONITORINFOEXW::szDevice`, such as `\\.\DISPLAY1`, printable ASCII
+  other than space, at most 32 characters), its size in pixels when the user said Yes, and its
+  rectangle on the virtual screen in physical pixels (call protocol version
+  12). The worker takes only the listed monitor with that name, size and
+  rectangle; none, another size or another rectangle is "not found". An index could name
+  another monitor of the same size after a monitor was removed or the order
+  changed while the question was open.
+* Windows documents `szDevice` only as the monitor's device name, not as
+  stable across display changes; after a change it can give a name to
+  another output. So the core reads every monitor's device name, rectangle
+  and display mode before the first question and again after a Yes. Any
+  change voids the Yes, and the share stays off (cancelled). For the moment
+  between that second read and the worker's open, the target carries the
+  rectangle from the second read: the core and the worker both read it with
+  `GetMonitorInfoW` on a thread set to per-monitor DPI awareness, and the
+  worker copies exactly that rectangle. If a name moved to another output
+  in that moment, the worker still copies only the part of the desktop the
+  user approved, or finds no monitor with both the name and the rectangle
+  and shares nothing.
+* The GDI copy reads a rectangle of the whole desktop. Before and after each
+  copy the worker reads the monitor's name and rectangle again
+  (`GetMonitorInfoW`, the same reading as the list's); a monitor that
+  moved, changed or went away ends the
+  share as "off" (the source ended), and the copy made while it changed is
+  dropped. The copy is that rectangle, not the display mode's size (the two
+  can differ), so it never reaches past the monitor and a monitor whose
+  mode is larger than its rectangle can still be shared. The device name
+  names the display output: a different monitor
+  plugged into the same output, at the same size and place, counts as the
+  same screen.
+* A stop reaches the worker at once. A Windows share has no portal session
+  that the desktop revokes, so the core keeps a stop as the share's session:
+  when the core accepts "Stop sharing", it queues the worker's stop before
+  the call bar shows "off", not after the call's other work (a key send can
+  take up to 20 s). Only a full worker command queue makes the stop wait for
+  the call task, as before.
+* The core lists monitors with the worker's list rule, but it asks only about
+  a monitor that the GDI capture takes (`screen_capture_size_ok` in the call
+  protocol, which the worker also uses: at least 2x2, at most 7680 on a side
+  and 3840x2160 pixels). A monitor whose device name is not printable ASCII,
+  or has a space, is not listed. The question numbers the offered monitors ("Screen 2 of 2")
+  and says how many it left out. It also says where each monitor is, so two
+  monitors of the same size read apart: "main screen" (the Windows primary
+  monitor), or its side of the main screen from the rectangles ("left of the
+  main screen", "above and right of the main screen"), and, when two or more
+  offered monitors are on one side, their order there ("2nd from the left",
+  "1st from the top"). A change of the main monitor while the question is
+  open voids a Yes. With none that fits, no window opens and the share is
+  "unavailable".
+* The question says that the shared screen can show Persephone's messages,
+  as on macOS, because the display affinity of ADR-0045 was not measured
+  against a GDI copy (see below).
+* Limits of GDI: Windows draws no capture border and no cursor into the
+  picture, the copy is the whole monitor (no window share), and the buffer is
+  at most 3840x2160 pixels and 7680 on a side. The core does not offer a
+  larger monitor, and the worker refuses one at the start ("unavailable")
+  instead of a share that sends no picture. The capture
+  thread sets per-monitor DPI awareness so that the monitor list and the copy
+  use physical pixels; this needs the `Win32_UI_HiDpi` feature of the locked
+  `windows 0.62.2` (no new crate, no `Cargo.lock` change).
+* Why this is not a containment loosening: a process in this AppContainer
+  could already copy the screen with GDI before this change. The worker does
+  not use Win32k lockdown (`LaunchSpec::call()` turns it off, because the audio stack needs it). Screen sharing only
+  uses an existing ability, and the core still grants one monitor for each
+  share. Turning on the Win32k lockdown for the call worker would stop this
+  capture and also close that ability; it needs its own decision.
+* The call bar shows that the screen is shared, because Windows shows no
+  border for a GDI copy. ADR-0045 hides the Persephone main window from
+  capture; whether that hides it from a GDI copy was not measured.
+* Not verified live: a share seen by another call member, a multi-monitor
+  setup (the machine had one monitor), a monitor of another DPI scale, a
+  protected (DRM) window, and a locked or secure desktop.

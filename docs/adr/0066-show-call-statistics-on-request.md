@@ -134,7 +134,7 @@ the worker must read for each request or keep the newest reading always.
 
 ### Message
 
-`FromWorker::Stats` (tag 23, protocol version 12) holds integers only:
+`FromWorker::Stats` (tag 23, protocol version 13) holds integers only:
 
 | Part | Content | Bound |
 | --- | --- | --- |

@@ -37,9 +37,9 @@
     OWN_TILE_LABEL,
     PARTICIPANT_MUTED_LABEL,
     PHASE_TEXT,
-    SCREEN_TEXT,
     SCREEN_TILE_LABEL,
     screenButton,
+    screenNote,
     SHARING_TEXT,
     SHOW_ALL_LABEL,
     SOUND_LEVEL_LABEL,
@@ -58,6 +58,7 @@
   import CallWindowDevices from './CallWindowDevices.svelte';
   import CallStatsPanel from './CallStats.svelte';
   import { STATS_LABEL } from './callStats';
+  import { platformOf } from './modules';
   import Icon from './Icon.svelte';
   import PersonName from './PersonName.svelte';
   import { tileCanvas, tileLayout, type TileRef, type VideoPicture } from './video';
@@ -77,6 +78,8 @@
   let ticks = $state(0);
   let rosterOpen = $state(true);
   let busy = $state(false);
+  // Only the macOS screen refusal names a setting to change.
+  const platform = platformOf(typeof navigator !== 'undefined' ? navigator.platform : '');
   let failure = $state<string | null>(null);
   let volumeDraft = $state<number | null>(null);
   // The viewer's pick of a large feed (ADR-0065) and the device panel.
@@ -516,8 +519,8 @@
     {#if CAMERA_TEXT[status.camera] !== ''}
       <p class="note call-window-note" role="status">{CAMERA_TEXT[status.camera]}</p>
     {/if}
-    {#if SCREEN_TEXT[status.screen] !== ''}
-      <p class="note call-window-note" role="status">{SCREEN_TEXT[status.screen]}</p>
+    {#if screenNote(status.screen, platform) !== ''}
+      <p class="note call-window-note" role="status">{screenNote(status.screen, platform)}</p>
     {/if}
     {#if status.deviceChange && !devicesOpen}
       <p class="note call-window-note" role="status">{DEVICE_CHANGE_TEXT[status.deviceChange]}</p>

@@ -18,6 +18,7 @@ pub mod credentials;
 pub mod main_loop;
 pub mod modules;
 pub mod pick;
+pub mod screen;
 pub mod ui;
 pub mod vault;
 
