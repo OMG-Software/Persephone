@@ -44,8 +44,11 @@ static ACTIVE: AtomicUsize = AtomicUsize::new(0);
 
 /// Lets one test at a time start helpers or launches, or wait until none is
 /// active: such tests share [`ACTIVE`], and a hanging helper of one holds it
-/// for seconds while another waits for 0. A tokio mutex, so an async test
-/// holds it across its awaits; a plain test takes it with `blocking_lock`.
+/// for seconds while another waits for 0. A call's end reads it only when
+/// that call began a pick or held a helper, so a test whose call did and
+/// then ends takes it too; other call tests never read it. A tokio mutex,
+/// so an async test holds it across its awaits; a plain test takes it with
+/// `blocking_lock`.
 #[cfg(test)]
 pub(crate) static HELPER_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 

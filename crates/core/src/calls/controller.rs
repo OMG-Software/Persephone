@@ -990,7 +990,16 @@ async fn finish_worker(link: CallWorkerLink) {
 /// after the launch and drops the helper (its reaper stops it), the frame
 /// pipe's read end goes with the grant, and the next share starts only
 /// when no helper is active.
-async fn end_screen_helpers(pick: Option<ScreenPick>, helper: Option<HelperShare>) {
+///
+/// A call that began no pick and held no helper (`capture_used` false) has
+/// no helper of its own that could still be active, so it does not wait for
+/// the process's count: an earlier call's end waited for its own helpers,
+/// and the next share waits until none is active before it starts one.
+async fn end_screen_helpers(
+    pick: Option<ScreenPick>,
+    helper: Option<HelperShare>,
+    capture_used: bool,
+) {
     let mut helpers: Vec<HelperShare> = helper.into_iter().collect();
     if let Some(mut pick) = pick {
         pick.cancel.store(true, Ordering::SeqCst);
@@ -1003,7 +1012,7 @@ async fn end_screen_helpers(pick: Option<ScreenPick>, helper: Option<HelperShare
             helpers.extend(grant.helper);
         }
     }
-    if helpers.is_empty() && super::screen_helper::helpers_active() == 0 {
+    if helpers.is_empty() && (!capture_used || super::screen_helper::helpers_active() == 0) {
         return;
     }
     let _ = tokio::task::spawn_blocking(move || {
@@ -2074,6 +2083,7 @@ impl CallController {
             screen_last_on: false,
             screen_closed: None,
             screen_helper: None,
+            screen_capture_used: false,
             screen_sent: false,
             proxy: setup.proxy,
             consent: None,
@@ -2717,6 +2727,11 @@ struct Call {
     /// Windows (ADR-0067): the capture helper of the running share. Dropping
     /// it stops it. It ends with the share, the call and the session.
     screen_helper: Option<HelperShare>,
+    /// The call began a screen pick or held a capture helper. Only such a
+    /// call can leave a helper of its own (a reaped one, or a launch under
+    /// way) that its end waits for; another call does not wait for the
+    /// process's helper count.
+    screen_capture_used: bool,
     /// A `SetScreen` start went to the worker and no stop or end since.
     screen_sent: bool,
     /// The profile has a SOCKS5 proxy, which the connection to another SFU
@@ -3451,6 +3466,7 @@ impl Call {
 
     /// Asks the platform's source off the call loop.
     fn begin_screen_pick(&mut self) {
+        self.screen_capture_used = true;
         let source = self.screens.clone();
         let cancel = Arc::new(AtomicBool::new(false));
         {
@@ -3588,6 +3604,7 @@ impl Call {
         accepted.session = session;
         self.screen_closed = closed;
         let helper_stop = helper.as_ref().and_then(HelperShare::stopper);
+        self.screen_capture_used |= helper.is_some();
         self.screen_helper = helper;
         self.screen_sent = true;
         self.screen_share = share;
@@ -4794,6 +4811,7 @@ impl Call {
             screen_control,
             screen_closed,
             screen_helper,
+            screen_capture_used,
             ..
         } = self;
         // A portal request still waiting for the user is cancelled first, so
@@ -4824,7 +4842,7 @@ impl Call {
         // gone: no helper outlives the call or the session. The membership
         // ends meanwhile, so a slow helper does not hold it either.
         if session_ended {
-            end_screen_helpers(screen_pick, screen_helper).await;
+            end_screen_helpers(screen_pick, screen_helper, screen_capture_used).await;
             return;
         }
         let room_id = view.room_id;
@@ -4834,7 +4852,10 @@ impl Call {
                 client.remove_event_handler(handle);
             }
         });
-        let ((), _) = tokio::join!(end_screen_helpers(screen_pick, screen_helper), membership);
+        let ((), _) = tokio::join!(
+            end_screen_helpers(screen_pick, screen_helper, screen_capture_used),
+            membership
+        );
     }
 }
 
@@ -6596,6 +6617,7 @@ mod tests {
             screen_last_on: false,
             screen_closed: None,
             screen_helper: None,
+            screen_capture_used: false,
             screen_sent: false,
             proxy: false,
             consent: None,
@@ -9716,6 +9738,8 @@ mod tests {
     /// flight is cancelled and the session closes with it.
     #[tokio::test]
     async fn given_the_call_ends_then_the_pick_is_cancelled_and_the_session_closes() {
+        // This call began a pick, so its end reads the helper count.
+        let _serial = crate::calls::screen_helper::HELPER_TESTS.lock().await;
         let (mut fixture, inner, _) = call_with_source(true);
         fixture.call.screen_command(&inner, true, 0).unwrap();
         let cancel = fixture
@@ -10019,7 +10043,40 @@ mod tests {
 
     use crate::calls::screen_helper::HELPER_TESTS;
     use crate::calls::screen_helper::HelperShare;
+    use crate::calls::screen_helper::LaunchGuard;
     use crate::calls::screen_helper::fake::FakeHelper;
+
+    /// GIVEN a helper count held in the process (a launch under way) WHEN a
+    /// call that began no pick and held no helper ends THEN its end does not
+    /// wait for that count; WHEN a call that began a pick ends THEN its end
+    /// waits until the count is free.
+    #[tokio::test]
+    async fn given_a_call_without_screen_capture_when_it_ends_then_it_waits_for_no_helper() {
+        let _serial = HELPER_TESTS.lock().await;
+        let never = AtomicBool::new(false);
+        let launch = LaunchGuard::begin(&never).expect("a launch under way");
+        let quiet = test_call(
+            no_admission(),
+            Arc::new(Flags::default()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let ended = time::timeout(Duration::from_secs(3), quiet.call.finish(true)).await;
+        assert!(ended.is_ok(), "a call without capture does not wait");
+
+        let (mut fixture, inner, _) = call_with_source(true);
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            drop(launch);
+        });
+        let started = std::time::Instant::now();
+        fixture.call.finish(true).await;
+        assert!(
+            started.elapsed() >= Duration::from_millis(250),
+            "a call that began a pick waits for the count"
+        );
+        release.join().expect("the release thread");
+    }
 
     /// A bare grant of one monitor with a fake helper for share `share`.
     fn helper_grant(helper: &Arc<FakeHelper>, share: u32) -> ScreenGrant {
@@ -10333,6 +10390,8 @@ mod tests {
     /// can start no helper.
     #[tokio::test]
     async fn given_a_waiting_pick_when_the_call_ends_then_it_is_cancelled_before_the_worker_wait() {
+        // This call began a pick, so its end reads the helper count.
+        let _serial = crate::calls::screen_helper::HELPER_TESTS.lock().await;
         let released = Arc::new(AtomicBool::new(false));
         let mut fixture = test_call_with(
             no_admission(),

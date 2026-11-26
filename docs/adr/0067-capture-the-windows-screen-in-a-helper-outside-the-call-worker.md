@@ -198,7 +198,10 @@ it as accepted.
   They also cancel a share pick that still runs and wait for it (at most
   2 seconds), so a helper that it started is stopped and joined too. Then
   they wait until no helper that an earlier stop left to its reaper is
-  active (at most 5 seconds). A pick looks at the cancel again just before
+  active (at most 5 seconds). A call that began no pick and held no helper
+  skips this wait: no helper of its own can be active, an earlier call's
+  end waited for its own, and the next share waits until none is active
+  before it starts one. A pick looks at the cancel again just before
   it starts the helper, and from that look until the helper counts as
   active the launch counts as active too, in the same count, so the end of
   the call also waits for a launch that passed the look. Both waits are
