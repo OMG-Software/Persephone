@@ -71,6 +71,8 @@ pub struct Selection {
 // that the contract accepts and the protocol refuses would make
 // `worker_effect` drop the whole saved effect at each join, so they must
 // match. The page's copies are typed as the contract's exported literals.
+// The two checks are separate formulas, so they are compared too, for every
+// value: a change of either one fails the build.
 const _: () = {
     assert!(persephone_contracts::CALL_BLUR_MIN == persephone_call_protocol::MIN_BLUR_PERCENT);
     assert!(persephone_contracts::CALL_BLUR_MAX == persephone_call_protocol::MAX_BLUR_PERCENT);
@@ -78,6 +80,16 @@ const _: () = {
     assert!(
         persephone_contracts::CALL_BLUR_DEFAULT == persephone_call_protocol::DEFAULT_BLUR_PERCENT
     );
+    let mut percent: u8 = 0;
+    loop {
+        assert!(
+            persephone_contracts::call_blur_valid(percent) == BlurStrength::new(percent).is_some()
+        );
+        if percent == u8::MAX {
+            break;
+        }
+        percent += 1;
+    }
 };
 
 /// The worker's form of a saved video effect, or `None` for a blur strength
