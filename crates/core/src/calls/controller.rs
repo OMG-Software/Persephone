@@ -2178,6 +2178,7 @@ impl CallController {
             audio: AudioWants::default(),
             volume: watch::channel(scope.devices.volume()).0,
             microphone: guard.microphone.clone(),
+            video_seen: guard.video_effect.subscribe(),
             video_effect: guard.video_effect.clone(),
             devices: guard.devices.clone(),
             levels: BTreeMap::new(),
@@ -2851,8 +2852,12 @@ struct Call {
     microphone: watch::Sender<Option<MicSettings>>,
     /// The video effect (ADR-0068) set since the join started; `None` until
     /// one is set, as the Join carried the saved one. The controller sends;
-    /// the task subscribes.
+    /// the task reads it through `video_seen`.
     video_effect: watch::Sender<Option<OwnVideo>>,
+    /// The task's reader of `video_effect`. A camera-on first takes a change
+    /// that the task has not read yet, so the camera never starts before an
+    /// effect that was asked earlier (ADR-0068).
+    video_seen: watch::Receiver<Option<OwnVideo>>,
     /// A device change during the call (ADR-0059). The controller sends;
     /// the task subscribes.
     devices: watch::Sender<Option<DeviceChoice>>,
@@ -3538,7 +3543,7 @@ impl Call {
             // with its own remote (`SetCamera { remote: true }`).
         } else {
             if on {
-                self.effect_before_camera()?;
+                self.effect_before_camera(inner)?;
             } else {
                 // The worker stops the capture and closes its remote.
                 self.portal_capture = false;
@@ -4083,7 +4088,7 @@ impl Call {
         if !self.camera_wanted.load(Ordering::SeqCst) || self.portal_capture {
             return Ok(());
         }
-        self.effect_before_camera()?;
+        self.effect_before_camera(inner)?;
         if !self.send_portal_remote(remote) {
             let refused = FromWorker::Camera {
                 state: CameraState::Unavailable,
@@ -4584,11 +4589,27 @@ impl Call {
         Ok(())
     }
 
-    /// Sends a waiting video effect before a camera-on, so the camera never
+    /// Applies an effect change that the task has not read yet (ADR-0068).
+    /// `select!` picks a ready arm at random, so a camera command or a retry
+    /// can run before the arm that reads an earlier change.
+    fn take_unread_effect(&mut self, inner: &Inner) -> Result<(), EndReason> {
+        if !self.video_seen.has_changed().unwrap_or(false) {
+            return Ok(());
+        }
+        let own = *self.video_seen.borrow_and_update();
+        match own {
+            Some(own) => self.video_effect_changed(inner, own),
+            None => Ok(()),
+        }
+    }
+
+    /// Sends the newest video effect before a camera-on: one that the task
+    /// has not read yet, or one that waits for room. So the camera never
     /// starts before an effect that was asked earlier (ADR-0068). When the
     /// queue is still full, the call ends, as it does when the camera
     /// command itself finds the queue full.
-    fn effect_before_camera(&mut self) -> Result<(), EndReason> {
+    fn effect_before_camera(&mut self, inner: &Inner) -> Result<(), EndReason> {
+        self.take_unread_effect(inner)?;
         self.send_effect()?;
         if self.unsent_effect.is_some() {
             return Err(EndReason::WorkerStopped);
@@ -4731,8 +4752,7 @@ impl Call {
         let mut microphone = self.microphone.subscribe();
         microphone.mark_changed();
         // The same for the video effect (ADR-0068).
-        let mut video_effect = self.video_effect.subscribe();
-        video_effect.mark_changed();
+        self.video_seen.mark_changed();
         // A device choice made since the join started; the join used the
         // saved one. A choice made before this point is sent at once.
         let mut devices = self.devices.subscribe();
@@ -4793,8 +4813,8 @@ impl Call {
                         self.microphone_changed(settings)?;
                     }
                 }
-                Ok(()) = video_effect.changed() => {
-                    let own = *video_effect.borrow_and_update();
+                Ok(()) = self.video_seen.changed() => {
+                    let own = *self.video_seen.borrow_and_update();
                     if let Some(own) = own {
                         self.video_effect_changed(inner, own)?;
                     }
@@ -4805,18 +4825,10 @@ impl Call {
                         None => std::future::pending().await,
                     }
                 } => {
-                    // `select!` picks a ready arm at random: a newer effect
-                    // that waits unread replaces the kept one first, so the
-                    // worker never gets an older one.
-                    let newer = if video_effect.has_changed().unwrap_or(false) {
-                        *video_effect.borrow_and_update()
-                    } else {
-                        None
-                    };
-                    match newer {
-                        Some(own) => self.video_effect_changed(inner, own)?,
-                        None => self.send_effect()?,
-                    }
+                    // A newer effect that waits unread replaces the kept
+                    // one first, so the worker never gets an older one.
+                    self.take_unread_effect(inner)?;
+                    self.send_effect()?;
                 }
                 Ok(()) = devices.changed() => {
                     let choice = devices.borrow_and_update().clone();
@@ -7243,6 +7255,7 @@ mod tests {
         let (events, event_rx) = mpsc::channel(4);
         let link = CallWorkerLink::from_parts(command_tx, event_rx, process);
         let video_streams = link.video().streams();
+        let video_effect = watch::channel(None::<OwnVideo>).0;
         let (changes_tx, changes) = mpsc::channel(1);
         let (incoming_tx, incoming) = mpsc::channel(1);
         let (failed_tx, failed) = mpsc::channel(1);
@@ -7274,7 +7287,8 @@ mod tests {
             audio: AudioWants::default(),
             volume: watch::channel(MAX_VOLUME_PERCENT).0,
             microphone: watch::channel(None).0,
-            video_effect: watch::channel(None).0,
+            video_seen: video_effect.subscribe(),
+            video_effect,
             devices: watch::channel(None).0,
             levels: BTreeMap::new(),
             portal: None,
@@ -7702,6 +7716,114 @@ mod tests {
                 "the effect goes when it fits (room {room})"
             );
         }
+    }
+
+    /// GIVEN an effect change that the call task has not read yet WHEN the
+    /// camera turns on THEN the worker gets that effect before the camera
+    /// command, the page sees its mirror and the task does not send it
+    /// again; WHEN a portal request ends THEN an unread effect goes first
+    /// there too (ADR-0068).
+    #[tokio::test]
+    async fn given_an_unread_effect_when_the_camera_turns_on_then_it_goes_first() {
+        let fixture = test_call(
+            no_admission(),
+            Arc::new(Flags::default()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let inner = controller(FakeHost::new(true, None)).inner.clone();
+        let (mut call, mut to_worker) = (fixture.call, fixture.to_worker);
+        let warm = VideoEffect {
+            background: persephone_call_protocol::Background::None,
+            filter: persephone_call_protocol::ColourFilter::Warm,
+        };
+        let cool = VideoEffect {
+            filter: persephone_call_protocol::ColourFilter::Cool,
+            ..warm
+        };
+
+        call.video_effect.send_replace(Some(OwnVideo {
+            effect: warm,
+            mirror: false,
+        }));
+        call.camera_command(&inner, true, 1).unwrap();
+        assert_eq!(
+            to_worker.try_recv().unwrap(),
+            ToWorker::SetVideoEffect { effect: warm }
+        );
+        assert!(matches!(
+            to_worker.try_recv(),
+            Ok(ToWorker::SetCamera {
+                on: true,
+                remote: false
+            })
+        ));
+        assert!(!call.view.mirror, "the page sees the mirror");
+        assert!(
+            !call.video_seen.has_changed().unwrap(),
+            "the task does not send it again"
+        );
+
+        call.video_effect.send_replace(Some(OwnVideo {
+            effect: cool,
+            mirror: false,
+        }));
+        call.camera_wanted.store(true, Ordering::SeqCst);
+        finish_without_remote(&mut call, &inner);
+        assert_eq!(
+            to_worker.try_recv().unwrap(),
+            ToWorker::SetVideoEffect { effect: cool }
+        );
+    }
+
+    /// GIVEN an effect change that the call task has not read yet WHEN a
+    /// granted portal request ends THEN the worker gets the effect before
+    /// the camera-on that carries the remote (ADR-0068).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn given_an_unread_effect_when_a_portal_remote_arrives_then_the_effect_goes_first() {
+        use std::io::Read;
+        let fixture = test_call(
+            no_admission(),
+            Arc::new(Flags::default()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let inner = controller(FakeHost::new(true, None)).inner.clone();
+        let (mut call, mut to_worker) = (fixture.call, fixture.to_worker);
+        let (core_end, mut worker_end) = std::os::unix::net::UnixStream::pair().unwrap();
+        call.link = std::mem::replace(
+            &mut call.link,
+            CallWorkerLink::from_parts(
+                mpsc::channel(1).0,
+                mpsc::channel(1).1,
+                Box::new(FakeProcess(Arc::new(AtomicBool::new(false)))),
+            ),
+        )
+        .with_camera_path(crate::calls::worker::CameraPath::Portal)
+        .with_camera_channel(core_end);
+        call.camera_wanted.store(true, Ordering::SeqCst);
+        let warm = VideoEffect {
+            background: persephone_call_protocol::Background::None,
+            filter: persephone_call_protocol::ColourFilter::Warm,
+        };
+        call.video_effect.send_replace(Some(OwnVideo {
+            effect: warm,
+            mirror: true,
+        }));
+        let remote = std::os::fd::OwnedFd::from(std::fs::File::open("/dev/null").unwrap());
+        call.portal_finished(&inner, Some(remote)).unwrap();
+        let mut byte = [0_u8; 1];
+        assert_eq!(worker_end.read(&mut byte).unwrap(), 1, "the remote went");
+        assert_eq!(
+            to_worker.try_recv().unwrap(),
+            ToWorker::SetVideoEffect { effect: warm }
+        );
+        assert!(matches!(
+            to_worker.try_recv(),
+            Ok(ToWorker::SetCamera {
+                on: true,
+                remote: true
+            })
+        ));
     }
 
     /// GIVEN a device choice kept for a retry and a newer choice not read

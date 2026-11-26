@@ -140,8 +140,10 @@ an embedded ONNX model as the later segmenter (owner choice).
   effect in use and whether the request was refused.
 * In a call, a full worker queue does not end the call: the core keeps the
   newest effect and sends it again later, and the mirror changes at once. A
-  camera-on sends a waiting effect first. When it still cannot go, the call
-  ends, so the camera never starts before an effect that was asked earlier.
+  camera-on, also after a portal request, first sends the newest effect: one
+  that the call task has not read yet, or one that waits for room. When it
+  still cannot go, the call ends, so the camera never starts before an effect
+  that was asked earlier.
 * `CameraState::EffectUnavailable` is 4.
 * `FromWorker::Devices` ends with `background_effects` (one byte, 0 or 1).
 
