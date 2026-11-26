@@ -306,3 +306,10 @@ test('GIVEN details open WHEN the call ends or goes idle THEN the panel closes',
   assert.equal(statsStayOpen(inRoom('!a:s', 'active'), { ...inRoom('!a:s', 'ended') }), false);
   assert.equal(statsStayOpen(inRoom('!a:s', 'active'), IDLE_CALL), false);
 });
+
+test('GIVEN an ended call in room A WHEN a new call in room A comes THEN the panel closes', () => {
+  for (const phase of ['joining', 'active']) {
+    assert.equal(statsStayOpen(inRoom('!a:s', 'ended'), inRoom('!a:s', phase)), false);
+  }
+  assert.equal(statsStayOpen(IDLE_CALL, inRoom('!a:s', 'joining')), false);
+});

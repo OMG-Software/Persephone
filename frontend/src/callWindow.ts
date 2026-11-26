@@ -68,12 +68,13 @@ export class SelfClose {
 
 /**
  * Whether the technical details panel stays open when `next` replaces
- * `previous` (ADR-0066). It stays only while the same room's call goes on.
- * The panel reads once, when it opens, so a call in another room must close
- * it: it would keep the old call's last reading.
+ * `previous` (ADR-0066). It stays only while the same room's call goes on:
+ * both statuses are in a call, in the same room. The panel reads once, when
+ * it opens, so a call in another room, or a new call after an ended one in
+ * the same room, must close it: it would keep the old call's last reading.
  */
 export function statsStayOpen(previous: CallStatus, next: CallStatus): boolean {
-  return inCall(next) && next.roomId === previous.roomId;
+  return inCall(previous) && inCall(next) && next.roomId === previous.roomId;
 }
 
 /** Shown in the main window when the call window cannot open. */
