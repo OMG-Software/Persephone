@@ -201,6 +201,8 @@ This record is then amended with the results.
 * Control: saved with the call devices, and changeable from the call window.
 * Downloads: not yet. Build the parts that need no model first, behind a
   segmenter interface.
+* A camera test whose effect the worker refuses: show the camera without an
+  effect. The test publishes no track, so only this device shows it.
 
 ### Positive Consequences
 
