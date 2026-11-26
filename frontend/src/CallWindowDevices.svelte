@@ -26,8 +26,9 @@
   // order rules: saves go one at a time and none is dropped, and a closed
   // panel takes no late answer. The own video effect and the preview's
   // mirror (ADR-0068) go through the same queue, as each save changes the
-  // same device record; each sends only the part the user changed, and a
-  // failed one puts both controls back to the saved values. `effectRefused`
+  // same device record; each sends only the part the user changed, and
+  // when the newest change of a part fails, that part's control goes back
+  // to the saved value. `effectRefused`
   // is the call status's: the worker answers after the save's reply, so
   // only the status has its refusal.
   let {
@@ -54,9 +55,9 @@
       }
     },
     (next) => (effectView = next),
-    (effect, savedMirror) => {
-      videoEffect = effect;
-      mirror = savedMirror;
+    (saved) => {
+      if (saved.effect) videoEffect = saved.effect;
+      if (typeof saved.mirror === 'boolean') mirror = saved.mirror;
     }
   );
   let view = $state(panel.state);

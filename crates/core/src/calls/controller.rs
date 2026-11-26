@@ -2982,6 +2982,18 @@ type PortalRemote = Option<std::os::fd::OwnedFd>;
 #[cfg(not(target_os = "linux"))]
 type PortalRemote = ();
 
+/// Whether a camera portal access request produced a remote.
+#[cfg(target_os = "linux")]
+fn has_portal_remote(remote: &PortalRemote) -> bool {
+    remote.is_some()
+}
+
+/// No camera portal off Linux: a request never produces a remote.
+#[cfg(not(target_os = "linux"))]
+fn has_portal_remote(_: &PortalRemote) -> bool {
+    false
+}
+
 /// Whether the worker gets its camera through the camera portal (ADR-0049).
 fn uses_portal(link: &CallWorkerLink) -> bool {
     link.camera_path() == super::worker::CameraPath::Portal
@@ -4097,12 +4109,14 @@ impl Call {
         if !self.camera_wanted.load(Ordering::SeqCst) || self.portal_capture {
             return Ok(());
         }
+        // No camera starts without a remote, so no effect has to go first,
+        // and a full queue must not end the call.
+        if !has_portal_remote(&remote) {
+            return self.portal_refused(inner);
+        }
         self.effect_before_camera(inner)?;
         if !self.send_portal_remote(remote) {
-            let refused = FromWorker::Camera {
-                state: CameraState::Unavailable,
-            };
-            return self.worker_event(inner, &refused);
+            return self.portal_refused(inner);
         }
         self.portal_capture = true;
         self.portal_sent = true;
@@ -4112,6 +4126,15 @@ impl Call {
             on: true,
             remote: true,
         })
+    }
+
+    /// A portal request that gives the worker no remote: the camera is
+    /// unavailable and the call goes on.
+    fn portal_refused(&mut self, inner: &Inner) -> Result<(), EndReason> {
+        let refused = FromWorker::Camera {
+            state: CameraState::Unavailable,
+        };
+        self.worker_event(inner, &refused)
     }
 
     /// Sends the portal's remote to the worker. Returns whether it went.
@@ -7730,8 +7753,9 @@ mod tests {
     /// GIVEN an effect change that the call task has not read yet WHEN the
     /// camera turns on THEN the worker gets that effect before the camera
     /// command, the page sees its mirror and the task does not send it
-    /// again; WHEN a portal request ends THEN an unread effect goes first
-    /// there too (ADR-0068).
+    /// again; WHEN a portal request ends without a remote THEN no camera
+    /// starts, so nothing goes, and the task still reads the effect later
+    /// (ADR-0068).
     #[tokio::test]
     async fn given_an_unread_effect_when_the_camera_turns_on_then_it_goes_first() {
         let fixture = test_call(
@@ -7778,10 +7802,45 @@ mod tests {
         }));
         call.camera_wanted.store(true, Ordering::SeqCst);
         finish_without_remote(&mut call, &inner);
-        assert_eq!(
-            to_worker.try_recv().unwrap(),
-            ToWorker::SetVideoEffect { effect: cool }
+        assert!(to_worker.try_recv().is_err(), "no camera, so nothing goes");
+        assert_eq!(call.view.camera, CallCamera::Unavailable);
+        assert!(
+            call.video_seen.has_changed().unwrap(),
+            "the task still reads the effect"
         );
+    }
+
+    /// GIVEN an effect that waits for room in a full queue WHEN a portal
+    /// request ends without a remote THEN the call goes on, the camera is
+    /// unavailable, nothing goes to the worker, and the effect still waits
+    /// for its retry (ADR-0068).
+    #[test]
+    fn given_a_waiting_effect_when_a_portal_request_gives_no_remote_then_the_call_goes_on() {
+        let fixture = test_call(
+            no_admission(),
+            Arc::new(Flags::default()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let inner = controller(FakeHost::new(true, None)).inner.clone();
+        let (mut call, mut to_worker) = (fixture.call, fixture.to_worker);
+        let warm = VideoEffect {
+            background: persephone_call_protocol::Background::None,
+            filter: persephone_call_protocol::ColourFilter::Warm,
+        };
+        call.unsent_effect = Some((Instant::now() + UNSENT_RETRY, warm));
+        fill_queue(&call, &mut to_worker, 0);
+        call.camera_wanted.store(true, Ordering::SeqCst);
+        call.view.request_camera(true);
+        finish_without_remote(&mut call, &inner);
+        assert_eq!(call.view.camera, CallCamera::Unavailable);
+        assert!(!call.portal_capture && !call.portal_sent);
+        let sent: Vec<ToWorker> = std::iter::from_fn(|| to_worker.try_recv().ok()).collect();
+        assert!(
+            sent.iter()
+                .all(|message| matches!(message, ToWorker::SetMuted { .. })),
+            "only the commands that filled the queue"
+        );
+        assert_eq!(call.unsent_effect.map(|(_, effect)| effect), Some(warm));
     }
 
     /// GIVEN an effect change that the call task has not read yet WHEN a

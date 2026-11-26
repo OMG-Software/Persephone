@@ -160,7 +160,9 @@ an embedded ONNX model as the later segmenter (owner choice).
   running or joining call and to a running camera test. It refuses a value
   outside the closed sets and a command with neither field, and a failed
   save changes nothing; both windows then put their controls back to the
-  saved values. The main window and the call window may call it; the call
+  saved values. The call window's panel takes the newest answer for each
+  part apart, so a failed effect goes back also when a mirror change was
+  sent after it. The main window and the call window may call it; the call
   window's device panel (ADR-0065) shows the same controls as the settings.
 * The core numbers each effect request. A join reads that number before it
   reads the record, and an effect asked after that read replaces the saved

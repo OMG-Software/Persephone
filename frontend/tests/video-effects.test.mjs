@@ -141,7 +141,7 @@ function panel(bridge) {
     () => {},
     () => {},
     (state) => effects.push(state),
-    (effect, mirror) => controls.push({ effect, mirror })
+    (saved) => controls.push(saved)
   );
   return { panel: made, effects, controls, last: () => effects.at(-1) };
 }
@@ -248,9 +248,9 @@ test('GIVEN a change of one part of the effect controls WHEN the command is made
   assert.deepEqual(withVideoEffectChange(record, { effect: sea }), { effect: sea, mirror: true, volume: 80 });
 });
 
-test('GIVEN a loaded panel WHEN only the mirror changes THEN only the mirror is sent and the copy keeps the effect; WHEN the newest change fails THEN the controls go back to the copy, and an older failure moves nothing', async () => {
+test('GIVEN a loaded panel WHEN only the mirror changes THEN only the mirror is sent and the copy keeps the effect; WHEN the newest change of a part fails THEN that part goes back to the copy, and an older failure of the same part moves nothing', async () => {
   const sent = [];
-  const answers = [later(), later(), later(), later()];
+  const answers = [later(), later(), later(), later(), later(), later()];
   let calls = 0;
   const { panel: made, controls, last } = panel({
     list: async () => listed(sea, true),
@@ -274,18 +274,56 @@ test('GIVEN a loaded panel WHEN only the mirror changes THEN only the mirror is 
   const failed = made.saveEffect({ effect: warm });
   answers[1].reject('core_unavailable');
   await failed;
-  assert.deepEqual(controls, [{ effect: sea, mirror: false }], 'the controls go back to the saved values');
+  assert.deepEqual(controls, [{ effect: sea }], 'the effect goes back to the saved value');
   assert.equal(last().failure, DEVICE_FAILURE_TEXT.core_unavailable);
 
-  const older = made.saveEffect({ mirror: true });
+  const older = made.saveEffect({ effect: { ...NO_VIDEO_EFFECT, filter: 'greyscale' } });
   const newer = made.saveEffect({ effect: warm });
+  assert.equal(last().failure, null, 'a new change of the part clears its failure');
   answers[2].reject('core_unavailable');
   answers[3].resolve({ ...IDLE_CALL });
   await Promise.all([older, newer]);
-  assert.equal(controls.length, 1, 'an older failure moves no control');
+  assert.equal(controls.length, 1, 'an older failure of the same part moves no control');
   assert.deepEqual(last(), { saving: false, failure: null });
   assert.deepEqual(made.state.devices.effect, warm);
+});
+
+test('GIVEN a failed effect change and a mirror change sent after it WHEN the mirror is saved THEN the effect still goes back and its failure stays; WHEN the mirror fails after an effect change THEN the mirror goes back', async () => {
+  const answers = [later(), later(), later(), later()];
+  let calls = 0;
+  const { panel: made, controls, last } = panel({
+    list: async () => listed(NO_VIDEO_EFFECT, true),
+    save: never,
+    effect: () => answers[calls++].promise
+  });
+  await made.load();
+  const warm = { ...NO_VIDEO_EFFECT, filter: 'warm' };
+
+  const effect = made.saveEffect({ effect: warm });
+  const mirror = made.saveEffect({ mirror: false });
+  answers[0].reject('core_unavailable');
+  await effect;
+  assert.deepEqual(controls, [{ effect: NO_VIDEO_EFFECT }], 'the unsaved filter does not stay shown');
+  assert.deepEqual(last(), { saving: true, failure: DEVICE_FAILURE_TEXT.core_unavailable });
+  answers[1].resolve({ ...IDLE_CALL });
+  await mirror;
+  assert.deepEqual(last(), { saving: false, failure: DEVICE_FAILURE_TEXT.core_unavailable }, 'a mirror success keeps the effect failure');
+  assert.equal(controls.length, 1, 'a saved mirror moves no control');
+  assert.deepEqual(made.state.devices.effect, NO_VIDEO_EFFECT);
+  assert.equal(made.state.devices.mirror, false);
+
+  const mirrorOn = made.saveEffect({ mirror: true });
+  const effectAgain = made.saveEffect({ effect: warm });
+  answers[2].reject('core_unavailable');
+  answers[3].resolve({ ...IDLE_CALL });
+  await Promise.all([mirrorOn, effectAgain]);
+  assert.deepEqual(controls.at(-1), { mirror: false }, 'the mirror goes back, the effect is left alone');
+  assert.deepEqual(last(), { saving: false, failure: DEVICE_FAILURE_TEXT.core_unavailable });
+  assert.deepEqual(made.state.devices.effect, warm);
   assert.equal(made.state.devices.mirror, false, 'the failed mirror change is not in the copy');
+  assert.equal(calls, 4);
+  await made.saveEffect({});
+  assert.equal(calls, 4, 'a change with neither part sends nothing');
 });
 
 test('GIVEN no person mask WHEN the controls are rendered THEN blur and the pictures cannot be chosen and a note says why; WHEN blur is saved THEN its strength shows', () => {
