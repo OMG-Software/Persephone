@@ -995,16 +995,17 @@ async fn finish_worker(link: CallWorkerLink) {
 /// The wait for the process's count runs only when `wait_for_count` is set:
 /// for a call that began a pick (also one cancelled or refused) or held a
 /// helper, and for a call that the end of the session stops. A call that did
-/// neither, and that the user left, has no helper of its own that could be
-/// active: a helper comes only from a call that began a pick, whose own end
-/// waited for it (bounded), and the next share waits until none is active
-/// before it starts one. A call that the end of the session stops waits
-/// even then, so a helper that outlived an earlier call's bounded waits gets
-/// one more wait. A session that ends with no call running has no call task
-/// to wait in, and `stop_for_session_end` must not block: a helper that an
-/// earlier call left can then still be active, until its reaper's stop ends
-/// it or, when no exit shows, until the core exits and its Job's
-/// kill-on-close ends it.
+/// neither, and that the user left, has no helper of its own: a helper comes
+/// only from a call that began a pick. A helper of an earlier call can still
+/// be active when that call's bounded waits ran out; this end does not wait
+/// for it. The next share waits at most `HELPER_IDLE_WAIT` (5 s, Windows)
+/// until no helper is active and is otherwise `Unavailable`, so no second
+/// helper starts. A call that the end of the session stops waits even then,
+/// so such a helper gets one more wait. A session that ends with no call
+/// running has no call task to wait in, and `stop_for_session_end` must not
+/// block: a helper that an earlier call left can then still be active, until
+/// its reaper's stop ends it or, when no exit shows, until the core exits
+/// and its Job's kill-on-close ends it.
 async fn end_screen_helpers(
     pick: Option<ScreenPick>,
     helper: Option<HelperShare>,
