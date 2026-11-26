@@ -344,14 +344,6 @@ impl<C, U> Slots<C, U> {
         })
     }
 
-    /// The open connections with their indexes.
-    pub fn open_indexed(&self) -> impl Iterator<Item = (u8, &U)> {
-        self.0.iter().filter_map(|(index, slot)| match slot {
-            Slot::Up(open) => Some((*index, open)),
-            Slot::Connecting(_) | Slot::Ended => None,
-        })
-    }
-
     /// Takes every connection out, for the end of the call.
     pub fn take_all(&mut self) -> Vec<Slot<C, U>> {
         self.0.drain().map(|(_, slot)| slot).collect()
@@ -598,6 +590,100 @@ impl LevelMeters {
         self.own
             .next(sound_level(linear), now)
             .map(|level| FromWorker::SoundLevel { level })
+    }
+}
+
+/// The most remote audio tracks measured at once: two for each participant
+/// (a microphone and a screen share's sound).
+pub const MAX_MEASURED_TRACKS: usize = 2 * MAX_PARTICIPANTS;
+
+/// The most remote audio tracks that [`AudioRoster`] keeps: the measured
+/// ones and as many that wait. A track that waits is measured when a
+/// measured one goes.
+pub const MAX_KEPT_AUDIO_TRACKS: usize = 2 * MAX_MEASURED_TRACKS;
+
+/// One remote audio track that [`AudioRoster`] keeps.
+#[derive(Debug)]
+struct KeptTrack<T> {
+    connection: u8,
+    identity: String,
+    sid: String,
+    track: T,
+}
+
+/// The subscribed remote audio tracks of every connection, in the order of
+/// their subscriptions, at most [`MAX_KEPT_AUDIO_TRACKS`] (ADR-0059). The
+/// room events change it: a subscription adds a track, and an
+/// unsubscription, a participant that leaves or a connection that goes
+/// removes tracks. The level meters read it on each tick, so no tick copies
+/// the SDK's participant map. `T` is the track.
+#[derive(Debug)]
+pub struct AudioRoster<T> {
+    tracks: Vec<KeptTrack<T>>,
+}
+
+impl<T> Default for AudioRoster<T> {
+    fn default() -> Self {
+        Self { tracks: Vec::new() }
+    }
+}
+
+impl<T> AudioRoster<T> {
+    /// Keeps a subscribed track and returns whether it is kept. The same
+    /// track (connection, identity and SID) again replaces the kept track
+    /// in its place. An identity that the protocol refuses, a connection
+    /// out of range, or a full roster keeps nothing.
+    pub fn add(&mut self, connection: u8, identity: String, sid: String, track: T) -> bool {
+        if !valid_identity(&identity) || connection > MAX_OTHER_CONNECTIONS {
+            return false;
+        }
+        if let Some(kept) = self.tracks.iter_mut().find(|kept| {
+            kept.connection == connection && kept.identity == identity && kept.sid == sid
+        }) {
+            kept.track = track;
+            return true;
+        }
+        if self.tracks.len() >= MAX_KEPT_AUDIO_TRACKS {
+            return false;
+        }
+        self.tracks.push(KeptTrack {
+            connection,
+            identity,
+            sid,
+            track,
+        });
+        true
+    }
+
+    /// An unsubscribed track goes.
+    pub fn remove(&mut self, connection: u8, identity: &str, sid: &str) {
+        self.tracks.retain(|kept| {
+            !(kept.connection == connection && kept.identity == identity && kept.sid == sid)
+        });
+    }
+
+    /// Every track of a participant that left the connection goes.
+    pub fn remove_participant(&mut self, connection: u8, identity: &str) {
+        self.tracks
+            .retain(|kept| !(kept.connection == connection && kept.identity == identity));
+    }
+
+    /// Every track of a connection that went down goes.
+    pub fn remove_connection(&mut self, connection: u8) {
+        self.tracks.retain(|kept| kept.connection != connection);
+    }
+
+    /// The tracks to measure: the first [`MAX_MEASURED_TRACKS`], each with
+    /// its connection and identity.
+    pub fn measured(&self) -> Vec<(u8, String, T)>
+    where
+        T: Clone,
+    {
+        self.tracks
+            .iter()
+            .take(MAX_MEASURED_TRACKS)
+            .map(|kept| (kept.connection, kept.identity.clone(), kept.track.clone()))
+            .collect()
     }
 }
 
@@ -1453,5 +1539,159 @@ mod tests {
                 .collect(),
         };
         assert_eq!(meters.next(&levels, Instant::now()).len(), MAX_PARTICIPANTS);
+    }
+
+    /// A roster with one track per entry: connection, identity, SID and a
+    /// number as the track.
+    fn roster(entries: &[(u8, &str, &str, u32)]) -> AudioRoster<u32> {
+        let mut roster = AudioRoster::default();
+        for (connection, identity, sid, track) in entries {
+            assert!(roster.add(
+                *connection,
+                (*identity).to_owned(),
+                (*sid).to_owned(),
+                *track
+            ));
+        }
+        roster
+    }
+
+    fn entry(connection: u8, identity: &str, track: u32) -> (u8, String, u32) {
+        (connection, identity.to_owned(), track)
+    }
+
+    const A: &str = "@a:example.org:D";
+    const B: &str = "@b:example.org:D";
+
+    #[test]
+    fn given_subscribed_audio_tracks_when_measured_then_they_come_in_subscription_order() {
+        // GIVEN tracks on the own connection and on another SFU
+        let roster = roster(&[(0, A, "TR_1", 1), (2, B, "TR_2", 2), (0, B, "TR_3", 3)]);
+
+        // WHEN the meters read them, THEN each comes with its connection
+        // and identity, in the order of the subscriptions
+        assert_eq!(
+            roster.measured(),
+            vec![entry(0, A, 1), entry(2, B, 2), entry(0, B, 3)]
+        );
+    }
+
+    #[test]
+    fn given_a_kept_track_when_it_is_subscribed_again_then_it_is_replaced_in_its_place() {
+        // GIVEN two kept tracks
+        let mut roster = roster(&[(0, A, "TR_1", 1), (0, B, "TR_2", 2)]);
+
+        // WHEN the first is subscribed again with a new track
+        assert!(roster.add(0, A.to_owned(), "TR_1".to_owned(), 7));
+
+        // THEN it keeps its place and is not kept twice
+        assert_eq!(roster.measured(), vec![entry(0, A, 7), entry(0, B, 2)]);
+    }
+
+    #[test]
+    fn given_kept_tracks_when_one_is_unsubscribed_then_only_that_track_goes() {
+        // GIVEN two tracks of one participant, one of another, and the same
+        // participant and SID on another connection
+        let mut roster = roster(&[
+            (0, A, "TR_1", 1),
+            (0, A, "TR_2", 2),
+            (0, B, "TR_1", 3),
+            (1, A, "TR_1", 4),
+        ]);
+
+        // WHEN the first track is unsubscribed
+        roster.remove(0, A, "TR_1");
+
+        // THEN the others stay
+        assert_eq!(
+            roster.measured(),
+            vec![entry(0, A, 2), entry(0, B, 3), entry(1, A, 4)]
+        );
+    }
+
+    #[test]
+    fn given_a_participant_with_tracks_when_it_leaves_then_its_tracks_on_that_connection_go() {
+        // GIVEN a participant with two tracks, on two connections
+        let mut roster = roster(&[
+            (0, A, "TR_1", 1),
+            (0, A, "TR_2", 2),
+            (0, B, "TR_3", 3),
+            (1, A, "TR_4", 4),
+        ]);
+
+        // WHEN it leaves the own connection
+        roster.remove_participant(0, A);
+
+        // THEN its tracks there go, and its track on the other connection
+        // stays
+        assert_eq!(roster.measured(), vec![entry(0, B, 3), entry(1, A, 4)]);
+    }
+
+    #[test]
+    fn given_tracks_on_two_connections_when_one_goes_down_then_only_its_tracks_go() {
+        // GIVEN tracks on the own connection and on two other SFUs
+        let mut roster = roster(&[(0, A, "TR_1", 1), (1, A, "TR_2", 2), (3, B, "TR_3", 3)]);
+
+        // WHEN connection 1 goes down
+        roster.remove_connection(1);
+
+        // THEN its track goes and the others stay
+        assert_eq!(roster.measured(), vec![entry(0, A, 1), entry(3, B, 3)]);
+    }
+
+    #[test]
+    fn given_an_invalid_identity_or_connection_when_a_track_comes_then_nothing_is_kept() {
+        let mut roster = AudioRoster::default();
+        let long = "a".repeat(MAX_IDENTITY_BYTES + 1);
+
+        // GIVEN identities the protocol refuses, and a connection out of
+        // range, WHEN their tracks come, THEN none is kept
+        for (connection, identity) in [
+            (0, ""),
+            (0, "@a:example.org\n"),
+            (0, long.as_str()),
+            (MAX_OTHER_CONNECTIONS + 1, A),
+        ] {
+            assert!(!roster.add(connection, identity.to_owned(), "TR_1".to_owned(), 1));
+        }
+        assert!(roster.measured().is_empty());
+    }
+
+    #[test]
+    fn given_more_tracks_than_are_measured_when_measured_ones_go_then_waiting_ones_move_up() {
+        // GIVEN a full roster: the measured tracks and as many waiting
+        let identities = names(MAX_KEPT_AUDIO_TRACKS);
+        let mut roster = AudioRoster::default();
+        for (track, identity) in (0_u32..).zip(&identities) {
+            assert!(roster.add(0, identity.clone(), format!("TR_{track}"), track));
+        }
+
+        // WHEN one more comes, THEN it is refused, and only the first are
+        // measured
+        assert!(!roster.add(0, A.to_owned(), "TR_X".to_owned(), u32::MAX));
+        let first: Vec<u32> = (0_u32..).take(MAX_MEASURED_TRACKS).collect();
+        let tracks = |roster: &AudioRoster<u32>| -> Vec<u32> {
+            roster
+                .measured()
+                .into_iter()
+                .map(|(_, _, track)| track)
+                .collect()
+        };
+        assert_eq!(tracks(&roster), first);
+
+        // WHEN the measured participants leave
+        for identity in identities.iter().take(MAX_MEASURED_TRACKS) {
+            roster.remove_participant(0, identity);
+        }
+
+        // THEN the waiting tracks are measured, and the refused one is not
+        let waiting: Vec<u32> = (0_u32..)
+            .skip(MAX_MEASURED_TRACKS)
+            .take(MAX_KEPT_AUDIO_TRACKS - MAX_MEASURED_TRACKS)
+            .collect();
+        assert_eq!(tracks(&roster), waiting);
+
+        // AND a new track has room again
+        assert!(roster.add(0, A.to_owned(), "TR_X".to_owned(), u32::MAX));
     }
 }
