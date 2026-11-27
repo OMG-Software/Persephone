@@ -16,6 +16,8 @@
 //! * [`encryption_keys`]: the `io.element.call.encryption_keys` to-device
 //!   event. It is sent Olm-encrypted, only to cross-signed devices (ADR-0005),
 //!   and parsed strictly: a sender can set a key only for its own identity.
+//! * [`deafen`]: the to-device event that tells the other members this device
+//!   is deafened (ADR-0071). Its checks are those of the key event.
 //! * [`sfu`]: the LiveKit JWT service request (`/sfu/get`) with an OpenID
 //!   token. The answer must name a `wss://` URL and a well-formed JWT.
 //! * [`other_sfu`]: which SFU each member is on, the other SFUs a call connects
@@ -45,6 +47,7 @@
 
 pub mod alone;
 pub mod controller;
+pub mod deafen;
 pub mod delayed;
 pub mod device_test;
 pub mod devices;

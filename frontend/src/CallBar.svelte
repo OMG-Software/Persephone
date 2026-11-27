@@ -9,6 +9,7 @@
     DEVICE_CHANGE_TEXT,
     END_TEXT,
     NO_KEY_TEXT,
+    PARTICIPANT_DEAFENED_LABEL,
     PARTICIPANT_MUTED_LABEL,
     PHASE_TEXT,
     RING_DECLINED_TEXT,
@@ -235,6 +236,7 @@
             {/if}
             <PersonName userId={person.userId} name={names.get(person.userId) ?? null} />
             {#if person.muted}<span class="call-muted" role="img" aria-label={PARTICIPANT_MUTED_LABEL}><Icon name="mic-off" /></span>{/if}
+            {#if person.deafened}<span class="call-deafened" role="img" aria-label={PARTICIPANT_DEAFENED_LABEL}><Icon name="headphones-off" /></span>{/if}
             {#if person.sharing}<span class="note call-note call-sharing">{SHARING_TEXT}</span>{/if}
             {#if !person.keyed}<span class="note call-note">{NO_KEY_TEXT}</span>{/if}
             {#if !person.reachable}<span class="note call-note">{UNREACHABLE_TEXT}</span>{/if}

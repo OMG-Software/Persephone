@@ -962,6 +962,17 @@ async fn call_video_effect(
     relay(core.inner(), call).await
 }
 
+/// Sets the own camera's send resolution (ADR-0070), for the running call
+/// and later ones. The value is one of a closed set, which the type
+/// enforces. The core saves it, and restarts a camera that is on.
+#[tauri::command]
+async fn call_video_quality(
+    core: State<'_, CoreLink>,
+    quality: persephone_contracts::CallVideoQuality,
+) -> Result<CallStatus, String> {
+    relay(core.inner(), Call::CallVideoQuality { quality }).await
+}
+
 /// Turns the camera on or off. The worker's answer arrives as a call change.
 #[tauri::command]
 async fn call_camera(core: State<'_, CoreLink>, on: bool) -> Result<CallStatus, String> {
@@ -2097,6 +2108,25 @@ async fn close_call_window<R: Runtime>(app: AppHandle<R>) -> Result<(), String> 
     Ok(())
 }
 
+/// Puts the call window in full screen, or takes it out (ADR-0060). Only the
+/// call window is addressed, by its fixed label. The page asks when an
+/// element of it enters or leaves full screen. On Windows wry leaves the web
+/// view's full-screen event unhandled, so the host turns the window full
+/// screen. On macOS and Linux the web view does it itself, and a second
+/// request would fight it. A closed call window is not an error.
+#[tauri::command]
+async fn set_call_fullscreen<R: Runtime>(app: AppHandle<R>, on: bool) -> Result<(), String> {
+    #[cfg(windows)]
+    if let Some(window) = app.get_webview_window(CALL_WINDOW) {
+        window
+            .set_fullscreen(on)
+            .map_err(|_| UNAVAILABLE.to_string())?;
+    }
+    #[cfg(not(windows))]
+    let _ = (app, on);
+    Ok(())
+}
+
 /// Saves the call microphone, speaker and camera as device IDs; null is the
 /// system default. The core checks the IDs again.
 #[tauri::command]
@@ -2528,6 +2558,7 @@ pub fn configure<R: Runtime>(
             call_volume,
             call_microphone,
             call_video_effect,
+            call_video_quality,
             call_camera,
             call_screen,
             call_stats,
@@ -2625,6 +2656,7 @@ pub fn configure<R: Runtime>(
             call_device_test_status,
             open_call_window,
             close_call_window,
+            set_call_fullscreen,
             call_window_ready
         ])
         .on_page_load(|webview, payload| {
@@ -2795,6 +2827,19 @@ pub fn context<R: Runtime>() -> tauri::Context<R> {
     tauri::generate_context!()
 }
 
+/// The program name on Linux: the product name. The bundler names the
+/// desktop file of every Linux package after it
+/// (`usr/share/applications/{productName}.desktop`; the AppImage and the
+/// Arch package use the .deb's files), and `linux/main.desktop` gives the
+/// same name as `StartupWMClass`. GTK sends the program name as each
+/// window's Wayland app ID and X11 `WM_CLASS`. KWin finds a Wayland window's
+/// icon only through `<app ID>.desktop`, so GTK's default, the executable
+/// name `persephone-ui`, showed the generic icon.
+#[cfg(any(target_os = "linux", test))]
+fn program_name(config: &tauri::Config) -> Option<&str> {
+    config.product_name.as_deref()
+}
+
 /// Runs the UI when the core started it. Started any other way, it becomes a
 /// launcher for the core ([`launcher`]) before any Tauri or channel state
 /// exists, because without the core channel the UI has nothing to relay to.
@@ -2822,8 +2867,15 @@ pub fn run() {
     };
     // Off until the core says the diagnostic log is on (ADR-0058).
     diagnostics::install(core.clone());
+    let context = context();
+    // Before the event loop starts GTK, which otherwise takes the executable
+    // name.
+    #[cfg(target_os = "linux")]
+    if let Some(name) = program_name(context.config()) {
+        gtk::glib::set_prgname(Some(name));
+    }
     let app = configure(tauri::Builder::default(), core, subscriptions)
-        .build(context())
+        .build(context)
         .expect("Persephone UI failed to start");
     // The display GTK opened for the window, for the capture note on Linux
     // (ADR-0047). `run` is on the GTK main thread, and the window exists once
@@ -2838,6 +2890,33 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// GIVEN the bundle configuration THEN the Linux program name (each
+    /// window's Wayland app ID and X11 `WM_CLASS`), the desktop file that
+    /// the bundler installs (`{productName}.desktop`, for the .deb, the .rpm
+    /// and the AppImage) and that file's `StartupWMClass` are one name. The
+    /// bundler fills the template's `{{name}}` with the product name. The
+    /// template paths are bundle-only settings, so they are read from the
+    /// file that the bundler reads.
+    #[test]
+    fn given_the_bundle_config_then_the_program_name_names_the_desktop_file() {
+        let context = context::<tauri::Wry>();
+        let file: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        assert_eq!(program_name(context.config()), Some("Persephone"));
+        assert_eq!(file["productName"], "Persephone");
+        for kind in ["deb", "rpm"] {
+            assert_eq!(
+                file["bundle"]["linux"][kind]["desktopTemplate"], "linux/main.desktop",
+                "{kind}"
+            );
+        }
+        let names: Vec<&str> = include_str!("../linux/main.desktop")
+            .lines()
+            .filter(|line| line.starts_with("StartupWMClass=") || line.starts_with("Name="))
+            .collect();
+        assert_eq!(names, ["StartupWMClass={{name}}", "Name={{name}}"]);
+    }
 
     /// GIVEN a call page that has not said it is ready WHEN an open waits
     /// THEN the wait ends false; WHEN the page says so THEN it is true;

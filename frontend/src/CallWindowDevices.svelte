@@ -1,9 +1,10 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import type { CallDeviceChange, CallVideoEffect } from '../../crates/contracts/generated/contracts';
-  import { callDevices, callVideoEffect, setCallDevices } from './bridge';
+  import type { CallDeviceChange, CallVideoEffect, CallVideoQuality } from '../../crates/contracts/generated/contracts';
+  import { callDevices, callVideoEffect, callVideoQuality, setCallDevices } from './bridge';
   import { DevicePanel } from './callDevicePanel';
   import CallVideoEffects from './CallVideoEffects.svelte';
+  import CallVideoQualitySelect from './CallVideoQuality.svelte';
   import {
     DEVICES_PANEL_LABEL,
     EFFECT_REFUSED_TEXT,
@@ -30,7 +31,8 @@
   // when the newest change of a part fails, that part's control goes back
   // to the saved value. `effectRefused`
   // is the call status's: the worker answers after the save's reply, so
-  // only the status has its refusal.
+  // only the status has its refusal. The send resolution (ADR-0070) goes
+  // through the same queue; a camera that is on restarts in the core.
   let {
     change = null,
     effectRefused = false
@@ -41,8 +43,9 @@
   let camera = $state('');
   let videoEffect = $state<CallVideoEffect>(NO_VIDEO_EFFECT);
   let mirror = $state(true);
+  let videoQuality = $state<CallVideoQuality>('auto');
   const panel = new DevicePanel(
-    { list: callDevices, save: setCallDevices, effect: callVideoEffect },
+    { list: callDevices, save: setCallDevices, effect: callVideoEffect, quality: callVideoQuality },
     (next) => (view = next),
     (menus) => {
       recording = menus.recording;
@@ -52,16 +55,20 @@
       if (listed) {
         videoEffect = listed.effect;
         mirror = listed.mirror;
+        videoQuality = listed.videoQuality;
       }
     },
     (next) => (effectView = next),
     (saved) => {
       if (saved.effect) videoEffect = saved.effect;
       if (typeof saved.mirror === 'boolean') mirror = saved.mirror;
-    }
+    },
+    (next) => (qualityView = next),
+    (saved) => (videoQuality = saved)
   );
   let view = $state(panel.state);
   let effectView = $state(panel.effect);
+  let qualityView = $state(panel.quality);
 
   onMount(() => {
     void panel.load();
@@ -71,6 +78,7 @@
   // Saves the three menus together; they keep their values on failure. The
   // menus stay usable while a save runs, so the focus stays on them.
   const save = () => void panel.save({ recording, playout, camera });
+  const saveQuality = (quality: CallVideoQuality) => void panel.saveQuality(quality);
   const saveEffect = (part: VideoEffectPart) => void panel.saveEffect(videoEffectChange(part, videoEffect, mirror));
 
   const devices = $derived(view.devices);
@@ -103,6 +111,12 @@
         <option value={option.value}>{option.label}</option>
       {/each}
     </select>
+    <CallVideoQualitySelect
+      bind:quality={videoQuality}
+      disabled={!devices || devices.unreadable || view.loading}
+      prefix="call-window"
+      onsave={saveQuality}
+    />
     <CallVideoEffects
       bind:effect={videoEffect}
       bind:mirror
@@ -118,10 +132,13 @@
     {#if effectView.failure}
       <p class="error" role="alert">{effectView.failure}</p>
     {/if}
+    {#if qualityView.failure}
+      <p class="error" role="alert">{qualityView.failure}</p>
+    {/if}
     <button
       type="button"
       class="secondary"
-      disabled={view.loading || view.saving || effectView.saving}
+      disabled={view.loading || view.saving || effectView.saving || qualityView.saving}
       onclick={() => void panel.load()}
     >
       {view.loading ? 'Looking for devices…' : 'Refresh devices'}

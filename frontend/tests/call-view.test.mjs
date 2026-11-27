@@ -139,6 +139,6 @@ test('GIVEN the device panel WHEN a change is read THEN each result has its own 
     assert.equal(deviceSwitchText(false, true, change), DEVICE_SWITCHING_TEXT);
   }
   assert.match(DEVICE_SWITCH_TEXT.not_found, /not connected/);
-  assert.match(DEVICE_SWITCH_TEXT.unsupported, /Linux/);
+  assert.match(DEVICE_SWITCH_TEXT.unsupported, /next call/);
   assert.match(DEVICE_SWITCH_TEXT.failed, /rejoin/);
 });

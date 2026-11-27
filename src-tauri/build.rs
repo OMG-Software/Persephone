@@ -59,6 +59,7 @@ fn main() {
             "call_volume",
             "call_microphone",
             "call_video_effect",
+            "call_video_quality",
             "call_camera",
             "call_screen",
             "call_stats",
@@ -148,6 +149,7 @@ fn main() {
             "call_device_test_status",
             "open_call_window",
             "close_call_window",
+            "set_call_fullscreen",
             "call_window_ready",
         ]));
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {

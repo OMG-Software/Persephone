@@ -2459,6 +2459,10 @@ pub struct CallParticipant {
     /// claim: shown as a hint only.
     #[serde(default)]
     pub muted: bool,
+    /// It said it is deafened: it hears nobody (ADR-0071). Its own claim:
+    /// shown as a hint only.
+    #[serde(default)]
+    pub deafened: bool,
 }
 
 /// The top of a call sound level meter (ADR-0055): 0 dBFS. 0 is -60 dBFS
@@ -2848,11 +2852,33 @@ pub struct CallDevices {
     /// nothing is saved, as before the choice existed. Others always see
     /// the picture as it is.
     pub mirror: bool,
+    /// The saved send resolution of the own camera (ADR-0070). Auto when
+    /// nothing is saved.
+    #[serde(default)]
+    pub video_quality: CallVideoQuality,
     /// Whether this build can run the background effects that need the
     /// person mask: blur and pictures (ADR-0068). The page offers them only
     /// when it is true.
     pub background_effects: bool,
     pub unreadable: bool,
+}
+
+/// The resolution at which the own camera is sent (ADR-0070). `Auto` takes
+/// the highest size that the connection allows. The others are fixed;
+/// the camera's best mode limits them, and a camera is never enlarged.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, TS, PartialEq, Eq)]
+pub enum CallVideoQuality {
+    #[default]
+    #[serde(rename = "auto")]
+    Auto,
+    #[serde(rename = "480p")]
+    P480,
+    #[serde(rename = "720p")]
+    P720,
+    #[serde(rename = "1080p")]
+    P1080,
+    #[serde(rename = "1440p")]
+    P1440,
 }
 
 /// What the own camera shows behind the person (ADR-0068). `blur` blurs
@@ -3026,11 +3052,30 @@ pub struct CallStatus {
     /// choice existed.
     #[serde(default = "mirrored")]
     pub mirror: bool,
+    /// The automatic microphone level of the call (ADR-0062): the saved
+    /// choice at the join, then each change. True when idle, and in a status
+    /// from before the call window set the gain.
+    #[serde(default = "mirrored")]
+    pub auto_level: bool,
+    /// The manual microphone gain of the call in percent, 0 to
+    /// [`CALL_MIC_GAIN_MAX`] in steps of [`CALL_MIC_GAIN_STEP`]
+    /// (ADR-0062): the saved choice at the join, then each change. 100 when
+    /// idle, and in a status from before the call window set the gain.
+    #[serde(default = "mic_gain_default", deserialize_with = "call_mic_gain")]
+    pub mic_gain: u16,
 }
 
-/// The own preview is mirrored unless the user turned it off (ADR-0068).
+/// The own preview is mirrored unless the user turned it off (ADR-0068). The
+/// automatic microphone level is on unless the user turned it off
+/// (ADR-0062).
 const fn mirrored() -> bool {
     true
+}
+
+/// The microphone gain of 100 percent: the sound as the microphone gives it
+/// (ADR-0062).
+const fn mic_gain_default() -> u16 {
+    100
 }
 
 /// Why a device change during a call did not apply (ADR-0059).
@@ -3101,6 +3146,8 @@ impl CallStatus {
             device_change: None,
             effect_refused: false,
             mirror: true,
+            auto_level: true,
+            mic_gain: mic_gain_default(),
         }
     }
 }
@@ -3276,6 +3323,7 @@ pub fn generated_typescript() -> String {
         format!("export {}", CallBackground::decl(&config)),
         format!("export {}", CallColourFilter::decl(&config)),
         format!("export {}", CallVideoEffect::decl(&config)),
+        format!("export {}", CallVideoQuality::decl(&config)),
         format!("export {}", CallDevices::decl(&config)),
         format!("export {}", ContactTrust::decl(&config)),
         format!("export {}", ContactStatus::decl(&config)),
@@ -3533,7 +3581,7 @@ mod personal_contract_tests {
     fn call_contracts_refuse_unknown_fields_and_codes() {
         assert_eq!(
             serde_json::to_string(&CallStatus::idle()).unwrap(),
-            r#"{"phase":"idle","roomId":null,"muted":false,"deafened":false,"volume":100,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[],"ringDeclined":false,"deviceChange":null,"effectRefused":false,"mirror":true}"#
+            r#"{"phase":"idle","roomId":null,"muted":false,"deafened":false,"volume":100,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[],"ringDeclined":false,"deviceChange":null,"effectRefused":false,"mirror":true,"autoLevel":true,"micGain":100}"#
         );
         // A status without the newer fields still reads (ADR-0059).
         let older: CallStatus = serde_json::from_str(
@@ -3541,7 +3589,26 @@ mod personal_contract_tests {
         )
         .unwrap();
         assert!(!older.participants[0].muted);
+        assert!(!older.participants[0].deafened);
         assert_eq!(older.device_change, None);
+        // ... and has the default microphone settings (ADR-0062).
+        assert!(older.auto_level);
+        assert_eq!(older.mic_gain, 100);
+        let status_gain = |gain: &str| {
+            format!(
+                r#"{{"phase":"idle","roomId":null,"muted":false,"deafened":false,"volume":100,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[],"ringDeclined":false,"autoLevel":false,"micGain":{gain}}}"#
+            )
+        };
+        for accepted in ["0", "250", "400"] {
+            let status: CallStatus = serde_json::from_str(&status_gain(accepted)).unwrap();
+            assert!(!status.auto_level, "{accepted}");
+        }
+        for refused in ["401", "7", "-5", "100.5", "null", "\"100\""] {
+            assert!(
+                serde_json::from_str::<CallStatus>(&status_gain(refused)).is_err(),
+                "{refused}"
+            );
+        }
         for wire in [
             r#"{"phase":"idle","roomId":null,"muted":false,"deafened":false,"volume":100,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[],"token":"x"}"#,
             r#"{"phase":"paused","roomId":null,"muted":false,"deafened":false,"volume":100,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[]}"#,

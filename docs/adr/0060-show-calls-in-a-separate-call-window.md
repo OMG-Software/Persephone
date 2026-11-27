@@ -112,6 +112,31 @@ commands.
 * This needs Tauri's `tray-icon` feature. Its crate was already in the
   lockfile at the same version.
 
+### Amendment of 27 November 2026 (proposed, needs owner approval)
+
+* The owner asked for a microphone gain control in the call window, right
+  below the volume control. The capability `call` also lets the call window
+  call `call_microphone`. The command, its validation and its core handler
+  are the ones of ADR-0062; the call window sends the call's own automatic
+  level flag with the new gain, and takes both from `CallStatus`
+  (`autoLevel`, `micGain`), which the core now fills from the running
+  call's microphone settings.
+* The owner also asked for a full screen view of someone's screen share.
+  The call window uses the web view's DOM Fullscreen API on the tile of a
+  screen share. On macOS and Linux the web view turns its window full
+  screen by itself (wry sets element full screen on macOS; WebKitGTK does
+  it by default), and Escape leaves it. On Windows wry 0.57 leaves the
+  web view's full-screen event unhandled, so the element would fill only the
+  window. The capability `call` therefore also lets the call window call
+  `set_call_fullscreen { on }`. It is host-only and never relayed to the
+  core. It addresses the call window by its fixed label, and turns that
+  window full screen on Windows only; elsewhere it does nothing, as a second
+  request would fight the web view. The page sends it on each
+  `fullscreenchange` event with whether an element is in full screen, so
+  Escape, the exit button and the end of the share send `false`. The main
+  window does not have the permission. The page only scales the picture it
+  already has; it never asks for a larger one.
+
 ### Positive Consequences
 
 * Calls with video no longer take space from the timeline.

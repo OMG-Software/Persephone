@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use persephone_call_protocol::{CameraState, MAX_DEVICES, MediaDevice};
 
+use crate::send_tier::SendTier;
 use crate::video::pick_camera;
 
 pub use crate::args::CameraMode;
@@ -48,6 +49,8 @@ pub(crate) mod linux_portal;
 mod v4l2;
 #[cfg(any(target_os = "linux", test))]
 mod yuyv;
+#[cfg(any(target_os = "linux", test))]
+pub use yuyv::yuyv_to_i420;
 
 /// What one camera-on brought for its open: on the Linux portal path, the
 /// PipeWire remote the core sent with it. Empty everywhere else. Dropping
@@ -124,6 +127,12 @@ pub enum Format {
     /// `ceil(stride / 2) * ceil(height / 2)` bytes each.
     #[allow(dead_code)] // for backends that deliver I420
     I420,
+    /// Packed `Y0 U Y1 V`, `stride` bytes per row, an even width (Linux).
+    /// The worker converts it only when it takes the picture
+    /// (`fitted_i420`, after the rate limit), so a picture that the limit
+    /// drops is never converted.
+    #[cfg(any(target_os = "linux", test))]
+    Yuyv,
 }
 
 /// One camera picture. The bytes live until the callback returns.
@@ -133,7 +142,7 @@ pub struct CapturedFrame<'a> {
     pub format: Format,
     pub width: u32,
     pub height: u32,
-    /// Bytes per row of the Y plane.
+    /// Bytes per row of the Y plane (of the packed picture for YUYV).
     pub stride: u32,
     pub data: &'a [u8],
 }
@@ -146,17 +155,25 @@ impl<'a> CapturedFrame<'a> {
         if !capture_size_ok(width, height) || stride < width {
             return None;
         }
-        let (stride, height) = (stride as usize, height as usize);
-        let y = stride.checked_mul(height)?;
-        let chroma_rows = height.div_ceil(2);
+        let (stride, rows) = (stride as usize, height as usize);
+        let chroma_rows = rows.div_ceil(2);
         let chroma = match format {
             Format::Nv12 => stride.checked_mul(chroma_rows)?,
             Format::I420 => stride
                 .div_ceil(2)
                 .checked_mul(chroma_rows)?
                 .checked_mul(2)?,
+            // Two bytes a pixel; the last row needs no padding after it.
+            #[cfg(any(target_os = "linux", test))]
+            Format::Yuyv => {
+                let row = (width as usize).checked_mul(2)?;
+                if !width.is_multiple_of(2) || stride < row {
+                    return None;
+                }
+                return (rows - 1).checked_mul(stride)?.checked_add(row);
+            }
         };
-        y.checked_add(chroma)
+        stride.checked_mul(rows)?.checked_add(chroma)
     }
 
     /// A frame over `data`, or `None` when `data` is shorter than a whole
@@ -312,12 +329,15 @@ pub fn list() -> Vec<MediaDevice> {
 /// capturing. It waits until the camera is open. `on_frame` runs on the
 /// capture thread for every picture; `on_end` runs there when the capture ends
 /// by itself (not after `stop`). `grant` is what the camera-on brought; the
-/// portal path connects only over its remote. `Err(NotFound)`: the chosen ID
+/// portal path connects only over its remote. `target` is the largest tier
+/// the camera will send (ADR-0070): the backend picks the capture mode for
+/// it. `Err(NotFound)`: the chosen ID
 /// is not listed, and no other camera is used. `Err(Unavailable)`: any other
 /// failure.
 pub fn open<F, E>(
     id: Option<&str>,
     grant: Grant,
+    target: SendTier,
     on_frame: F,
     on_end: E,
 ) -> Result<Capture, CameraState>
@@ -331,16 +351,17 @@ where
         if id == Some("") {
             return Err(CameraState::NotFound);
         }
-        return start(id.unwrap_or(""), grant, on_frame, on_end);
+        return start(id.unwrap_or(""), grant, target, on_frame, on_end);
     }
     let devices = list();
     let chosen = pick_camera(id, devices.iter().map(|device| device.id.as_str()))?;
-    start(&chosen, grant, on_frame, on_end)
+    start(&chosen, grant, target, on_frame, on_end)
 }
 
 fn start<F, E>(
     device_id: &str,
     grant: Grant,
+    target: SendTier,
     on_frame: F,
     on_end: E,
 ) -> Result<Capture, CameraState>
@@ -360,11 +381,19 @@ where
         .spawn(move || {
             let _done = signal;
             #[cfg(target_os = "linux")]
-            backend::capture(&id, grant.remote, &thread_stop, open_tx, on_frame, on_end);
+            backend::capture(
+                &id,
+                grant.remote,
+                target,
+                &thread_stop,
+                open_tx,
+                on_frame,
+                on_end,
+            );
             #[cfg(not(target_os = "linux"))]
             {
                 let Grant {} = grant;
-                backend::capture(&id, &thread_stop, open_tx, on_frame, on_end);
+                backend::capture(&id, target, &thread_stop, open_tx, on_frame, on_end);
             }
         })
         .map_err(|_| CameraState::Unavailable)?;
@@ -517,6 +546,20 @@ mod tests {
             CapturedFrame::expected_len(Format::I420, 9000, 9000, 9000),
             None
         );
+        // YUYV: every row but the last at its stride, then one row of two
+        // bytes a pixel; an odd width or a stride under a row gives none.
+        assert_eq!(
+            CapturedFrame::expected_len(Format::Yuyv, 640, 360, 1300),
+            Some(359 * 1300 + 1280)
+        );
+        assert_eq!(
+            CapturedFrame::expected_len(Format::Yuyv, 641, 360, 1300),
+            None
+        );
+        assert_eq!(
+            CapturedFrame::expected_len(Format::Yuyv, 640, 360, 1279),
+            None
+        );
     }
 
     /// GIVEN a buffer WHEN a frame is made over it THEN a short buffer is
@@ -535,7 +578,13 @@ mod tests {
     /// no thread is started.
     #[test]
     fn given_unknown_camera_when_opened_then_it_fails_without_fallback() {
-        let result = open(Some("no-such-camera"), Grant::default(), |_| {}, || {});
+        let result = open(
+            Some("no-such-camera"),
+            Grant::default(),
+            SendTier::P360,
+            |_| {},
+            || {},
+        );
         assert_eq!(result.err(), Some(CameraState::NotFound));
     }
 
@@ -560,7 +609,7 @@ mod tests {
     fn given_no_camera_when_opened_without_choice_then_unavailable() {
         if list().is_empty() {
             assert_eq!(
-                open(None, Grant::default(), |_| {}, || {}).err(),
+                open(None, Grant::default(), SendTier::P360, |_| {}, || {}).err(),
                 Some(CameraState::Unavailable)
             );
         }

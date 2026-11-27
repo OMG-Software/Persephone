@@ -22,7 +22,7 @@ pub use stats::{
     VideoReceiveStats, VideoSendStats,
 };
 
-pub const VERSION: u8 = 15;
+pub const VERSION: u8 = 16;
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 /// Longest diagnostic record target (ADR-0058).
 pub const MAX_DIAGNOSTIC_TARGET_BYTES: usize = 64;
@@ -326,6 +326,40 @@ impl VideoEffect {
         })
     }
 }
+/// The most the own camera sends (ADR-0070, proposed). `Auto` lets the
+/// worker choose from the measured connection. The worker owns the table of
+/// picture sizes: no size crosses the wire.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
+#[repr(u8)]
+pub enum VideoQuality {
+    #[default]
+    Auto = 0,
+    P480 = 1,
+    P720 = 2,
+    P1080 = 3,
+    P1440 = 4,
+}
+
+impl VideoQuality {
+    /// Every quality, in wire order.
+    pub const ALL: [Self; 5] = [Self::Auto, Self::P480, Self::P720, Self::P1080, Self::P1440];
+}
+
+impl TryFrom<u8> for VideoQuality {
+    type Error = DecodeError;
+
+    fn try_from(value: u8) -> Result<Self, DecodeError> {
+        Ok(match value {
+            0 => Self::Auto,
+            1 => Self::P480,
+            2 => Self::P720,
+            3 => Self::P1080,
+            4 => Self::P1440,
+            _ => return Err(DecodeError::InvalidValue),
+        })
+    }
+}
+
 /// The highest received sound level (ADR-0055): 0 dBFS. 0 is -60 dBFS or
 /// quieter, and each step is 0.6 dB.
 pub const MAX_SOUND_LEVEL: u8 = 100;
@@ -475,6 +509,8 @@ pub enum ToWorker {
         mic_gain: u16,
         /// The own camera's video effect (ADR-0068).
         video_effect: VideoEffect,
+        /// The most the own camera sends (ADR-0070).
+        video_quality: VideoQuality,
     },
     /// Only as the first message: report the devices, then exit.
     ListDevices,
@@ -595,6 +631,12 @@ pub enum ToWorker {
     SetVideoEffect {
         effect: VideoEffect,
     },
+    /// Set the most the own camera sends, from the next camera start
+    /// (ADR-0070). A camera that is on keeps its size until it starts again
+    /// (the core restarts it). No answer.
+    SetVideoQuality {
+        quality: VideoQuality,
+    },
 }
 
 /// The device that [`ToWorker::TestDevice`] tests. A closed set.
@@ -637,6 +679,7 @@ impl std::fmt::Debug for ToWorker {
                 auto_level,
                 mic_gain,
                 video_effect,
+                video_quality,
             } => f
                 .debug_struct("Join")
                 .field("sfu_url", sfu_url)
@@ -653,6 +696,7 @@ impl std::fmt::Debug for ToWorker {
                 .field("auto_level", auto_level)
                 .field("mic_gain", mic_gain)
                 .field("video_effect", video_effect)
+                .field("video_quality", video_quality)
                 .finish(),
             Self::ListDevices => f.write_str("ListDevices"),
             Self::SetKey { identity, key } => f
@@ -731,6 +775,10 @@ impl std::fmt::Debug for ToWorker {
             Self::SetVideoEffect { effect } => f
                 .debug_struct("SetVideoEffect")
                 .field("effect", effect)
+                .finish(),
+            Self::SetVideoQuality { quality } => f
+                .debug_struct("SetVideoQuality")
+                .field("quality", quality)
                 .finish(),
         }
     }
@@ -1133,6 +1181,7 @@ const TO_SET_MICROPHONE: u8 = 16;
 const TO_SET_STATS: u8 = 17;
 const TO_SCREEN_FRAMES: u8 = 18;
 const TO_SET_VIDEO_EFFECT: u8 = 19;
+const TO_SET_VIDEO_QUALITY: u8 = 20;
 
 // Tags of worker to core messages.
 const FROM_READY: u8 = 1;
@@ -1200,6 +1249,11 @@ impl<'a> Reader<'a> {
     fn video_effect(&mut self) -> Result<VideoEffect, DecodeError> {
         let bytes = self.take(3)?;
         VideoEffect::from_bytes([bytes[0], bytes[1], bytes[2]])
+    }
+
+    /// A video quality: see [`VideoQuality`].
+    fn video_quality(&mut self) -> Result<VideoQuality, DecodeError> {
+        VideoQuality::try_from(self.u8()?)
     }
 
     /// A microphone gain: see [`valid_mic_gain`].
@@ -1447,6 +1501,7 @@ impl ToWorker {
                 auto_level,
                 mic_gain,
                 video_effect,
+                video_quality,
             } => {
                 out.push(TO_JOIN);
                 put_str(&mut out, sfu_url);
@@ -1468,6 +1523,7 @@ impl ToWorker {
                 out.push(u8::from(*auto_level));
                 out.extend_from_slice(&mic_gain.to_be_bytes());
                 out.extend_from_slice(&video_effect.to_bytes());
+                out.push(*video_quality as u8);
             }
             Self::ListDevices => out.push(TO_LIST_DEVICES),
             Self::SetKey { identity, key } => {
@@ -1587,6 +1643,10 @@ impl ToWorker {
                 out.push(TO_SET_VIDEO_EFFECT);
                 out.extend_from_slice(&effect.to_bytes());
             }
+            Self::SetVideoQuality { quality } => {
+                out.push(TO_SET_VIDEO_QUALITY);
+                out.push(*quality as u8);
+            }
         }
         out
     }
@@ -1631,6 +1691,7 @@ impl ToWorker {
                     auto_level: reader.bool()?,
                     mic_gain: reader.mic_gain()?,
                     video_effect: reader.video_effect()?,
+                    video_quality: reader.video_quality()?,
                 }
             }
             TO_LIST_DEVICES => Self::ListDevices,
@@ -1742,6 +1803,9 @@ impl ToWorker {
             TO_SET_STATS => Self::SetStats { on: reader.bool()? },
             TO_SET_VIDEO_EFFECT => Self::SetVideoEffect {
                 effect: reader.video_effect()?,
+            },
+            TO_SET_VIDEO_QUALITY => Self::SetVideoQuality {
+                quality: reader.video_quality()?,
             },
             _ => return Err(DecodeError::UnknownTag),
         };
@@ -2352,6 +2416,7 @@ mod tests {
                 background: Background::Blur(BlurStrength::new(40).expect("valid")),
                 filter: ColourFilter::Warm,
             },
+            video_quality: VideoQuality::P720,
         }
     }
 
@@ -2378,6 +2443,7 @@ mod tests {
             auto_level: true,
             mic_gain: DEFAULT_MIC_GAIN_PERCENT,
             video_effect: VideoEffect::NONE,
+            video_quality: VideoQuality::Auto,
         }
         .encode()
         .to_vec()
@@ -2920,7 +2986,7 @@ mod tests {
             Err(DecodeError::UnknownTag)
         );
         assert_eq!(
-            ToWorker::decode(&[VERSION, 20]),
+            ToWorker::decode(&[VERSION, 21]),
             Err(DecodeError::UnknownTag)
         );
         assert_eq!(
@@ -3098,6 +3164,7 @@ mod tests {
             auto_level: true,
             mic_gain: DEFAULT_MIC_GAIN_PERCENT,
             video_effect: VideoEffect::NONE,
+            video_quality: VideoQuality::Auto,
         }
     }
 
@@ -3549,7 +3616,7 @@ mod tests {
     /// 640x360 at 15 per second.
     #[test]
     fn given_tiles_when_limits_asked_then_screen_differs_from_camera() {
-        assert_eq!((VIDEO_TILES, SCREEN_TILE, VERSION), (6, 5, 15));
+        assert_eq!((VIDEO_TILES, SCREEN_TILE, VERSION), (6, 5, 16));
         assert_eq!(MAX_SCREEN_BYTES, 3_686_400);
         assert_eq!(MAX_SCREEN_PIXELS, 921_600);
         for tile in 0..SCREEN_TILE {
@@ -3891,6 +3958,7 @@ mod tests {
                 auto_level: true,
                 mic_gain: DEFAULT_MIC_GAIN_PERCENT,
                 video_effect: VideoEffect::NONE,
+                video_quality: VideoQuality::Auto,
             }
             .encode()
         };
@@ -4054,13 +4122,13 @@ mod tests {
         );
     }
 
-    /// GIVEN a message of the previous wire versions (6 to 14)
+    /// GIVEN a message of the previous wire versions (6 to 15)
     /// WHEN it is decoded in either direction
     /// THEN the version is refused.
     #[test]
     fn given_older_wire_versions_when_decoded_then_they_are_refused() {
-        assert_eq!(VERSION, 15);
-        for old in [6, 7, 8, 9, 10, 11, 12, 13, 14] {
+        assert_eq!(VERSION, 16);
+        for old in [6, 7, 8, 9, 10, 11, 12, 13, 14, 15] {
             assert_eq!(
                 ToWorker::decode(&[old, TO_LEAVE]),
                 Err(DecodeError::UnknownVersion)
@@ -4118,9 +4186,10 @@ mod tests {
             panic!("join decodes");
         };
         assert_eq!(volume, 65);
-        // The volume, the automatic level flag, the two gain bytes and the
-        // three effect bytes end it.
-        let at = body.len() - 7;
+        // The volume, the automatic level flag, the two gain bytes, the three
+        // effect bytes and the quality byte end it.
+        let at = body.len() - 8;
+        assert_eq!(body[at], volume, "the offset names the volume byte");
         body[at] = MAX_VOLUME_PERCENT + 1;
         assert_eq!(ToWorker::decode(&body), Err(DecodeError::InvalidValue));
     }
@@ -4168,9 +4237,9 @@ mod tests {
             Err(DecodeError::TrailingBytes)
         );
         // A Join with a gain over the limit is refused as a whole. The gain
-        // comes before the three effect bytes.
+        // comes before the three effect bytes and the quality byte.
         let mut body = join().encode().to_vec();
-        let end = body.len() - 3;
+        let end = body.len() - 4;
         body[end - 2..end].copy_from_slice(&405_u16.to_be_bytes());
         assert_eq!(ToWorker::decode(&body), invalid);
         body[end - 2..end].copy_from_slice(&MAX_MIC_GAIN_PERCENT.to_be_bytes());
@@ -4183,6 +4252,56 @@ mod tests {
         ));
         assert!(valid_mic_gain(0) && valid_mic_gain(400));
         assert!(!valid_mic_gain(2) && !valid_mic_gain(405));
+    }
+
+    /// GIVEN every video quality
+    /// WHEN it is sent in a SetVideoQuality and in a Join
+    /// THEN it comes back unchanged, and no other byte is a quality.
+    #[test]
+    fn given_every_video_quality_when_round_tripped_then_it_is_unchanged() {
+        for quality in VideoQuality::ALL {
+            let set = ToWorker::SetVideoQuality { quality };
+            assert_eq!(ToWorker::decode(&set.encode()), Ok(set), "{quality:?}");
+            assert_eq!(VideoQuality::try_from(quality as u8), Ok(quality));
+            let mut body = join().encode().to_vec();
+            *body.last_mut().unwrap() = quality as u8;
+            assert!(
+                matches!(
+                    ToWorker::decode(&body),
+                    Ok(ToWorker::Join { video_quality, .. }) if video_quality == quality
+                ),
+                "{quality:?}"
+            );
+        }
+        assert_eq!(VideoQuality::default(), VideoQuality::Auto);
+    }
+
+    /// GIVEN a quality byte outside the closed set
+    /// WHEN it is decoded in a SetVideoQuality or a Join
+    /// THEN it is refused, and a Join without the byte is truncated.
+    #[test]
+    fn given_bad_video_quality_bytes_when_decoded_then_they_are_refused() {
+        for byte in [5, 255] {
+            assert_eq!(
+                ToWorker::decode(&[VERSION, TO_SET_VIDEO_QUALITY, byte]),
+                Err(DecodeError::InvalidValue),
+                "set {byte}"
+            );
+            let mut body = join().encode().to_vec();
+            *body.last_mut().unwrap() = byte;
+            assert_eq!(
+                ToWorker::decode(&body),
+                Err(DecodeError::InvalidValue),
+                "join {byte}"
+            );
+        }
+        assert_eq!(
+            ToWorker::decode(&[VERSION, TO_SET_VIDEO_QUALITY]),
+            Err(DecodeError::Truncated)
+        );
+        let mut body = join().encode().to_vec();
+        body.pop();
+        assert_eq!(ToWorker::decode(&body), Err(DecodeError::Truncated));
     }
 
     /// Every video effect: each background with each filter.
@@ -4234,8 +4353,9 @@ mod tests {
             };
             assert_eq!(FromWorker::decode(&answer.encode()), Ok(answer));
             let mut body = join().encode().to_vec();
-            let end = body.len();
-            body[end - 3..].copy_from_slice(&effect.to_bytes());
+            // The effect is the three bytes before the quality byte.
+            let end = body.len() - 1;
+            body[end - 3..end].copy_from_slice(&effect.to_bytes());
             assert!(matches!(
                 ToWorker::decode(&body),
                 Ok(ToWorker::Join { video_effect, .. }) if video_effect == effect
@@ -4284,8 +4404,23 @@ mod tests {
             let answer = [VERSION, FROM_VIDEO_EFFECT, bytes[0], bytes[1], bytes[2], 0];
             assert_eq!(FromWorker::decode(&answer).err(), invalid, "{bytes:?}");
             let mut body = join().encode().to_vec();
-            let end = body.len();
-            body[end - 3..].copy_from_slice(&bytes);
+            // The three effect bytes come before the quality byte.
+            let end = body.len() - 1;
+            let Ok(ToWorker::Join {
+                video_effect,
+                video_quality,
+                ..
+            }) = ToWorker::decode(&body)
+            else {
+                panic!("join decodes");
+            };
+            assert_eq!(
+                body[end - 3..end],
+                video_effect.to_bytes(),
+                "the offset names the effect bytes"
+            );
+            assert_eq!(body[end], video_quality as u8);
+            body[end - 3..end].copy_from_slice(&bytes);
             assert_eq!(ToWorker::decode(&body).err(), invalid, "{bytes:?}");
         }
         // A bad refused flag, and a short or long message.

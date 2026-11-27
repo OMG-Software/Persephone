@@ -183,6 +183,17 @@ pub async fn send_key(
     recipients: &[(OwnedUserId, OwnedDeviceId)],
     content: Value,
 ) -> Result<SendReport, SendError> {
+    send_event(room, recipients, EVENT_TYPE, content).await
+}
+
+/// As [`send_key`], for another call to-device event type with the same
+/// rules (ADR-0071).
+pub async fn send_event(
+    room: &matrix_sdk::Room,
+    recipients: &[(OwnedUserId, OwnedDeviceId)],
+    event_type: &str,
+    content: Value,
+) -> Result<SendReport, SendError> {
     if recipients.len() > MAX_CALL_MEMBERS {
         return Err(SendError::TooManyRecipients);
     }
@@ -213,7 +224,7 @@ pub async fn send_key(
         .encryption()
         .encrypt_and_send_raw_to_device(
             devices.iter().collect(),
-            EVENT_TYPE,
+            event_type,
             raw,
             // The same strategy as room keys (account.rs): the SDK checks the
             // owner's signature again and withholds from unsigned devices.

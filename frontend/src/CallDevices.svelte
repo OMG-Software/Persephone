@@ -4,7 +4,8 @@
     CallDeviceTestKind,
     CallDeviceTestStatus,
     CallDevices,
-    CallVideoEffect
+    CallVideoEffect,
+    CallVideoQuality
   } from '../../crates/contracts/generated/contracts';
   import {
     callDevices,
@@ -13,11 +14,13 @@
     callDeviceTestStop,
     callMicrophone,
     callVideoEffect,
+    callVideoQuality,
     callVolume,
     setCallDevices
   } from './bridge';
   import CallVideo from './CallVideo.svelte';
   import CallVideoEffects from './CallVideoEffects.svelte';
+  import CallVideoQualitySelect from './CallVideoQuality.svelte';
   import {
     DEVICE_FAILURE_TEXT,
     DEVICE_TEST_LABEL,
@@ -40,6 +43,8 @@
     EFFECT_REFUSED_TEXT,
     EFFECT_SAVE_TEXT,
     NO_VIDEO_EFFECT,
+    VIDEO_QUALITY_SAVE_TEXT,
+    withVideoQuality,
     micGainText,
     micGainValue,
     deviceChoice,
@@ -126,6 +131,9 @@
   let videoEffect = $state<CallVideoEffect>(NO_VIDEO_EFFECT);
   let mirror = $state(true);
   let effectSaving = $state(false);
+  // The own camera's send resolution (ADR-0070).
+  let videoQuality = $state<CallVideoQuality>('auto');
+  let qualitySaving = $state(false);
   // The worker answers after the save's reply, so a refusal comes from the
   // camera test's status or the call's, as each worker answered.
   const effectRefused = $derived(test.effectRefused || callEffectRefused);
@@ -133,7 +141,7 @@
   let saving = $state(false);
   // Any request that reads or writes the device record. A refresh or device
   // save during a volume save could bring back the old volume, so each waits.
-  const busy = $derived(loading || saving || volumeSaving || micSaving || effectSaving);
+  const busy = $derived(loading || saving || volumeSaving || micSaving || effectSaving || qualitySaving);
   let failure = $state<string | null>(null);
   let generation = 0;
 
@@ -156,6 +164,7 @@
       micGain = next.micGain;
       videoEffect = next.effect;
       mirror = next.mirror;
+      videoQuality = next.videoQuality;
     } catch (reason) {
       if (mine === generation) failure = failures[String(reason)] ?? 'The call devices could not be listed.';
     } finally {
@@ -245,6 +254,24 @@
     }
   }
 
+  // Saves the send resolution. It applies to the next call, and a camera that
+  // is on in a call that runs restarts at once (ADR-0070). On failure the
+  // menu goes back to the saved value.
+  async function saveQuality(wanted: CallVideoQuality) {
+    if (busy || !devices) return;
+    qualitySaving = true;
+    failure = null;
+    try {
+      await callVideoQuality(wanted);
+      if (devices) devices = withVideoQuality(devices, wanted);
+    } catch (reason) {
+      failure = failures[String(reason)] ?? VIDEO_QUALITY_SAVE_TEXT;
+      if (devices) videoQuality = devices.videoQuality;
+    } finally {
+      qualitySaving = false;
+    }
+  }
+
   let recordingOptions = $derived(deviceOptions(devices?.recording ?? [], deviceChoice(recording)));
   let playoutOptions = $derived(deviceOptions(devices?.playout ?? [], deviceChoice(playout)));
   let cameraOptions = $derived(deviceOptions(devices?.cameras ?? [], deviceChoice(camera)));
@@ -290,6 +317,12 @@
         <option value={option.value}>{option.label}</option>
       {/each}
     </select>
+    <CallVideoQualitySelect
+      bind:quality={videoQuality}
+      disabled={!devices || devices.unreadable || busy}
+      prefix="call"
+      onsave={saveQuality}
+    />
     <label for="call-volume">{VOLUME_LABEL}: <output for="call-volume">{volumeText(volume)}</output></label>
     <input
       id="call-volume"

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-call-fullscreen"
+description = "Enables the set_call_fullscreen command without any pre-configured scope."
+commands.allow = ["set_call_fullscreen"]
+
+[[permission]]
+identifier = "deny-set-call-fullscreen"
+description = "Denies the set_call_fullscreen command without any pre-configured scope."
+commands.deny = ["set_call_fullscreen"]

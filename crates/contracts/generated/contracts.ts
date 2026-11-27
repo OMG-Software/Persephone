@@ -113,7 +113,12 @@ sharing: boolean,
  * Its microphone is muted, or it sends no sound (ADR-0059). Its own
  * claim: shown as a hint only.
  */
-muted: boolean, };
+muted: boolean, 
+/**
+ * It said it is deafened: it hears nobody (ADR-0071). Its own claim:
+ * shown as a hint only.
+ */
+deafened: boolean, };
 
 export type CallParticipantLevel = { userId: string, deviceId: string, level: number, };
 
@@ -285,7 +290,20 @@ effectRefused: boolean,
  * call device record. True when idle, and in a status from before the
  * choice existed.
  */
-mirror: boolean, };
+mirror: boolean, 
+/**
+ * The automatic microphone level of the call (ADR-0062): the saved
+ * choice at the join, then each change. True when idle, and in a status
+ * from before the call window set the gain.
+ */
+autoLevel: boolean, 
+/**
+ * The manual microphone gain of the call in percent, 0 to
+ * [`CALL_MIC_GAIN_MAX`] in steps of [`CALL_MIC_GAIN_STEP`]
+ * (ADR-0062): the saved choice at the join, then each change. 100 when
+ * idle, and in a status from before the call window set the gain.
+ */
+micGain: number, };
 
 export type CallIntent = "audio" | "video";
 
@@ -306,6 +324,8 @@ export type CallColourFilter = "none" | "greyscale" | "warm" | "cool" | "brighte
 
 export type CallVideoEffect = { background: CallBackground, blur: number, filter: CallColourFilter, };
 
+export type CallVideoQuality = "auto" | "480p" | "720p" | "1080p" | "1440p";
+
 export type CallDevices = { supported: boolean, recording: Array<CallDevice>, playout: Array<CallDevice>, cameras: Array<CallDevice>, selectedRecording: string | null, selectedPlayout: string | null, selectedCamera: string | null, volume: number, autoLevel: boolean, micGain: number, 
 /**
  * The saved video effect of the own camera (ADR-0068). No effect when
@@ -318,6 +338,11 @@ effect: CallVideoEffect,
  * the picture as it is.
  */
 mirror: boolean, 
+/**
+ * The saved send resolution of the own camera (ADR-0070). Auto when
+ * nothing is saved.
+ */
+videoQuality: CallVideoQuality, 
 /**
  * Whether this build can run the background effects that need the
  * person mask: blur and pictures (ADR-0068). The page offers them only

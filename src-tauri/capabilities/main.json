@@ -52,6 +52,7 @@
     "allow-call-volume",
     "allow-call-microphone",
     "allow-call-video-effect",
+    "allow-call-video-quality",
     "allow-call-camera",
     "allow-call-screen",
     "allow-call-video-frame",

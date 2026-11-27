@@ -37,6 +37,8 @@
     | 'video'
     | 'video-off'
     | 'screen'
+    | 'maximize'
+    | 'minimize'
     | 'activity';
 </script>
 
@@ -109,6 +111,10 @@
   {:else if name === 'screen'}
     <rect x="3" y="4" width="18" height="12" rx="2" />
     <path d="M8 20h8M12 16v4" />
+  {:else if name === 'maximize'}
+    <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" />
+  {:else if name === 'minimize'}
+    <path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5" />
   {:else if name === 'video-off'}
     <path d="M10 6h3a2 2 0 0 1 2 2v3l6-4v10M15 15v1a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2M3 3l18 18" />
   {:else if name === 'chevron-left'}

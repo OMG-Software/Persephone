@@ -172,8 +172,8 @@ The worker applies two stages itself.
   microphones and speakers still are.
 * V4L2 path: the worker opens `/dev/video*` itself. It lists only nodes with
   the video-capture capability; it does not stream to list them.
-* Formats: NV12, I420 and YUYV only, at most 1280x720. The worker converts
-  YUYV to I420. It decodes no MJPEG. PipeWire buffers must be shared memory
+* Formats: NV12, I420 and YUYV only, at most 2560x1440 (ADR-0070). The
+  worker converts YUYV to I420. It decodes no MJPEG. PipeWire buffers must be shared memory
   (`MemFd` or `MemPtr`); DMA buffers are refused.
 * Camera IDs: each ID starts with its path, `pipewire:` or `v4l2:`. After
   `pipewire:` comes the PipeWire `node.name`. After `v4l2:` come the
@@ -239,6 +239,111 @@ The worker applies two stages itself.
   [the live call test plan](../planning/live-call-test.md#linux-and-macos-containment-checks-adr-0049-not-yet-run).
   Those checks have not been run.
 
+### Linux: microphone and speaker changes during a call (amended 27 November 2026)
+
+Amendment status: proposed, needs owner approval. On 27 November 2026 the
+owner accepted one part of it: the best-effort process ID match below, as a
+known security limitation (see Containment). The rest still needs approval.
+
+Problem: the worker's sound target is fixed at launch (`PULSE_SOURCE` and
+`PULSE_SINK`), libwebrtc gives only `index:` IDs on Linux, and stage 2 allows
+no new socket. A change of microphone or speaker during a call therefore
+answered `Unsupported`, and every change made in the call window is a change
+during a call. The call kept the system default or the join's choice.
+
+Decision:
+
+* The worker opens one PulseAudio connection before stage 2, in the `Join`
+  path next to the device check, and keeps it for the call (`pulse::Session`).
+  It uses the same `libpulse.so.0` handle and a blocking `pa_mainloop`.
+  Dropping the call closes it. If it cannot open, the call still starts and a
+  sound change answers `Unsupported` as before.
+* A `SetDevices` sound change runs on that one connection, on a blocking
+  thread, one operation at a time, each with a 3 s deadline. It reads the sink
+  and source names, the stream lists, and (once, at join) the server's default
+  names; then it moves streams with `pa_context_move_source_output_by_name`
+  and `pa_context_move_sink_input_by_name`. "System default" during the call
+  means the default when the call started (ADR-0059). The worker's event
+  loop never waits for it: each sound job (a change, or a try of a waiting
+  target) runs on a task of its own, one at a time, and sends its result to
+  the loop, so `Leave` and keys are served while the sound server is slow. A
+  change asked while a job runs waits (the newest only) and is answered after
+  that job. A job is over only when its blocking thread has ended, also when
+  its answer went out at the deadline, so two never run at once.
+* It moves only streams that name this process: those whose
+  `application.process.id` equals the worker's process ID. That match is
+  best effort, not proof of ownership: it is a security limitation that
+  the owner accepted (see Containment and Negative Consequences).
+  No stream that names
+  another process is read for any other purpose or moved. Both choices are
+  checked before either stream moves. A non-`pulse:` ID or a name the server
+  lacks is `DeviceNotFound`. A "System default" whose call-start device the
+  server lacks now is `Unsupported`; a start default may be a monitor. A kind that must move but has no own stream
+  yet (for example no playback stream while nobody else is in the call) is
+  not a failure: the target waits, the change counts as done, and the move
+  runs when a stream exists (after remote audio is subscribed or the own
+  microphone is published or unmuted, tried at 250 ms, 1 s and 3 s, and no
+  timer runs when nothing waits). One change takes at most 5 s. The forward
+  moves must end 1.5 s before that (`ROLLBACK_RESERVE`), so the undo has time;
+  an operation that has no time left is not sent. A stream is where the
+  server shows it: the worker reads each own stream's sink or source index
+  and resolves it to a device name, and plans from that, not from what it last
+  asked for, because the server moves streams by itself when a device goes
+  away. A move whose reply is late is not a refusal: the server may have done
+  it, so the stream is undone too. A move that fails is undone, and the routes
+  are read again: `DeviceKept` only when every own stream is on its old
+  device, else `AudioDevice`. The new waiting targets are stored only when
+  every immediate move worked. A waiting target whose move is refused at the
+  last try is dropped and reported with an unasked `DevicesSet`
+  (`AudioDevice` also when a try moved the other kind's stream); a stream
+  that is not open yet only waits. A try that runs late, after a newer
+  change was accepted, does nothing. A choice equal to the last accepted
+  one (a camera-only change) is no change; after a lost route it goes to the
+  session again. If the defaults query failed at the join, every other
+  change is `Unsupported`.
+* libwebrtc's own device selection is not touched.
+
+Containment: this adds no capability after stage 2. It creates no socket and
+opens no file after stage 2; every later request is a read and a write on the
+socket that was open at stage 2. The seccomp deny list and the Landlock rules
+are unchanged. The connection can ask the sound server to move the worker's
+streams, and also to move other programs' streams, because the sound server
+trusts any client of the user. The worker never sends such a request: the
+code selects own streams by process ID. A compromised worker could move other
+streams already, through the socket that the call needs; this change does not
+widen that. The process ID is the stream's `application.process.id`, which the
+client that opened the stream sets itself; PulseAudio does not check it.
+Another client of the same user can name the worker's process ID, and its
+stream then moves with the worker's, to the device the user chose. That gives
+it nothing it lacks, because it can already move any stream itself. PulseAudio
+gives no server-checked owner for a stream, and a PipeWire-only check was not
+reviewed, so this is a known security limitation: the worker cannot tell
+its own streams from those of a client that copies its process ID. The
+owner accepted that best-effort match on 27 November 2026, because failing
+closed without a checked owner would remove device changes during a call on
+Linux. A stronger check is open: PipeWire's server sets
+`pipewire.sec.pid` on a client from its socket's credentials, and matching a
+stream's client by it was not reviewed or measured. A listing keeps only streams that name the
+worker's process ID, before its limit, so other programs' streams never push
+the worker's own out of it.
+
+Verification: unit tests cover the stream and name choice, the routes check,
+the commit rule and the rollback with a fake sound server. The session test
+`pulse_session_test.rs` is ignored by default and needs a disposable sound
+server with two speakers and two microphones. It is a synthetic test, not a
+call: `given_a_call_session` starts the test binary as a child process that
+opens its own record and playback streams and calls `pulse::Session`
+directly, under both containment stages, and checks the moves of those
+existing streams from outside. It runs no call loop and connects to no SFU.
+The second test, `given_a_speaker_that_waits_for_its_stream`, applies stage 1
+only. Both passed once on Linux Mint 22.3 with a disposable PipeWire 1.0.5 and
+`pipewire-pulse` (27 November 2026). Still open: a change during a running
+call, a PulseAudio daemon, sound hardware and the native containment gate.
+The earlier contained sound tests show that the worker checks and opens
+devices at launch (`PULSE_SOURCE`, `PULSE_SINK`). See
+[the device test evidence](../evidence/device-tests-linux-macos.md) for both.
+This amendment is not accepted until the owner approves it.
+
 ### Positive Consequences
 
 * One call path on all three systems, with no Matrix secret in the worker.
@@ -253,6 +358,15 @@ The worker applies two stages itself.
   initialiser from connecting elsewhere.
 * Linux: the deny list is weaker than an allow list; a system call that is
   missing from it is allowed.
+* **Linux (proposed sound amendment): the owner of a stream is not
+  checked.** The worker picks its own streams by `application.process.id`,
+  which the client sets. A stream of another client of the same user that
+  copies the worker's process ID moves to the device that the user chose
+  during a call. This is a security limitation, not an ownership check. The
+  owner accepted it on 27 November 2026 instead of requiring a
+  server-checked owner (for example PipeWire's `pipewire.sec.pid`, not
+  reviewed) and failing closed without one, which would remove device
+  changes during a call on Linux.
 * Linux: calls need Linux 6.2 or newer with Landlock turned on.
 * Linux V4L2 path: the worker can open any camera node, and there is no
   desktop permission dialog.

@@ -121,6 +121,7 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
     [() => bridge.minimiseToTray(), 'minimise_to_tray', {}],
     [() => bridge.openCallWindow(), 'open_call_window', {}],
     [() => bridge.closeCallWindow(), 'close_call_window', {}],
+    [() => bridge.setCallFullscreen(true), 'set_call_fullscreen', { on: true }],
     [() => bridge.callWindowReady(), 'call_window_ready', {}],
     [() => bridge.callDeviceTest('microphone', null), 'call_device_test', { test: 'microphone', device: null }],
     [() => bridge.callDeviceTest('camera', 'cam-1'), 'call_device_test', { test: 'camera', device: 'cam-1' }],
@@ -251,6 +252,8 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
       'call_video_effect',
       { effect: { background: 'none', blur: 50, filter: 'warm' }, mirror: true }
     ],
+    [() => bridge.callVideoQuality('auto'), 'call_video_quality', { quality: 'auto' }],
+    [() => bridge.callVideoQuality('1440p'), 'call_video_quality', { quality: '1440p' }],
     [() => bridge.callStatus(), 'call_status', {}],
     [() => bridge.callRings(), 'call_rings', {}],
     [() => bridge.callDeclineRing('!r:s'), 'call_decline_ring', { roomId: '!r:s' }],
