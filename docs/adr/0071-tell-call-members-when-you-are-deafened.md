@@ -57,13 +57,19 @@ that we need, and does not touch the member state event.
   counter is above that note. The note is at most the start counter of its
   call plus that call's changes (less when a send failed); that start is
   the clock then, or more after quick rejoins in that run. A new run's
-  first counter is its clock at the call's start, so the run is ignored
-  while that clock has not passed the note. The note can be ahead of its
-  own call's clock: by that call's changes, and by quick rejoins in that
-  run, whose start counters go above the clock. So a restart soon after the
-  earlier call, or a clock set back, can cause this; whether it does
-  depends on the note. The receiver then shows the old state until the new
-  counter passes the note (see the negative consequences).
+  first counter is its clock at its call's start. After that, the counter
+  goes up by 1 on each change and does not read the clock; a later call of
+  that run starts from the clock at its start, or above the run's last
+  counter. So the receiver ignores each message of the new run whose
+  counter is not above the note, and takes the first one whose counter is
+  above it: after enough changes, or in a later call that starts after the
+  clock passed the note. The clock alone does not end it. The note can be
+  ahead of its own call's clock: by that call's changes, and by quick
+  rejoins in that run, whose start counters go above the clock. So a
+  restart soon after the earlier call, or a clock set back, can cause this;
+  whether it does depends on the note. The receiver then shows the old
+  state until a delivered counter is above the note (see the negative
+  consequences).
   The counter shows members roughly when the state changed, which they can
   already see from the call.
 * The core sends the message to the devices that get the frame key, with the
@@ -124,10 +130,12 @@ that we need, and does not touch the member state event.
 * No counter is stored between runs. A receiver ignores a new run's
   messages, and shows the old state, while their counter is not above its
   note: the last counter that it accepted from that device. A new run's
-  first counter is its clock, so this lasts while that clock has not passed
-  the note. The note can be ahead of its call's clock by that call's
-  changes and by quick rejoins, so a restart soon after that call, or a
-  clock set back, is at risk.
+  first counter is its clock at its call's start, and each change adds 1
+  without reading the clock. So the old state stays until a message
+  arrives whose counter is above the note: after enough changes, or in a
+  later call that starts after the clock passed the note. The note can be
+  ahead of its call's clock by that call's changes and by quick rejoins,
+  so a restart soon after that call, or a clock set back, is at risk.
 * Not verified against a live homeserver or a second client yet.
 
 ## Pros and Cons of the Options

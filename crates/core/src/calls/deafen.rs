@@ -83,10 +83,13 @@ fn take_seq(last: &AtomicU64, floor: u64) -> Option<u64> {
 /// its note, the last counter that it accepted from this device: at most
 /// an earlier call's start counter (the clock then, or more after quick
 /// rejoins) plus that call's changes. A new run's first counter is its
-/// clock, so the run is ignored while that clock has not passed the note,
-/// until its counter passes it. The note can be ahead of its call's clock
-/// by that call's changes and by quick rejoins, so a restart soon after
-/// that call, or a clock set back, is at risk (ADR-0071).
+/// clock at the call's start, and each change adds 1 (`next_seq`) without
+/// reading the clock. So the receiver ignores the run's messages until one
+/// arrives whose counter is above the note: after enough changes, or in a
+/// later call that starts after the clock passed the note. The note can be
+/// ahead of its call's clock by that call's changes and by quick rejoins,
+/// so a restart soon after that call, or a clock set back, is at risk
+/// (ADR-0071).
 /// It shows members roughly when the state changed, which they can already
 /// see from the call.
 /// `None` when no counter is left (`take_seq`).
@@ -394,6 +397,44 @@ mod tests {
         };
         assert_eq!(take(Some(old), &message).map(|n| n.deafened), Some(false));
         assert_eq!(take_seq(&last, 1_060_000), Some(1_060_000));
+    }
+
+    /// GIVEN a receiver's note of an earlier run that is above a new run's
+    /// first counter WHEN the new run's counters arrive while its clock
+    /// stays the same THEN each counter that is not above the note is
+    /// ignored, and the first counter above it is taken: the delivered
+    /// counter decides, not the clock. A later call of the run at the same
+    /// clock reading also goes above the note.
+    #[test]
+    fn given_a_new_run_below_the_note_then_the_first_counter_above_it_is_taken() {
+        let message = |deafened, seq| IncomingDeafen {
+            identity: IDENTITY.to_owned(),
+            deafened,
+            seq,
+        };
+        let note = Note {
+            deafened: true,
+            seq: 1_001,
+        };
+        let last = AtomicU64::new(0);
+        let start = take_seq(&last, 1_000).unwrap();
+        assert_eq!(start, 1_000);
+        assert_eq!(take(Some(note), &message(false, start)), None);
+        let change = take_seq(&last, start + 1).unwrap();
+        assert_eq!(change, 1_001);
+        assert_eq!(take(Some(note), &message(true, change)), None);
+        let change = take_seq(&last, change + 1).unwrap();
+        assert_eq!(change, 1_002);
+        let taken = take(Some(note), &message(false, change)).unwrap();
+        assert_eq!(
+            taken,
+            Note {
+                deafened: false,
+                seq: 1_002
+            }
+        );
+        let later_call = take_seq(&last, 1_000).unwrap();
+        assert!(later_call > note.seq);
     }
 
     /// GIVEN a counter one below `u64::MAX` WHEN counters are taken THEN
