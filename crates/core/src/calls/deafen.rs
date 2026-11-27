@@ -49,13 +49,14 @@ static LAST_SEQ: AtomicU64 = AtomicU64::new(0);
 /// A counter of at least `floor` and above every counter that `last` holds,
 /// which it then holds.
 fn take_seq(last: &AtomicU64, floor: u64) -> u64 {
-    let above = |previous: u64| floor.max(previous.saturating_add(1));
-    let previous = last
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |previous| {
-            Some(above(previous))
-        })
-        .unwrap_or_else(|previous| previous);
-    above(previous)
+    let mut previous = last.load(Ordering::SeqCst);
+    loop {
+        let taken = floor.max(previous.saturating_add(1));
+        match last.compare_exchange_weak(previous, taken, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return taken,
+            Err(now) => previous = now,
+        }
+    }
 }
 
 /// The counter at the start of a call: the milliseconds since the Unix
