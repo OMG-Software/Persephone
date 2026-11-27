@@ -64,14 +64,19 @@ during a call. The worker has no answer to it.
 * Auto steps down one tier after 2 bad samples. A sample is bad when the
   bandwidth is below 0.8 times the tier's bitrate, or the round-trip time is
   above 400 ms. 360p is the floor.
-* The samples come from WebRTC's candidate-pair statistics.
+* The samples come from WebRTC's candidate-pair statistics of the sending
+  transport: the publisher's, or the one transport when the room uses one
+  peer connection. A subscriber's round-trip time is never a sample, also
+  while the statistics view reads it.
 * Samples less than 1.5 seconds apart are skipped, so the statistics view's
   one-second reads do not speed Auto up. The hold goes back to 10 seconds only
   after a tier reached by a step up has held for 60 seconds.
 * Auto's top tier is 1440p. A fixed choice's top tier is that tier. The size
   of the camera's first picture caps either one, at the largest tier whose
   short side the picture's short side reaches. The open thread waits up to
-  2 seconds for that picture, so the publish knows the real top tier.
+  2 seconds for that picture, so the publish knows the real top tier. A
+  picture that comes later caps the tier when it comes: Auto's top and
+  tier, or the fixed tier.
 * While the camera is on, Auto reads the WebRTC statistics every 2 seconds,
   also with the statistics view off. With the view off, it reads only the
   own camera track. The core sees no change: statistics go to it only while
@@ -120,24 +125,33 @@ keeps its size until it restarts.
 * While any effect runs, the send box is 640x360, also with a fixed 1440p,
   because the effect works at that size.
 * Windows lists every native camera type up to 3840x2160, MJPEG included,
-  and Media Foundation decodes it to NV12 for every frame. The worker leaves
-  out modes larger than 2560x1440 (1440x2560 when tall) while the camera has
-  another mode, so Auto and 1440p never open a 4K mode that no tier sends.
-  A camera with only larger modes opens at its smallest. Speed comes first:
-  a 4K mode at 30 frames a second still beats a 1080p mode at 5.
+  and Media Foundation decodes it to NV12 for every frame. Speed comes
+  first: the worker compares sizes only among the modes of at least 15
+  frames a second, or among all modes when none is that fast. In that
+  group, it leaves out modes larger than 2560x1440 (1440x2560 when tall)
+  while the group has another mode. So Auto and 1440p never open a 4K mode
+  when a fast smaller mode exists, but a 4K mode at 30 frames a second
+  beats a 1080p mode at 5. When every mode of the group is larger, the
+  smallest opens.
 * Linux V4L2 takes raw YUYV, NV12 and I420 only, up to 2560x1440. MJPEG is
   refused. YUYV is converted to I420 only for the pictures that the 15
   frames a second limit lets through, not in the capture loop. The worker reads each mode's frame intervals and asks the driver
   for the chosen rate, at most 30. Among modes of at least 15 frames a second,
-  it picks the smallest that covers the tier, else the largest of those. An
-  unknown rate counts as fast enough. Buffers are bounded: at most 16 MiB each
-  and at most 16 buffers.
+  it picks the smallest that covers the tier, else the one that reaches the
+  highest tier up to the target by its short side, then the largest. An
+  unknown rate counts as fast enough; a known rate below 1 frame a second
+  counts as 1, so it is slow. Buffers are bounded: at most 16 MiB each and
+  at most 16 buffers.
 * On the Linux camera portal path, the worker names only a preferred size (the
   tier's box) and a maximum of 2560x1440. PipeWire's negotiation chooses the
   camera format, often the camera's first listed raw format. The path cannot
   prefer 15 frames a second, because a least rate would make cameras with
   only slow modes fail. A camera could therefore give a large, slow mode.
   This needs a live test with a camera.
+* When the camera's first picture comes more than 2 seconds after the
+  open, the track is published with the uncapped top tier's bitrate. The
+  tier is capped when the picture comes, but the bitrate stays: LiveKit
+  0.11 gives no call to change a published track's encoding.
 * The own preview and the received tiles stay at 640x360. The page shows no
   larger picture.
 * A higher tier costs more CPU and bandwidth for the sender and for each

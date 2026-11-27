@@ -172,8 +172,8 @@ The worker applies two stages itself.
   microphones and speakers still are.
 * V4L2 path: the worker opens `/dev/video*` itself. It lists only nodes with
   the video-capture capability; it does not stream to list them.
-* Formats: NV12, I420 and YUYV only, at most 1280x720. The worker converts
-  YUYV to I420. It decodes no MJPEG. PipeWire buffers must be shared memory
+* Formats: NV12, I420 and YUYV only, at most 2560x1440 (ADR-0070). The
+  worker converts YUYV to I420. It decodes no MJPEG. PipeWire buffers must be shared memory
   (`MemFd` or `MemPtr`); DMA buffers are refused.
 * Camera IDs: each ID starts with its path, `pipewire:` or `v4l2:`. After
   `pipewire:` comes the PipeWire `node.name`. After `v4l2:` come the

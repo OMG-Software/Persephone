@@ -105,6 +105,19 @@ impl AutoQuality {
         self.tier
     }
 
+    /// Lowers the top tier to `cap` at `now`: the camera's first picture
+    /// came after the open's wait, and it is smaller than the top
+    /// (ADR-0070). A tier above the new top drops to it at once. Returns the
+    /// new tier when it changes.
+    pub fn cap_top(&mut self, now: Instant, cap: SendTier) -> Option<SendTier> {
+        self.top = self.top.min(cap);
+        if self.tier <= self.top {
+            return None;
+        }
+        self.moved(now, self.top, false);
+        Some(self.top)
+    }
+
     /// Takes one sample taken at `now`. Returns the new tier when it
     /// changes.
     pub fn sample(&mut self, now: Instant, sample: Sample) -> Option<SendTier> {
@@ -288,6 +301,34 @@ mod tests {
         let mut quality = AutoQuality::new(SendTier::P720, start);
         feed(&mut quality, &mut now, 100, rich());
         assert_eq!(quality.tier(), SendTier::P720);
+    }
+
+    /// GIVEN a run whose tier climbed to 1080p WHEN the top is capped at
+    /// 720p (a late first picture) THEN the tier drops to 720p at once and
+    /// never climbs past it. GIVEN a tier below the cap THEN nothing changes
+    /// at the cap, and the tier climbs only to it.
+    #[test]
+    fn given_a_cap_on_the_top_then_the_tier_follows_it() {
+        let start = Instant::now();
+        let mut now = start;
+        let mut quality = AutoQuality::new(SendTier::P1440, start);
+        for _ in 0..100 {
+            if quality.tier() == SendTier::P1080 {
+                break;
+            }
+            feed(&mut quality, &mut now, 1, rich());
+        }
+        assert_eq!(quality.tier(), SendTier::P1080);
+        assert_eq!(quality.cap_top(now, SendTier::P720), Some(SendTier::P720));
+        assert_eq!(quality.tier(), SendTier::P720);
+        assert!(feed(&mut quality, &mut now, 100, rich()).is_empty());
+        assert_eq!(quality.tier(), SendTier::P720);
+
+        let mut now = start;
+        let mut quality = AutoQuality::new(SendTier::P1440, start);
+        assert_eq!(quality.cap_top(start, SendTier::P720), None);
+        assert_eq!(quality.tier(), SendTier::P480);
+        assert_eq!(feed(&mut quality, &mut now, 100, rich()), [SendTier::P720]);
     }
 
     /// GIVEN a link with too little bandwidth WHEN 2 samples come THEN the

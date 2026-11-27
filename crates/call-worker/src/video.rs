@@ -372,23 +372,40 @@ pub fn pick_camera<'a>(
 pub struct CaptureMode {
     pub width: u32,
     pub height: u32,
-    /// Frames per second, rounded down.
+    /// Frames per second, rounded down ([`whole_fps`]): at least 1 for a
+    /// known rate, 0 when the camera does not say.
     pub fps: u32,
 }
 
+/// Whole frames per second of `frames` frames in `seconds` seconds, rounded
+/// down. A known rate below 1 frame a second gives 1, so a slow mode is never
+/// taken for one whose speed is unknown (0). 0 when either value is 0.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub fn whole_fps(frames: u32, seconds: u32) -> u32 {
+    if frames == 0 || seconds == 0 {
+        return 0;
+    }
+    (frames / seconds).max(1)
+}
+
 /// The index of the best mode for a camera that sends `target` (ADR-0070).
-/// A mode that reaches [`MAX_VIDEO_FPS`] is preferred: a camera that gives
-/// 5 frames per second at a large size would make the call worse. A mode
-/// whose speed is unknown (0) counts as reaching it. A mode larger than the
-/// largest tier's box (2560x1440, either orientation) is left out while
-/// another mode remains: no tier sends more, so it would only cost decoding
-/// (Windows lists modes up to 3840x2160, and a 4K MJPEG mode is decoded for
-/// every frame). Among the fast modes, the smallest picture that covers the
-/// target's box (both sides, either orientation) wins; when none covers it,
-/// the largest picture wins. When no mode reaches the speed, the largest
-/// picture wins. When every mode is larger than the box, the smallest wins.
-/// On a tie, the faster mode wins, counted up to 30 fps, then the lower
-/// index. A mode with a side of 0 is skipped.
+/// Speed comes first: the modes that reach [`MAX_VIDEO_FPS`] form the pool,
+/// because a camera that gives 5 frames per second at a large size would
+/// make the call worse. A mode whose speed is unknown (0) counts as reaching
+/// it. When no mode reaches it, every mode is in the pool. Size is compared
+/// only within the pool, so a 4K mode at 30 fps beats a 1080p mode at 5 fps.
+/// A mode of the pool that is larger than the largest tier's box (2560x1440,
+/// either orientation) is left out while another mode of the pool remains:
+/// no tier sends more, so it would only cost decoding (Windows lists modes
+/// up to 3840x2160, and a 4K MJPEG mode is decoded for every frame). Among
+/// fast modes, the smallest picture that covers the target's box (both
+/// sides, either orientation) wins. When none covers it, or no mode is fast,
+/// the mode that reaches the highest tier up to the target wins (by its
+/// short side, [`SendTier::reached_by`]), then the largest picture: for
+/// 1080p, 1440x1080 beats 1920x900, which reaches 720p only. When every mode
+/// of the pool is larger than the box, the smallest wins. On a tie, the
+/// faster mode wins, counted up to 30 fps, then the lower index. A mode with
+/// a side of 0 is skipped.
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 pub fn pick_capture_mode(modes: &[CaptureMode], target: SendTier) -> Option<usize> {
     let area = |mode: &CaptureMode| u64::from(mode.width) * u64::from(mode.height);
@@ -407,8 +424,11 @@ pub fn pick_capture_mode(modes: &[CaptureMode], target: SendTier) -> Option<usiz
     // Ties go to the faster mode, then to the lower index.
     let smaller_first =
         |index: usize, mode: &CaptureMode| (area(mode), std::cmp::Reverse(mode.fps.min(30)), index);
+    // The send tier is capped by the capture's short side, so the tier that
+    // a mode reaches goes before its area.
     let larger_first = |index: usize, mode: &CaptureMode| {
         (
+            std::cmp::Reverse(SendTier::reached_by(mode.width, mode.height).min(target)),
             std::cmp::Reverse(area(mode)),
             std::cmp::Reverse(mode.fps.min(30)),
             index,
@@ -976,5 +996,37 @@ mod tests {
         // No mode is fast enough: the largest within the box.
         let modes = [mode(3840, 2160, 5), mode(1920, 1080, 5)];
         assert_eq!(pick_capture_mode(&modes, SendTier::P720), Some(1));
+    }
+
+    /// GIVEN no mode that covers the target's box WHEN one is picked THEN
+    /// the mode that reaches the highest tier up to the target wins before
+    /// a larger picture: 1440x1080 reaches 1080p, 1920x900 only 720p. The
+    /// speed rule stays first, and past the target the area decides.
+    #[test]
+    fn given_no_covering_mode_when_picked_then_the_reached_tier_goes_first() {
+        let modes = [mode(1920, 900, 30), mode(1440, 1080, 30)];
+        assert_eq!(pick_capture_mode(&modes, SendTier::P1080), Some(1));
+        let tall = [mode(900, 1920, 30), mode(1080, 1440, 30)];
+        assert_eq!(pick_capture_mode(&tall, SendTier::P1080), Some(1));
+        // A mode that reaches 1080p only at 5 fps never beats a fast one.
+        let modes = [mode(1920, 900, 30), mode(1440, 1080, 5)];
+        assert_eq!(pick_capture_mode(&modes, SendTier::P1080), Some(0));
+        // Both reach the same tier: the larger picture.
+        let modes = [mode(1440, 1080, 30), mode(1920, 1080, 30)];
+        assert_eq!(pick_capture_mode(&modes, SendTier::P1440), Some(1));
+        // No mode is fast: the reached tier still goes first.
+        let modes = [mode(1920, 900, 5), mode(1440, 1080, 5)];
+        assert_eq!(pick_capture_mode(&modes, SendTier::P1080), Some(1));
+    }
+
+    /// GIVEN frame counts and times WHEN the whole rate is taken THEN it
+    /// rounds down, a known rate below 1 fps is 1, and a 0 is unknown.
+    #[test]
+    fn given_a_frame_rate_then_its_whole_rate_is_never_a_false_unknown() {
+        assert_eq!(whole_fps(30, 1), 30);
+        assert_eq!(whole_fps(30000, 1001), 29);
+        assert_eq!(whole_fps(1, 2), 1);
+        assert_eq!(whole_fps(0, 1), 0);
+        assert_eq!(whole_fps(30, 0), 0);
     }
 }

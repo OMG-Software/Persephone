@@ -50,11 +50,15 @@ that we need, and does not touch the member state event.
   starts in the same milliseconds as an earlier one, or rejoins after many
   changes, starts above the earlier call's last counter. A receiver
   ignores a message whose `seq` is not higher than the last one it took
-  from that sender device, so a late message cannot undo a newer one. While
-  the device's clock does not go back between runs, a new call's counter is
-  above any counter of an earlier call of the same device, so a note that a
-  receiver kept from an earlier call is replaced (see the negative
-  consequences for a clock set back).
+  from that sender device, so a late message cannot undo a newer one. The
+  counter is not stored between runs of the app: a new run starts from the
+  device's clock. The earlier run's counters ran ahead of its clock by at
+  most one for each change and each call start, so a new run's counter is
+  above them, and a note that a receiver kept from the earlier run is
+  replaced, only when more milliseconds passed than that, and the clock did
+  not go back. Otherwise the receiver ignores the new run's messages, and
+  shows the old state, until the new counter passes the old one (see the
+  negative consequences).
   The counter shows members roughly when the state changed, which they can
   already see from the call.
 * The core sends the message to the devices that get the frame key, with the
@@ -112,6 +116,11 @@ that we need, and does not touch the member state event.
   against it only until the clock is right; a clock set back between two
   runs of the app can hide the new state of the later call. In one run the
   counter only rises.
+* No counter is stored between runs. A run that starts before the clock
+  passed the earlier run's last counter (that run made more changes and
+  call starts than milliseconds passed until the new run) can hide its
+  state from a receiver that kept a note of the earlier run, until its
+  counter passes that note's.
 * Not verified against a live homeserver or a second client yet.
 
 ## Pros and Cons of the Options

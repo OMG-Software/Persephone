@@ -211,6 +211,14 @@ pub struct RawConnection {
     pub complete: bool,
 }
 
+/// The sending transport's numbers, for the Auto camera quality.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct RawSending {
+    /// WebRTC's estimate of the bandwidth for sending, in bit/s.
+    pub outgoing_bits_per_second: Option<f64>,
+    pub rtt_seconds: Option<f64>,
+}
+
 /// One reading of everything. Each part carries the time it was read, on a
 /// clock that only goes forward.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -220,6 +228,11 @@ pub struct RawStats {
     pub screen: Option<RawOwnVideo>,
     pub remotes: Vec<RawRemote>,
     pub connections: Vec<RawConnection>,
+    /// The own room's sending transport: the publisher's, or the one
+    /// transport when the room uses one peer connection. Never a
+    /// subscriber's: its round-trip time says nothing about the sending
+    /// link. The connections' numbers take each value from any transport.
+    pub sending: Option<RawSending>,
 }
 
 /// What a counter belongs to: an own track by its track ID, a remote track

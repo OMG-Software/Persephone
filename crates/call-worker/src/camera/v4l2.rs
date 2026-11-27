@@ -434,8 +434,9 @@ fn enumerate(fd: RawFd) -> Vec<Offer> {
 }
 
 /// The fastest frame rate of a format and size, in frames per second rounded
-/// down, or 0 when the driver does not say. A list of intervals gives its
-/// shortest one; a range gives its least one.
+/// down (at least 1 for an interval the driver gives), or 0 when the driver
+/// does not say. A list of intervals gives its shortest one; a range gives
+/// its least one.
 fn max_frame_rate(fd: RawFd, pixel_format: u32, width: u32, height: u32) -> u32 {
     let mut fastest = 0;
     for index in 0..MAX_INTERVALS {
@@ -457,9 +458,11 @@ fn max_frame_rate(fd: RawFd, pixel_format: u32, width: u32, height: u32) -> u32 
 }
 
 /// Frames per second, rounded down, of an interval of `numerator` over
-/// `denominator` seconds. 0 for an interval of 0 seconds or no time base.
+/// `denominator` seconds (`video::whole_fps`): an interval longer than a
+/// second gives 1, so the picker never takes it for an unknown speed. 0 for
+/// an interval of 0 seconds or no time base.
 fn rate_of(numerator: u32, denominator: u32) -> u32 {
-    denominator.checked_div(numerator).unwrap_or(0)
+    crate::video::whole_fps(denominator, numerator)
 }
 
 /// Asks for `fps` frames per second, at most 30. Does nothing for an unknown
@@ -848,7 +851,8 @@ mod tests {
     }
 
     /// GIVEN frame intervals WHEN the rate is read THEN it is the whole
-    /// frames per second, rounded down, and a zero interval gives none.
+    /// frames per second, rounded down, a zero interval gives none, and an
+    /// interval longer than a second gives 1, not the unknown 0.
     #[test]
     fn given_intervals_then_the_rate_rounds_down() {
         assert_eq!(rate_of(1, 30), 30);
@@ -856,6 +860,8 @@ mod tests {
         assert_eq!(rate_of(1, 5), 5);
         assert_eq!(rate_of(0, 30), 0);
         assert_eq!(rate_of(1, 0), 0);
+        assert_eq!(rate_of(2, 1), 1, "0.5 fps is slow, not unknown");
+        assert_eq!(rate_of(u32::MAX, 1), 1);
     }
 
     /// GIVEN the widest picture WHEN its row is measured THEN it fits the

@@ -2212,6 +2212,10 @@ struct LocalCamera {
     /// The feed's admission. Closed before a stop, so no picture leaves
     /// after a blocked read returns.
     live: Arc<FrameAdmission>,
+    /// The size of the first picture while it had not come by the end of
+    /// the open's wait (`FIRST_PICTURE_WAIT`): the tier is capped when it
+    /// comes (`Session::cap_late_camera`).
+    late_first: Option<Arc<FirstSize>>,
 }
 
 /// One remote video track: the participant's identity and the track's SID.
@@ -2654,14 +2658,17 @@ impl Call<'_> {
                 // The mode that the camera opened decides how large the
                 // tier can be (ADR-0070): a camera that gives 1280x720 at
                 // best sends P720 at most. The wait is short, because the
-                // open waits for the stream to start.
-                let top = top.capped_by_capture(wait_for_first_size(&first));
+                // open waits for the stream to start. A picture that comes
+                // later caps the tier then.
+                let size = wait_for_first_size(&first);
+                let top = top.capped_by_capture(size);
                 Ok(OpenedCamera {
                     capture,
                     source,
                     live,
                     top,
                     quality,
+                    late_first: size.is_none().then_some(first),
                 })
             },
         );
@@ -2749,6 +2756,7 @@ impl Call<'_> {
             live,
             top,
             quality,
+            late_first,
         } = opened;
         let track = LocalVideoTrack::create_video_track("camera", RtcVideoSource::Native(source));
         let options = TrackPublishOptions {
@@ -2797,6 +2805,7 @@ impl Call<'_> {
             capture,
             sid,
             live,
+            late_first,
         });
         CameraState::On
     }
@@ -2814,6 +2823,26 @@ impl Call<'_> {
         if let Some(tier) = auto.sample(std::time::Instant::now(), sample) {
             self.send_tier.set(tier);
             note_camera(format_args!("send tier {tier:?}"));
+        }
+    }
+
+    /// Caps the tier at the camera's first picture when it came after the
+    /// open's wait (ADR-0070). The published bitrate stays the one of the
+    /// uncapped top: LiveKit has no call to change it after the publish.
+    fn cap_late_camera(&mut self) {
+        let Some(camera) = self.camera.as_mut() else {
+            return;
+        };
+        let Some((width, height)) = camera.late_first.as_ref().and_then(|first| first.get()) else {
+            return;
+        };
+        camera.late_first = None;
+        let cap = SendTier::reached_by(width, height);
+        let now = std::time::Instant::now();
+        if let Some(tier) = capped_tier(cap, self.auto_quality.as_mut(), self.send_tier.get(), now)
+        {
+            self.send_tier.set(tier);
+            note_camera(format_args!("send tier {tier:?}, capped by a late picture"));
         }
     }
 
@@ -3955,6 +3984,8 @@ struct OpenedCamera {
     top: SendTier,
     /// The quality at the start of this open.
     quality: VideoQuality,
+    /// The first picture's size while none had come by the end of the wait.
+    late_first: Option<Arc<FirstSize>>,
 }
 
 /// Runs `open` on its own thread and sends the result to `tx`. The thread is
@@ -4263,6 +4294,7 @@ async fn event_loop(
                 }
             }
             _ = tick.tick() => {
+                call.cap_late_camera();
                 call.measure_sound();
                 call.measure_stats();
             }
@@ -4461,6 +4493,21 @@ fn preview_rgba(picture: &mut I420Buffer) -> Option<(u32, u32, Vec<u8>)> {
 /// How long the open of a camera waits for the first picture, to learn the
 /// size of the mode that it opened.
 const FIRST_PICTURE_WAIT: Duration = Duration::from_secs(2);
+
+/// The send tier after a cap at `cap`, the tier that a late first picture
+/// reaches: Auto lowers its top and a tier above it, and a fixed `tier` goes
+/// down to it. `None` when the tier stays.
+fn capped_tier(
+    cap: SendTier,
+    auto: Option<&mut AutoQuality>,
+    tier: SendTier,
+    now: std::time::Instant,
+) -> Option<SendTier> {
+    match auto {
+        Some(auto) => auto.cap_top(now, cap),
+        None => (tier > cap).then_some(cap),
+    }
+}
 
 /// Waits for the first picture of the capture, on the open thread. `None`
 /// when none comes in time.
@@ -5238,25 +5285,39 @@ mod tests {
         );
     }
 
-    /// A sound session fake: each switch is counted, waits `delay`, then
-    /// gives `answer`, and each return is counted (`ends`). `Unsupported` is
-    /// what `pulse::Session::switch` gives when the server's defaults could
-    /// not be read.
+    /// A sound session fake: each switch is counted, waits for its release
+    /// when it is held (`held`), then gives `answer`, and each return is
+    /// counted (`ends`). `Unsupported` is what `pulse::Session::switch`
+    /// gives when the server's defaults could not be read.
     struct FakeSwitch {
         answer: Result<u64, FailureCode>,
-        delay: Duration,
+        /// A held switch returns when the test sends on, or drops, the
+        /// other end, so it never depends on how the runtime schedules.
+        release: Option<std::sync::Mutex<std::sync::mpsc::Receiver<()>>>,
         calls: std::sync::atomic::AtomicUsize,
         ends: std::sync::atomic::AtomicUsize,
     }
 
     impl FakeSwitch {
-        fn new(answer: Result<u64, FailureCode>, delay: Duration) -> Arc<Self> {
+        fn new(answer: Result<u64, FailureCode>) -> Arc<Self> {
             Arc::new(Self {
                 answer,
-                delay,
+                release: None,
                 calls: std::sync::atomic::AtomicUsize::new(0),
                 ends: std::sync::atomic::AtomicUsize::new(0),
             })
+        }
+
+        /// A fake whose switches wait until the sender sends or is dropped.
+        fn held(answer: Result<u64, FailureCode>) -> (Arc<Self>, std::sync::mpsc::Sender<()>) {
+            let (release, wait) = std::sync::mpsc::channel();
+            let fake = Arc::new(Self {
+                answer,
+                release: Some(std::sync::Mutex::new(wait)),
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                ends: std::sync::atomic::AtomicUsize::new(0),
+            });
+            (fake, release)
         }
 
         fn calls(&self) -> usize {
@@ -5298,7 +5359,12 @@ mod tests {
             _playout: Option<&str>,
         ) -> Result<u64, FailureCode> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            std::thread::sleep(self.delay);
+            if let Some(release) = &self.release {
+                let _ = release
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .recv();
+            }
             self.ends.fetch_add(1, Ordering::SeqCst);
             self.answer
         }
@@ -5315,7 +5381,7 @@ mod tests {
     #[tokio::test]
     async fn given_unknown_defaults_when_set_devices_changes_the_camera_then_it_is_kept() {
         let wait = Duration::from_secs(5);
-        let unknown = FakeSwitch::new(Err(FailureCode::Unsupported), Duration::ZERO);
+        let unknown = FakeSwitch::new(Err(FailureCode::Unsupported));
         let mut camera = Some("v4l2:old".to_owned());
         let mut book = SoundBook::new((None, None));
 
@@ -5374,7 +5440,7 @@ mod tests {
         let real = (None, Some("pulse:spk".to_owned()));
         let mut book = SoundBook::new((None, None));
         assert_eq!(book.offer(real.clone()), SoundStep::Start(real.clone()));
-        let late = FakeSwitch::new(Ok(7), Duration::from_millis(300));
+        let (late, release) = FakeSwitch::held(Ok(7));
         let (answer, ended, mut ends) =
             change_end(late.clone(), real.clone(), Duration::from_millis(20)).await;
         assert_eq!(
@@ -5391,13 +5457,15 @@ mod tests {
         assert!(book.busy());
         assert_eq!(book.offer(real.clone()), SoundStep::Wait);
         assert_eq!(book.next(), None);
+        assert_eq!(late.ends(), 0, "the switch is still held");
 
+        release.send(()).expect("the switch waits");
         assert!(matches!(ends.recv().await, Some(SoundDone::Ended)));
         assert_eq!(late.ends(), 1);
         book.ended();
         assert_eq!(book.next(), Some(SoundStep::Start(real.clone())));
 
-        let moves = FakeSwitch::new(Ok(3), Duration::ZERO);
+        let moves = FakeSwitch::new(Ok(3));
         let (answer, ended, _) = change_end(moves, real.clone(), Duration::from_secs(5)).await;
         assert_eq!(
             answer,
@@ -6266,6 +6334,46 @@ mod tests {
             ..CapturedFrame::checked(Format::Yuyv, 4, 2, 8, &src).expect("fits")
         };
         assert!(fitted_i420(&short, SendTier::P360).is_none());
+    }
+
+    /// GIVEN a first picture of 1280x720 that came after the open's wait
+    /// WHEN it caps a fixed 1440p THEN the tier is 720p, and a fixed 480p
+    /// stays. GIVEN Auto at 1080p under a 1440p top THEN its tier and top
+    /// drop to 720p; GIVEN Auto at 480p THEN its tier stays.
+    #[test]
+    fn given_a_late_first_picture_then_the_tier_is_capped() {
+        let now = std::time::Instant::now();
+        let cap = SendTier::reached_by(1280, 720);
+        assert_eq!(
+            capped_tier(cap, None, SendTier::P1440, now),
+            Some(SendTier::P720)
+        );
+        assert_eq!(capped_tier(cap, None, SendTier::P480, now), None);
+        assert_eq!(capped_tier(cap, None, SendTier::P720, now), None);
+
+        let mut auto = AutoQuality::new(SendTier::P1440, now);
+        assert_eq!(capped_tier(cap, Some(&mut auto), SendTier::P480, now), None);
+        assert_eq!(auto.tier(), SendTier::P480);
+
+        let mut auto = AutoQuality::new(SendTier::P1440, now);
+        let mut later = now;
+        let rich = Sample {
+            bits_per_second: Some(50_000_000.0),
+            rtt_seconds: Some(0.04),
+        };
+        for _ in 0..100 {
+            if auto.tier() == SendTier::P1080 {
+                break;
+            }
+            later += Duration::from_secs(2);
+            auto.sample(later, rich);
+        }
+        assert_eq!(auto.tier(), SendTier::P1080);
+        assert_eq!(
+            capped_tier(cap, Some(&mut auto), SendTier::P1080, later),
+            Some(SendTier::P720)
+        );
+        assert_eq!(auto.tier(), SendTier::P720);
     }
 
     /// GIVEN a 640x480 camera and a fixed 480p WHEN the top tier is capped by
