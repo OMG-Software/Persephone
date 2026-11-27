@@ -18,6 +18,12 @@ configuration (sidecars and bundled licence files) that the workflow merges
 with `cargo tauri --config`. It never adds a signing hook: signing runs in
 separate jobs that build nothing (see docs/release.md).
 
+`arch-pkgbuild` takes the one x86_64 .deb in .local/release/arch/in, writes
+.local/release/arch/build/PKGBUILD from tools/arch/PKGBUILD.in and copies the
+.deb beside it, so that makepkg in that folder makes an Arch Linux package
+with the .deb's files (ADR-0069). As with append-notice, no argument names a
+file.
+
 The edits change only the version strings. Each edit is verified by parsing
 the file again and comparing it with the expected document, so formatting and
 all other values stay as they are.
@@ -26,10 +32,12 @@ all other values stay as they are.
 import argparse
 import copy
 import glob
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tomllib
@@ -86,6 +94,33 @@ def parse_tag(tag):
     if not tag.startswith("v"):
         raise ReleaseError(f"tag {tag!r} must start with 'v'")
     return parse_version(tag[1:])
+
+
+# A pre-release that pacman orders as Semantic Versioning does once its hyphen
+# is gone: one word, then dot-separated numbers (alpha.1, rc.2, beta.1.3).
+_ARCH_PRERELEASE = re.compile(r"[A-Za-z]+(?:\.(?:0|[1-9]\d*))+")
+
+
+def arch_pkgver(version):
+    """The Arch Linux pkgver of a release version.
+
+    A pkgver cannot hold a hyphen. Without it, pacman's vercmp puts letters
+    that follow a number before the number alone, so 0.1.0alpha.1 <
+    0.1.0beta.2 < 0.1.0rc.1 < 0.1.0, as Semantic Versioning does. Other
+    pre-releases sort differently in pacman: 0.1.0-7 would become 0.1.07,
+    newer than 0.1.0, and vercmp puts a number after a word where Semantic
+    Versioning puts it before. These are refused.
+    """
+    parse_version(version)
+    release, _, pre = version.partition("-")
+    if not pre:
+        return release
+    if not _ARCH_PRERELEASE.fullmatch(pre):
+        raise ReleaseError(
+            f"pre-release {version!r} has no Arch Linux version that pacman sorts correctly: "
+            "use a word and dot-separated numbers, for example 0.1.0-alpha.1 or 0.1.0-rc.2"
+        )
+    return release + pre
 
 
 def _read(path):
@@ -246,6 +281,7 @@ def current_versions(root):
 def check(root, tag):
     """Return the places whose version differs from the tag."""
     version, msi = parse_tag(tag)
+    arch_pkgver(version)
     mismatches = []
     for place, found in current_versions(root):
         wanted = msi if "(MSI)" in place else version
@@ -257,6 +293,7 @@ def check(root, tag):
 def set_version(root, new):
     """Write `new` to every first-party manifest under `root`."""
     version, msi = parse_version(new)
+    arch_pkgver(version)
     edits = {}
 
     path = root / "src-tauri/tauri.conf.json"
@@ -344,6 +381,59 @@ def bundle_config(root, notices, platform):
         }
     }
     return config
+
+
+ARCH_TEMPLATE = Path("tools/arch/PKGBUILD.in")
+# The release job downloads the Linux x64 files into ARCH_INPUT and runs
+# makepkg in ARCH_OUTPUT.
+ARCH_INPUT = Path(".local/release/arch/in")
+ARCH_OUTPUT = Path(".local/release/arch/build")
+ARCH_PLACEHOLDERS = ("@PKGVER@", "@DEB@", "@SHA256@")
+_ARCH_PLACEHOLDER = re.compile(r"@[A-Z0-9_]+@")
+
+
+def arch_deb_name(version):
+    """The names that the Linux release job gives the x86_64 .deb of `version`."""
+    return re.compile(rf"Persephone_{re.escape(version)}_amd64(?:-unsigned)?\.deb")
+
+
+def arch_pkgbuild(root=ROOT):
+    """Write ARCH_OUTPUT/PKGBUILD and copy the x86_64 .deb into ARCH_OUTPUT.
+
+    The paths are fixed, so no argument names a file. ARCH_INPUT must hold
+    exactly one .deb. The version is the app version in tauri.conf.json. The
+    .deb must have the name that the Linux job gives it for that version, so
+    that the package cannot be made from the .deb of another version. The
+    PKGBUILD names the .deb's SHA-256, which makepkg checks before it uses the
+    copy.
+    """
+    debs = sorted((root / ARCH_INPUT).glob("*.deb"))
+    if len(debs) != 1:
+        raise ReleaseError(f"{ARCH_INPUT.as_posix()} must hold exactly one .deb; it holds {len(debs)}")
+    deb = debs[0]
+    version = _get(json.loads(_read(root / "src-tauri/tauri.conf.json")), ["version"])
+    if not isinstance(version, str):
+        raise ReleaseError("src-tauri/tauri.conf.json has no version")
+    pkgver = arch_pkgver(version)
+    if not arch_deb_name(version).fullmatch(deb.name):
+        raise ReleaseError(f"{deb.name!r} is not the x86_64 .deb of Persephone {version}")
+    if deb.is_symlink() or not deb.is_file():
+        raise ReleaseError(f"{deb} is not a regular file")
+    template = _read(root / ARCH_TEMPLATE)
+    for placeholder in ARCH_PLACEHOLDERS:
+        if placeholder not in template:
+            raise ReleaseError(f"{ARCH_TEMPLATE.as_posix()} has no {placeholder}")
+    with open(deb, "rb") as file:
+        digest = hashlib.file_digest(file, "sha256").hexdigest()
+    text = template.replace("@PKGVER@", pkgver).replace("@DEB@", deb.name).replace("@SHA256@", digest)
+    unknown = _ARCH_PLACEHOLDER.search(text)
+    if unknown:
+        raise ReleaseError(f"{ARCH_TEMPLATE.as_posix()} has an unknown placeholder {unknown.group()}")
+    output = root / ARCH_OUTPUT
+    output.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(deb, output / deb.name)
+    _write(output / "PKGBUILD", text)
+    return ARCH_OUTPUT / "PKGBUILD"
 
 
 NOTICE_SOURCE_LIMIT = 1024 * 1024
@@ -485,8 +575,15 @@ def main(argv=None, root=ROOT):
         "Default: win-x64 on windows, mac-arm64 and mac-x64 on macos; linux needs one",
     )
     append.add_argument("--title", help="section title; default from the tag in tools/webrtc.json")
+    commands.add_parser(
+        "arch-pkgbuild",
+        help=f"write {ARCH_OUTPUT.as_posix()}/PKGBUILD, which repackages the x86_64 .deb in {ARCH_INPUT.as_posix()}",
+    )
     args = parser.parse_args(argv)
     try:
+        if args.command == "arch-pkgbuild":
+            print(f"Wrote {arch_pkgbuild(root).as_posix()}")
+            return 0
         if args.command == "append-notice":
             append_notice(args.title or webrtc_title(root), root, args.platform, args.keys)
             return 0

@@ -14,6 +14,8 @@ from pathlib import Path
 import re
 import unittest
 
+from tools import release
+
 try:
     import yaml
 except ImportError:
@@ -275,6 +277,32 @@ class RepositoryWorkflows(unittest.TestCase):
         self.assertIn("--require-hashes", runs[install])
         requirements = (ROOT / "tools/ci-requirements.txt").read_text(encoding="utf-8")
         self.assertRegex(requirements, r"--hash=sha256:[0-9a-f]{64}")
+
+    def test_the_arch_package_uses_the_checked_arch_image(self):
+        """GIVEN release.yml and check.yml
+        WHEN the arch-package job and the arch check name their containers
+        THEN both use the same archlinux:base-devel image, pinned by digest
+        (ADR-0069)."""
+        package = load(WORKFLOWS / "release.yml")["jobs"]["arch-package"]["container"]["image"]
+        checked = load(WORKFLOWS / REQUIRED_WORKFLOW)["jobs"]["arch"]["container"]["image"]
+        self.assertRegex(package, r"^archlinux:base-devel@sha256:[0-9a-f]{64}$")
+        self.assertEqual(package, checked)
+
+    def test_the_arch_package_job_uses_the_folders_of_arch_pkgbuild(self):
+        """GIVEN release.yml and tools/release.py
+        WHEN the arch-package job downloads the .deb and runs makepkg
+        THEN it uses the folders that `release.py arch-pkgbuild` reads and
+        writes, because that command takes no paths (ADR-0069)."""
+        job = load(WORKFLOWS / "release.yml")["jobs"]["arch-package"]
+        work = job["env"]["WORK"]
+        self.assertEqual(release.ARCH_INPUT.as_posix(), f"{work}/in")
+        self.assertEqual(release.ARCH_OUTPUT.as_posix(), f"{work}/build")
+        downloads = [
+            step["with"]["path"]
+            for step in job["steps"]
+            if step.get("uses", "").startswith("actions/download-artifact@")
+        ]
+        self.assertEqual(downloads, ["${{ env.WORK }}/in"])
 
 
 MINIMAL = """

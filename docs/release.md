@@ -27,12 +27,20 @@ files as workflow artifacts.
 | Windows x64 | `windows-latest` | NSIS installer (per-user, `currentUser`) and MSI |
 | Linux x64 | `ubuntu-22.04` | AppImage, `.deb`, `.rpm` |
 | Linux arm64 | `ubuntu-22.04-arm` | AppImage, `.deb`, `.rpm` |
+| Arch Linux x86_64 | `archlinux:base-devel` container on `ubuntu-latest` | `.pkg.tar.zst`, made from the Linux x64 `.deb` |
 | macOS universal (arm64 + x86_64) | `macos-latest` | `.dmg` and the same app as `.app.zip` |
 
 The Linux jobs build on Ubuntu 22.04 to keep the bundles' glibc floor low. Its
 PipeWire 0.3.48 headers are too old for the `pipewire` crates, so the jobs
 build against PipeWire 1.0.5 headers and link the system's `libpipewire`
 ([Release builds](development.md#release-builds)).
+
+Linux users should install their distribution's package: the `.deb` on
+Debian and Ubuntu, the `.rpm` on Fedora and openSUSE, and the `.pkg.tar.zst`
+on Arch Linux (`sudo pacman -U <file>`).
+These use the distribution's GTK and WebKitGTK, which get its security
+updates. The AppImage carries its own copies of those libraries. Use it only
+when no package fits.
 
 Every release also has `SHA256SUMS` over all files, `SHA256SUMS.sigstore.json`
 (cosign keyless signature), `SHA256SUMS.asc` (GPG signature), a CycloneDX SBOM
@@ -83,7 +91,29 @@ install directory and the web view's data folder.
       one that `windows-sign-binaries` signed, and verifies every signature.
 4. `linux` (x64 and arm64, no secrets): builds and bundles as above in one
    job. Linux packages are not signed themselves.
-5. macOS, in two jobs:
+5. `arch-package` (no secrets, ADR-0069): repackages the x64 `.deb` as an
+   Arch Linux package in an `archlinux:base-devel` container. The container
+   has the same digest pin as the `arch` job of `check.yml`; change both
+   together. After `pacman -Syu`,
+   `python tools/release.py arch-pkgbuild` takes the one `.deb` in
+   `.local/release/arch/in` and writes `.local/release/arch/build/PKGBUILD`
+   from [`tools/arch/PKGBUILD.in`](../tools/arch/PKGBUILD.in) with the Arch
+   version and the `.deb`'s name and SHA-256. The command takes no file
+   arguments, as `append-notice` does. makepkg builds the
+   package as an unprivileged user. The job then checks that:
+   - the package holds the `.deb`'s files, byte for byte and with the same
+     type, mode, owner, group and link target, and nothing else except
+     pacman's metadata (`options` turns off each makepkg option that changes
+     files, such as stripping);
+   - `pacman -U` installs it with its dependencies;
+   - every library that the four programs link belongs to a package that
+     `depends` lists, and `ldd` finds every library;
+   - the tray library that `persephone-ui` loads at run time is installed.
+
+   The package is x86_64 only, because Arch Linux supports only x86_64. Its
+   version drops the hyphen of a pre-release (`0.1.0-alpha.1` becomes
+   `0.1.0alpha.1`), which pacman sorts before `0.1.0`.
+6. macOS, in two jobs:
    1. `macos-build` (no secrets): builds both architectures, joins them with
       `lipo`, and bundles an unsigned `.app` with `cargo tauri bundle --no-sign`.
       The call worker is built once per architecture, each against its own
@@ -92,11 +122,12 @@ install directory and the web view's data folder.
       permissions, and `src-tauri/entitlements/call-worker.plist` beside it. On a dry run it also makes the unsigned `.dmg` and `.app.zip`.
    2. `macos-sign` (tag only, `release` environment): see
       [Apple Developer ID and notarization](#apple-developer-id-and-notarization).
-6. `checksums`: SBOM, `SHA256SUMS`, cosign and GPG signatures, attestations.
+7. `checksums`: SBOM, `SHA256SUMS`, cosign and GPG signatures, attestations.
    It downloads each platform's artifact by name and accepts only that
-   platform's file types.
-7. `release`: on a tag only, `gh release create --draft --prerelease`.
-8. `latest`: on a push to `main` only, see [Latest builds](#latest-builds).
+   platform's file types (`*.pkg.tar.zst` from `arch-package`). The Arch
+   package carries the x64 `.deb`'s notices, so `linux-x64` notices cover it.
+8. `release`: on a tag only, `gh release create --draft --prerelease`.
+9. `latest`: on a push to `main` only, see [Latest builds](#latest-builds).
    `release` and `latest` are the only jobs with `contents: write`.
 
 #### Which jobs have secrets
@@ -373,10 +404,13 @@ set of release notes names the fingerprint that signed it.
 
 ## Cutting a release
 
-1. Choose the version. Use `X.Y.Z` or a pre-release that ends in a number,
-   such as `0.1.0-alpha.1`. The MSI version carries that number as its fourth
-   field (`0.1.0.1`); Windows Installer ignores the fourth field when it
-   compares versions.
+1. Choose the version. Use `X.Y.Z` or a pre-release of one word and
+   dot-separated numbers, such as `0.1.0-alpha.1` or `0.1.0-rc.2`. The MSI
+   version carries the last number as its fourth field (`0.1.0.1`); Windows
+   Installer ignores the fourth field when it compares versions. The Arch
+   package drops the hyphen (`0.1.0alpha.1`). `version` and `check-tag`
+   refuse other pre-releases, such as `0.1.0-7`, because pacman would sort
+   them after `0.1.0` (ADR-0069).
 2. Set it everywhere and review the diff:
 
    ```sh
@@ -434,6 +468,13 @@ self-signed, Windows still warns, as described above.
 On macOS, `spctl --assess --type execute -vv /Applications/Persephone.app`
 should report a notarized Developer ID source.
 
+On Arch Linux, check the package against `SHA256SUMS` as above, then install
+it with `sudo pacman -U <file>`. The file name holds the Arch version, which
+has no hyphen before a pre-release, for example
+`persephone-0.1.0alpha.1-1-x86_64.pkg.tar.zst`. `latest` and dry-run files
+end in `-unsigned.pkg.tar.zst`. The package has no pacman signature; Arch's default `LocalFileSigLevel = Optional`
+installs it, so `SHA256SUMS` is the check.
+
 ## Limits
 
 - **No updater.** Tauri's updater is not enabled; users install each version
@@ -444,6 +485,12 @@ should report a notarized Developer ID source.
   publisher; SmartScreen warns. Users must rely on the signed `SHA256SUMS` and
   attestations.
 - **Linux packages** are not signed themselves; only `SHA256SUMS` is.
+- **Arch Linux package.** x86_64 only, with no Arch repository: users install
+  each new file by hand. `latest` builds keep the last release's version, so
+  pacman reinstalls them instead of upgrading. Its programs are built on
+  Ubuntu 22.04 and use Arch's newer libraries. The job checks the libraries on
+  the day of the build only, so a later Arch update can break an installed
+  package. The app has not been started on Arch Linux with a display.
 - **Build tools fetched during bundling.** The Tauri CLI downloads NSIS and
   WiX on Windows, and linuxdeploy, its plugins and AppRun on Linux, from
   GitHub. One linuxdeploy plugin is a moving `continuous` release. The
