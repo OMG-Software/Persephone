@@ -2033,7 +2033,7 @@ impl Call<'_> {
                 .moves_failed
                 .iter()
                 .any(|(_, code)| *code == FailureCode::AudioDevice);
-            return match run.moves_failed.first() {
+            match run.moves_failed.first() {
                 Some(_) if last => vec![FromWorker::DevicesSet {
                     failure: Some(if lost {
                         FailureCode::AudioDevice
@@ -2042,7 +2042,7 @@ impl Call<'_> {
                     }),
                 }],
                 _ => Vec::new(),
-            };
+            }
         }
         #[cfg(not(target_os = "linux"))]
         Vec::new()

@@ -579,10 +579,13 @@ unsafe extern "C" fn on_server_info(
     state.done.set(true);
 }
 
-/// A stream listing as `(index, owner process ID, device index)` triples.
+/// One stream as `(index, owner process ID, device index)`.
+type RawStream = (u32, Option<u32>, Option<u32>);
+
+/// A stream listing of [`RawStream`] entries.
 #[derive(Default)]
 struct StreamList {
-    entries: RefCell<Vec<(u32, Option<u32>, Option<u32>)>>,
+    entries: RefCell<Vec<RawStream>>,
     done: Cell<bool>,
     failed: Cell<bool>,
 }
@@ -672,7 +675,7 @@ unsafe extern "C" fn on_success(_context: *mut Context, success: c_int, userdata
 /// The own streams of one listing with the name of the device each is on.
 /// `indexes` and `names` are the device list of the same kind, in order.
 fn route_streams(
-    streams: Vec<(u32, Option<u32>, Option<u32>)>,
+    streams: Vec<RawStream>,
     own_process: u32,
     indexes: &[u32],
     names: &[(String, String)],
@@ -833,11 +836,7 @@ impl Inner {
 
     /// The sound server's streams of one kind as
     /// `(index, process ID, device index)`.
-    fn streams(
-        &self,
-        deadline: Instant,
-        kind: Kind,
-    ) -> Option<Vec<(u32, Option<u32>, Option<u32>)>> {
+    fn streams(&self, deadline: Instant, kind: Kind) -> Option<Vec<RawStream>> {
         let list = StreamList::default();
         let run = self.drive(
             deadline,
@@ -1526,10 +1525,10 @@ mod tests {
     impl Server for Fake {
         fn snapshot(&self, _deadline: Instant) -> Option<Snapshot> {
             self.reads.set(self.reads.get() + 1);
-            if self.reads.get() == 2 {
-                if let Some((kind, index, name)) = self.drift {
-                    self.place(kind, index, name);
-                }
+            if self.reads.get() == 2
+                && let Some((kind, index, name)) = self.drift
+            {
+                self.place(kind, index, name);
             }
             Some(Snapshot {
                 sources: vec!["mic-a".to_owned(), "mic-b".to_owned()],
