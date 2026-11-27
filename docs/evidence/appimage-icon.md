@@ -35,6 +35,18 @@ The shipped image (superblock at offset 944,632):
 The image's root holds `.DirIcon` → `Persephone.png` (256 × 256 PNG, 8,423
 bytes), `Persephone.desktop` with `Icon=persephone-ui`, and
 `usr/share/icons/hicolor/{32x32,128x128,256x256,256x256@2}/apps/persephone-ui.png`.
+`usr/share/applications/Persephone.desktop` is in the image too.
+
+The image's `apprun-hooks/linuxdeploy-plugin-gtk.sh` (read with `grep`):
+
+* line 14 keeps the runtime's `APPDIR`;
+* line 17, `export GDK_BACKEND=x11`, is commented out, so GTK uses Wayland
+  when the desktop has it;
+* line 18 exports `XDG_DATA_DIRS="$APPDIR/usr/share:/usr/share:$XDG_DATA_DIRS"`.
+
+So the core's own `XDG_DATA_DIRS` starts with a folder that holds a
+`Persephone.desktop` that the desktop does not read. ADR-0072 leaves folders
+inside `APPDIR` out of its check for that reason.
 
 The unpacked tree packed again with `mksquashfs <tree> <out> <options>
 -root-owned -noappend`, then unpacked with `unsquashfs -p 1` (one CPU) to
