@@ -243,7 +243,14 @@ The worker applies two stages itself.
 
 Amendment status: proposed, needs owner approval. On 27 November 2026 the
 owner accepted one part of it: the best-effort process ID match below, as a
-known security limitation (see Containment). The rest still needs approval.
+known security limitation (see Containment). The same day the owner asked to
+narrow that match in a follow-up of pull request 111: a server-checked owner
+from PipeWire's `pipewire.sec.pid` (option C) and, on servers without it, a
+refusal when the streams that claim the worker's process ID come from more
+than one client (option B). Option C cannot work for a PulseAudio client
+(see Containment). Told that, the owner chose option B on every server the
+same day ("Option 1: B everywhere"), and the follow-up implements that. The
+rest of this amendment still needs approval.
 
 Problem: the worker's sound target is fixed at launch (`PULSE_SOURCE` and
 `PULSE_SINK`), libwebrtc gives only `index:` IDs on Linux, and stage 2 allows
@@ -271,10 +278,24 @@ Decision:
   that job. A job is over only when its blocking thread has ended, also when
   its answer went out at the deadline, so two never run at once.
 * It moves only streams that name this process: those whose
-  `application.process.id` equals the worker's process ID. That match is
-  best effort, not proof of ownership: it is a security limitation that
-  the owner accepted (see Containment and Negative Consequences).
-  No stream that names
+  `application.process.id` equals the worker's process ID, and that all come
+  from one sound server client (the server's client index of each stream).
+  That match is best effort, not proof of ownership: it is a security
+  limitation that the owner accepted (see Containment and Negative
+  Consequences). A stream with no client is never moved. When the streams
+  that name the worker's process ID come from more than one client, or one
+  of them has no client, some claim is false and nothing shows which, so
+  nothing moves: a change answers `DeviceKept` before any move, and a try of
+  a waiting target counts each waiting kind as a refused move (the last try
+  drops it and reports it as below). The listing counts the client of every
+  such stream, also past its limit of 8 streams, so a flood of false claims
+  from one client never hides a second client. `DeviceKept` is the existing
+  code for "the change failed and the call runs on the devices it had",
+  which is true when nothing moved, and the core then keeps the accepted
+  choice. `AudioDevice` would say that the routes are not known and drop the
+  accepted choice; `Unsupported` would say that this system cannot change
+  devices, but the refusal ends when the false claim ends. The call
+  protocol stays at version 16. No stream that names
   another process is read for any other purpose or moved. Both choices are
   checked before either stream moves. A non-`pulse:` ID or a name the server
   lacks is `DeviceNotFound`. A "System default" whose call-start device the
@@ -312,20 +333,55 @@ trusts any client of the user. The worker never sends such a request: the
 code selects own streams by process ID. A compromised worker could move other
 streams already, through the socket that the call needs; this change does not
 widen that. The process ID is the stream's `application.process.id`, which the
-client that opened the stream sets itself; PulseAudio does not check it.
-Another client of the same user can name the worker's process ID, and its
-stream then moves with the worker's, to the device the user chose. That gives
-it nothing it lacks, because it can already move any stream itself. PulseAudio
-gives no server-checked owner for a stream, and a PipeWire-only check was not
-reviewed, so this is a known security limitation: the worker cannot tell
-its own streams from those of a client that copies its process ID. The
-owner accepted that best-effort match on 27 November 2026, because failing
-closed without a checked owner would remove device changes during a call on
-Linux. A stronger check is open: PipeWire's server sets
-`pipewire.sec.pid` on a client from its socket's credentials, and matching a
-stream's client by it was not reviewed or measured. A listing keeps only streams that name the
-worker's process ID, before its limit, so other programs' streams never push
-the worker's own out of it.
+client that opened the stream sets itself; the server does not check it.
+Another client of the same user can name the worker's process ID. Without a
+check of its own, its stream then moves with the worker's, to the device the
+user chose, and eight or more such streams fill the listing and push the
+worker's own out, so a change reports success while the call stays on its
+old devices. That gives the other client nothing it lacks, because it can
+already move any stream itself. The owner accepted that best-effort match on
+27 November 2026, because failing closed without a checked owner would remove
+device changes during a call on Linux.
+
+The one-client rule (follow-up of pull request 111) narrows that limit. The
+client index of a stream is the server's own: a client cannot open a stream
+under another client's index. libwebrtc's PulseAudio module opens its record
+and playback streams on one `pa_context`, so the worker's own streams come
+from one client. A copied process ID beside any stream of the worker now
+stops every move, also behind a flood of copies, so the copier's stream no
+longer moves to the user's device and a change no longer reports success
+while the call stays where it was. It is still not an ownership check, and
+one gap stays. The claims of both kinds are judged together, so a copied
+playback stream beside the worker's real record stream (or the other way
+round) stops every move. But when the worker has no real stream of either
+kind yet (for example before its microphone stream opens and while nobody
+else is in the call), the streams of one other client are one client's, and
+they move as the worker's: the change then reports success, and the worker's
+later streams open on the default devices, because the target no longer
+waits. A client that copies the process ID can also make every change fail
+with `DeviceKept`; it can already move the streams itself.
+
+The owner's first choice was a server-checked owner: PipeWire sets
+`pipewire.sec.pid` on each of its clients from the socket's credentials.
+That cannot work for a PulseAudio client. `pipewire-pulse` opens one
+PipeWire connection of its own for each PulseAudio client, so PipeWire takes
+`pipewire.sec.pid` from the socket of the `pipewire-pulse` process, and it
+refuses every client update of `pipewire.sec.*`. Every PulseAudio client,
+the worker included, therefore shows the process ID of `pipewire-pulse`, and
+a check by it would leave out the worker's own streams on every PipeWire
+system. A PulseAudio daemon gives no server-checked process ID, and a client
+can set any property there, `pipewire.sec.pid` included. These facts come
+from source reading (PipeWire 1.0.5 and `master`, PulseAudio 17.0) and one
+published `wpctl inspect` output on PipeWire 1.4.10 (KDE bug 516064); no
+live run confirmed them, as the project's Linux VM was unreachable; see
+[the device test evidence](../evidence/device-tests-linux-macos.md). A
+narrower form was considered and not built: use `pipewire.sec.pid` only when
+the worker's own `pulse::Session` client shows the worker's process ID in it,
+else the one-client rule. No server known on 27 November 2026 passes that
+check, so it would always fall back, and the owner chose the one-client rule
+on every server.
+A listing keeps only streams that name the worker's process ID, before its
+limit, so other programs' streams never push the worker's own out of it.
 
 Verification: unit tests cover the stream and name choice, the routes check,
 the commit rule and the rollback with a fake sound server. The session test
@@ -335,10 +391,19 @@ call: `given_a_call_session` starts the test binary as a child process that
 opens its own record and playback streams and calls `pulse::Session`
 directly, under both containment stages, and checks the moves of those
 existing streams from outside. It runs no call loop and connects to no SFU.
-The second test, `given_a_speaker_that_waits_for_its_stream`, applies stage 1
+The second test, `given_a_speaker_that_waits_for_its_stream`, applied stage 1
 only. Both passed once on Linux Mint 22.3 with a disposable PipeWire 1.0.5 and
-`pipewire-pulse` (27 November 2026). Still open: a change during a running
-call, a PulseAudio daemon, sound hardware and the native containment gate.
+`pipewire-pulse` (27 November 2026). The one-client rule changed the child
+to open both streams on one connection, as libwebrtc does, so the second test
+now applies stage 2 too, and its late playback stream opens under full
+containment. It also added `given_a_false_claim_of_the_process_id`: a `pacat`
+that copies the child's process ID stops a change (`DeviceKept`, nothing
+moves) until it ends. Unit tests with the fake sound server cover the rule
+in changes and in tries, and the flood of false claims. The changed session
+tests have not run: the Linux VM was unreachable on 27 November 2026, so the
+runs above certify only the earlier tests and the earlier rule. Still open:
+a change during a running call, a PulseAudio daemon, sound hardware and the
+native containment gate.
 The earlier contained sound tests show that the worker checks and opens
 devices at launch (`PULSE_SOURCE`, `PULSE_SINK`). See
 [the device test evidence](../evidence/device-tests-linux-macos.md) for both.
@@ -360,13 +425,17 @@ This amendment is not accepted until the owner approves it.
   missing from it is allowed.
 * **Linux (proposed sound amendment): the owner of a stream is not
   checked.** The worker picks its own streams by `application.process.id`,
-  which the client sets. A stream of another client of the same user that
-  copies the worker's process ID moves to the device that the user chose
-  during a call. This is a security limitation, not an ownership check. The
-  owner accepted it on 27 November 2026 instead of requiring a
-  server-checked owner (for example PipeWire's `pipewire.sec.pid`, not
-  reviewed) and failing closed without one, which would remove device
-  changes during a call on Linux.
+  which the client sets, and moves nothing when those streams come from more
+  than one sound server client. This is a security limitation, not an
+  ownership check: while the worker has no real stream of either kind yet,
+  a stream of one other client of the same user that copies the worker's
+  process ID moves to the device that the user chose, and the change reports
+  success; such a client can also make every change during a call fail. The
+  owner accepted the process ID match on 27 November 2026 instead of failing
+  closed, which would remove device changes during a call on Linux, and chose
+  the one-client rule on every server the same day. No sound server gives a
+  PulseAudio client a checked owner: PipeWire's `pipewire.sec.pid` names
+  `pipewire-pulse` for every one (source reading, not confirmed live).
 * Linux: calls need Linux 6.2 or newer with Landlock turned on.
 * Linux V4L2 path: the worker can open any camera node, and there is no
   desktop permission dialog.

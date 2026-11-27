@@ -13,11 +13,14 @@
 //! `trap` before the first change.
 //!
 //! The test binary starts itself as a child. The child plays the call
-//! worker: it opens its own record and playback streams, opens the
-//! [`Session`], applies the real containment (stage 1 and stage 2, so no
-//! new socket after the connection) and then moves its streams when the
-//! parent asks. The parent checks the result from outside with `pactl` and
-//! also keeps streams of other programs to show that they never move.
+//! worker: it opens its own record and playback streams on one connection,
+//! as libwebrtc does (one client, so the claims of its process ID are one
+//! client's), opens the [`Session`], applies the real containment (stage 1
+//! and stage 2, so no new socket after the connection) and then moves its
+//! streams when the parent asks. The parent checks the result from outside
+//! with `pactl` and also keeps streams of other programs to show that they
+//! never move, and one program that copies the child's process ID to show
+//! that such a false claim stops every move.
 //!
 //! Run the setup in a subshell, so the parent shell keeps its environment.
 //! `PULSE_RUNTIME_PATH` points the daemon, `pactl` and `pulseaudio --kill`
@@ -49,7 +52,7 @@
 //!   pactl set-default-sink persephone_main
 //!   pactl set-default-source persephone_mic_a
 //!   PERSEPHONE_TEST_OTHER_SINK=pulse:persephone_other PERSEPHONE_TEST_OTHER_SOURCE=pulse:persephone_mic_b \
-//!     cargo test --locked -p persephone-call-worker -- --ignored --exact pulse_session_test::given_a_call_session
+//!     cargo test --locked -p persephone-call-worker -- --ignored --test-threads=1 pulse_session_test::given_a
 //! )
 //! ```
 //!
@@ -60,6 +63,7 @@
 use std::ffi::{c_char, c_int, c_void};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 use crate::pulse::{Session, library, symbol};
 
@@ -73,52 +77,201 @@ struct SampleSpec {
     channels: u8,
 }
 
-type SimpleNew = unsafe extern "C" fn(
-    *const c_char,
-    *const c_char,
-    c_int,
-    *const c_char,
-    *const c_char,
-    *const SampleSpec,
-    *const c_void,
-    *const c_void,
-    *mut c_int,
-) -> *mut c_void;
+/// Which stream [`Connection::open`] opens.
+#[derive(Clone, Copy)]
+enum Direction {
+    Playback,
+    Record,
+}
 
-/// Opens one `pa_simple` stream (1 playback, 2 record) in this process.
-fn open_stream(direction: c_int) -> *mut c_void {
-    // SAFETY: a fixed library name; the handle is never closed.
-    let handle = unsafe {
-        libc::dlopen(
-            c"libpulse-simple.so.0".as_ptr(),
-            libc::RTLD_NOW | libc::RTLD_LOCAL,
-        )
-    };
-    assert!(!handle.is_null(), "libpulse-simple.so.0");
-    // SAFETY: the C signature of pa_simple_new.
-    let new: SimpleNew = unsafe { symbol(handle, c"pa_simple_new").expect("pa_simple_new") };
-    let spec = SampleSpec {
-        format: 3, // PA_SAMPLE_S16LE
-        rate: 48_000,
-        channels: 1,
-    };
-    let mut error = 0;
-    // SAFETY: valid C strings and a valid spec; null for the defaults.
-    let stream = unsafe {
-        new(
-            std::ptr::null(),
-            c"Persephone session test".as_ptr(),
-            direction,
-            std::ptr::null(),
-            c"test".as_ptr(),
-            &spec,
-            std::ptr::null(),
-            std::ptr::null(),
-            &mut error,
-        )
-    };
-    assert!(!stream.is_null(), "pa_simple_new failed: {error}");
-    stream
+// pa_context_state_t and pa_stream_state_t.
+const CONTEXT_READY: c_int = 4;
+const CONTEXT_FAILED: c_int = 5;
+const STREAM_READY: c_int = 2;
+const STREAM_FAILED: c_int = 3;
+// pa_context_flags_t: PA_CONTEXT_NOAUTOSPAWN.
+const NO_AUTOSPAWN: c_int = 1;
+
+/// The libpulse functions that the child uses for its streams.
+struct Functions {
+    lock: unsafe extern "C" fn(*mut c_void),
+    unlock: unsafe extern "C" fn(*mut c_void),
+    context_state: unsafe extern "C" fn(*const c_void) -> c_int,
+    stream_new: unsafe extern "C" fn(
+        *mut c_void,
+        *const c_char,
+        *const SampleSpec,
+        *const c_void,
+    ) -> *mut c_void,
+    connect_playback: unsafe extern "C" fn(
+        *mut c_void,
+        *const c_char,
+        *const c_void,
+        c_int,
+        *const c_void,
+        *mut c_void,
+    ) -> c_int,
+    connect_record: unsafe extern "C" fn(*mut c_void, *const c_char, *const c_void, c_int) -> c_int,
+    stream_state: unsafe extern "C" fn(*const c_void) -> c_int,
+}
+
+/// One sound server connection of this process for its streams, as
+/// libwebrtc keeps one (`pa_threaded_mainloop`, one `pa_context`): every
+/// stream on it has the same client index. It stays open until the child
+/// ends.
+struct Connection {
+    functions: Functions,
+    mainloop: *mut c_void,
+    context: *mut c_void,
+}
+
+impl Connection {
+    /// Connects to the sound server and waits until the connection is ready.
+    fn connect() -> Self {
+        let handle = library().expect("libpulse.so.0");
+        // SAFETY: each type is the C signature from pulse/*.h.
+        let (new, get_api, start, context_new, context_connect) = unsafe {
+            (
+                symbol::<unsafe extern "C" fn() -> *mut c_void>(
+                    handle,
+                    c"pa_threaded_mainloop_new",
+                )
+                .unwrap(),
+                symbol::<unsafe extern "C" fn(*mut c_void) -> *mut c_void>(
+                    handle,
+                    c"pa_threaded_mainloop_get_api",
+                )
+                .unwrap(),
+                symbol::<unsafe extern "C" fn(*mut c_void) -> c_int>(
+                    handle,
+                    c"pa_threaded_mainloop_start",
+                )
+                .unwrap(),
+                symbol::<unsafe extern "C" fn(*mut c_void, *const c_char) -> *mut c_void>(
+                    handle,
+                    c"pa_context_new",
+                )
+                .unwrap(),
+                symbol::<
+                    unsafe extern "C" fn(*mut c_void, *const c_char, c_int, *const c_void) -> c_int,
+                >(handle, c"pa_context_connect")
+                .unwrap(),
+            )
+        };
+        // SAFETY: as above.
+        let functions = unsafe {
+            Functions {
+                lock: symbol(handle, c"pa_threaded_mainloop_lock").unwrap(),
+                unlock: symbol(handle, c"pa_threaded_mainloop_unlock").unwrap(),
+                context_state: symbol(handle, c"pa_context_get_state").unwrap(),
+                stream_new: symbol(handle, c"pa_stream_new").unwrap(),
+                connect_playback: symbol(handle, c"pa_stream_connect_playback").unwrap(),
+                connect_record: symbol(handle, c"pa_stream_connect_record").unwrap(),
+                stream_state: symbol(handle, c"pa_stream_get_state").unwrap(),
+            }
+        };
+        // SAFETY: plain constructor.
+        let mainloop = unsafe { new() };
+        assert!(!mainloop.is_null(), "pa_threaded_mainloop_new");
+        // SAFETY: the main loop is live and not started yet, so this thread
+        // may use it without the lock; the name is a C string.
+        let context =
+            unsafe { context_new(get_api(mainloop), c"Persephone session test".as_ptr()) };
+        assert!(!context.is_null(), "pa_context_new");
+        // SAFETY: as above; no server name, so the environment chooses it.
+        let connected =
+            unsafe { context_connect(context, std::ptr::null(), NO_AUTOSPAWN, std::ptr::null()) };
+        assert!(connected >= 0, "pa_context_connect");
+        // SAFETY: the main loop is live.
+        assert!(
+            unsafe { start(mainloop) } >= 0,
+            "pa_threaded_mainloop_start"
+        );
+        let connection = Self {
+            functions,
+            mainloop,
+            context,
+        };
+        connection.wait_for("the connection", || {
+            // SAFETY: the context is live; the caller holds the lock.
+            match unsafe { (connection.functions.context_state)(connection.context) } {
+                CONTEXT_READY => Some(true),
+                state if state >= CONTEXT_FAILED => Some(false),
+                _ => None,
+            }
+        });
+        connection
+    }
+
+    /// Runs `state` under the main loop's lock until it gives an answer, at
+    /// most 3 s. It must give `Some(true)` (ready).
+    fn wait_for(&self, what: &str, state: impl Fn() -> Option<bool>) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            // SAFETY: the main loop is live and started.
+            unsafe { (self.functions.lock)(self.mainloop) };
+            let answer = state();
+            // SAFETY: as above; this thread holds the lock.
+            unsafe { (self.functions.unlock)(self.mainloop) };
+            match answer {
+                Some(ready) => {
+                    assert!(ready, "{what} failed");
+                    return;
+                }
+                None => assert!(Instant::now() < deadline, "{what} timed out"),
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Opens one stream on the server's default device and waits until it
+    /// is ready. It plays or records nothing, and stays until the child
+    /// ends.
+    fn open(&self, direction: Direction) {
+        let spec = SampleSpec {
+            format: 3, // PA_SAMPLE_S16LE
+            rate: 48_000,
+            channels: 1,
+        };
+        let f = &self.functions;
+        // SAFETY: the main loop is live and started.
+        unsafe { (f.lock)(self.mainloop) };
+        // SAFETY: the context is ready and this thread holds the lock; the
+        // name and spec are valid, and null asks for the defaults.
+        let stream =
+            unsafe { (f.stream_new)(self.context, c"test".as_ptr(), &spec, std::ptr::null()) };
+        let connected = !stream.is_null() && {
+            // SAFETY: as above; null device, attributes and volume are the
+            // defaults, and no flags.
+            let result = unsafe {
+                match direction {
+                    Direction::Playback => (f.connect_playback)(
+                        stream,
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        0,
+                        std::ptr::null(),
+                        std::ptr::null_mut(),
+                    ),
+                    Direction::Record => {
+                        (f.connect_record)(stream, std::ptr::null(), std::ptr::null(), 0)
+                    }
+                }
+            };
+            result >= 0
+        };
+        // SAFETY: this thread holds the lock.
+        unsafe { (f.unlock)(self.mainloop) };
+        assert!(connected, "the stream does not connect");
+        self.wait_for("the stream", || {
+            // SAFETY: the stream is live; the caller holds the lock.
+            match unsafe { (f.stream_state)(stream) } {
+                STREAM_READY => Some(true),
+                state if state >= STREAM_FAILED => Some(false),
+                _ => None,
+            }
+        });
+    }
 }
 
 /// The child: one `SWITCH <microphone|-> <speaker|->` line in, one `OK` or
@@ -129,8 +282,9 @@ fn the_call_worker_side() {
     let Some(mode) = std::env::var_os(CHILD_FLAG) else {
         return;
     };
-    // "late": no playback stream yet (nobody else is in the call), and only
-    // stage 1, because a stream opened later needs a new socket.
+    // "late": no playback stream yet (nobody else is in the call). It opens
+    // later on the same connection, under stage 2, as libwebrtc's does when
+    // someone joins: a new stream needs no new socket.
     let late = mode == "late";
     // The same order as the worker: stage 1 first (before any input), then
     // the sound server connections, then stage 2.
@@ -139,13 +293,15 @@ fn the_call_worker_side() {
         libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
     }
     assert_eq!(crate::containment::missing_controls(), 0, "stage 1");
-    let _record = open_stream(2);
-    let mut _playback = (!late).then(|| open_stream(1));
+    // Both streams on one connection, as libwebrtc opens them.
+    let streams = Connection::connect();
+    streams.open(Direction::Record);
+    if !late {
+        streams.open(Direction::Playback);
+    }
     assert!(library().is_some());
     let session = Session::open().expect("the session opens");
-    if !late {
-        assert!(crate::containment::apply_stage2(), "stage 2");
-    }
+    assert!(crate::containment::apply_stage2(), "stage 2");
     let mut out = std::io::stdout();
     writeln!(out, "READY").unwrap();
     out.flush().unwrap();
@@ -154,14 +310,13 @@ fn the_call_worker_side() {
         let mut words = line.split_whitespace();
         match words.next() {
             Some("OPEN_PLAYBACK") => {
-                _playback = Some(open_stream(1));
+                streams.open(Direction::Playback);
                 writeln!(out, "OK").unwrap();
                 out.flush().unwrap();
                 continue;
             }
             Some("APPLY") => {
-                let run =
-                    session.apply_pending(std::time::Instant::now(), false, session.generation());
+                let run = session.apply_pending(Instant::now(), false, session.generation());
                 writeln!(
                     out,
                     "OK waiting={} failed={:?}",
@@ -176,11 +331,7 @@ fn the_call_worker_side() {
         }
         let choice = |word: Option<&str>| word.filter(|word| *word != "-").map(str::to_owned);
         let (recording, playout) = (choice(words.next()), choice(words.next()));
-        match session.switch(
-            std::time::Instant::now(),
-            recording.as_deref(),
-            playout.as_deref(),
-        ) {
+        match session.switch(Instant::now(), recording.as_deref(), playout.as_deref()) {
             Ok(_) => writeln!(out, "OK").unwrap(),
             Err(code) => writeln!(out, "ERR {code:?}").unwrap(),
         }
@@ -334,7 +485,7 @@ fn given_a_call_session() {
             .expect("parec"),
     );
     let (mut child, mut reader) = start_child("1");
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    std::thread::sleep(Duration::from_millis(300));
     let pid = child.id();
     let (playing_pid, recording_pid) = (playing.0.id(), recording.0.id());
 
@@ -393,7 +544,8 @@ fn given_a_call_session() {
 /// change is made, THEN it answers done and the stream does not exist; WHEN
 /// the stream opens (on the default speaker) and the waiting target is
 /// applied, THEN the stream moves to the chosen speaker. The microphone
-/// moves at once. Stage 1 only: a stream that opens later needs a socket.
+/// moves at once. The child runs under both stages, so the late stream
+/// opens under full containment, on the connection it already has.
 #[test]
 #[ignore = "needs a sound server with two speakers and two microphones, pactl"]
 fn given_a_speaker_that_waits_for_its_stream() {
@@ -408,7 +560,7 @@ fn given_a_speaker_that_waits_for_its_stream() {
     let source = other_source.strip_prefix("pulse:").unwrap();
     let default_sink = pactl(&["get-default-sink"]).trim().to_owned();
     let (mut child, mut reader) = start_child("late");
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    std::thread::sleep(Duration::from_millis(300));
     let pid = child.id();
     assert!(on("sink-inputs", pid).is_empty(), "no playback stream yet");
 
@@ -423,7 +575,7 @@ fn given_a_speaker_that_waits_for_its_stream() {
     assert_eq!(reply, "OK waiting=true failed=[]", "still no stream");
 
     assert_eq!(ask(&mut child, &mut reader, "OPEN_PLAYBACK"), "OK");
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    std::thread::sleep(Duration::from_millis(300));
     assert_eq!(on("sink-inputs", pid), [default_sink.as_str()]);
     let reply = ask(&mut child, &mut reader, "APPLY");
     assert_eq!(reply, "OK waiting=false failed=[]");
@@ -431,6 +583,60 @@ fn given_a_speaker_that_waits_for_its_stream() {
     // Nothing waits any more.
     let reply = ask(&mut child, &mut reader, "APPLY");
     assert_eq!(reply, "OK waiting=false failed=[]");
+
+    drop(child.stdin.take());
+    assert!(child.wait().unwrap().success());
+}
+
+/// GIVEN a child that plays the contained call worker and another program
+/// whose playback stream copies the child's process ID, WHEN the child is
+/// told to change devices, THEN nothing moves, neither the child's streams
+/// nor the other program's, and the answer is `DeviceKept`; WHEN the other
+/// program ends and the change is asked again, THEN the child's streams move.
+#[test]
+#[ignore = "needs a sound server with two speakers and two microphones, pactl and pacat"]
+fn given_a_false_claim_of_the_process_id() {
+    if std::env::var_os(CHILD_FLAG).is_some() {
+        return;
+    }
+    let other_sink =
+        std::env::var("PERSEPHONE_TEST_OTHER_SINK").expect("PERSEPHONE_TEST_OTHER_SINK");
+    let other_source =
+        std::env::var("PERSEPHONE_TEST_OTHER_SOURCE").expect("PERSEPHONE_TEST_OTHER_SOURCE");
+    let sink = other_sink.strip_prefix("pulse:").unwrap();
+    let source = other_source.strip_prefix("pulse:").unwrap();
+    let default_sink = pactl(&["get-default-sink"]).trim().to_owned();
+    let default_source = pactl(&["get-default-source"]).trim().to_owned();
+    let (mut child, mut reader) = start_child("1");
+    let pid = child.id();
+    // `--property` sets the client's and the stream's properties, so the
+    // stream names the child's process ID from another client.
+    let false_claim = Reaper(
+        command("pacat")
+            .args(["--playback", "--raw"])
+            .arg(format!("--property=application.process.id={pid}"))
+            .stdin(Stdio::from(std::fs::File::open("/dev/zero").unwrap()))
+            .spawn()
+            .expect("pacat"),
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    // Both playback streams name the child: its own and the false one.
+    let on_defaults = [default_sink.as_str(), default_sink.as_str()];
+    assert_eq!(on("sink-inputs", pid), on_defaults, "two playback claims");
+    assert_eq!(on("source-outputs", pid), [default_source.as_str()]);
+
+    let change = format!("SWITCH {other_source} {other_sink}");
+    let reply = ask(&mut child, &mut reader, &change);
+    assert_eq!(reply, "ERR DeviceKept", "a false claim stops the change");
+    assert_eq!(on("sink-inputs", pid), on_defaults, "no playback moved");
+    assert_eq!(on("source-outputs", pid), [default_source.as_str()]);
+
+    drop(false_claim);
+    std::thread::sleep(Duration::from_millis(300));
+    let reply = ask(&mut child, &mut reader, &change);
+    assert_eq!(reply, "OK", "one client's claims move");
+    assert_eq!(on("sink-inputs", pid), [sink]);
+    assert_eq!(on("source-outputs", pid), [source]);
 
     drop(child.stdin.take());
     assert!(child.wait().unwrap().success());

@@ -9,6 +9,9 @@
 //! A call also opens a [`Session`] before stage 2 and keeps it. It moves the
 //! call's own streams (this process ID only) to another microphone or
 //! speaker on that one connection, so it needs no new socket after stage 2.
+//! The process ID is the client's own word, so the streams that name it must
+//! also come from one sound server client ([`Claimants`]); else nothing
+//! moves.
 //!
 //! The library is opened with `dlopen` (as libwebrtc does), so the worker
 //! has no build or link dependency on it. A missing library, a failed
@@ -24,8 +27,8 @@ use std::time::{Duration, Instant};
 use persephone_call_protocol::{FailureCode, MAX_PULSE_NAME_BYTES};
 
 use crate::mapping::{
-    MAX_OWN_STREAMS, OwnStream, SoundKnown, SoundNow, SoundTarget, own_streams, plan_sound_move,
-    routes_kept,
+    Claimants, MAX_OWN_STREAMS, OwnStream, SoundKnown, SoundNow, SoundTarget, own_streams,
+    plan_sound_move, routes_kept,
 };
 
 /// The longest the whole query may take.
@@ -659,6 +662,9 @@ struct StreamList {
     /// This process's ID: only streams that name it are kept.
     own_process: u32,
     entries: RefCell<Vec<RawStream>>,
+    /// The clients of every stream that names this process, also of those
+    /// past the limit of `entries`.
+    claimants: Cell<Claimants>,
     done: Cell<bool>,
     failed: Cell<bool>,
 }
@@ -668,17 +674,19 @@ impl StreamList {
         Self {
             own_process,
             entries: RefCell::default(),
+            claimants: Cell::default(),
             done: Cell::default(),
             failed: Cell::default(),
         }
     }
 
-    /// Copies one stream, if it is this process's own (`keep`).
+    /// Copies one stream, if it names this process (`keep`). `client` and
+    /// `device` are the server's indexes of the stream's client and device.
     ///
     /// # Safety
     ///
     /// `proplist` is null or a property list that lives for the call.
-    unsafe fn add(&self, index: u32, device: u32, proplist: *const c_void) {
+    unsafe fn add(&self, index: u32, client: u32, device: u32, proplist: *const c_void) {
         let owner = session_api()
             .filter(|_| !proplist.is_null())
             .and_then(|api| {
@@ -688,14 +696,22 @@ impl StreamList {
                 (!value.is_null()).then(|| unsafe { CStr::from_ptr(value) }.to_bytes())
             })
             .and_then(parse_process_id);
-        self.keep(index, owner, (device != PA_INVALID_INDEX).then_some(device));
+        let known = |value: u32| (value != PA_INVALID_INDEX).then_some(value);
+        self.keep(index, owner, known(client), known(device));
     }
 
-    /// Keeps a stream of this process, at most [`MAX_OWN_STREAMS`]. A stream
-    /// of another program, or with no owner, is left out before the limit,
-    /// so other programs' streams never push the own ones out.
-    fn keep(&self, index: u32, owner: Option<u32>, device: Option<u32>) {
-        if owner != Some(self.own_process) || self.entries.borrow().len() >= MAX_OWN_STREAMS {
+    /// Keeps a stream that names this process, at most [`MAX_OWN_STREAMS`].
+    /// A stream of another program, or with no owner, is left out before
+    /// the limit, so other programs' streams never push the own ones out.
+    /// Every stream that names this process adds its client to `claimants`,
+    /// also past the limit, so a flood of false claims from one client never
+    /// hides a second client. A stream with no client is never kept.
+    fn keep(&self, index: u32, owner: Option<u32>, client: Option<u32>, device: Option<u32>) {
+        if owner != Some(self.own_process) {
+            return;
+        }
+        self.claimants.set(self.claimants.get().with(client));
+        if client.is_none() || self.entries.borrow().len() >= MAX_OWN_STREAMS {
             return;
         }
         self.entries.borrow_mut().push((index, owner, device));
@@ -722,7 +738,7 @@ unsafe extern "C" fn on_sink_input(
         // SAFETY: the library gives a valid pa_sink_input_info.
         let info = unsafe { &*info.cast::<SinkInputPrefix>() };
         // SAFETY: the property list lives for this call.
-        unsafe { list.add(info.index, info.sink, info.proplist) };
+        unsafe { list.add(info.index, info.client, info.sink, info.proplist) };
     }
 }
 
@@ -741,7 +757,7 @@ unsafe extern "C" fn on_source_output(
         // SAFETY: the library gives a valid pa_source_output_info.
         let info = unsafe { &*info.cast::<SourceOutputPrefix>() };
         // SAFETY: the property list lives for this call.
-        unsafe { list.add(info.index, info.source, info.proplist) };
+        unsafe { list.add(info.index, info.client, info.source, info.proplist) };
     }
 }
 
@@ -851,6 +867,9 @@ struct Snapshot {
     monitors: Vec<String>,
     recording: Vec<OwnStream>,
     playout: Vec<OwnStream>,
+    /// The clients of every stream of both kinds that names this process.
+    /// When they are unclear, the own streams above may be false claims.
+    claimants: Claimants,
 }
 
 impl Snapshot {
@@ -918,9 +937,9 @@ impl Inner {
         (run == Run::Done).then(|| (state.source.into_inner(), state.sink.into_inner()))
     }
 
-    /// The sound server's streams of one kind as
-    /// `(index, process ID, device index)`.
-    fn streams(&self, deadline: Instant, kind: Kind) -> Option<Vec<RawStream>> {
+    /// The sound server's streams of one kind that name this process, as
+    /// `(index, process ID, device index)`, and the clients of all of them.
+    fn streams(&self, deadline: Instant, kind: Kind) -> Option<(Vec<RawStream>, Claimants)> {
         let list = StreamList::new(std::process::id());
         let run = self.drive(
             deadline,
@@ -941,7 +960,8 @@ impl Inner {
             },
             || list.done.get(),
         );
-        (run == Run::Done && !list.failed.get()).then(|| list.entries.into_inner())
+        (run == Run::Done && !list.failed.get())
+            .then(|| (list.entries.into_inner(), list.claimants.get()))
     }
 
     /// The device lists, as the one-shot query reads them, on this context.
@@ -976,8 +996,8 @@ impl Inner {
 impl Server for Inner {
     fn snapshot(&self, deadline: Instant) -> Option<Snapshot> {
         let lists = self.lists(deadline)?;
-        let recording = self.streams(deadline, Kind::Recording)?;
-        let playout = self.streams(deadline, Kind::Playout)?;
+        let (recording, recording_claims) = self.streams(deadline, Kind::Recording)?;
+        let (playout, playout_claims) = self.streams(deadline, Kind::Playout)?;
         let own = std::process::id();
         // Monitors are known for routes, but never listed as choices.
         let recording = route_streams(recording, own, &lists.recording_devices());
@@ -989,6 +1009,7 @@ impl Server for Inner {
             monitors,
             sources: lists.sources.into_iter().map(|(name, _)| name).collect(),
             sinks: lists.sinks.into_iter().map(|(name, _)| name).collect(),
+            claimants: recording_claims.and(playout_claims),
         })
     }
 
@@ -1058,6 +1079,10 @@ struct Devices {
     /// current when it was scheduled, so a try that runs late never touches
     /// the targets of a newer change.
     generation: u64,
+    /// The last change or try found streams that name this process from
+    /// more than one client (or one with no client), so it moved nothing.
+    /// Only for the diagnostics note: the result codes carry the outcome.
+    unclear: bool,
 }
 
 /// The deadlines of one change. Forward moves must end by `forward`, so
@@ -1132,6 +1157,8 @@ pub struct Session {
     /// change to ask.
     waiting: AtomicBool,
     generation: AtomicU64,
+    /// [`Devices::unclear`] of the last job, for [`Session::claims_unclear`].
+    unclear: AtomicBool,
 }
 
 impl Session {
@@ -1178,6 +1205,7 @@ impl Session {
             devices: Mutex::new(Devices::default()),
             waiting: AtomicBool::new(false),
             generation: AtomicU64::new(0),
+            unclear: AtomicBool::new(false),
         })
     }
 
@@ -1192,6 +1220,14 @@ impl Session {
         self.generation.load(Ordering::Relaxed)
     }
 
+    /// Whether the last [`Session::switch`] or [`Session::apply_pending`]
+    /// moved nothing because streams that name this process came from more
+    /// than one client. Read it only after that call ended, for the
+    /// diagnostics note.
+    pub fn claims_unclear(&self) -> bool {
+        self.unclear.load(Ordering::Relaxed)
+    }
+
     /// Moves the call's own streams to the chosen microphone and speaker
     /// (ADR-0059). `started` is when the caller began the change; the
     /// deadlines count from it, so a task that starts late or waits for the
@@ -1202,16 +1238,19 @@ impl Session {
     /// waits for one and counts as done (`apply_pending` moves it later). A
     /// stream that cannot move stays where it was. `DeviceKept` when every
     /// move is undone and the server shows every own stream on its old
-    /// device, `AudioDevice` when not. Gives the generation of the accepted
-    /// change ([`Session::generation`]): the caller tries waiting targets
-    /// only for the change it was told worked, so the targets of a change
-    /// whose answer came too late never move a stream unasked.
+    /// device, `AudioDevice` when not. `DeviceKept` with no move at all when
+    /// the streams that name this process come from more than one client.
+    /// Gives the generation of the accepted change ([`Session::generation`]):
+    /// the caller tries waiting targets only for the change it was told
+    /// worked, so the targets of a change whose answer came too late never
+    /// move a stream unasked.
     pub fn switch(
         &self,
         started: Instant,
         recording: Option<&str>,
         playout: Option<&str>,
     ) -> Result<u64, FailureCode> {
+        self.unclear.store(false, Ordering::Relaxed);
         if !self.defaults_known {
             return Err(FailureCode::Unsupported);
         }
@@ -1235,9 +1274,12 @@ impl Session {
     /// stays for the next try, except when `last` is set (the last try of a
     /// series): then it is dropped, and the caller reports the failure. The
     /// last try also reports a kind whose routes it could not read. A try
+    /// that finds streams naming this process from more than one client
+    /// moves nothing, and each waiting kind counts as a refused move. A try
     /// for an older `generation` than the accepted change does nothing. Same
     /// start, bound and thread rule as [`Session::switch`].
     pub fn apply_pending(&self, started: Instant, last: bool, generation: u64) -> PendingRun {
+        self.unclear.store(false, Ordering::Relaxed);
         let deadlines = Deadlines::starting_at(started);
         let (Ok(inner), Ok(mut devices)) = (self.inner.lock(), self.devices.lock()) else {
             return PendingRun::default();
@@ -1254,6 +1296,7 @@ impl Session {
             Ordering::Relaxed,
         );
         self.generation.store(devices.generation, Ordering::Relaxed);
+        self.unclear.store(devices.unclear, Ordering::Relaxed);
     }
 }
 
@@ -1325,7 +1368,11 @@ fn undo(server: &impl Server, deadline: Instant, kind: Kind, touched: &[OwnStrea
 
 /// One change of microphone and speaker. The new targets are local: they
 /// replace `devices.pending` only when every immediate move worked, so a
-/// refused change leaves the earlier accepted state alone.
+/// refused change leaves the earlier accepted state alone. Streams that name
+/// this process from more than one client refuse the change before any move:
+/// `DeviceKept`, as nothing moved and the call runs on the devices it had.
+/// That check comes before `plan_sound_move`, so it wins over the plan's
+/// `DeviceNotFound` and `Unsupported`; `devices.unclear` records it.
 fn run_change(
     server: &impl Server,
     defaults: (Option<&str>, Option<&str>),
@@ -1333,9 +1380,14 @@ fn run_change(
     choice: (Option<&str>, Option<&str>),
     deadlines: Deadlines,
 ) -> Result<(), FailureCode> {
+    devices.unclear = false;
     let snapshot = server
         .snapshot(deadlines.read)
         .ok_or(FailureCode::AudioDevice)?;
+    if snapshot.claimants.unclear() {
+        devices.unclear = true;
+        return Err(FailureCode::DeviceKept);
+    }
     let source_names: Vec<&str> = snapshot.sources.iter().map(String::as_str).collect();
     let sink_names: Vec<&str> = snapshot.sinks.iter().map(String::as_str).collect();
     let monitor_names: Vec<&str> = snapshot.monitors.iter().map(String::as_str).collect();
@@ -1423,6 +1475,7 @@ fn run_pending(
     deadlines: Deadlines,
 ) -> PendingRun {
     let (last, generation) = try_of;
+    devices.unclear = false;
     let mut run = PendingRun {
         waiting: devices.pending.iter().any(Option::is_some),
         moves_failed: Vec::new(),
@@ -1448,6 +1501,19 @@ fn run_pending(
         run.waiting = devices.pending.iter().any(Option::is_some);
         return run;
     };
+    // Streams that name this process come from more than one client: some
+    // claim is false, and nothing shows which. Nothing moves, and each
+    // waiting kind counts as a refused move that left its routes alone.
+    if snapshot.claimants.unclear() {
+        devices.unclear = true;
+        for kind in KINDS {
+            if devices.pending[kind.slot()].is_some() {
+                failed_try(devices, &mut run, kind, true, last);
+            }
+        }
+        run.waiting = devices.pending.iter().any(Option::is_some);
+        return run;
+    }
     // First the forward moves of every kind, each under the forward
     // deadline, so the rollback of one kind never uses up the forward time
     // of the other. Each result is the streams that moved (or may have
@@ -1511,26 +1577,33 @@ fn run_pending(
             && now
                 .as_ref()
                 .is_some_and(|now| routes_kept(snapshot.streams(kind), now.streams(kind)));
-        if last {
-            // The routes that were read may already be split by an earlier
-            // try: the kind is then lost, whatever they show now. A route of
-            // the other kind that a try moved, or that an earlier try left
-            // split (a kind with no stream in this try keeps its mark), is
-            // not the call's old device either.
-            let other = 1 - slot;
-            let code = failure(
-                kept && !devices.lost[slot] && !devices.applied[other] && !devices.lost[other],
-            );
-            devices.pending[slot] = None;
-            devices.lost[slot] = false;
-            run.moves_failed.push((kind.label(), code));
-        } else {
-            devices.lost[slot] |= !kept;
-            run.moves_failed.push((kind.label(), failure(kept)));
-        }
+        failed_try(devices, &mut run, kind, kept, last);
     }
     run.waiting = devices.pending.iter().any(Option::is_some);
     run
+}
+
+/// Records a try whose target of `kind` did not move. `kept` is whether its
+/// routes are verified as before. An earlier try keeps the target and marks
+/// the kind lost when not kept; the last try drops it and reports it.
+fn failed_try(devices: &mut Devices, run: &mut PendingRun, kind: Kind, kept: bool, last: bool) {
+    let slot = kind.slot();
+    if last {
+        // The routes that were read may already be split by an earlier
+        // try: the kind is then lost, whatever they show now. A route of
+        // the other kind that a try moved, or that an earlier try left
+        // split (a kind with no stream in this try keeps its mark), is
+        // not the call's old device either.
+        let other = 1 - slot;
+        let code =
+            failure(kept && !devices.lost[slot] && !devices.applied[other] && !devices.lost[other]);
+        devices.pending[slot] = None;
+        devices.lost[slot] = false;
+        run.moves_failed.push((kind.label(), code));
+    } else {
+        devices.lost[slot] |= !kept;
+        run.moves_failed.push((kind.label(), failure(kept)));
+    }
 }
 
 #[cfg(test)]
@@ -1565,6 +1638,8 @@ mod tests {
         assert_eq!(offset_of!(SourceOutputPrefix, proplist), 208);
         assert_eq!(offset_of!(SinkInputPrefix, sink), 24);
         assert_eq!(offset_of!(SourceOutputPrefix, source), 24);
+        assert_eq!(offset_of!(SinkInputPrefix, client), 20);
+        assert_eq!(offset_of!(SourceOutputPrefix, client), 20);
     }
 
     #[test]
@@ -1586,28 +1661,62 @@ mod tests {
         // no owner and is not kept, so it is never picked as the call's own.
         let list = StreamList::new(7);
         // SAFETY: a null property list is allowed.
-        unsafe { list.add(5, PA_INVALID_INDEX, std::ptr::null()) };
+        unsafe { list.add(5, 3, PA_INVALID_INDEX, std::ptr::null()) };
         assert!(list.entries.into_inner().is_empty());
+        assert_eq!(list.claimants.get(), Claimants::None);
     }
 
     #[test]
     fn given_many_streams_of_other_programs_first_when_listed_then_the_own_ones_stay() {
-        // GIVEN thousands of other programs' streams and one with no owner
-        // before this process's streams, WHEN listed, THEN only own streams
-        // are kept, the first one with its device, at most MAX_OWN_STREAMS.
+        // GIVEN thousands of other programs' streams (other clients) and one
+        // with no owner before this process's streams (client 3), WHEN
+        // listed, THEN only own streams are kept, the first one with its
+        // device, at most MAX_OWN_STREAMS, and they are one client's: other
+        // programs' streams that do not name this process never count.
         let list = StreamList::new(7);
         for index in 0..5000 {
-            list.keep(index, Some(8), None);
+            list.keep(index, Some(8), Some(index % 50), None);
         }
-        list.keep(9000, None, None);
-        list.keep(9001, Some(7), Some(2));
+        list.keep(9000, None, Some(9), None);
+        list.keep(9001, Some(7), Some(3), Some(2));
         for index in 0..u32::try_from(MAX_OWN_STREAMS).unwrap() + 3 {
-            list.keep(10_000 + index, Some(7), None);
+            list.keep(10_000 + index, Some(7), Some(3), None);
         }
+        assert_eq!(list.claimants.get(), Claimants::One(3));
         let kept = list.entries.into_inner();
         assert_eq!(kept.len(), MAX_OWN_STREAMS);
         assert_eq!(kept[0], (9001, Some(7), Some(2)));
         assert!(kept.iter().all(|(_, owner, _)| *owner == Some(7)));
+    }
+
+    #[test]
+    fn given_a_flood_of_false_claims_before_the_own_stream_then_the_second_client_shows() {
+        // GIVEN more streams than MAX_OWN_STREAMS from client 5 that copy
+        // this process's ID, before the own stream from client 3, WHEN
+        // listed, THEN the flood fills the kept streams but cannot hide the
+        // second client: the claimants are unclear, so nothing will move.
+        let list = StreamList::new(7);
+        for index in 0..u32::try_from(MAX_OWN_STREAMS).unwrap() + 4 {
+            list.keep(100 + index, Some(7), Some(5), Some(1));
+        }
+        list.keep(9001, Some(7), Some(3), Some(2));
+        assert_eq!(list.claimants.get(), Claimants::Several);
+        let kept = list.entries.into_inner();
+        assert_eq!(kept.len(), MAX_OWN_STREAMS);
+        assert!(kept.iter().all(|(index, _, _)| *index != 9001));
+    }
+
+    #[test]
+    fn given_a_claim_from_no_client_then_it_is_not_kept_and_the_claim_is_unclear() {
+        // GIVEN a stream with no client (a module's) that names this process,
+        // WHEN listed, THEN it is never kept as an own stream, and its false
+        // claim makes the claimants unclear also beside the own stream.
+        let list = StreamList::new(7);
+        list.keep(4, Some(7), None, Some(1));
+        assert!(list.entries.borrow().is_empty());
+        assert_eq!(list.claimants.get(), Claimants::Several);
+        list.keep(5, Some(7), Some(3), Some(1));
+        assert_eq!(list.claimants.get(), Claimants::Several);
     }
 
     #[test]
@@ -1716,6 +1825,9 @@ mod tests {
         slow_reads: Vec<usize>,
         reads: Cell<usize>,
         sent: RefCell<Vec<(Kind, u32, String)>>,
+        /// The clients of the streams that name this process, as every read
+        /// shows them.
+        claimants: Claimants,
     }
 
     fn at(index: u32, device: &str) -> OwnStream {
@@ -1777,6 +1889,7 @@ mod tests {
                 monitors: vec!["spk-a.monitor".to_owned()],
                 recording: self.recording.borrow().clone(),
                 playout: self.playout.borrow().clone(),
+                claimants: self.claimants,
             })
         }
 
@@ -2501,5 +2614,182 @@ mod tests {
         );
         assert_eq!(routed, vec![at(5, "spk-a.monitor")]);
         assert_eq!(lists.sources.len(), 1);
+    }
+
+    #[test]
+    fn given_claims_from_two_clients_when_a_change_runs_then_nothing_moves_and_it_is_kept() {
+        // GIVEN own streams and an earlier waiting speaker, while streams
+        // from two clients name this process, WHEN a change asks for other
+        // devices, THEN no move is sent, the answer is DeviceKept (the call
+        // runs on the devices it had), the accepted state stays, and the
+        // devices record why, for the diagnostics note.
+        let server = Fake {
+            claimants: Claimants::Several,
+            ..Fake::with(vec![at(1, "mic-a")], vec![at(2, "spk-a")])
+        };
+        let mut devices = Devices {
+            pending: [None, Some("spk-b".to_owned())],
+            generation: 4,
+            ..Devices::default()
+        };
+        let result = run_change(
+            &server,
+            DEFAULTS,
+            &mut devices,
+            (Some("pulse:mic-b"), Some("pulse:spk-b")),
+            deadlines(),
+        );
+        assert_eq!(result, Err(FailureCode::DeviceKept));
+        assert!(server.sent.borrow().is_empty());
+        assert_eq!(server.reads.get(), 1);
+        assert_eq!(server.route(Kind::Recording, 1).as_deref(), Some("mic-a"));
+        assert_eq!(server.route(Kind::Playout, 2).as_deref(), Some("spk-a"));
+        assert_eq!(devices.pending, [None, Some("spk-b".to_owned())]);
+        assert_eq!(devices.generation, 4);
+        assert!(devices.unclear);
+    }
+
+    #[test]
+    fn given_claims_from_one_client_when_a_change_runs_then_the_streams_move_as_before() {
+        // GIVEN own streams whose claims all come from client 4, and an
+        // earlier job that found unclear claims, WHEN a change asks for
+        // other devices, THEN both streams move, the change is committed and
+        // the earlier mark is gone.
+        let server = Fake {
+            claimants: Claimants::One(4),
+            ..Fake::with(vec![at(1, "mic-a")], vec![at(2, "spk-a")])
+        };
+        let mut devices = Devices {
+            unclear: true,
+            ..Devices::default()
+        };
+        let result = run_change(
+            &server,
+            DEFAULTS,
+            &mut devices,
+            (Some("pulse:mic-b"), Some("pulse:spk-b")),
+            deadlines(),
+        );
+        assert_eq!(result, Ok(()));
+        assert_eq!(server.route(Kind::Recording, 1).as_deref(), Some("mic-b"));
+        assert_eq!(server.route(Kind::Playout, 2).as_deref(), Some("spk-b"));
+        assert_eq!(devices.generation, 1);
+        assert!(!devices.unclear);
+    }
+
+    #[test]
+    fn given_claims_from_two_clients_when_waiting_targets_are_tried_then_nothing_moves() {
+        // GIVEN waiting targets of both kinds and streams from two clients
+        // that name this process, WHEN a try that is not the last runs, THEN
+        // no move is sent, both targets stay and each kind is noted as kept;
+        // WHEN the last try runs, THEN still nothing moves, both targets are
+        // dropped and each is reported as DeviceKept.
+        let server = Fake {
+            claimants: Claimants::Several,
+            ..Fake::with(vec![at(1, "mic-a")], vec![at(2, "spk-a")])
+        };
+        let mut devices = Devices {
+            pending: [Some("mic-b".to_owned()), Some("spk-b".to_owned())],
+            ..Devices::default()
+        };
+        let kept = vec![
+            ("microphone", FailureCode::DeviceKept),
+            ("speaker", FailureCode::DeviceKept),
+        ];
+        let early = run_pending(&server, &mut devices, (false, 0), deadlines());
+        assert_eq!(
+            early,
+            PendingRun {
+                waiting: true,
+                moves_failed: kept.clone(),
+            }
+        );
+        assert_eq!(devices.lost, [false, false]);
+        assert!(devices.unclear);
+        let last = run_pending(&server, &mut devices, (true, 0), deadlines());
+        assert_eq!(
+            last,
+            PendingRun {
+                waiting: false,
+                moves_failed: kept,
+            }
+        );
+        assert!(server.sent.borrow().is_empty());
+        assert_eq!(devices.pending, [None, None]);
+        assert_eq!(server.route(Kind::Recording, 1).as_deref(), Some("mic-a"));
+        assert_eq!(server.route(Kind::Playout, 2).as_deref(), Some("spk-a"));
+    }
+
+    #[test]
+    fn given_one_kind_moved_by_a_try_when_claims_turn_unclear_then_the_last_try_is_audio_device() {
+        // GIVEN waiting targets of both kinds, an earlier try that moved the
+        // microphone and failed the speaker, WHEN streams of a second client
+        // then name this process and the last try runs, THEN nothing moves
+        // and the speaker is AudioDevice: one route of the change moved, so
+        // the call does not run on the devices it had.
+        let mut server = Fake {
+            refuse: vec![(2, "spk-b")],
+            ..Fake::with(vec![at(1, "mic-a")], vec![at(2, "spk-a")])
+        };
+        let mut devices = Devices {
+            pending: [Some("mic-b".to_owned()), Some("spk-b".to_owned())],
+            ..Devices::default()
+        };
+        let early = run_pending(&server, &mut devices, (false, 0), deadlines());
+        assert_eq!(
+            early.moves_failed,
+            vec![("speaker", FailureCode::DeviceKept)]
+        );
+        assert!(devices.applied[Kind::Recording.slot()]);
+        let sent = server.sent.borrow().len();
+        server.claimants = Claimants::Several;
+        let last = run_pending(&server, &mut devices, (true, 0), deadlines());
+        assert_eq!(
+            last,
+            PendingRun {
+                waiting: false,
+                moves_failed: vec![("speaker", FailureCode::AudioDevice)],
+            }
+        );
+        assert_eq!(server.sent.borrow().len(), sent);
+        assert_eq!(server.route(Kind::Playout, 2).as_deref(), Some("spk-a"));
+    }
+
+    #[test]
+    fn given_unclear_claims_and_a_waiting_speaker_with_no_stream_then_the_last_try_drops_it() {
+        // GIVEN a waiting speaker, no playback stream yet, a recording
+        // stream, and streams from two clients that name this process, WHEN
+        // a try that is not the last runs, THEN the speaker counts as a
+        // refused move that kept its routes and keeps waiting (without the
+        // unclear claims it would only wait); WHEN the last try runs, THEN
+        // the target is dropped and reported as DeviceKept. Nothing moves.
+        let server = Fake {
+            claimants: Claimants::Several,
+            ..Fake::with(vec![at(1, "mic-a")], vec![])
+        };
+        let mut devices = Devices {
+            pending: [None, Some("spk-b".to_owned())],
+            ..Devices::default()
+        };
+        let kept = vec![("speaker", FailureCode::DeviceKept)];
+        let early = run_pending(&server, &mut devices, (false, 0), deadlines());
+        assert_eq!(
+            early,
+            PendingRun {
+                waiting: true,
+                moves_failed: kept.clone(),
+            }
+        );
+        assert_eq!(devices.pending, [None, Some("spk-b".to_owned())]);
+        let last = run_pending(&server, &mut devices, (true, 0), deadlines());
+        assert_eq!(
+            last,
+            PendingRun {
+                waiting: false,
+                moves_failed: kept,
+            }
+        );
+        assert_eq!(devices.pending, [None, None]);
+        assert!(server.sent.borrow().is_empty());
     }
 }
