@@ -95,6 +95,10 @@ keeps its size until it restarts.
 * The core restarts a camera that is on or starting when the quality or the
   camera device changes. It uses the user's own camera commands, `set_camera`
   off and then on, so every portal request, gate and request number applies.
+  The restart reserves queue room for both commands first. Without room it
+  queues nothing, the camera goes on as it was, the restart stays owed for
+  the next quality or device request of the same call, and the core answers
+  `limit_exceeded` after it saved the value.
   The call task sends the new device choice and quality to the worker before
   the camera-on. A joining call has no camera to restart. A camera that is off
   stays off.

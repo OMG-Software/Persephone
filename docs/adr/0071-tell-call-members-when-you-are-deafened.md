@@ -58,8 +58,12 @@ that we need, and does not touch the member state event.
 * The core sends it after the worker answers `Deafened` and the state
   differs from the one last shared. It also sends the current state, deafened
   or not, to each member device that joins, and to the members that are
-  already there when this device starts the call. A failed send is not fatal and is not retried;
-  the next change or the next new member sends the state again.
+  already there when this device starts the call. The call loop only queues the
+  hint: a sender task of the call sends it, so a slow homeserver never delays
+  the call's commands. The task merges waiting hints (the newest content, the
+  recipients together, at most 32), and the call's end joins it. A failed send
+  is not fatal and is not retried; the next change or the next new member
+  sends the state again.
 * The core takes a message only when it is Olm-encrypted, from a device that
   its owner signed, with an unchanged identity, with content that names that
   device, and from a current member of the running call. A message that
