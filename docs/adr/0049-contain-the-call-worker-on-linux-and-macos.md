@@ -270,7 +270,9 @@ Decision:
   its answer went out at the deadline, so two never run at once.
 * It moves only streams that name this process: those whose
   `application.process.id` equals the worker's process ID. That match is
-  best effort, not proof of ownership (see Containment). No stream that names
+  best effort, not proof of ownership: it is a security limitation that
+  needs the owner's approval (see Containment and Negative Consequences).
+  No stream that names
   another process is read for any other purpose or moved. Both choices are
   checked before either stream moves. A non-`pulse:` ID or a name the server
   lacks is `DeviceNotFound`. A "System default" whose call-start device the
@@ -313,7 +315,9 @@ Another client of the same user can name the worker's process ID, and its
 stream then moves with the worker's, to the device the user chose. That gives
 it nothing it lacks, because it can already move any stream itself. PulseAudio
 gives no server-checked owner for a stream, and a PipeWire-only check was not
-reviewed, so this is a known limit. This amendment proposes to accept that
+reviewed, so this is a known security limitation: the worker cannot tell
+its own streams from those of a client that copies its process ID. This
+amendment proposes to accept that
 best-effort match: failing closed without a checked owner would remove device
 changes during a call on Linux. It needs the owner's approval, as the rest of
 the amendment does. A stronger check is open: PipeWire's server sets
@@ -353,6 +357,14 @@ This amendment is not accepted until the owner approves it.
   initialiser from connecting elsewhere.
 * Linux: the deny list is weaker than an allow list; a system call that is
   missing from it is allowed.
+* **Linux (proposed sound amendment): the owner of a stream is not
+  checked.** The worker picks its own streams by `application.process.id`,
+  which the client sets. A stream of another client of the same user that
+  copies the worker's process ID moves to the device that the user chose
+  during a call. This is a security limitation, not an ownership check. The
+  owner must accept it, or require a server-checked owner (for example
+  PipeWire's `pipewire.sec.pid`, not reviewed) and fail closed without one,
+  which removes device changes during a call on Linux.
 * Linux: calls need Linux 6.2 or newer with Landlock turned on.
 * Linux V4L2 path: the worker can open any camera node, and there is no
   desktop permission dialog.
