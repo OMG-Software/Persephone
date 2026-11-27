@@ -58,13 +58,15 @@ pub fn outgoing_content(
 static LAST_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// A counter of at least `floor` and above every counter that `last` holds,
-/// which it then holds.
-fn take_seq(last: &AtomicU64, floor: u64) -> u64 {
+/// which it then holds. `None` when no counter is above it (`u64::MAX` was
+/// given): a counter never repeats, so the caller sends no more hints. From
+/// the clock's milliseconds that takes more than 10^19 changes.
+fn take_seq(last: &AtomicU64, floor: u64) -> Option<u64> {
     let mut previous = last.load(Ordering::SeqCst);
     loop {
-        let taken = floor.max(previous.saturating_add(1));
+        let taken = floor.max(previous.checked_add(1)?);
         match last.compare_exchange_weak(previous, taken, Ordering::SeqCst, Ordering::SeqCst) {
-            Ok(_) => return taken,
+            Ok(_) => return Some(taken),
             Err(now) => previous = now,
         }
     }
@@ -81,14 +83,16 @@ fn take_seq(last: &AtomicU64, floor: u64) -> u64 {
 /// ahead of the clock only by their changes; a clock set back between the
 /// runs can leave an old note in place (ADR-0071). It shows members roughly
 /// when the state changed, which they can already see from the call.
-pub fn first_seq(now_ms: u64) -> u64 {
+/// `None` when no counter is left (`take_seq`).
+pub fn first_seq(now_ms: u64) -> Option<u64> {
     take_seq(&LAST_SEQ, now_ms)
 }
 
 /// The counter of the next change in a call whose counter is `current`:
-/// above it and above every counter that this process gave.
-pub fn next_seq(current: u64) -> u64 {
-    take_seq(&LAST_SEQ, current.saturating_add(1))
+/// above it and above every counter that this process gave. `None` when no
+/// counter is left (`take_seq`).
+pub fn next_seq(current: u64) -> Option<u64> {
+    take_seq(&LAST_SEQ, current.checked_add(1)?)
 }
 
 /// A checked deafened message.
@@ -341,8 +345,8 @@ mod tests {
     #[test]
     fn given_a_later_call_then_its_counter_is_above_the_earlier_one() {
         let last = AtomicU64::new(0);
-        let earlier = take_seq(&last, 1_000_000) + 500;
-        let later = take_seq(&last, 1_060_000);
+        let earlier = take_seq(&last, 1_000_000).unwrap() + 500;
+        let later = take_seq(&last, 1_060_000).unwrap();
         assert_eq!(later, 1_060_000);
         assert!(later > earlier);
         let old = Note {
@@ -365,13 +369,13 @@ mod tests {
     #[test]
     fn given_a_quick_rejoin_then_the_counter_still_rises() {
         let last = AtomicU64::new(0);
-        let mut seq = take_seq(&last, 1_000_000);
+        let mut seq = take_seq(&last, 1_000_000).unwrap();
         assert_eq!(seq, 1_000_000);
         for _ in 0..5 {
-            seq = take_seq(&last, seq + 1);
+            seq = take_seq(&last, seq + 1).unwrap();
         }
         assert_eq!(seq, 1_000_005);
-        let rejoin = take_seq(&last, 1_000_002);
+        let rejoin = take_seq(&last, 1_000_002).unwrap();
         assert_eq!(rejoin, 1_000_006);
         let old = Note {
             deafened: true,
@@ -383,19 +387,31 @@ mod tests {
             seq: rejoin,
         };
         assert_eq!(take(Some(old), &message).map(|n| n.deafened), Some(false));
-        assert_eq!(take_seq(&last, 1_060_000), 1_060_000);
+        assert_eq!(take_seq(&last, 1_060_000), Some(1_060_000));
+    }
+
+    /// GIVEN a counter one below `u64::MAX` WHEN counters are taken THEN
+    /// `u64::MAX` is given once and then none, so no hint goes with a
+    /// counter that a receiver already has.
+    #[test]
+    fn given_the_last_counter_then_none_repeats() {
+        let last = AtomicU64::new(u64::MAX - 1);
+        assert_eq!(take_seq(&last, 0), Some(u64::MAX));
+        assert_eq!(take_seq(&last, 0), None);
+        assert_eq!(take_seq(&last, u64::MAX), None);
+        assert_eq!(next_seq(u64::MAX), None);
     }
 
     /// GIVEN the process's counter WHEN calls start and change, also at the
     /// same clock reading THEN every counter is above the one before.
     #[test]
     fn given_the_process_counter_then_each_counter_is_higher() {
-        let first = first_seq(1);
-        let change = next_seq(first);
-        let again = first_seq(1);
+        let first = first_seq(1).unwrap();
+        let change = next_seq(first).unwrap();
+        let again = first_seq(1).unwrap();
         assert!(change > first);
         assert!(again > change);
-        assert!(next_seq(0) > again);
+        assert!(next_seq(0).unwrap() > again);
     }
 
     /// GIVEN a known counter WHEN a message with a lower or equal counter comes THEN it is stale.

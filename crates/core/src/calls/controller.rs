@@ -3070,7 +3070,8 @@ struct Call {
     own_identity: String,
     own_device: OwnedDeviceId,
     /// The counter of the own deafened messages in this call (ADR-0071).
-    deafen_seq: u64,
+    /// `None` once no counter is left: no hint goes then.
+    deafen_seq: Option<u64>,
     /// The deafen state that the other members were last sent.
     deafen_shared: bool,
     /// Sends the deafen hints off the call loop (ADR-0071). `finish` joins
@@ -5297,6 +5298,11 @@ impl Call {
     /// not fatal and is not retried: the next change or a new member sends
     /// the state again.
     fn queue_deafen(&mut self, recipients: Vec<(OwnedUserId, OwnedDeviceId)>) {
+        // No counter is left once one reached `u64::MAX`: a repeated one
+        // would be ignored, so none is sent.
+        let Some(seq) = self.deafen_seq else {
+            return;
+        };
         // Content over the bound (a very long device ID) would be refused by
         // every receiver, so none is sent.
         let Some(content) = deafen::outgoing_content(
@@ -5304,7 +5310,7 @@ impl Call {
             &self.own_identity,
             &self.own_device,
             self.deafen_shared,
-            self.deafen_seq,
+            seq,
         ) else {
             return;
         };
@@ -5319,7 +5325,7 @@ impl Call {
             return;
         }
         self.deafen_shared = self.view.deafened;
-        self.deafen_seq = deafen::next_seq(self.deafen_seq);
+        self.deafen_seq = self.deafen_seq.and_then(deafen::next_seq);
         let all = self
             .view
             .members
@@ -8225,7 +8231,7 @@ mod tests {
             state_key: "key".to_owned(),
             own_identity: "@a:example.org:A".to_owned(),
             own_device: owned_device_id!("A"),
-            deafen_seq: 0,
+            deafen_seq: Some(0),
             deafen_shared: false,
             deafen_sender: DeafenSender::new(Arc::new(|_, _| Box::pin(async {}))),
             own_keys: OwnKeys::new(Instant::now()).unwrap(),

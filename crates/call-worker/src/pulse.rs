@@ -1514,9 +1514,13 @@ fn run_pending(
         if last {
             // The routes that were read may already be split by an earlier
             // try: the kind is then lost, whatever they show now. A route of
-            // the other kind that a try moved is not the call's old device.
+            // the other kind that a try moved, or that an earlier try left
+            // split (a kind with no stream in this try keeps its mark), is
+            // not the call's old device either.
             let other = 1 - slot;
-            let code = failure(kept && !devices.lost[slot] && !devices.applied[other]);
+            let code = failure(
+                kept && !devices.lost[slot] && !devices.applied[other] && !devices.lost[other],
+            );
             devices.pending[slot] = None;
             devices.lost[slot] = false;
             run.moves_failed.push((kind.label(), code));
@@ -2387,6 +2391,30 @@ mod tests {
             );
             assert_eq!(server.route(Kind::Recording, 1).as_deref(), Some("mic-b"));
         }
+    }
+
+    #[test]
+    fn given_a_split_microphone_with_no_stream_when_the_last_speaker_try_fails_then_audio_device() {
+        // GIVEN an earlier try that left the microphone's routes split
+        // (`lost`) and no microphone stream now, WHEN the last try's speaker
+        // move is refused and undone, THEN the speaker is AudioDevice, not
+        // DeviceKept: the call may not run on the microphone it had. The
+        // microphone's target keeps waiting for a stream.
+        let mut server = Fake::with(vec![], vec![at(2, "spk-a")]);
+        server.refuse = vec![(2, "spk-b")];
+        let mut devices = Devices {
+            pending: [Some("mic-b".to_owned()), Some("spk-b".to_owned())],
+            lost: [true, false],
+            ..Devices::default()
+        };
+        assert_eq!(
+            run_pending(&server, &mut devices, (true, 0), deadlines()),
+            PendingRun {
+                waiting: true,
+                moves_failed: vec![("speaker", FailureCode::AudioDevice)],
+            }
+        );
+        assert_eq!(server.route(Kind::Playout, 2).as_deref(), Some("spk-a"));
     }
 
     #[test]
