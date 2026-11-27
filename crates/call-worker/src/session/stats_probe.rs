@@ -31,7 +31,7 @@ use tokio::time::Instant;
 use super::read_all;
 use crate::mapping::stats::{
     LinkRole, RawConnection, RawLink, RawOwnAudio, RawOwnVideo, RawRemote, RawRemoteAudio,
-    RawRemoteVideo, RawStats, StatsBook,
+    RawRemoteVideo, RawSending, RawStats, StatsBook,
 };
 
 /// The shortest time between two reads while the statistics are on.
@@ -194,8 +194,10 @@ impl StatsProbe {
     }
 
     /// The link numbers of a reading, when the Auto camera quality needs
-    /// them: the first connection's estimate of the outgoing bandwidth and
-    /// round-trip time. A read that did not finish gives none. A read that
+    /// them: the sending transport's estimate of the outgoing bandwidth and
+    /// round-trip time (`RawStats::sending`), never a subscriber's, also
+    /// while the statistics read the remote tracks. A read that did not
+    /// finish gives none. A read that
     /// began in an earlier Auto run (another camera's) gives none: its
     /// round-trip time must never become the lowest of the new run. Call it
     /// before `end`, while the finishing read is still the one in flight.
@@ -203,10 +205,10 @@ impl StatsProbe {
         if !self.auto || self.read_run != self.auto_run {
             return None;
         }
-        let connection = raw?.connections.iter().find(|c| c.connection == 0)?;
+        let sending = raw?.sending?;
         Some(LinkReading {
-            outgoing_bits_per_second: connection.outgoing_bits_per_second,
-            rtt_seconds: connection.rtt_seconds,
+            outgoing_bits_per_second: sending.outgoing_bits_per_second,
+            rtt_seconds: sending.rtt_seconds,
         })
     }
 
@@ -376,6 +378,17 @@ fn assemble(asked: &Asked, one_connection: bool, reads: impl Iterator<Item = Rea
             }
         }
     }
+    // The Auto quality judges the sending link only: the publisher's
+    // transport, or the one transport of a single peer connection.
+    let sending = if one_connection {
+        publisher.as_ref().or(subscribers.get(&0))
+    } else {
+        publisher.as_ref()
+    };
+    raw.sending = sending.map(|link| RawSending {
+        outgoing_bits_per_second: link.outgoing_bits_per_second,
+        rtt_seconds: link.rtt_seconds,
+    });
     raw.remotes = remotes.into_values().collect();
     raw.remotes
         .sort_by(|a, b| (a.connection, &a.identity).cmp(&(b.connection, &b.identity)));
@@ -778,15 +791,13 @@ mod tests {
         assert_eq!(tick(&mut probe, Instant::now()), 0);
     }
 
-    /// A reading whose first connection has these link numbers.
+    /// A reading whose sending transport has these link numbers.
     fn linked(bits: f64, rtt: f64) -> RawStats {
         RawStats {
-            connections: vec![RawConnection {
-                connection: 0,
+            sending: Some(RawSending {
                 outgoing_bits_per_second: Some(bits),
                 rtt_seconds: Some(rtt),
-                ..RawConnection::default()
-            }],
+            }),
             ..RawStats::default()
         }
     }
@@ -976,6 +987,81 @@ mod tests {
                 (1, vec![(LinkRole::Subscriber, 12, 7, 9)], true),
             ]
         );
+    }
+
+    /// The statistics of a track whose transport's selected pair gives
+    /// `bits` (0 for none) and `rtt` seconds (0 for none).
+    fn on_pair(bits: f64, rtt: f64) -> Vec<RtcStats> {
+        let mut transport = livekit::webrtc::stats::TransportStats::default();
+        transport.transport.selected_candidate_pair_id = "CP".to_owned();
+        let mut pair = livekit::webrtc::stats::CandidatePairStats::default();
+        pair.rtc.id = "CP".to_owned();
+        pair.candidate_pair.available_outgoing_bitrate = bits;
+        pair.candidate_pair.current_round_trip_time = rtt;
+        vec![
+            RtcStats::Transport(transport),
+            RtcStats::CandidatePair(pair),
+        ]
+    }
+
+    /// GIVEN a publisher with a bandwidth but no round-trip time and a
+    /// subscriber with a round-trip time of 450 ms WHEN the reading is
+    /// assembled THEN the sending numbers are the publisher's only, so the
+    /// Auto quality gets no round-trip time, and the connection still shows
+    /// both values. GIVEN one peer connection THEN the sending numbers are
+    /// its transport's, also from a remote track's read.
+    #[test]
+    fn given_split_transports_when_assembled_then_the_sending_link_is_the_publisher() {
+        let split = || {
+            [
+                read(ReadKind::Camera, 10, on_pair(2_000_000.0, 0.0)),
+                read(ReadKind::RemoteVideo(0, "a".into()), 11, on_pair(0.0, 0.45)),
+            ]
+            .into_iter()
+        };
+        let raw = assemble(&asked(true, &[0]), false, split());
+        assert_eq!(
+            raw.sending,
+            Some(RawSending {
+                outgoing_bits_per_second: Some(2_000_000.0),
+                rtt_seconds: None
+            })
+        );
+        assert_eq!(
+            raw.connections[0].outgoing_bits_per_second,
+            Some(2_000_000.0)
+        );
+        assert_eq!(raw.connections[0].rtt_seconds, Some(0.45));
+
+        let raw = assemble(
+            &asked(false, &[0]),
+            true,
+            [read(
+                ReadKind::RemoteVideo(0, "a".into()),
+                11,
+                on_pair(900_000.0, 0.05),
+            )]
+            .into_iter(),
+        );
+        assert_eq!(
+            raw.sending,
+            Some(RawSending {
+                outgoing_bits_per_second: Some(900_000.0),
+                rtt_seconds: Some(0.05)
+            })
+        );
+        // Split transports and no own read: no sending numbers.
+        let raw = assemble(
+            &asked(false, &[0]),
+            false,
+            [read(
+                ReadKind::RemoteVideo(0, "a".into()),
+                11,
+                on_pair(900_000.0, 0.05),
+            )]
+            .into_iter(),
+        );
+        assert_eq!(raw.sending, None);
     }
 
     /// GIVEN the own room uses a publisher and a subscriber connection WHEN

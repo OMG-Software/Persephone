@@ -92,26 +92,27 @@ impl SendTier {
     }
 
     /// The top tier that a camera allows: `top`, or the tier that its first
-    /// picture covers when that is smaller. With no picture seen, `top`: the
+    /// picture reaches when that is smaller. With no picture seen, `top`: the
     /// send path never enlarges a picture.
     pub fn capped_by_capture(self, first: Option<(u32, u32)>) -> Self {
         first.map_or(self, |(width, height)| {
-            self.min(Self::covered_by(width, height))
+            self.min(Self::reached_by(width, height))
         })
     }
 
-    /// The largest tier whose box a capture of `width` x `height` covers on
-    /// both sides, in either orientation. A capture below 640x360 still
-    /// gives `P360`: it is sent at its own size and never enlarged.
-    pub fn covered_by(width: u32, height: u32) -> Self {
-        let (long, short) = (width.max(height), width.min(height));
+    /// The largest tier whose short side the short side of a capture of
+    /// `width` x `height` reaches, in either orientation. A tier is named by
+    /// that side (480p has 480 rows), and the send path keeps the capture's
+    /// shape inside the tier's box, so a 640x480 camera reaches `P480` and
+    /// sends 640x480: a 4:3 camera is not held one tier down. A capture
+    /// whose short side is below 360 still gives `P360`: it is sent at its
+    /// own size and never enlarged.
+    pub fn reached_by(width: u32, height: u32) -> Self {
+        let short = width.min(height);
         Self::ALL
             .into_iter()
             .rev()
-            .find(|tier| {
-                let (tier_long, tier_short) = tier.long_short();
-                long >= tier_long && short >= tier_short
-            })
+            .find(|tier| short >= tier.long_short().1)
             .unwrap_or(Self::P360)
     }
 }
@@ -201,25 +202,29 @@ mod tests {
         );
     }
 
-    /// GIVEN captures of many sizes WHEN the covered tier is asked THEN it is
-    /// the largest box that the capture fills on both sides.
+    /// GIVEN captures of many sizes WHEN their tier is asked THEN it is the
+    /// largest tier whose short side the capture's short side reaches, so a
+    /// 4:3 camera is not held one tier down.
     #[test]
-    fn given_a_capture_then_the_covered_tier_is_the_largest_that_fits() {
+    fn given_a_capture_then_its_tier_follows_the_short_side() {
         let cases = [
             ((2560, 1440), SendTier::P1440),
             ((3840, 2160), SendTier::P1440),
             ((1920, 1080), SendTier::P1080),
+            ((1600, 1200), SendTier::P1080),
+            ((1440, 1080), SendTier::P1080),
             ((1280, 720), SendTier::P720),
             ((1280, 960), SendTier::P720),
             ((854, 480), SendTier::P480),
+            ((640, 480), SendTier::P480),
+            ((480, 640), SendTier::P480),
             ((720, 1280), SendTier::P720),
-            ((640, 480), SendTier::P360),
             ((640, 360), SendTier::P360),
             ((320, 240), SendTier::P360),
             ((1, 1), SendTier::P360),
         ];
         for ((w, h), want) in cases {
-            assert_eq!(SendTier::covered_by(w, h), want, "{w}x{h}");
+            assert_eq!(SendTier::reached_by(w, h), want, "{w}x{h}");
         }
     }
 
@@ -263,6 +268,15 @@ mod tests {
         assert_eq!(
             SendTier::P1080.capped_by_capture(Some((320, 240))),
             SendTier::P360
+        );
+        // A 4:3 camera reaches the tier of its rows.
+        assert_eq!(
+            SendTier::P480.capped_by_capture(Some((640, 480))),
+            SendTier::P480
+        );
+        assert_eq!(
+            SendTier::P1080.capped_by_capture(Some((1440, 1080))),
+            SendTier::P1080
         );
         assert_eq!(SendTier::P1080.capped_by_capture(None), SendTier::P1080);
     }

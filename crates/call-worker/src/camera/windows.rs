@@ -291,7 +291,8 @@ fn frame_rate(media_type: &IMFMediaType) -> Option<u32> {
     // SAFETY: `media_type` is a live attribute store; the GUID is valid.
     let packed = unsafe { media_type.GetUINT64(&MF_MT_FRAME_RATE) }.ok()?;
     let (numerator, denominator) = ((packed >> 32) as u32, packed as u32);
-    numerator.checked_div(denominator)
+    // A known rate below 1 frame a second is 1, never the unknown 0.
+    Some(crate::video::whole_fps(numerator, denominator))
 }
 
 /// The row stride of the reader's current (NV12) output. When the type has

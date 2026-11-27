@@ -434,8 +434,9 @@ fn enumerate(fd: RawFd) -> Vec<Offer> {
 }
 
 /// The fastest frame rate of a format and size, in frames per second rounded
-/// down, or 0 when the driver does not say. A list of intervals gives its
-/// shortest one; a range gives its least one.
+/// down (at least 1 for an interval the driver gives), or 0 when the driver
+/// does not say. A list of intervals gives its shortest one; a range gives
+/// its least one.
 fn max_frame_rate(fd: RawFd, pixel_format: u32, width: u32, height: u32) -> u32 {
     let mut fastest = 0;
     for index in 0..MAX_INTERVALS {
@@ -457,9 +458,11 @@ fn max_frame_rate(fd: RawFd, pixel_format: u32, width: u32, height: u32) -> u32 
 }
 
 /// Frames per second, rounded down, of an interval of `numerator` over
-/// `denominator` seconds. 0 for an interval of 0 seconds or no time base.
+/// `denominator` seconds (`video::whole_fps`): an interval longer than a
+/// second gives 1, so the picker never takes it for an unknown speed. 0 for
+/// an interval of 0 seconds or no time base.
 fn rate_of(numerator: u32, denominator: u32) -> u32 {
-    denominator.checked_div(numerator).unwrap_or(0)
+    crate::video::whole_fps(denominator, numerator)
 }
 
 /// Asks for `fps` frames per second, at most 30. Does nothing for an unknown
@@ -654,7 +657,6 @@ fn read_frames<F: FnMut(CapturedFrame<'_>)>(
     on_frame: &mut F,
 ) -> bool {
     let raw = stream.fd.as_raw_fd();
-    let mut converted = Vec::new();
     while !stop.load(Ordering::Acquire) {
         let mut wait = libc::pollfd {
             fd: raw,
@@ -684,7 +686,7 @@ fn read_frames<F: FnMut(CapturedFrame<'_>)>(
             Err(_) => return true,
         }
         let index = buffer.index;
-        deliver(stream, &buffer, &mut converted, on_frame);
+        deliver(stream, &buffer, on_frame);
         if queue(raw, index).is_err() {
             return true;
         }
@@ -692,14 +694,10 @@ fn read_frames<F: FnMut(CapturedFrame<'_>)>(
     false
 }
 
-/// Hands one picture to the callback as NV12 or I420. A picture with the error
-/// flag, a bad buffer index or too few bytes is skipped.
-fn deliver<F: FnMut(CapturedFrame<'_>)>(
-    stream: &Stream,
-    buffer: &Buffer,
-    converted: &mut Vec<u8>,
-    on_frame: &mut F,
-) {
+/// Hands one picture to the callback as NV12, I420 or YUYV (converted only
+/// when the callback takes it). A picture with the error flag, a bad buffer
+/// index or too few bytes is skipped.
+fn deliver<F: FnMut(CapturedFrame<'_>)>(stream: &Stream, buffer: &Buffer, on_frame: &mut F) {
     let Some(map) = stream.maps.get(buffer.index as usize) else {
         return;
     };
@@ -715,15 +713,7 @@ fn deliver<F: FnMut(CapturedFrame<'_>)>(
     // it is queued again, which happens after this slice is gone.
     let bytes = unsafe { std::slice::from_raw_parts(map.ptr.cast::<u8>(), used) };
     let (width, height, stride) = (stream.width, stream.height, stream.stride);
-    yuyv::deliver_frame(
-        stream.format,
-        width,
-        height,
-        stride,
-        bytes,
-        converted,
-        on_frame,
-    );
+    yuyv::deliver_frame(stream.format, width, height, stride, bytes, on_frame);
 }
 
 #[cfg(test)]
@@ -861,7 +851,8 @@ mod tests {
     }
 
     /// GIVEN frame intervals WHEN the rate is read THEN it is the whole
-    /// frames per second, rounded down, and a zero interval gives none.
+    /// frames per second, rounded down, a zero interval gives none, and an
+    /// interval longer than a second gives 1, not the unknown 0.
     #[test]
     fn given_intervals_then_the_rate_rounds_down() {
         assert_eq!(rate_of(1, 30), 30);
@@ -869,6 +860,8 @@ mod tests {
         assert_eq!(rate_of(1, 5), 5);
         assert_eq!(rate_of(0, 30), 0);
         assert_eq!(rate_of(1, 0), 0);
+        assert_eq!(rate_of(2, 1), 1, "0.5 fps is slow, not unknown");
+        assert_eq!(rate_of(u32::MAX, 1), 1);
     }
 
     /// GIVEN the widest picture WHEN its row is measured THEN it fits the

@@ -115,7 +115,9 @@ const UNSENT_RETRY: Duration = Duration::from_millis(200);
 
 /// Worker queue places that a restart of the Join's camera holds before its
 /// first command (`CallWorkerLink::hold_places`): the off, the devices, the
-/// resolution, the video effect and the on.
+/// resolution, the video effect and the on. A camera-on reads the device
+/// choice once (`settings_before_camera`), so it sends one `SetDevices` at
+/// most.
 const JOIN_RESTART_ROOM: usize = 5;
 
 /// Most remote keys of one member waiting for room in the worker queue: every
@@ -2448,8 +2450,10 @@ impl CallController {
     /// joining call. Only the newest value is kept, and the call task sends
     /// it to the worker, always before a camera-on. The worker applies it at
     /// its next camera start, so a camera that is on or starting restarts at
-    /// once (`restart_camera`). A joining call has no camera to restart; it
-    /// sends the value after the join. `NotInCall` without a call. The
+    /// once (`restart_camera`). For a joining call this only writes the
+    /// value: the call task sends it after the join and restarts the camera
+    /// that the `Join` started (`Call::restart_join_camera`). `NotInCall`
+    /// without a call. The
     /// caller saves the value for later calls before it calls this, so a
     /// join that read the saved record before the save gets it from here
     /// (`video_asked`).
@@ -3125,7 +3129,7 @@ struct Call {
     /// older resolution.
     quality_seen: watch::Receiver<Option<VideoQuality>>,
     /// The send resolution and the camera of the camera that the Join
-    /// opened, and whether that camera still runs (no camera command came
+    /// opened, and whether that camera still runs (no camera-off came
     /// since). Until the page sees the call active, the controller restarts
     /// no camera (`restart_camera` needs `Active`), so a resolution or camera
     /// chosen while the call joins does not reach that camera. The task
@@ -3837,11 +3841,16 @@ impl Call {
     /// turns the camera on. The request runs off the call loop, which goes on
     /// with mute, keys and events while the desktop asks the user.
     fn camera_command(&mut self, inner: &Inner, on: bool, request: u64) -> Result<(), EndReason> {
-        // The camera that the Join opened stops or is replaced here; a new
-        // camera-on starts with the newest settings, so an owed restart of
-        // it ends.
-        self.join_camera = false;
-        self.join_restart_due = None;
+        // An off stops the camera that the Join opened, so an owed restart
+        // of it ends. A camera-on keeps the debt: while that camera runs or
+        // opens, the worker keeps it (it reports `On`, or the open reports
+        // when it ends), so it still has the Join's settings. If it had
+        // ended, the on opens a camera with the newest settings, and the
+        // owed restart opens it once more with the same ones.
+        if !on {
+            self.join_camera = false;
+            self.join_restart_due = None;
+        }
         // The off's own place is held first, so neither the device choice
         // below nor a share's stop that another thread queues (`WorkerStop`)
         // can take it. A full queue ends the call, as the off itself would.
@@ -5041,7 +5050,8 @@ impl Call {
     /// would end the call; without them, the restart stays owed and tries
     /// again after [`UNSENT_RETRY`] (`join_restart_due`), also after the
     /// connect. Each try checks the camera intent and the newest choice
-    /// again, and a camera command ends the debt.
+    /// again, and a camera-off ends the debt; a camera-on keeps it, as the
+    /// worker keeps a camera that runs (`camera_command`).
     fn restart_join_camera(&mut self, inner: &Inner) -> Result<(), EndReason> {
         self.join_restart_due = None;
         let wanted = self.camera_wanted.load(Ordering::SeqCst);
@@ -5150,8 +5160,14 @@ impl Call {
     /// not read yet replaced it (ADR-0059). A full queue keeps the choice
     /// for a retry.
     fn send_devices(&mut self) -> Result<(), EndReason> {
+        take_newer_choice(&mut self.devices_seen, &mut self.unsent_devices);
+        self.apply_unsent_devices()
+    }
+
+    /// Sends the waiting device choice as it is, without reading a newer
+    /// one. A full queue keeps it for a retry.
+    fn apply_unsent_devices(&mut self) -> Result<(), EndReason> {
         let mut pending = self.unsent_devices.take();
-        take_newer_choice(&mut self.devices_seen, &mut pending);
         let sent = self.apply_devices(&mut pending);
         self.unsent_devices = pending;
         sent
@@ -5161,28 +5177,38 @@ impl Call {
     /// before a camera-on (ADR-0059, ADR-0068, ADR-0070): the ones that the
     /// task has not read yet, and the ones that wait for room. So a camera
     /// never starts at an older device, effect or resolution, also when the
-    /// camera command is read before the change. A choice that changes only
-    /// the microphone or speaker may wait for room (its retry sends it): the
-    /// camera starts on the device that the worker has. When a new camera,
-    /// resolution or effect still finds the queue full, the call ends, as it
-    /// does when the camera command itself finds the queue full. The camera
-    /// command holds its own place first (`hold_camera_place`), so these
-    /// never take it.
+    /// camera command is read before the change. A choice with a new camera
+    /// goes first. A choice that changes only the microphone or speaker goes
+    /// last and may wait for room (its retry sends it), so it never takes
+    /// the room that the resolution and the effect need: the camera starts
+    /// on the device that the worker has. The device choice is read once,
+    /// at the start: a choice that comes later waits for the task's devices
+    /// arm, so one camera-on sends one `SetDevices` at most, and a Join
+    /// restart fits its held places ([`JOIN_RESTART_ROOM`]). When a new
+    /// camera, resolution or effect still finds the queue full, the call
+    /// ends, as it does when the camera command itself finds the queue full.
+    /// The camera command holds its own place first (`hold_camera_place`),
+    /// so these never take it.
     fn settings_before_camera(&mut self, inner: &Inner) -> Result<(), EndReason> {
-        self.send_devices()?;
-        if self
-            .unsent_devices
-            .as_ref()
-            .is_some_and(|(_, choice)| choice.camera != self.worker_camera)
-        {
-            return Err(EndReason::WorkerStopped);
+        take_newer_choice(&mut self.devices_seen, &mut self.unsent_devices);
+        let new_camera = |call: &Self| {
+            call.unsent_devices
+                .as_ref()
+                .is_some_and(|(_, choice)| choice.camera != call.worker_camera)
+        };
+        if new_camera(self) {
+            self.apply_unsent_devices()?;
+            if new_camera(self) {
+                return Err(EndReason::WorkerStopped);
+            }
         }
         self.take_unread_quality()?;
         self.send_quality()?;
         if self.unsent_quality.is_some() {
             return Err(EndReason::WorkerStopped);
         }
-        self.effect_before_camera(inner)
+        self.effect_before_camera(inner)?;
+        self.apply_unsent_devices()
     }
 
     /// The user changed the microphone level or gain: the worker applies it
@@ -5944,7 +5970,23 @@ impl DeafenJob {
 struct DeafenShared {
     job: Mutex<DeafenJob>,
     wake: Notify,
+    /// Set under the job's lock (`signal_stop`), where the task also reads
+    /// it before it takes a batch.
     stop: AtomicBool,
+}
+
+impl DeafenShared {
+    /// Sets the stop under the job's lock and wakes the task. The task reads
+    /// the stop and takes a batch under the same lock (`deafen_task`), so a
+    /// stop goes wholly before the take, and the batch is dropped, or
+    /// wholly after it, and the send has started.
+    fn signal_stop(&self) {
+        {
+            let _job = plain(&self.job);
+            self.stop.store(true, Ordering::SeqCst);
+        }
+        self.wake.notify_one();
+    }
 }
 
 /// Sends the deafen hints (ADR-0071) from its own task, so the call loop
@@ -5988,9 +6030,9 @@ impl DeafenSender {
 
     /// Tells the task to stop: it starts no new send, and one that runs
     /// ends within its own timeout. A hint that has not started is dropped.
+    /// A send has started once the task took its batch.
     fn signal_stop(&self) {
-        self.shared.stop.store(true, Ordering::SeqCst);
-        self.shared.wake.notify_one();
+        self.shared.signal_stop();
     }
 
     /// Stops the task and waits until it has ended. A hint that has not
@@ -6016,10 +6058,16 @@ impl Drop for DeafenSender {
 async fn deafen_task(shared: Arc<DeafenShared>, send: DeafenSend) {
     loop {
         shared.wake.notified().await;
-        if shared.stop.load(Ordering::SeqCst) {
-            return;
-        }
-        let batch = plain(&shared.job).take();
+        // The stop is read under the job's lock, where `signal_stop` sets
+        // it: a stop before the take drops the batch, and a stop after it
+        // finds a send that has started, which ends within its timeout.
+        let batch = {
+            let mut job = plain(&shared.job);
+            if shared.stop.load(Ordering::SeqCst) {
+                return;
+            }
+            job.take()
+        };
         if let Some((recipients, content)) = batch {
             send(recipients, content).await;
         }
@@ -9308,8 +9356,8 @@ mod tests {
     /// 1440p and then the connect THEN nothing is queued and the restart
     /// stays owed. WHEN the queue has room and the retry runs THEN the
     /// camera restarts and the debt ends. GIVEN an owed restart and a user
-    /// who turned the camera off since THEN the retry restarts nothing; a
-    /// camera command also ends the debt.
+    /// who turned the camera off since THEN the retry restarts nothing. A
+    /// camera-on keeps the debt, and a camera-off ends it.
     #[tokio::test]
     async fn given_no_room_through_the_connect_then_the_join_restart_stays_owed() {
         let fixture = test_call(
@@ -9359,12 +9407,19 @@ mod tests {
         assert_eq!(call.join_restart_due, None);
         assert_eq!(call.join_quality, VideoQuality::P1440);
 
-        // A camera command ends an owed restart.
+        // A camera-on keeps an owed restart: the worker keeps the Join's
+        // camera, which still has the Join's settings. An off ends it.
         call.camera_wanted.store(true, Ordering::SeqCst);
         fill_queue(&call, &mut to_worker, JOIN_RESTART_ROOM - 1);
         assert_eq!(call.restart_join_camera(&inner), Ok(()));
         assert!(call.join_restart_due.is_some());
-        assert_eq!(call.camera_command(&inner, false, 1), Ok(()));
+        assert_eq!(call.camera_command(&inner, true, 1), Ok(()));
+        assert!(
+            call.join_restart_due.is_some(),
+            "a camera-on keeps the debt"
+        );
+        assert!(call.join_camera);
+        assert_eq!(call.camera_command(&inner, false, 2), Ok(()));
         assert_eq!(call.join_restart_due, None);
         assert!(!call.join_camera);
     }
@@ -9525,7 +9580,9 @@ mod tests {
     /// GIVEN a worker queue with one free place and a choice of the
     /// microphone only that waits WHEN the camera is turned on THEN the on
     /// gets the place, the call goes on and the choice still waits for its
-    /// retry. GIVEN a new camera that waits THEN the call ends and no
+    /// retry. GIVEN two free places, that choice and an effect that waits
+    /// THEN the effect gets the second place, not the choice, and the call
+    /// goes on. GIVEN a new camera that waits THEN the call ends and no
     /// camera-on goes, so the camera never starts on the old device.
     #[tokio::test]
     async fn given_one_free_place_when_the_camera_turns_on_then_a_sound_choice_waits() {
@@ -9566,10 +9623,33 @@ mod tests {
             "the sound choice still waits"
         );
 
+        let effect = VideoEffect {
+            background: persephone_call_protocol::Background::None,
+            filter: persephone_call_protocol::ColourFilter::Warm,
+        };
+        call.unsent_effect = Some((Instant::now() + UNSENT_RETRY, effect));
+        fill_queue(&call, &mut to_worker, 2);
+        assert_eq!(call.camera_command(&inner, true, 2), Ok(()));
+        let sent: Vec<ToWorker> = std::iter::from_fn(|| to_worker.try_recv().ok())
+            .filter(|message| !matches!(message, ToWorker::SetMuted { .. }))
+            .collect();
+        assert_eq!(
+            sent,
+            [
+                ToWorker::SetVideoEffect { effect },
+                ToWorker::SetCamera {
+                    on: true,
+                    remote: false
+                }
+            ]
+        );
+        assert!(call.unsent_devices.is_some(), "the sound choice waits");
+        assert!(call.unsent_effect.is_none());
+
         call.unsent_devices = waiting(Some("cam-2"));
         fill_queue(&call, &mut to_worker, 1);
         assert!(matches!(
-            call.camera_command(&inner, true, 2),
+            call.camera_command(&inner, true, 3),
             Err(EndReason::WorkerStopped)
         ));
         let sent: Vec<ToWorker> = std::iter::from_fn(|| to_worker.try_recv().ok()).collect();
@@ -9579,6 +9659,79 @@ mod tests {
                 .any(|message| matches!(message, ToWorker::SetCamera { .. })),
             "no camera-on goes before the new camera: {sent:?}"
         );
+    }
+
+    /// GIVEN a Join restart with exactly `JOIN_RESTART_ROOM` free places and
+    /// a new camera, a send resolution and an effect that all wait WHEN the
+    /// restart runs THEN each command gets a place, in the order off,
+    /// devices, resolution, effect, on. GIVEN a choice of the microphone
+    /// only instead THEN it goes after the effect, still within the places.
+    /// The device choice is read once, so a restart sends one `SetDevices`.
+    #[tokio::test]
+    async fn given_every_setting_waiting_then_the_join_restart_fits_its_places() {
+        let fixture = test_call(
+            no_admission(),
+            Arc::new(Flags::default()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let inner = controller(FakeHost::new(true, None)).inner.clone();
+        let (mut call, mut to_worker) = (fixture.call, fixture.to_worker);
+        call.join_camera = true;
+        call.join_quality = VideoQuality::P480;
+        call.join_device = Some("cam-1".to_owned());
+        call.worker_camera = Some("cam-1".to_owned());
+        call.camera_wanted.store(true, Ordering::SeqCst);
+        let effect = VideoEffect {
+            background: persephone_call_protocol::Background::None,
+            filter: persephone_call_protocol::ColourFilter::Warm,
+        };
+        let choice = |camera: &str| {
+            Some((
+                Instant::now(),
+                DeviceChoice {
+                    recording: Some("mic-2".to_owned()),
+                    playout: None,
+                    camera: Some(camera.to_owned()),
+                },
+            ))
+        };
+        let commands = |to_worker: &mut mpsc::Receiver<ToWorker>| {
+            std::iter::from_fn(|| to_worker.try_recv().ok())
+                .filter_map(|message| match message {
+                    ToWorker::SetCamera { on: false, .. } => Some("off"),
+                    ToWorker::SetDevices { .. } => Some("devices"),
+                    ToWorker::SetVideoQuality { .. } => Some("quality"),
+                    ToWorker::SetVideoEffect { .. } => Some("effect"),
+                    ToWorker::SetCamera { on: true, .. } => Some("on"),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        // A new camera goes first.
+        fill_queue(&call, &mut to_worker, JOIN_RESTART_ROOM);
+        call.unsent_devices = choice("cam-2");
+        call.unsent_effect = Some((Instant::now(), effect));
+        call.video_quality.send_replace(Some(VideoQuality::P1440));
+        assert_eq!(call.restart_join_camera(&inner), Ok(()));
+        assert_eq!(
+            commands(&mut to_worker),
+            ["off", "devices", "quality", "effect", "on"]
+        );
+        assert_eq!(call.join_restart_due, None);
+        assert!(call.unsent_devices.is_none());
+
+        // A choice of the microphone only goes after the effect.
+        fill_queue(&call, &mut to_worker, JOIN_RESTART_ROOM);
+        call.unsent_devices = choice("cam-2");
+        call.unsent_effect = Some((Instant::now(), effect));
+        call.video_quality.send_replace(Some(VideoQuality::P720));
+        assert_eq!(call.restart_join_camera(&inner), Ok(()));
+        assert_eq!(
+            commands(&mut to_worker),
+            ["off", "quality", "effect", "devices", "on"]
+        );
+        assert!(call.unsent_devices.is_none());
     }
 
     /// GIVEN a restart of the Join's camera WHEN an off was accepted while
@@ -9854,6 +10007,81 @@ mod tests {
             .await
             .expect("the end finishes");
         assert_eq!(*plain(&order), vec!["helpers", "membership"]);
+    }
+
+    /// GIVEN the job's lock is held, as the task holds it while it reads
+    /// the stop and takes a batch, WHEN the stop is signalled from another
+    /// thread THEN the stop waits for the lock, so it never falls between
+    /// that read and the take. WHEN the lock is free THEN the stop is set.
+    #[test]
+    fn given_the_job_lock_held_when_the_stop_is_signalled_then_it_waits() {
+        let shared = Arc::new(DeafenShared::default());
+        let job = plain(&shared.job);
+        let (done_tx, done) = std::sync::mpsc::channel();
+        let stopper = {
+            let shared = shared.clone();
+            std::thread::spawn(move || {
+                shared.signal_stop();
+                let _ = done_tx.send(());
+            })
+        };
+        assert!(
+            done.recv_timeout(Duration::from_millis(100)).is_err(),
+            "the stop waits for the lock"
+        );
+        assert!(!shared.stop.load(Ordering::SeqCst));
+        drop(job);
+        done.recv_timeout(Duration::from_secs(5))
+            .expect("the stop goes once the lock is free");
+        assert!(shared.stop.load(Ordering::SeqCst));
+        stopper.join().expect("the stopper ends");
+    }
+
+    /// Polls `task` once with a waker that does nothing, so a test decides
+    /// the order of every step.
+    fn poll_once(task: Pin<&mut impl Future<Output = ()>>) -> std::task::Poll<()> {
+        Future::poll(
+            task,
+            &mut std::task::Context::from_waker(std::task::Waker::noop()),
+        )
+    }
+
+    /// GIVEN a waiting batch WHEN the stop goes before the task takes it
+    /// THEN the task ends and nothing is sent. GIVEN a batch that the task
+    /// took, so its send has started, WHEN the stop goes during that send
+    /// THEN the send still runs, finishes when its homeserver answers, and
+    /// the task ends after it. The task is polled by hand, so each order is
+    /// exact.
+    #[tokio::test]
+    async fn given_a_stop_before_or_after_the_take_then_the_send_follows_the_order() {
+        // The stop goes first: the batch is never sent.
+        let (fake, send) = fake_deafen();
+        let shared = Arc::new(DeafenShared::default());
+        plain(&shared.job).merge(vec![deafen_pair(1)], serde_json::json!({ "seq": 1 }));
+        shared.signal_stop();
+        let mut task = std::pin::pin!(deafen_task(shared.clone(), send));
+        assert!(poll_once(task.as_mut()).is_ready(), "the task ends at once");
+        assert_eq!(fake.started.load(Ordering::SeqCst), 0, "nothing is sent");
+
+        // The take goes first: the send has started, and it finishes.
+        let (fake, send) = fake_deafen();
+        let shared = Arc::new(DeafenShared::default());
+        plain(&shared.job).merge(vec![deafen_pair(2)], serde_json::json!({ "seq": 2 }));
+        shared.wake.notify_one();
+        let mut task = std::pin::pin!(deafen_task(shared.clone(), send));
+        assert!(poll_once(task.as_mut()).is_pending(), "the send waits");
+        assert_eq!(fake.started.load(Ordering::SeqCst), 1, "the send started");
+        shared.signal_stop();
+        assert!(poll_once(task.as_mut()).is_pending(), "the send still runs");
+        fake.gate.add_permits(1);
+        assert!(
+            poll_once(task.as_mut()).is_ready(),
+            "the task ends after it"
+        );
+        assert_eq!(
+            plain(&fake.batches).clone(),
+            vec![(1, serde_json::json!({ "seq": 2 }))]
+        );
     }
 
     /// GIVEN a pending hint WHEN the call stops THEN the task ends and the
