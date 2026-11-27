@@ -1,6 +1,6 @@
 {
   "identifier": "call",
-  "description": "The call window may watch the session and call levels, read the call status and pictures, turn the call's technical details on or off, and mute, deafen, change the volume, turn the camera or screen on or off, list the call devices and change them, set the own video effect and mirror (ADR-0068), leave or close its window, and say that its page is ready, and nothing else: no rooms, messages, keys, account, files, links, plugins, events, paths or webview permissions (ADR-0060).",
+  "description": "The call window may watch the session and call levels, read the call status and pictures, turn the call's technical details on or off, and mute, deafen, change the volume and the microphone gain, turn the camera or screen on or off, list the call devices and change them, set the own video effect and mirror (ADR-0068), leave or close its window, and say that its page is ready, and nothing else: no rooms, messages, keys, account, files, links, plugins, events, paths or webview permissions (ADR-0060).",
   "windows": ["call"],
   "permissions": [
     "allow-watch-session",
@@ -10,6 +10,7 @@
     "allow-call-mute",
     "allow-call-deafen",
     "allow-call-volume",
+    "allow-call-microphone",
     "allow-call-camera",
     "allow-call-screen",
     "allow-call-devices",

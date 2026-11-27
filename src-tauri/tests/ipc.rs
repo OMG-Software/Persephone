@@ -1161,6 +1161,7 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-call-mute",
             "allow-call-deafen",
             "allow-call-volume",
+            "allow-call-microphone",
             "allow-call-camera",
             "allow-call-screen",
             "allow-call-devices",
@@ -1197,10 +1198,6 @@ fn given_the_call_window_then_only_call_commands_are_allowed() {
         ("minimise_to_tray", serde_json::json!({})),
         ("exit_app", serde_json::json!({})),
         (
-            "call_microphone",
-            serde_json::json!({"autoLevel": true, "gain": 100}),
-        ),
-        (
             "call_device_test",
             serde_json::json!({"test": "microphone", "device": null}),
         ),
@@ -1223,6 +1220,34 @@ fn given_the_call_window_then_only_call_commands_are_allowed() {
             serde_json::json!({})
         )
         .is_err()
+    );
+}
+
+/// GIVEN the call window WHEN it sets the microphone gain THEN it is relayed
+/// (ADR-0060); WHEN the gain is off the step or too high THEN it is refused
+/// before the core.
+#[test]
+fn given_the_call_window_then_it_sets_the_microphone_gain() {
+    let core = FakeCore::new(true);
+    let app = app_with(core.clone());
+    let _main = create_main_window(&app).unwrap();
+    let window = create_call_window(&app).unwrap();
+    let invoke = |args| invoke_on(&window, "call_microphone", app_origin(), args);
+    let before = core.calls.load(Ordering::SeqCst);
+    assert!(invoke(serde_json::json!({"autoLevel": false, "gain": 250})).is_ok());
+    assert_eq!(core.calls.load(Ordering::SeqCst), before + 1, "relayed");
+    for args in [
+        serde_json::json!({"autoLevel": false, "gain": 401}),
+        serde_json::json!({"autoLevel": false, "gain": 7}),
+        serde_json::json!({"autoLevel": false, "gain": -5}),
+        serde_json::json!({"gain": 100}),
+    ] {
+        assert!(invoke(args.clone()).is_err(), "{args} refused");
+    }
+    assert_eq!(
+        core.calls.load(Ordering::SeqCst),
+        before + 1,
+        "no more relays"
     );
 }
 

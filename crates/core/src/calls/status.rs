@@ -100,6 +100,7 @@ pub fn status(state: &CallState) -> CallStatus {
             device_change,
             effect_refused,
             mirror,
+            microphone,
         } => CallStatus {
             phase: CallPhase::Active,
             room_id: Some(room_id.to_string()),
@@ -128,6 +129,8 @@ pub fn status(state: &CallState) -> CallStatus {
             device_change: *device_change,
             effect_refused: *effect_refused,
             mirror: *mirror,
+            auto_level: microphone.auto_level,
+            mic_gain: microphone.gain,
         },
         CallState::Ended { room_id, reason } => CallStatus {
             phase: CallPhase::Ended,
@@ -265,6 +268,7 @@ pub async fn readiness(client: &Client, room_id: &RoomId, supported: bool) -> Ca
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::calls::controller::MicSettings;
     use crate::calls::controller::Participant;
     use crate::calls::sfu::{Refusal, SfuError};
     use matrix_sdk::ruma::{
@@ -492,6 +496,10 @@ mod tests {
             device_change: None,
             effect_refused: false,
             mirror: true,
+            microphone: MicSettings {
+                auto_level: false,
+                gain: 250,
+            },
         };
         let refused = join_reply(CallError::Declined, &CallState::Idle);
         assert_eq!(refused.phase, CallPhase::Idle);
@@ -503,6 +511,8 @@ mod tests {
         assert!(busy.muted);
         assert!(busy.deafened);
         assert_eq!(busy.volume, 30);
+        assert!(!busy.auto_level);
+        assert_eq!(busy.mic_gain, 250);
         assert_eq!(busy.join_error, Some(CallJoinError::AlreadyInCall));
 
         let ended = CallState::Ended {
@@ -521,6 +531,10 @@ mod tests {
     fn given_call_states_then_the_status_shows_codes_and_bounded_ids() {
         let room = room_id!("!r:example.org").to_owned();
         assert_eq!(status(&CallState::Idle), CallStatus::idle());
+        assert!(CallStatus::idle().auto_level);
+        assert_eq!(CallStatus::idle().mic_gain, 100);
+        assert_eq!(MicSettings::default().gain, 100);
+        assert!(MicSettings::default().auto_level);
         let joining = status(&CallState::Joining {
             room_id: room.clone(),
         });
@@ -558,6 +572,10 @@ mod tests {
             device_change: Some(persephone_contracts::CallDeviceChange::NotFound),
             effect_refused: true,
             mirror: false,
+            microphone: MicSettings {
+                auto_level: false,
+                gain: 250,
+            },
         });
         assert!(active.ring_declined);
         assert!(active.effect_refused);
@@ -578,6 +596,8 @@ mod tests {
         assert!(active.participants.iter().all(|p| p.sharing));
         assert_eq!(active.video.len(), CALL_VIDEO_TILES_MAX);
         assert_eq!(CALL_VIDEO_TILES_MAX, 6);
+        assert!(!active.auto_level);
+        assert_eq!(active.mic_gain, 250);
         assert_eq!(active.phase, CallPhase::Active);
         assert_eq!(active.participants.len(), CALL_PARTICIPANTS_MAX);
         assert_eq!(active.participants[0].user_id, "@a:example.org");

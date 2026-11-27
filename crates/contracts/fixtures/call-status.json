@@ -48,5 +48,7 @@
   "ringDeclined": true,
   "deviceChange": "not_found",
   "effectRefused": true,
-  "mirror": false
+  "mirror": false,
+  "autoLevel": false,
+  "micGain": 250
 }

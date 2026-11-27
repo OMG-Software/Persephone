@@ -161,7 +161,10 @@ control and the gain follow the requests while the track is sent.
   (`mapping::Microphone::new`).
 * Core protocol: `CallMicrophone { auto_level, gain }`. The host command is
   `call_microphone { autoLevel, gain }`, with its own permission in the main
-  window's capability only: the call window has no microphone settings.
+  window's capability. The amendment of 27 November 2026 to
+  [ADR-0060](0060-show-calls-in-a-separate-call-window.md) also gives it to
+  the call window, for a gain slider below the volume (proposed, needs owner
+  approval).
 * `CallDevices` has `autoLevel` and `micGain`. The core, the host and the
   page each check the gain.
 * The settings are saved in the profile's call device record (optional
