@@ -1079,6 +1079,10 @@ struct Devices {
     /// current when it was scheduled, so a try that runs late never touches
     /// the targets of a newer change.
     generation: u64,
+    /// The last change or try found streams that name this process from
+    /// more than one client (or one with no client), so it moved nothing.
+    /// Only for the diagnostics note: the result codes carry the outcome.
+    unclear: bool,
 }
 
 /// The deadlines of one change. Forward moves must end by `forward`, so
@@ -1153,6 +1157,8 @@ pub struct Session {
     /// change to ask.
     waiting: AtomicBool,
     generation: AtomicU64,
+    /// [`Devices::unclear`] of the last job, for [`Session::claims_unclear`].
+    unclear: AtomicBool,
 }
 
 impl Session {
@@ -1199,6 +1205,7 @@ impl Session {
             devices: Mutex::new(Devices::default()),
             waiting: AtomicBool::new(false),
             generation: AtomicU64::new(0),
+            unclear: AtomicBool::new(false),
         })
     }
 
@@ -1211,6 +1218,14 @@ impl Session {
     /// schedules a try and gives it to [`Session::apply_pending`].
     pub fn generation(&self) -> u64 {
         self.generation.load(Ordering::Relaxed)
+    }
+
+    /// Whether the last [`Session::switch`] or [`Session::apply_pending`]
+    /// moved nothing because streams that name this process came from more
+    /// than one client. Read it only after that call ended, for the
+    /// diagnostics note.
+    pub fn claims_unclear(&self) -> bool {
+        self.unclear.load(Ordering::Relaxed)
     }
 
     /// Moves the call's own streams to the chosen microphone and speaker
@@ -1235,6 +1250,7 @@ impl Session {
         recording: Option<&str>,
         playout: Option<&str>,
     ) -> Result<u64, FailureCode> {
+        self.unclear.store(false, Ordering::Relaxed);
         if !self.defaults_known {
             return Err(FailureCode::Unsupported);
         }
@@ -1263,6 +1279,7 @@ impl Session {
     /// for an older `generation` than the accepted change does nothing. Same
     /// start, bound and thread rule as [`Session::switch`].
     pub fn apply_pending(&self, started: Instant, last: bool, generation: u64) -> PendingRun {
+        self.unclear.store(false, Ordering::Relaxed);
         let deadlines = Deadlines::starting_at(started);
         let (Ok(inner), Ok(mut devices)) = (self.inner.lock(), self.devices.lock()) else {
             return PendingRun::default();
@@ -1279,6 +1296,7 @@ impl Session {
             Ordering::Relaxed,
         );
         self.generation.store(devices.generation, Ordering::Relaxed);
+        self.unclear.store(devices.unclear, Ordering::Relaxed);
     }
 }
 
@@ -1353,6 +1371,8 @@ fn undo(server: &impl Server, deadline: Instant, kind: Kind, touched: &[OwnStrea
 /// refused change leaves the earlier accepted state alone. Streams that name
 /// this process from more than one client refuse the change before any move:
 /// `DeviceKept`, as nothing moved and the call runs on the devices it had.
+/// That check comes before `plan_sound_move`, so it wins over the plan's
+/// `DeviceNotFound` and `Unsupported`; `devices.unclear` records it.
 fn run_change(
     server: &impl Server,
     defaults: (Option<&str>, Option<&str>),
@@ -1360,10 +1380,12 @@ fn run_change(
     choice: (Option<&str>, Option<&str>),
     deadlines: Deadlines,
 ) -> Result<(), FailureCode> {
+    devices.unclear = false;
     let snapshot = server
         .snapshot(deadlines.read)
         .ok_or(FailureCode::AudioDevice)?;
     if snapshot.claimants.unclear() {
+        devices.unclear = true;
         return Err(FailureCode::DeviceKept);
     }
     let source_names: Vec<&str> = snapshot.sources.iter().map(String::as_str).collect();
@@ -1453,6 +1475,7 @@ fn run_pending(
     deadlines: Deadlines,
 ) -> PendingRun {
     let (last, generation) = try_of;
+    devices.unclear = false;
     let mut run = PendingRun {
         waiting: devices.pending.iter().any(Option::is_some),
         moves_failed: Vec::new(),
@@ -1482,6 +1505,7 @@ fn run_pending(
     // claim is false, and nothing shows which. Nothing moves, and each
     // waiting kind counts as a refused move that left its routes alone.
     if snapshot.claimants.unclear() {
+        devices.unclear = true;
         for kind in KINDS {
             if devices.pending[kind.slot()].is_some() {
                 failed_try(devices, &mut run, kind, true, last);
@@ -2597,7 +2621,8 @@ mod tests {
         // GIVEN own streams and an earlier waiting speaker, while streams
         // from two clients name this process, WHEN a change asks for other
         // devices, THEN no move is sent, the answer is DeviceKept (the call
-        // runs on the devices it had), and the accepted state stays.
+        // runs on the devices it had), the accepted state stays, and the
+        // devices record why, for the diagnostics note.
         let server = Fake {
             claimants: Claimants::Several,
             ..Fake::with(vec![at(1, "mic-a")], vec![at(2, "spk-a")])
@@ -2621,18 +2646,23 @@ mod tests {
         assert_eq!(server.route(Kind::Playout, 2).as_deref(), Some("spk-a"));
         assert_eq!(devices.pending, [None, Some("spk-b".to_owned())]);
         assert_eq!(devices.generation, 4);
+        assert!(devices.unclear);
     }
 
     #[test]
     fn given_claims_from_one_client_when_a_change_runs_then_the_streams_move_as_before() {
-        // GIVEN own streams whose claims all come from client 4, WHEN a
-        // change asks for other devices, THEN both streams move and the
-        // change is committed.
+        // GIVEN own streams whose claims all come from client 4, and an
+        // earlier job that found unclear claims, WHEN a change asks for
+        // other devices, THEN both streams move, the change is committed and
+        // the earlier mark is gone.
         let server = Fake {
             claimants: Claimants::One(4),
             ..Fake::with(vec![at(1, "mic-a")], vec![at(2, "spk-a")])
         };
-        let mut devices = Devices::default();
+        let mut devices = Devices {
+            unclear: true,
+            ..Devices::default()
+        };
         let result = run_change(
             &server,
             DEFAULTS,
@@ -2644,6 +2674,7 @@ mod tests {
         assert_eq!(server.route(Kind::Recording, 1).as_deref(), Some("mic-b"));
         assert_eq!(server.route(Kind::Playout, 2).as_deref(), Some("spk-b"));
         assert_eq!(devices.generation, 1);
+        assert!(!devices.unclear);
     }
 
     #[test]
@@ -2674,6 +2705,7 @@ mod tests {
             }
         );
         assert_eq!(devices.lost, [false, false]);
+        assert!(devices.unclear);
         let last = run_pending(&server, &mut devices, (true, 0), deadlines());
         assert_eq!(
             last,
@@ -2721,5 +2753,43 @@ mod tests {
         );
         assert_eq!(server.sent.borrow().len(), sent);
         assert_eq!(server.route(Kind::Playout, 2).as_deref(), Some("spk-a"));
+    }
+
+    #[test]
+    fn given_unclear_claims_and_a_waiting_speaker_with_no_stream_then_the_last_try_drops_it() {
+        // GIVEN a waiting speaker, no playback stream yet, a recording
+        // stream, and streams from two clients that name this process, WHEN
+        // a try that is not the last runs, THEN the speaker counts as a
+        // refused move that kept its routes and keeps waiting (without the
+        // unclear claims it would only wait); WHEN the last try runs, THEN
+        // the target is dropped and reported as DeviceKept. Nothing moves.
+        let server = Fake {
+            claimants: Claimants::Several,
+            ..Fake::with(vec![at(1, "mic-a")], vec![])
+        };
+        let mut devices = Devices {
+            pending: [None, Some("spk-b".to_owned())],
+            ..Devices::default()
+        };
+        let kept = vec![("speaker", FailureCode::DeviceKept)];
+        let early = run_pending(&server, &mut devices, (false, 0), deadlines());
+        assert_eq!(
+            early,
+            PendingRun {
+                waiting: true,
+                moves_failed: kept.clone(),
+            }
+        );
+        assert_eq!(devices.pending, [None, Some("spk-b".to_owned())]);
+        let last = run_pending(&server, &mut devices, (true, 0), deadlines());
+        assert_eq!(
+            last,
+            PendingRun {
+                waiting: false,
+                moves_failed: kept,
+            }
+        );
+        assert_eq!(devices.pending, [None, None]);
+        assert!(server.sent.borrow().is_empty());
     }
 }

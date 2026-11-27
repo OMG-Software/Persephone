@@ -714,6 +714,13 @@ trait SoundSwitch: Send + Sync + 'static {
         recording: Option<&str>,
         playout: Option<&str>,
     ) -> Result<u64, FailureCode>;
+
+    /// Whether the last `switch` moved nothing because streams that name
+    /// this process came from more than one client; same contract as
+    /// `pulse::Session::claims_unclear`. Only for the diagnostics note.
+    fn claims_unclear(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -726,6 +733,24 @@ impl SoundSwitch for crate::pulse::Session {
     ) -> Result<u64, FailureCode> {
         crate::pulse::Session::switch(self, started, recording, playout)
     }
+
+    fn claims_unclear(&self) -> bool {
+        crate::pulse::Session::claims_unclear(self)
+    }
+}
+
+/// Notes that a sound job moved nothing because streams that name this
+/// process came from more than one sound server client (ADR-0049). Its
+/// result code (`DeviceKept`) is the same as for a refused move that was
+/// undone, so only this note tells them apart. It holds no ID or name.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn note_unclear_claims() {
+    note_audio(
+        crate::diagnostics::WARN,
+        format_args!(
+            "streams from more than one sound server client name this process: nothing moved"
+        ),
+    );
 }
 
 /// The answer to one sound change through a sound server connection.
@@ -795,6 +820,7 @@ async fn run_change<S: SoundSwitch>(
     done: mpsc::Sender<SoundDone>,
 ) {
     let started = std::time::Instant::now();
+    let probe = Arc::clone(&session);
     let change = {
         let choice = choice.clone();
         tokio::task::spawn_blocking(move || {
@@ -802,6 +828,10 @@ async fn run_change<S: SoundSwitch>(
         })
     };
     let (outcome, late) = wait_blocking(change, wait).await;
+    // The flag is the job's own only once its blocking thread ended.
+    if late.is_none() && probe.claims_unclear() {
+        note_unclear_claims();
+    }
     let (failure, generation) = match outcome {
         Some(Ok(generation)) => (None, Some(generation)),
         Some(Err(code)) => (Some(code), None),
@@ -2395,11 +2425,15 @@ impl Call<'_> {
             let done = self.sound_jobs.clone();
             let wait = crate::pulse::CHANGE_TIMEOUT + crate::pulse::REPORT_GRACE;
             tokio::spawn(async move {
+                let probe = Arc::clone(&pulse);
                 let apply = tokio::task::spawn_blocking(move || {
                     pulse.apply_pending(started, last, accepted)
                 });
                 let (run, late) = wait_blocking(apply, wait).await;
                 let ended = late.is_none();
+                if ended && probe.claims_unclear() {
+                    note_unclear_claims();
+                }
                 // One job runs at a time, so the slot is free.
                 let _ = done.send(SoundDone::Try { last, run, ended }).await;
                 end_late(late, &done).await;

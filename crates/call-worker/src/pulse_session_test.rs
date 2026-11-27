@@ -282,8 +282,9 @@ fn the_call_worker_side() {
     let Some(mode) = std::env::var_os(CHILD_FLAG) else {
         return;
     };
-    // "late": no playback stream yet (nobody else is in the call), and only
-    // stage 1: this mode checks the waiting target, not the containment.
+    // "late": no playback stream yet (nobody else is in the call). It opens
+    // later on the same connection, under stage 2, as libwebrtc's does when
+    // someone joins: a new stream needs no new socket.
     let late = mode == "late";
     // The same order as the worker: stage 1 first (before any input), then
     // the sound server connections, then stage 2.
@@ -300,9 +301,7 @@ fn the_call_worker_side() {
     }
     assert!(library().is_some());
     let session = Session::open().expect("the session opens");
-    if !late {
-        assert!(crate::containment::apply_stage2(), "stage 2");
-    }
+    assert!(crate::containment::apply_stage2(), "stage 2");
     let mut out = std::io::stdout();
     writeln!(out, "READY").unwrap();
     out.flush().unwrap();
@@ -317,8 +316,7 @@ fn the_call_worker_side() {
                 continue;
             }
             Some("APPLY") => {
-                let run =
-                    session.apply_pending(std::time::Instant::now(), false, session.generation());
+                let run = session.apply_pending(Instant::now(), false, session.generation());
                 writeln!(
                     out,
                     "OK waiting={} failed={:?}",
@@ -333,11 +331,7 @@ fn the_call_worker_side() {
         }
         let choice = |word: Option<&str>| word.filter(|word| *word != "-").map(str::to_owned);
         let (recording, playout) = (choice(words.next()), choice(words.next()));
-        match session.switch(
-            std::time::Instant::now(),
-            recording.as_deref(),
-            playout.as_deref(),
-        ) {
+        match session.switch(Instant::now(), recording.as_deref(), playout.as_deref()) {
             Ok(_) => writeln!(out, "OK").unwrap(),
             Err(code) => writeln!(out, "ERR {code:?}").unwrap(),
         }
@@ -491,7 +485,7 @@ fn given_a_call_session() {
             .expect("parec"),
     );
     let (mut child, mut reader) = start_child("1");
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    std::thread::sleep(Duration::from_millis(300));
     let pid = child.id();
     let (playing_pid, recording_pid) = (playing.0.id(), recording.0.id());
 
@@ -550,7 +544,8 @@ fn given_a_call_session() {
 /// change is made, THEN it answers done and the stream does not exist; WHEN
 /// the stream opens (on the default speaker) and the waiting target is
 /// applied, THEN the stream moves to the chosen speaker. The microphone
-/// moves at once. Stage 1 only: a stream that opens later needs a socket.
+/// moves at once. The child runs under both stages, so the late stream
+/// opens under full containment, on the connection it already has.
 #[test]
 #[ignore = "needs a sound server with two speakers and two microphones, pactl"]
 fn given_a_speaker_that_waits_for_its_stream() {
@@ -565,7 +560,7 @@ fn given_a_speaker_that_waits_for_its_stream() {
     let source = other_source.strip_prefix("pulse:").unwrap();
     let default_sink = pactl(&["get-default-sink"]).trim().to_owned();
     let (mut child, mut reader) = start_child("late");
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    std::thread::sleep(Duration::from_millis(300));
     let pid = child.id();
     assert!(on("sink-inputs", pid).is_empty(), "no playback stream yet");
 
@@ -580,7 +575,7 @@ fn given_a_speaker_that_waits_for_its_stream() {
     assert_eq!(reply, "OK waiting=true failed=[]", "still no stream");
 
     assert_eq!(ask(&mut child, &mut reader, "OPEN_PLAYBACK"), "OK");
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    std::thread::sleep(Duration::from_millis(300));
     assert_eq!(on("sink-inputs", pid), [default_sink.as_str()]);
     let reply = ask(&mut child, &mut reader, "APPLY");
     assert_eq!(reply, "OK waiting=false failed=[]");
@@ -624,7 +619,7 @@ fn given_a_false_claim_of_the_process_id() {
             .spawn()
             .expect("pacat"),
     );
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    std::thread::sleep(Duration::from_millis(300));
     // Both playback streams name the child: its own and the false one.
     let on_defaults = [default_sink.as_str(), default_sink.as_str()];
     assert_eq!(on("sink-inputs", pid), on_defaults, "two playback claims");
@@ -637,7 +632,7 @@ fn given_a_false_claim_of_the_process_id() {
     assert_eq!(on("source-outputs", pid), [default_source.as_str()]);
 
     drop(false_claim);
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    std::thread::sleep(Duration::from_millis(300));
     let reply = ask(&mut child, &mut reader, &change);
     assert_eq!(reply, "OK", "one client's claims move");
     assert_eq!(on("sink-inputs", pid), [sink]);

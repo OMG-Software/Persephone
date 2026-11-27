@@ -391,11 +391,12 @@ call: `given_a_call_session` starts the test binary as a child process that
 opens its own record and playback streams and calls `pulse::Session`
 directly, under both containment stages, and checks the moves of those
 existing streams from outside. It runs no call loop and connects to no SFU.
-The second test, `given_a_speaker_that_waits_for_its_stream`, applies stage 1
+The second test, `given_a_speaker_that_waits_for_its_stream`, applied stage 1
 only. Both passed once on Linux Mint 22.3 with a disposable PipeWire 1.0.5 and
 `pipewire-pulse` (27 November 2026). The one-client rule changed the child
-of `given_a_call_session` to open both streams on one connection, as
-libwebrtc does, and added `given_a_false_claim_of_the_process_id`: a `pacat`
+to open both streams on one connection, as libwebrtc does, so the second test
+now applies stage 2 too, and its late playback stream opens under full
+containment. It also added `given_a_false_claim_of_the_process_id`: a `pacat`
 that copies the child's process ID stops a change (`DeviceKept`, nothing
 moves) until it ends. Unit tests with the fake sound server cover the rule
 in changes and in tries, and the flood of false claims. The changed session

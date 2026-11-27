@@ -151,9 +151,12 @@ Later change, not run: the follow-up of pull request 111 (one-client rule,
 ADR-0049) changed the child to open its record and playback streams on one
 connection (`pa_threaded_mainloop` and one `pa_context`, as libwebrtc does)
 instead of two `pa_simple` connections, and added
-`given_a_false_claim_of_the_process_id`. The runs above used the earlier
-child and the earlier rule. The changed tests have not run: the VM did not
-answer on 27 November 2026.
+`given_a_false_claim_of_the_process_id`. A late stream now needs no new
+socket, so `given_a_speaker_that_waits_for_its_stream` applies stage 2 too,
+and its playback stream opens under full containment, as libwebrtc's does
+when someone joins a call. The runs above used the earlier child and the
+earlier rule. The changed tests have not run: the VM did not answer on
+27 November 2026.
 
 ### Stream owner on the sound server, 27 November 2026
 
