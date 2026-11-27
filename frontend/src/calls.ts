@@ -757,7 +757,7 @@ export class LatestOnly<T> {
 export const DEVICES_UNSUPPORTED_TEXT = 'Calls are not available on this system yet.';
 export const DEVICES_UNREADABLE_TEXT = 'The saved call devices could not be read. Choose them again.';
 export const DEVICES_NOTE_TEXT =
-  'A microphone or speaker change applies to a running call at once, except on Linux, where it applies from the next call. A camera change applies from the next camera start. The volume changes at once.';
+  'A microphone or speaker change applies to a running call at once. A camera change applies from the next camera start. The volume changes at once.';
 
 /** The note under the menus, for a device reply. */
 export function devicesNote(devices: CallDevices): string {
@@ -905,7 +905,7 @@ export const PARTICIPANT_DEAFENED_LABEL = 'Deafened';
 export const DEVICE_CHANGE_TEXT: Record<CallDeviceChange, string> = {
   not_found: 'The chosen microphone or speaker is not connected. The call keeps the one it had.',
   unsupported: 'This change cannot be made during a call on this system. It applies to the next call.',
-  kept: 'The chosen microphone could not be opened. The call keeps the one it had.',
+  kept: 'The chosen microphone or speaker could not be used. The call keeps the one it had.',
   failed: 'The microphone or speaker could not be changed, and the sound may have stopped. Choose a device again, or leave and rejoin the call.'
 };
 
@@ -928,8 +928,8 @@ export const DEVICE_SAVE_FAILURE_TEXT = 'The call devices could not be saved.';
  */
 export const DEVICE_SWITCH_TEXT: Record<CallDeviceChange, string> = {
   not_found: 'The chosen microphone or speaker is not connected. The call keeps the one it had.',
-  unsupported: 'This system cannot switch the microphone or speaker during a call (Linux today). Your choice applies from the next call.',
-  kept: 'The chosen microphone could not be opened. The call keeps the one it had.',
+  unsupported: 'This call cannot switch the microphone or speaker now. Your choice applies from the next call.',
+  kept: 'The chosen microphone or speaker could not be used. The call keeps the one it had.',
   failed: 'The microphone or speaker could not be changed, and the sound may have stopped. A lost speaker needs a rejoin: leave the call and join it again.'
 };
 export const DEVICE_SAVED_TEXT =

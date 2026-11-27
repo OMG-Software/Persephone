@@ -116,13 +116,15 @@ no media permissions, and a browser test would prove nothing about the worker.
   `failed`) until the next change. `kept` (worker code `DeviceKept`) is a
   failed microphone switch that the worker undid: the old microphone
   captures again and the speaker is not lost, so the page does not ask to
-  rejoin. Linux reports `unsupported`: the PulseAudio path has no
-  switch yet.
+  rejoin. Linux moves the call's own sound server streams on a connection
+  that the worker opened before stage 2 (ADR-0049, amended 27 November 2026,
+  proposed). Where that connection could not open, Linux reports
+  `unsupported`.
 * `SetDevices` also carries the camera choice. The worker keeps it, and the
   call's next camera start opens it; a camera that is on keeps running until
-  it is turned off. On Linux a choice whose microphone and speaker equal the
-  join's is no sound change, so a change of the camera only does not report
-  `unsupported`.
+  it is turned off. On Linux without that connection, a choice whose
+  microphone and speaker equal the join's is no sound change, so a change of
+  the camera only does not report `unsupported`.
 
 ### Device tests
 
@@ -201,5 +203,7 @@ no media permissions, and a browser test would prove nothing about the worker.
   ([evidence](../evidence/device-tests-linux-macos.md)); the Linux camera
   test with the portal was not run.
 * The Linux camera test may show the desktop's camera portal dialog.
-* Linux cannot switch the microphone or speaker during a call.
+* Linux switches the microphone or speaker during a call only through the
+  sound server connection (ADR-0049 amendment, proposed). Without it, Linux
+  cannot.
 * Each test starts a worker process, which takes about a second.

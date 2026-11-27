@@ -173,6 +173,11 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
         Ok(paths) => paths,
         Err(code) => return fail(output, code).await,
     };
+    // Linux (ADR-0049): the call's own sound server connection, opened here
+    // because stage 2 allows no new socket. A failure only means that a
+    // microphone or speaker change during the call is `Unsupported`.
+    #[cfg(target_os = "linux")]
+    let pulse = open_pulse(recording_device.as_deref(), playout_device.as_deref()).await;
     let audio = match start_audio() {
         Ok(audio) => audio,
         Err(code) => return fail(output, code).await,
@@ -283,6 +288,10 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
         video_effect,
         shared_effect: SharedEffect::new(video_effect),
         joined_sound,
+        #[cfg(target_os = "linux")]
+        pulse,
+        #[cfg(target_os = "linux")]
+        sound_retries: std::collections::VecDeque::new(),
         camera: None,
         stalled: None,
         gate: CameraGate::new(own_index),
@@ -436,6 +445,45 @@ async fn sound_paths(
     ])
 }
 
+/// The tries of a waiting sound target after an event that may open a stream.
+#[cfg(target_os = "linux")]
+const SOUND_RETRIES: [Duration; 3] = [
+    Duration::from_millis(250),
+    Duration::from_secs(1),
+    Duration::from_secs(3),
+];
+
+/// Waits until `at`; for ever when nothing waits.
+async fn retry_wait(at: Option<Instant>) {
+    match at {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Opens the call's sound server connection on a blocking thread (Linux,
+/// ADR-0049). `None` when it cannot open; the call goes on without it.
+#[cfg(target_os = "linux")]
+async fn open_pulse(
+    recording: Option<&str>,
+    playout: Option<&str>,
+) -> Option<Arc<crate::pulse::Session>> {
+    let (recording, playout) = (recording.map(str::to_owned), playout.map(str::to_owned));
+    let opened = tokio::task::spawn_blocking(move || {
+        crate::pulse::Session::open(recording.as_deref(), playout.as_deref())
+    })
+    .await
+    .ok()
+    .flatten();
+    if opened.is_none() {
+        note_audio(
+            crate::diagnostics::WARN,
+            format_args!("no sound server connection: a device change needs a new call"),
+        );
+    }
+    opened.map(Arc::new)
+}
+
 /// One sound server name from the environment. A value that is not UTF-8
 /// cannot match any choice.
 #[cfg(target_os = "linux")]
@@ -586,9 +634,9 @@ fn device_switch(
 }
 
 /// Whether a `SetDevices` sound choice is no change where no device changes
-/// during a call (Linux, ADR-0049): the same choice as the join. Elsewhere
-/// every choice goes to `switch_devices`, which finds what changes and
-/// switches a lost device again.
+/// during a call (Linux without a sound server connection, ADR-0049): the
+/// same choice as the join. Elsewhere every choice goes to `switch_devices`
+/// or the sound server connection, which find what changes.
 fn sound_unchanged_here(
     joined: &(Option<String>, Option<String>),
     recording: &Option<String>,
@@ -599,8 +647,10 @@ fn sound_unchanged_here(
 
 /// Moves the running call to other devices (`SetDevices`, ADR-0059). Both
 /// choices are checked before either device changes; `apply_switch` then
-/// changes them. On Linux the sound server stream was chosen when the
-/// worker started (ADR-0049), so a change applies to the next call only.
+/// changes them. On Linux libwebrtc has no device IDs, so a change goes
+/// through the call's sound server connection (`Call::change_sound`); this
+/// function is only the fallback where that connection could not open
+/// (ADR-0049), and a change then applies to the next call only.
 fn switch_devices(
     audio: &PlatformAudio,
     defaults: &MediaDefaults,
@@ -1110,6 +1160,13 @@ struct Call<'a> {
     /// changes during a call, so a `SetDevices` with this choice (a change of
     /// the camera only) is no sound change there.
     joined_sound: (Option<String>, Option<String>),
+    /// Linux: the call's sound server connection, which moves the call's own
+    /// streams on a change (ADR-0049). `None` when it could not open.
+    #[cfg(target_os = "linux")]
+    pulse: Option<Arc<crate::pulse::Session>>,
+    /// When a waiting sound target is tried next (`SOUND_RETRIES`).
+    #[cfg(target_os = "linux")]
+    sound_retries: std::collections::VecDeque<Instant>,
     camera: Option<LocalCamera>,
     /// A capture that did not end in time after a stop (a blocked read on a
     /// stalled camera). Its frames are already revoked. No new camera opens
@@ -1895,6 +1952,87 @@ impl ScreenFeed {
 }
 
 impl Call<'_> {
+    /// The time of the next try of a sound target that waits for a stream
+    /// (Linux, ADR-0049); `None` when nothing waits, so no timer runs.
+    fn retry_next(&self) -> Option<Instant> {
+        #[cfg(target_os = "linux")]
+        return self.sound_retries.front().copied();
+        #[cfg(not(target_os = "linux"))]
+        return None;
+    }
+
+    /// Starts the bounded tries after an event that may open a stream: remote
+    /// audio subscribed, or the own microphone published or unmuted. libwebrtc
+    /// may open its stream a little later. Nothing waits: no timer.
+    fn sound_trigger(&mut self) {
+        #[cfg(target_os = "linux")]
+        if self.pulse.as_ref().is_some_and(|pulse| pulse.has_pending()) {
+            let now = Instant::now();
+            self.sound_retries = SOUND_RETRIES.iter().map(|after| now + *after).collect();
+        }
+    }
+
+    /// One try of the waiting sound targets. A failed move has no request to
+    /// answer: it is noted by kind, and the target stays.
+    async fn retry_pending_sound(&mut self) {
+        #[cfg(target_os = "linux")]
+        {
+            self.sound_retries.pop_front();
+            let Some(pulse) = self.pulse.clone().filter(|pulse| pulse.has_pending()) else {
+                self.sound_retries.clear();
+                return;
+            };
+            let apply = tokio::task::spawn_blocking(move || pulse.apply_pending());
+            let (waiting, failed) =
+                match tokio::time::timeout(crate::pulse::CHANGE_TIMEOUT, apply).await {
+                    Ok(Ok(result)) => result,
+                    _ => (true, Vec::new()),
+                };
+            for kind in failed {
+                note_audio(
+                    crate::diagnostics::WARN,
+                    format_args!("a waiting {kind} move failed"),
+                );
+            }
+            if !waiting {
+                self.sound_retries.clear();
+            }
+        }
+    }
+
+    /// Applies a microphone and speaker choice during the call and gives the
+    /// failure, if any. On Linux the sound server connection moves the call's
+    /// own streams on a blocking thread (ADR-0049); without it, only the
+    /// join's own choice is accepted.
+    async fn change_sound(
+        &mut self,
+        recording: Option<String>,
+        playout: Option<String>,
+    ) -> Option<FailureCode> {
+        #[cfg(target_os = "linux")]
+        if let Some(pulse) = self.pulse.clone() {
+            // The whole change is bound: the loop never waits longer.
+            let change = tokio::task::spawn_blocking(move || {
+                pulse.switch(recording.as_deref(), playout.as_deref())
+            });
+            return match tokio::time::timeout(crate::pulse::CHANGE_TIMEOUT, change).await {
+                Ok(Ok(result)) => result.err(),
+                _ => Some(FailureCode::AudioDevice),
+            };
+        }
+        if sound_unchanged_here(&self.joined_sound, &recording, &playout) {
+            return None;
+        }
+        switch_devices(
+            self.audio,
+            &self.media_defaults,
+            &mut self.sound_devices,
+            recording.as_deref(),
+            playout.as_deref(),
+        )
+        .err()
+    }
+
     /// Applies a new video effect, at once for a running camera and for
     /// later camera starts, unless it cannot run here: the old one then
     /// stays (ADR-0068). The answer names the effect in use.
@@ -2889,6 +3027,15 @@ impl Call<'_> {
     /// Follows the remote tracks of any connection: audio gets the call's
     /// playout, video a tile.
     async fn on_event(&mut self, connection: u8, event: &RoomEvent) -> Result<(), Closed> {
+        if matches!(
+            event,
+            RoomEvent::TrackSubscribed {
+                track: RemoteTrack::Audio(_),
+                ..
+            } | RoomEvent::LocalTrackPublished { .. }
+        ) {
+            self.sound_trigger();
+        }
         match event {
             RoomEvent::TrackSubscribed {
                 track: RemoteTrack::Audio(track),
@@ -3065,6 +3212,7 @@ impl Call<'_> {
                     self.publication.mute();
                 } else {
                     self.publication.unmute();
+                    self.sound_trigger();
                 }
                 Ok(vec![FromWorker::Muted { muted }])
             }
@@ -3158,18 +3306,7 @@ impl Call<'_> {
                 camera,
             } => {
                 self.camera_device = camera;
-                let failure = if sound_unchanged_here(&self.joined_sound, &recording, &playout) {
-                    None
-                } else {
-                    switch_devices(
-                        self.audio,
-                        &self.media_defaults,
-                        &mut self.sound_devices,
-                        recording.as_deref(),
-                        playout.as_deref(),
-                    )
-                    .err()
-                };
+                let failure = self.change_sound(recording, playout).await;
                 // A device change may reconfigure the capture path, so the
                 // microphone settings are applied again (ADR-0062).
                 self.apply_microphone();
@@ -3424,6 +3561,9 @@ async fn event_loop(
                         }
                     }
                 }
+            }
+            () = retry_wait(call.retry_next()) => {
+                call.retry_pending_sound().await;
             }
             Some(done) = others.connected.recv() => {
                 if call.other_connected(done, &mut others.events).await.is_err() {
