@@ -123,10 +123,13 @@ that we need, and does not touch the member state event.
   device at the start of the call and at each join, also when not deafened.
   This replaces a note that a receiver kept when it did not read a leave.
 * The counter is a clock reading, so it shows roughly when the state
-  changed. A clock set far ahead makes later calls of that device lose
-  against it only until the clock is right; a clock set back between two
-  runs of the app can hide the new state of the later call. In one run the
-  counter only rises.
+  changed. In one run the counter only rises. Between two runs, a clock
+  that is set right after it was ahead is a clock set back. A receiver that
+  kept a note from the run whose clock was ahead ignores the later run
+  until a delivered counter is above that note (see the next point). When
+  the clock was far ahead, the changes of a call do not reach the note, so
+  this can last about as long as the clock was ahead, unless the receiver
+  forgets the note first: when the member leaves or the call ends.
 * No counter is stored between runs. A receiver ignores a new run's
   messages, and shows the old state, while their counter is not above its
   note: the last counter that it accepted from that device. A new run's
