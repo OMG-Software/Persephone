@@ -2869,8 +2869,9 @@ impl Core {
     /// or joining call, which restarts a camera that is on. A choice that
     /// equals the saved one changes nothing, so the camera does not restart
     /// for it, unless an earlier restart is owed (the call's queue was
-    /// full): then the answer was `limit_exceeded` and this one restarts. A record that cannot be read is not replaced; the reply is
-    /// then `unavailable`, and nothing changes. The save comes first, so a
+    /// full): then the answer was `limit_exceeded` and this one restarts. A
+    /// record that cannot be read is not replaced; the reply is then
+    /// `unavailable`, and nothing changes. The save comes first, so a
     /// join that read the record before it gets the value from the
     /// controller (`CallController::video_asked`).
     fn call_video_quality(&self, quality: persephone_contracts::CallVideoQuality) -> Outcome {

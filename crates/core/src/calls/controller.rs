@@ -2477,6 +2477,10 @@ impl CallController {
     /// goes on as it was, the restart stays owed (`restart_owed`) and the
     /// error is `Busy`.
     pub fn restart_camera(&self) -> Result<(), CallError> {
+        // The camera state is read under the slot lock, which every camera
+        // command holds while it publishes. So an off that the user asked
+        // for just before is seen here, and the restart does not undo it.
+        let slot = self.inner.slot();
         let on = matches!(
             &*self.inner.state.borrow(),
             CallState::Active {
@@ -2484,7 +2488,6 @@ impl CallController {
                 ..
             }
         );
-        let slot = self.inner.slot();
         let Slot::Running(run) = &*slot else {
             return if on {
                 Err(CallError::NotInCall)
