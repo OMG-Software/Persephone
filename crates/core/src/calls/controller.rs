@@ -2140,6 +2140,8 @@ impl CallController {
             auto_level: scope.devices.auto_level(),
             mic_gain: scope.devices.mic_gain(),
             video_effect: own.effect,
+            // The device record's choice comes with ADR-0070.
+            video_quality: persephone_call_protocol::VideoQuality::Auto,
         };
         // Before the join, so the worker's connection records are kept
         // (ADR-0058). The call task sends the switch again when it starts.

@@ -751,6 +751,7 @@ mod tests {
             auto_level: true,
             mic_gain: 100,
             video_effect: persephone_call_protocol::VideoEffect::NONE,
+            video_quality: persephone_call_protocol::VideoQuality::Auto,
         };
         assert!(is_first_message_allowed(&join));
     }

@@ -117,6 +117,7 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
         auto_level,
         mic_gain,
         video_effect,
+        video_quality: _video_quality,
     } = first
     else {
         return fail(output, FailureCode::Protocol).await;
@@ -3175,6 +3176,8 @@ impl Call<'_> {
                 Ok(vec![FromWorker::DevicesSet { failure }])
             }
             ToWorker::SetVideoEffect { effect } => Ok(vec![self.set_video_effect(effect)]),
+            // The worker behaviour comes with ADR-0070.
+            ToWorker::SetVideoQuality { .. } => Ok(Vec::new()),
             ToWorker::Join { .. }
             | ToWorker::ListDevices
             | ToWorker::TestDevice { .. }
