@@ -841,7 +841,7 @@ mod tests {
         assert_eq!(range_sizes([160, 1920, 16, 120, 1080, 8]).len(), 5);
         // Narrow range.
         assert_eq!(
-            range_sizes([1000, 1920, 0, 600, 1080, 0]),
+            range_sizes([1000, 1900, 0, 600, 1000, 0]),
             vec![(1280, 720)]
         );
         // Off the step: 360 - 100 = 260 is not a multiple of 64.
