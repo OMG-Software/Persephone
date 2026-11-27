@@ -145,6 +145,11 @@ impl AutoQuality {
                 }
             }
         }
+        // A sample with a missing value changes no count and no tier. Counts
+        // from earlier samples must not step up on it.
+        if bits.is_none() || rtt.is_none() {
+            return None;
+        }
         if self.bad_in_a_row >= DOWN_SAMPLES {
             return self.step_down(now);
         }
@@ -396,6 +401,33 @@ mod tests {
         let mut quality = AutoQuality::new(SendTier::P1440, start);
         feed(&mut quality, &mut now, 2, rich());
         feed(&mut quality, &mut now, 3, none);
+        assert_eq!(feed(&mut quality, &mut now, 1, rich()), [SendTier::P720]);
+    }
+
+    /// GIVEN 3 good samples before the hold ends WHEN incomplete samples come
+    /// after the hold ended THEN the tier does not step up, and the first
+    /// complete good sample after the hold steps up.
+    #[test]
+    fn given_incomplete_samples_after_the_hold_then_no_step_up_until_a_complete_one() {
+        let start = Instant::now();
+        let mut now = start;
+        let mut quality = AutoQuality::new(SendTier::P1440, start);
+        let none = Sample {
+            bits_per_second: None,
+            rtt_seconds: None,
+        };
+        let no_rtt = Sample {
+            bits_per_second: Some(50_000_000.0),
+            rtt_seconds: None,
+        };
+        // Good samples at 2, 4 and 6 seconds: the run is long enough, the
+        // hold of 10 seconds is not over.
+        assert!(feed(&mut quality, &mut now, 3, rich()).is_empty());
+        // Incomplete samples at 8 and 10 seconds: the hold ends at 10.
+        assert!(feed(&mut quality, &mut now, 1, none).is_empty());
+        assert!(feed(&mut quality, &mut now, 1, no_rtt).is_empty());
+        assert_eq!(quality.tier(), SendTier::P480);
+        // A complete good sample at 12 seconds steps up.
         assert_eq!(feed(&mut quality, &mut now, 1, rich()), [SendTier::P720]);
     }
 

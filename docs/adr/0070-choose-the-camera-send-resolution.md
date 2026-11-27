@@ -97,7 +97,8 @@ keeps its size until it restarts.
   off and then on, so every portal request, gate and request number applies.
   The call task sends the new device choice and quality to the worker before
   the camera-on. A joining call has no camera to restart. A camera that is off
-  stays off.
+  stays off. If the camera is starting, the worker ends the open that is in
+  flight, releases it, and opens again with the new device and quality.
 * The page offers a "Video quality" menu next to the camera menu, in the
   main window's call settings and in the call window's device panel. The
   hint says that the camera and the computer limit the highest resolution.

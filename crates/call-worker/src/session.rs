@@ -2187,6 +2187,17 @@ impl Call<'_> {
                 };
                 self.output.send(FromWorker::Camera { state }).await
             }
+            // An off and an on arrived during the open: release it and open
+            // again, so the new open reads the current device and quality.
+            (Completion::Restart, result) => {
+                if let Ok(opened) = result {
+                    self.release_capture(opened.capture).await;
+                }
+                match self.begin_camera(camera::Grant::default()) {
+                    Some(state) => self.output.send(FromWorker::Camera { state }).await,
+                    None => Ok(()),
+                }
+            }
             // The capture ended before this completion: it is dead, not on.
             (Completion::Ended, result) => {
                 if let Ok(opened) = result {
@@ -2478,7 +2489,10 @@ impl Call<'_> {
                 }
                 Ok(())
             }
-            (Completion::Cancelled, result) => {
+            // A screen start waits in `screen_next` while an open is stopped,
+            // so the gate never sees an on after an off; `Restart` is the
+            // same as `Cancelled` here.
+            (Completion::Cancelled | Completion::Restart, result) => {
                 let released = match result {
                     Ok(opened) => self.release_screen_capture(opened.capture).await,
                     Err(_) => true,
@@ -3479,6 +3493,10 @@ enum Completion {
     /// The camera was turned off while this open was in flight: release a
     /// camera that opened, then report the off that waited for it.
     Cancelled,
+    /// The camera was turned off and on again while this open was in flight:
+    /// the open used the old device and quality. Release a camera that
+    /// opened, then open again with the current settings.
+    Restart,
     /// The capture ended before the completion: release it and report
     /// `Unavailable`.
     Ended,
@@ -3490,13 +3508,16 @@ enum Completion {
 /// The camera is "wanted" from `request_on` until `request_off`. A second
 /// `request_on` during an open does not start a second open of the same
 /// device. If the camera was turned off meanwhile (a stale open), it makes
-/// that one open current again.
+/// that one open current again, unless an off arrived during it: the open
+/// then used settings that may be old, and it ends as `Restart`.
 struct CameraGate {
     /// Generation of the last open started.
     generation: u64,
     /// Generation of the open in flight, if any.
     in_flight: Option<u64>,
     wanted: bool,
+    /// The open in flight that an off arrived during.
+    superseded: Option<u64>,
     /// The open in flight whose capture already ended by itself.
     ended_early: Option<u64>,
     own_index: i32,
@@ -3508,6 +3529,7 @@ impl CameraGate {
             generation: 0,
             in_flight: None,
             wanted: false,
+            superseded: None,
             ended_early: None,
             own_index,
         }
@@ -3523,6 +3545,7 @@ impl CameraGate {
         }
         self.generation += 1;
         self.in_flight = Some(self.generation);
+        self.superseded = None;
         self.ended_early = None;
         OnRequest::Start(self.generation)
     }
@@ -3540,6 +3563,7 @@ impl CameraGate {
     /// The camera is not wanted. An open in flight stays and ends cancelled.
     fn request_off(&mut self) {
         self.wanted = false;
+        self.superseded = self.in_flight;
     }
 
     /// An open for `generation` ended; `opened` tells whether it succeeded.
@@ -3549,8 +3573,11 @@ impl CameraGate {
         }
         self.in_flight = None;
         let ended = self.ended_early.take() == Some(generation);
+        let superseded = self.superseded.take() == Some(generation);
         if !self.wanted {
             Completion::Cancelled
+        } else if superseded {
+            Completion::Restart
         } else if opened && ended {
             self.wanted = false;
             Completion::Ended
@@ -5171,7 +5198,8 @@ mod tests {
 
     /// GIVEN a screen open in flight WHEN it is stopped THEN the gate still
     /// shows the open and no longer wants the device, which is when a new
-    /// start must wait; WHEN started again THEN it is wanted again.
+    /// start must wait; WHEN started again THEN it is wanted again and the
+    /// open ends as a restart.
     #[test]
     fn given_a_stopped_open_then_the_gate_is_opening_but_not_wanted() {
         let mut gate = CameraGate::new(0);
@@ -5184,7 +5212,7 @@ mod tests {
         assert!(gate.opening() && !gate.wanted());
         assert_eq!(gate.request_on(false), OnRequest::Pending);
         assert!(gate.wanted());
-        assert_eq!(gate.complete(first, true), Completion::Publish);
+        assert_eq!(gate.complete(first, true), Completion::Restart);
     }
 
     /// A grant that counts its drops.
@@ -5439,14 +5467,45 @@ mod tests {
     }
 
     /// GIVEN an open turned off and on again before it ends WHEN it ends THEN
-    /// that one result is published (the device is not opened twice).
+    /// it restarts, because it used the old device and quality; no second
+    /// open starts beside it, and the restart opens at once.
     #[test]
-    fn given_off_then_on_during_open_then_one_open_serves_both() {
+    fn given_off_then_on_during_open_then_the_open_restarts() {
         let mut gate = CameraGate::new(0);
         assert_eq!(gate.request_on(false), OnRequest::Start(1));
         gate.request_off();
         assert_eq!(gate.request_on(false), OnRequest::Pending);
-        assert_eq!(gate.complete(1, true), Completion::Publish);
+        assert_eq!(gate.complete(1, true), Completion::Restart);
+        assert!(gate.wanted() && !gate.opening());
+        assert_eq!(gate.request_on(false), OnRequest::Start(2));
+        assert_eq!(gate.complete(2, true), Completion::Publish);
+    }
+
+    /// GIVEN an open that failed after an off and an on WHEN it ends THEN it
+    /// restarts too: the new open may use a device that works.
+    #[test]
+    fn given_off_then_on_during_failed_open_then_the_open_restarts() {
+        let mut gate = CameraGate::new(0);
+        assert_eq!(gate.request_on(false), OnRequest::Start(1));
+        gate.request_off();
+        assert_eq!(gate.request_on(false), OnRequest::Pending);
+        assert_eq!(gate.complete(1, false), Completion::Restart);
+    }
+
+    /// GIVEN an off, an on and a last off during an open WHEN it ends THEN it
+    /// is cancelled; a stale generation is released and does not restart.
+    #[test]
+    fn given_off_on_off_during_open_then_it_is_cancelled_and_stale_is_released() {
+        let mut gate = CameraGate::new(0);
+        assert_eq!(gate.request_on(false), OnRequest::Start(1));
+        gate.request_off();
+        assert_eq!(gate.request_on(false), OnRequest::Pending);
+        gate.request_off();
+        assert_eq!(gate.complete(7, true), Completion::Release);
+        assert_eq!(gate.complete(1, true), Completion::Cancelled);
+        // The marker does not outlive its open.
+        assert_eq!(gate.request_on(false), OnRequest::Start(2));
+        assert_eq!(gate.complete(2, true), Completion::Publish);
     }
 
     /// GIVEN a current open WHEN it fails THEN the error is reported, and the

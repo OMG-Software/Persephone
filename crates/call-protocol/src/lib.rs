@@ -4186,9 +4186,10 @@ mod tests {
             panic!("join decodes");
         };
         assert_eq!(volume, 65);
-        // The volume, the automatic level flag, the two gain bytes and the
-        // three effect bytes end it.
-        let at = body.len() - 7;
+        // The volume, the automatic level flag, the two gain bytes, the three
+        // effect bytes and the quality byte end it.
+        let at = body.len() - 8;
+        assert_eq!(body[at], volume, "the offset names the volume byte");
         body[at] = MAX_VOLUME_PERCENT + 1;
         assert_eq!(ToWorker::decode(&body), Err(DecodeError::InvalidValue));
     }
@@ -4403,8 +4404,23 @@ mod tests {
             let answer = [VERSION, FROM_VIDEO_EFFECT, bytes[0], bytes[1], bytes[2], 0];
             assert_eq!(FromWorker::decode(&answer).err(), invalid, "{bytes:?}");
             let mut body = join().encode().to_vec();
-            let end = body.len();
-            body[end - 3..].copy_from_slice(&bytes);
+            // The three effect bytes come before the quality byte.
+            let end = body.len() - 1;
+            let Ok(ToWorker::Join {
+                video_effect,
+                video_quality,
+                ..
+            }) = ToWorker::decode(&body)
+            else {
+                panic!("join decodes");
+            };
+            assert_eq!(
+                body[end - 3..end],
+                video_effect.to_bytes(),
+                "the offset names the effect bytes"
+            );
+            assert_eq!(body[end], video_quality as u8);
+            body[end - 3..end].copy_from_slice(&bytes);
             assert_eq!(ToWorker::decode(&body).err(), invalid, "{bytes:?}");
         }
         // A bad refused flag, and a short or long message.
