@@ -57,9 +57,10 @@ that we need, and does not touch the member state event.
   counter is above that note. The note is at most the start counter of its
   call plus that call's changes (less when a send failed); that start is
   the clock then, or more after quick rejoins in that run. So a new run is
-  ignored while its counter is not above the note: when it starts within
-  that many milliseconds of that call's start, or when the clock was set
-  back to the note or below it. The receiver then shows the old state until
+  ignored while its counter is not above the note. Only a run that starts
+  within that many milliseconds of that call's start, or after the clock
+  was set back, can be ignored; whether it is depends on the note. The
+  receiver then shows the old state until
   the new counter passes the note (see the negative consequences).
   The counter shows members roughly when the state changed, which they can
   already see from the call.
@@ -121,10 +122,9 @@ that we need, and does not touch the member state event.
 * No counter is stored between runs. A receiver ignores a new run's
   messages, and shows the old state, while their counter is not above its
   note: the last counter that it accepted from that device. That note is
-  at most its call's start counter plus that call's changes, so this needs
-  a new run within that many milliseconds of that call's start (more after
-  quick rejoins in the earlier run), or a clock set back to the note or
-  below it.
+  at most its call's start counter plus that call's changes, so only a new
+  run within that many milliseconds of that call's start (more after quick
+  rejoins in the earlier run), or after a clock set back, is at risk.
 * Not verified against a live homeserver or a second client yet.
 
 ## Pros and Cons of the Options
