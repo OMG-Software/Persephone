@@ -6,8 +6,10 @@
 //! The icons are the bundle's PNG files, compiled in, so nothing is read
 //! from the image or the disk to write them.
 //!
-//! Persephone writes a file only where no file is, and removes only its own
-//! file, so no other program's file is replaced or deleted:
+//! Persephone writes a file only where no file is, and removes only a file
+//! with exactly its own content, so no file that differs from Persephone's
+//! in any byte is replaced or deleted (a check of content, not of origin;
+//! see [`app_menu::is_ours`]):
 //!
 //! * A file is written to a new file with a random name in the same folder
 //!   (`O_EXCL`), synced, and hard-linked to its name, which fails when a

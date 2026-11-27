@@ -123,6 +123,15 @@ alone is not enough, so the core never replaces or removes a copy that the
 user or another program changed. A later version that changes the text must
 also accept the earlier exact texts.
 
+This is a check of content, not of origin. A file with exactly this text,
+or an icon with exactly Persephone's bytes at `persephone-appimage.png`, is
+treated as Persephone's, whoever wrote it: "Update" replaces it and "Remove"
+removes it. No record could prove the origin better. Every program that runs
+as the user can write, change and delete these files, and it could write
+such a record in the user's folders as well. A byte-identical file is the
+same entry or icon, so removing it is what the user asked for. A file that
+differs in any byte is never replaced or removed.
+
 The folders inside `APPDIR` do not count. The AppImage's GTK hook
 (`apprun-hooks/linuxdeploy-plugin-gtk.sh`) puts `$APPDIR/usr/share` first in
 the process's `XDG_DATA_DIRS`. The image's own `Persephone.desktop` is there,
@@ -251,6 +260,8 @@ entry does not change Dolphin's file icon.
 * Another file named `persephone-appimage.png` in the user's icon folders
   stops the add, and an entry that the user edited can no longer be updated
   or removed from Settings. Both are left to the user.
+* Ownership is by exact content. A byte-identical entry or icon that another
+  program wrote is updated or removed as Persephone's.
 * A file system without hard links cannot take the entry; the add then
   fails and writes nothing that stays.
 * AppImageLauncher or Gear Lever can still add their own entries beside it.

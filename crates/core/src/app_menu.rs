@@ -166,7 +166,9 @@ fn string_value(text: &str) -> String {
 /// Whether an entry's bytes are exactly the text that [`entry`] makes for
 /// the path in the entry's own `TryExec` line. The mark line alone is not
 /// enough: a file with any other change is another program's, or one the
-/// user edited, and is never replaced or removed.
+/// user edited, and is never replaced or removed. This checks content, not
+/// origin (ADR-0072): any program that runs as the user can write these
+/// files, and a byte-identical copy is the same entry.
 pub fn is_ours(content: &[u8]) -> bool {
     std::str::from_utf8(content).is_ok_and(|text| {
         text.lines()
