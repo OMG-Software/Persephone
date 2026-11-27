@@ -2290,6 +2290,7 @@ impl CallController {
             video_quality: guard.video_quality.clone(),
             join_quality: quality,
             join_camera: scope.video && !portal_camera,
+            join_restart_due: None,
             unsent_quality: None,
             devices_seen: guard.devices.subscribe(),
             unsent_devices: None,
@@ -3127,6 +3128,9 @@ struct Call {
     /// records the new resolution here.
     join_quality: VideoQuality,
     join_camera: bool,
+    /// When an owed restart of the Join's camera tries again: the worker's
+    /// queue had no room for it. Each try checks the camera intent again.
+    join_restart_due: Option<Instant>,
     /// The newest send resolution while the worker's queue is full, and when
     /// it goes again. A camera-on sends it first.
     unsent_quality: Option<(Instant, VideoQuality)>,
@@ -3821,8 +3825,10 @@ impl Call {
     /// with mute, keys and events while the desktop asks the user.
     fn camera_command(&mut self, inner: &Inner, on: bool, request: u64) -> Result<(), EndReason> {
         // The camera that the Join opened stops or is replaced here; a new
-        // camera-on starts with the newest settings.
+        // camera-on starts with the newest settings, so an owed restart of
+        // it ends.
         self.join_camera = false;
+        self.join_restart_due = None;
         // The off's own place is held first, so neither the device choice
         // below nor a share's stop that another thread queues (`WorkerStop`)
         // can take it. A full queue ends the call, as the off itself would.
@@ -4983,15 +4989,21 @@ impl Call {
     /// worker's answers update the view. A choice that equals the camera's
     /// changes nothing. A restart needs room for all its commands
     /// ([`JOIN_RESTART_ROOM`]), as a full queue would end the call; without
-    /// it, the restart waits for the next change or the connect.
+    /// it, the restart stays owed and tries again after [`UNSENT_RETRY`]
+    /// (`join_restart_due`), also after the connect. Each try checks the
+    /// camera intent and the newest choice again, and a camera command ends
+    /// the debt.
     fn restart_join_camera(&mut self, inner: &Inner) -> Result<(), EndReason> {
+        self.join_restart_due = None;
         let Some(newest) = *self.quality_seen.borrow() else {
             return Ok(());
         };
         let wanted = self.camera_wanted.load(Ordering::SeqCst);
-        if !(self.join_camera && newest != self.join_quality && wanted)
-            || self.link.room() < JOIN_RESTART_ROOM
-        {
+        if !(self.join_camera && newest != self.join_quality && wanted) {
+            return Ok(());
+        }
+        if self.link.room() < JOIN_RESTART_ROOM {
+            self.join_restart_due = Some(Instant::now() + UNSENT_RETRY);
             return Ok(());
         }
         self.send_worker(ToWorker::SetCamera {
@@ -5302,6 +5314,7 @@ impl Call {
             let devices_due = self.unsent_devices.as_ref().map(|(at, _)| *at);
             let effect_due = self.unsent_effect.map(|(at, _)| at);
             let quality_due = self.unsent_quality.map(|(at, _)| at);
+            let join_restart_due = self.join_restart_due;
             tokio::select! {
                 _ = &mut *stop => return Ok(()),
                 () = wake.notified() => self.take_waiting_stop(inner, u64::MAX)?,
@@ -5365,6 +5378,12 @@ impl Call {
                     self.take_unread_quality()?;
                     self.send_quality()?;
                 }
+                () = async {
+                    match join_restart_due {
+                        Some(at) => time::sleep_until(at.into()).await,
+                        None => std::future::pending().await,
+                    }
+                } => self.restart_join_camera(inner)?,
                 Ok(()) = self.devices_seen.changed() => self.devices_changed()?,
                 () = async {
                     match devices_due {
@@ -8088,6 +8107,7 @@ mod tests {
             video_quality,
             join_quality: VideoQuality::Auto,
             join_camera: false,
+            join_restart_due: None,
             unsent_quality: None,
             devices_seen: devices.subscribe(),
             unsent_devices: None,
@@ -9130,6 +9150,72 @@ mod tests {
         let quality = *call.quality_seen.borrow_and_update();
         assert_eq!(call.quality_read(&inner, quality), Ok(()));
         assert_eq!(cameras(&mut to_worker), Vec::<bool>::new());
+    }
+
+    /// GIVEN a joining call whose Join started the camera at 480p and a
+    /// worker queue with less room than a restart needs WHEN the task reads
+    /// 1440p and then the connect THEN nothing is queued and the restart
+    /// stays owed. WHEN the queue has room and the retry runs THEN the
+    /// camera restarts and the debt ends. GIVEN an owed restart and a user
+    /// who turned the camera off since THEN the retry restarts nothing; a
+    /// camera command also ends the debt.
+    #[tokio::test]
+    async fn given_no_room_through_the_connect_then_the_join_restart_stays_owed() {
+        let fixture = test_call(
+            no_admission(),
+            Arc::new(Flags::default()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let inner = controller(FakeHost::new(true, None)).inner.clone();
+        let (mut call, mut to_worker) = (fixture.call, fixture.to_worker);
+        call.join_camera = true;
+        call.join_quality = VideoQuality::P480;
+        call.camera_wanted.store(true, Ordering::SeqCst);
+        let cameras = |to_worker: &mut mpsc::Receiver<ToWorker>| {
+            std::iter::from_fn(|| to_worker.try_recv().ok())
+                .filter_map(|message| match message {
+                    ToWorker::SetCamera { on, .. } => Some(on),
+                    _ => None,
+                })
+                .collect::<Vec<bool>>()
+        };
+
+        fill_queue(&call, &mut to_worker, JOIN_RESTART_ROOM - 1);
+        call.video_quality.send_replace(Some(VideoQuality::P1440));
+        let quality = *call.quality_seen.borrow_and_update();
+        assert_eq!(call.quality_read(&inner, quality), Ok(()));
+        assert!(call.join_restart_due.is_some(), "owed at the read");
+        assert_eq!(call.worker_event(&inner, &FromWorker::Connected), Ok(()));
+        assert!(call.join_restart_due.is_some(), "still owed at the connect");
+        assert_eq!(call.join_quality, VideoQuality::P480);
+        assert_eq!(cameras(&mut to_worker), Vec::<bool>::new());
+
+        // The queue is empty now: the retry restarts the camera.
+        assert_eq!(call.restart_join_camera(&inner), Ok(()));
+        assert_eq!(cameras(&mut to_worker), vec![false, true]);
+        assert_eq!(call.join_quality, VideoQuality::P1440);
+        assert_eq!(call.join_restart_due, None);
+
+        // Owed again, but the user turned the camera off since.
+        fill_queue(&call, &mut to_worker, JOIN_RESTART_ROOM - 1);
+        call.video_quality.send_replace(Some(VideoQuality::P720));
+        assert_eq!(call.restart_join_camera(&inner), Ok(()));
+        assert!(call.join_restart_due.is_some());
+        let _ = cameras(&mut to_worker);
+        call.camera_wanted.store(false, Ordering::SeqCst);
+        assert_eq!(call.restart_join_camera(&inner), Ok(()));
+        assert_eq!(cameras(&mut to_worker), Vec::<bool>::new());
+        assert_eq!(call.join_restart_due, None);
+        assert_eq!(call.join_quality, VideoQuality::P1440);
+
+        // A camera command ends an owed restart.
+        call.camera_wanted.store(true, Ordering::SeqCst);
+        fill_queue(&call, &mut to_worker, JOIN_RESTART_ROOM - 1);
+        assert_eq!(call.restart_join_camera(&inner), Ok(()));
+        assert!(call.join_restart_due.is_some());
+        assert_eq!(call.camera_command(&inner, false, 1), Ok(()));
+        assert_eq!(call.join_restart_due, None);
+        assert!(!call.join_camera);
     }
 
     /// GIVEN a worker queue with one free place and a device choice that

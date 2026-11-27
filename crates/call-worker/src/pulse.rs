@@ -1046,10 +1046,14 @@ struct Devices {
 }
 
 /// The deadlines of one change. Forward moves must end by `forward`, so
-/// the rollback still has time up to `full`; the microphone's end by
-/// `first`, so the speaker's keep their own time ([`Deadlines::forward_for`]).
+/// the rollback still has time up to `full`. The forward time is in three
+/// parts: the routes are read by `read`, the microphone's moves end by
+/// `first`, and the speaker's by `forward` ([`Deadlines::forward_for`]). So
+/// neither a slow read nor a slow microphone move uses up a later step's
+/// time.
 #[derive(Clone, Copy)]
 struct Deadlines {
+    read: Instant,
     first: Instant,
     forward: Instant,
     full: Instant,
@@ -1060,16 +1064,19 @@ impl Deadlines {
     fn starting_at(start: Instant) -> Self {
         let full = start + CHANGE_TIMEOUT;
         let forward = full.checked_sub(ROLLBACK_RESERVE).unwrap_or(start);
+        let part = forward.saturating_duration_since(start) / 3;
         Self {
-            first: start + forward.saturating_duration_since(start) / 2,
+            read: start + part,
+            first: start + part * 2,
             forward,
             full,
         }
     }
 
     /// The end of the forward moves of `kind`. The microphone goes first and
-    /// has half of the forward time, so a slow microphone move never uses
-    /// up the speaker's: each kind gets its own bounded try.
+    /// has the second third of the forward time, after the read, so a slow
+    /// microphone move never uses up the speaker's: each kind gets its own
+    /// bounded try.
     fn forward_for(&self, kind: Kind) -> Instant {
         match kind {
             Kind::Recording => self.first,
@@ -1291,7 +1298,7 @@ fn run_change(
     deadlines: Deadlines,
 ) -> Result<(), FailureCode> {
     let snapshot = server
-        .snapshot(deadlines.forward)
+        .snapshot(deadlines.read)
         .ok_or(FailureCode::AudioDevice)?;
     let source_names: Vec<&str> = snapshot.sources.iter().map(String::as_str).collect();
     let sink_names: Vec<&str> = snapshot.sinks.iter().map(String::as_str).collect();
@@ -1374,7 +1381,9 @@ fn run_pending(
     if !run.waiting || devices.generation != generation {
         return run;
     }
-    let Some(snapshot) = server.snapshot(deadlines.forward) else {
+    // The read has its own part of the forward time, so a slow read never
+    // leaves a move unsent for want of time.
+    let Some(snapshot) = server.snapshot(deadlines.read) else {
         // The routes cannot be read. An earlier try waits silently; the last
         // try reports every waiting kind, as the outcome is not known.
         if last {
@@ -1614,6 +1623,8 @@ mod tests {
         drift: Option<(Kind, u32, &'static str)>,
         /// Whether a read fails.
         unreadable: Cell<bool>,
+        /// Whether the first read takes all of its time.
+        slow_read: Cell<bool>,
         reads: Cell<usize>,
         sent: RefCell<Vec<(Kind, u32, String)>>,
     }
@@ -1657,10 +1668,14 @@ mod tests {
     }
 
     impl Server for Fake {
-        fn snapshot(&self, _deadline: Instant) -> Option<Snapshot> {
+        fn snapshot(&self, deadline: Instant) -> Option<Snapshot> {
             self.reads.set(self.reads.get() + 1);
             if self.unreadable.get() {
                 return None;
+            }
+            if self.slow_read.get() && self.reads.get() == 1 {
+                // A real read ends by its deadline, so it answers then.
+                std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
             }
             if self.reads.get() == 2
                 && let Some((kind, index, name)) = self.drift
@@ -1711,11 +1726,62 @@ mod tests {
         let limits = deadlines();
         assert_eq!(limits.full - limits.forward, ROLLBACK_RESERVE);
         assert!(ROLLBACK_RESERVE < CHANGE_TIMEOUT);
-        // The microphone has the first half of the forward time; the speaker
-        // keeps at least the second half.
-        assert!(limits.first < limits.forward);
+        // The read, the microphone and the speaker each have a third of the
+        // forward time, in that order, so no step uses up a later one's.
+        let start = limits.full - CHANGE_TIMEOUT;
+        let part = (limits.forward - start) / 3;
+        assert_eq!(limits.read - start, part);
+        assert_eq!(limits.first - limits.read, part);
+        assert!(limits.forward - limits.first >= part);
         assert_eq!(limits.forward_for(Kind::Recording), limits.first);
         assert_eq!(limits.forward_for(Kind::Playout), limits.forward);
+    }
+
+    #[test]
+    fn given_a_read_that_uses_all_its_time_then_both_kinds_still_move() {
+        // GIVEN waiting targets of both kinds and a route read that takes
+        // all of its time, WHEN the last try runs, THEN each move is still
+        // sent within its own time and both waits end. GIVEN the same slow
+        // read WHEN a change moves both kinds at once THEN both move too.
+        let limits = || {
+            let now = Instant::now();
+            Deadlines {
+                read: now + Duration::from_millis(50),
+                first: now + Duration::from_secs(3),
+                forward: now + Duration::from_secs(4),
+                full: now + Duration::from_secs(5),
+            }
+        };
+        let server = Fake::with(vec![at(1, "mic-a")], vec![at(2, "spk-a")]);
+        server.slow_read.set(true);
+        let mut devices = Devices {
+            pending: [Some("mic-b".to_owned()), Some("spk-b".to_owned())],
+            ..Devices::default()
+        };
+        let run = run_pending(&server, &mut devices, (true, 0), limits());
+        assert_eq!(
+            run,
+            PendingRun {
+                waiting: false,
+                moves_failed: Vec::new(),
+            }
+        );
+        assert_eq!(server.route(Kind::Recording, 1).as_deref(), Some("mic-b"));
+        assert_eq!(server.route(Kind::Playout, 2).as_deref(), Some("spk-b"));
+
+        let server = Fake::with(vec![at(1, "mic-a")], vec![at(2, "spk-a")]);
+        server.slow_read.set(true);
+        let mut devices = Devices::default();
+        let result = run_change(
+            &server,
+            DEFAULTS,
+            &mut devices,
+            (Some("pulse:mic-b"), Some("pulse:spk-b")),
+            limits(),
+        );
+        assert_eq!(result, Ok(()));
+        assert_eq!(server.route(Kind::Recording, 1).as_deref(), Some("mic-b"));
+        assert_eq!(server.route(Kind::Playout, 2).as_deref(), Some("spk-b"));
     }
 
     #[test]
@@ -1730,6 +1796,7 @@ mod tests {
             ..Devices::default()
         };
         let limits = Deadlines {
+            read: Instant::now(),
             first: Instant::now() - Duration::from_secs(1),
             forward: Instant::now() + Duration::from_secs(5),
             full: Instant::now() + Duration::from_secs(6),
@@ -1754,6 +1821,7 @@ mod tests {
         let server = Fake::with(vec![at(1, "mic-a")], vec![at(2, "spk-a")]);
         let mut devices = Devices::default();
         let limits = Deadlines {
+            read: Instant::now(),
             first: Instant::now() - Duration::from_secs(1),
             forward: Instant::now() - Duration::from_secs(1),
             full: Instant::now() + Duration::from_secs(5),

@@ -697,6 +697,79 @@ fn accepted_after(
     }
 }
 
+/// A sound server connection that moves the call's own streams: the
+/// `pulse::Session` on Linux (ADR-0049), a fake in the tests.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+trait SoundSwitch: Send + Sync + 'static {
+    /// Moves the streams; same contract as `pulse::Session::switch`, which
+    /// answers `Unsupported` while the server's defaults are unknown.
+    fn switch(
+        &self,
+        started: std::time::Instant,
+        recording: Option<&str>,
+        playout: Option<&str>,
+    ) -> Result<(), FailureCode>;
+}
+
+#[cfg(target_os = "linux")]
+impl SoundSwitch for crate::pulse::Session {
+    fn switch(
+        &self,
+        started: std::time::Instant,
+        recording: Option<&str>,
+        playout: Option<&str>,
+    ) -> Result<(), FailureCode> {
+        crate::pulse::Session::switch(self, started, recording, playout)
+    }
+}
+
+/// The answer to one sound change through a sound server connection.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Debug, Eq, PartialEq)]
+struct SoundAnswer {
+    /// The sound error for `DevicesSet`.
+    failure: Option<FailureCode>,
+    /// Whether the session accepted a real change, so a waiting target is
+    /// tried soon (`Call::sound_trigger`).
+    switched: bool,
+}
+
+/// One sound change through `session` (`Call::change_sound` on Linux). The
+/// accepted choice again (a camera-only change) does not reach the session
+/// and has no sound error (`sound_route`). Any other choice goes to the
+/// session on a blocking thread; the deadlines start here, so a task that
+/// starts late sends nothing, and no answer within `wait` is `AudioDevice`.
+/// `accepted` then follows the answer (`accepted_after`).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+async fn switch_sound<S: SoundSwitch>(
+    session: Arc<S>,
+    accepted: &mut Option<(Option<String>, Option<String>)>,
+    choice: (Option<String>, Option<String>),
+    wait: Duration,
+) -> SoundAnswer {
+    if sound_route(accepted.as_ref(), &choice.0, &choice.1) == SoundRoute::Skip {
+        return SoundAnswer {
+            failure: None,
+            switched: false,
+        };
+    }
+    let started = std::time::Instant::now();
+    let (recording, playout) = choice.clone();
+    let change = tokio::task::spawn_blocking(move || {
+        session.switch(started, recording.as_deref(), playout.as_deref())
+    });
+    let failure = match tokio::time::timeout(wait, change).await {
+        Ok(Ok(Ok(()))) => None,
+        Ok(Ok(Err(code))) => Some(code),
+        _ => Some(FailureCode::AudioDevice),
+    };
+    *accepted = accepted_after(accepted.take(), choice, failure);
+    SoundAnswer {
+        failure,
+        switched: failure.is_none(),
+    }
+}
+
 /// Moves the running call to other devices (`SetDevices`, ADR-0059). Both
 /// choices are checked before either device changes; `apply_switch` then
 /// changes them. On Linux libwebrtc has no device IDs, so a change goes
@@ -2148,30 +2221,17 @@ impl Call<'_> {
         if let Some(pulse) = self.pulse.clone() {
             // The accepted choice again (a camera-only change) is no sound
             // change. A real change is not resolved without the server's
-            // defaults: `Session::switch` then answers `Unsupported`.
-            if sound_route(self.accepted_sound.as_ref(), &recording, &playout) == SoundRoute::Skip {
-                return None;
-            }
-            let choice = (recording.clone(), playout.clone());
-            // The change's deadlines start here, so a task that starts late
-            // sends nothing. The loop waits for them to end, plus a grace.
-            let started = std::time::Instant::now();
-            let change = tokio::task::spawn_blocking(move || {
-                pulse.switch(started, recording.as_deref(), playout.as_deref())
-            });
+            // defaults: `Session::switch` then answers `Unsupported`. The
+            // loop waits for the change's deadlines to end, plus a grace.
             let wait = crate::pulse::CHANGE_TIMEOUT + crate::pulse::REPORT_GRACE;
-            let answer = match tokio::time::timeout(wait, change).await {
-                Ok(Ok(Ok(()))) => None,
-                Ok(Ok(Err(code))) => Some(code),
-                _ => Some(FailureCode::AudioDevice),
-            };
-            self.accepted_sound = accepted_after(self.accepted_sound.take(), choice, answer);
-            if answer.is_none() {
+            let answer =
+                switch_sound(pulse, &mut self.accepted_sound, (recording, playout), wait).await;
+            if answer.switched {
                 // A target that waits for a stream is tried soon, also when
                 // no sound event follows.
                 self.sound_trigger();
             }
-            return answer;
+            return answer.failure;
         }
         if sound_unchanged_here(&self.joined_sound, &recording, &playout) {
             return None;
@@ -4832,6 +4892,106 @@ mod tests {
             sound_route(accepted.as_ref(), &other.0, &other.1),
             SoundRoute::Skip
         );
+    }
+
+    /// A sound session fake: each switch is counted, waits `delay`, then
+    /// gives `answer`. `Unsupported` is what `pulse::Session::switch` gives
+    /// when the server's defaults could not be read.
+    struct FakeSwitch {
+        answer: Result<(), FailureCode>,
+        delay: Duration,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl FakeSwitch {
+        fn new(answer: Result<(), FailureCode>, delay: Duration) -> Arc<Self> {
+            Arc::new(Self {
+                answer,
+                delay,
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            })
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl SoundSwitch for FakeSwitch {
+        fn switch(
+            &self,
+            _started: std::time::Instant,
+            _recording: Option<&str>,
+            _playout: Option<&str>,
+        ) -> Result<(), FailureCode> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(self.delay);
+            self.answer
+        }
+    }
+
+    /// GIVEN a call that joined on "System default" with a session whose
+    /// defaults read failed (every switch answers `Unsupported`) WHEN a
+    /// camera-only `SetDevices` comes THEN the session is not asked and there
+    /// is no sound error. WHEN a real choice comes THEN it is `Unsupported`,
+    /// the join's choice stays accepted, and a camera-only change after it
+    /// still gives no error. GIVEN a session that does not answer in time
+    /// THEN the change is `AudioDevice` and no choice stays accepted. GIVEN
+    /// a session that moves THEN the choice is accepted and the tries start.
+    #[tokio::test]
+    async fn given_unknown_defaults_when_a_camera_only_change_comes_then_it_gives_no_sound_error() {
+        let wait = Duration::from_secs(5);
+        let joined = (None, None);
+        let real = (None, Some("pulse:spk".to_owned()));
+        let unknown = FakeSwitch::new(Err(FailureCode::Unsupported), Duration::ZERO);
+        let mut accepted = Some(joined.clone());
+
+        let answer = switch_sound(unknown.clone(), &mut accepted, joined.clone(), wait).await;
+        assert_eq!(
+            answer,
+            SoundAnswer {
+                failure: None,
+                switched: false
+            }
+        );
+        assert_eq!(unknown.calls(), 0);
+
+        let answer = switch_sound(unknown.clone(), &mut accepted, real.clone(), wait).await;
+        assert_eq!(
+            answer,
+            SoundAnswer {
+                failure: Some(FailureCode::Unsupported),
+                switched: false
+            }
+        );
+        assert_eq!(unknown.calls(), 1);
+        assert_eq!(accepted, Some(joined.clone()));
+
+        let answer = switch_sound(unknown.clone(), &mut accepted, joined.clone(), wait).await;
+        assert_eq!(answer.failure, None);
+        assert_eq!(unknown.calls(), 1);
+
+        let late = FakeSwitch::new(Ok(()), Duration::from_millis(300));
+        let answer = switch_sound(
+            late.clone(),
+            &mut accepted,
+            real.clone(),
+            Duration::from_millis(20),
+        )
+        .await;
+        assert_eq!(answer.failure, Some(FailureCode::AudioDevice));
+        assert_eq!(accepted, None);
+
+        let moves = FakeSwitch::new(Ok(()), Duration::ZERO);
+        let answer = switch_sound(moves.clone(), &mut accepted, real.clone(), wait).await;
+        assert_eq!(
+            answer,
+            SoundAnswer {
+                failure: None,
+                switched: true
+            }
+        );
+        assert_eq!(accepted, Some(real));
     }
 
     /// A sound device fake that keeps LiveKit 0.11's capture state: the
