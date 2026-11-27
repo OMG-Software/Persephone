@@ -440,10 +440,11 @@ mod tests {
     }
 
     /// GIVEN offers of several sizes and speeds WHEN a target tier is given
-    /// THEN the smallest offer that covers it and reaches 15 fps wins, and a
-    /// slow large offer never beats a fast smaller one.
+    /// THEN the offer that reaches 15 fps and sends the largest picture at
+    /// the tier wins (`pick_capture_mode`), and a slow large offer never
+    /// beats a fast smaller one.
     #[test]
-    fn given_a_target_then_the_offer_follows_cover_and_speed() {
+    fn given_a_target_then_the_offer_follows_the_sent_picture_and_speed() {
         let offers = [
             offer(PixelFormat::Yuyv, 640, 480, 30),
             offer(PixelFormat::Yuyv, 1280, 720, 10),
@@ -461,6 +462,13 @@ mod tests {
             offer(PixelFormat::Yuyv, 1920, 1080, 0),
         ];
         assert_eq!(choose(&unknown, SendTier::P1080), Some(1));
-        assert_eq!(choose(&unknown, SendTier::P360), Some(0));
+        // At 360p, 1920x1080 sends the whole 640x360 box and 640x480 only
+        // 480x360. Offers that send the same picture go to the smaller one.
+        assert_eq!(choose(&unknown, SendTier::P360), Some(1));
+        let same = [
+            offer(PixelFormat::Yuyv, 640, 360, 0),
+            offer(PixelFormat::Yuyv, 1920, 1080, 0),
+        ];
+        assert_eq!(choose(&same, SendTier::P360), Some(0));
     }
 }
