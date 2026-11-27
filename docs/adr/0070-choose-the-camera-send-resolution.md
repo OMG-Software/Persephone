@@ -127,7 +127,8 @@ keeps its size until it restarts.
 * Windows lists every native camera type up to 3840x2160, MJPEG included,
   and Media Foundation decodes it to NV12 for every frame. Speed comes
   first: the worker compares sizes only among the modes of at least 15
-  frames a second, or among all modes when none is that fast. In that
+  frames a second, or among all modes when none is that fast. A mode whose
+  type gives no frame rate counts as fast enough (rate 0, unknown). In that
   group, it leaves out modes larger than 2560x1440 (1440x2560 when tall)
   while the group has another mode. So Auto and 1440p never open a 4K mode
   when a fast smaller mode exists, but a 4K mode at 30 frames a second
