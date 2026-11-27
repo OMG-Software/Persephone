@@ -78,14 +78,14 @@ fn take_seq(last: &AtomicU64, floor: u64) -> Option<u64> {
 /// quick rejoin after many changes). Every counter of this process is above
 /// all the ones it gave before (`next_seq`), so a receiver that kept a note
 /// of an earlier call of this process takes the new call's messages. No
-/// counter is stored between runs: a new process starts from its clock. The
-/// earlier run's counters ran ahead of the clock by at most one for each
-/// change and each call start, so the new run starts above them only when
-/// more milliseconds passed than that and the clock did not go back.
-/// Otherwise a receiver that kept a note of the earlier run ignores the new
-/// run's messages until the new counter passes it (ADR-0071). It shows
-/// members roughly when the state changed, which they can already see from
-/// the call.
+/// counter is stored between runs: a new process starts from its clock. A
+/// receiver that kept a note of an earlier run takes the new run's messages
+/// only when their counter is above that note: its call's start counter
+/// (the clock then, or more after quick rejoins) plus that call's changes.
+/// A new run that starts before the clock passes the note, or after the
+/// clock was set back, is ignored until its counter passes it (ADR-0071).
+/// It shows members roughly when the state changed, which they can already
+/// see from the call.
 /// `None` when no counter is left (`take_seq`).
 pub fn first_seq(now_ms: u64) -> Option<u64> {
     take_seq(&LAST_SEQ, now_ms)

@@ -5958,7 +5958,23 @@ impl DeafenJob {
 struct DeafenShared {
     job: Mutex<DeafenJob>,
     wake: Notify,
+    /// Set under the job's lock (`signal_stop`), where the task also reads
+    /// it before it takes a batch.
     stop: AtomicBool,
+}
+
+impl DeafenShared {
+    /// Sets the stop under the job's lock and wakes the task. The task reads
+    /// the stop and takes a batch under the same lock (`deafen_task`), so a
+    /// stop goes wholly before the take, and the batch is dropped, or
+    /// wholly after it, and the send has started.
+    fn signal_stop(&self) {
+        {
+            let _job = plain(&self.job);
+            self.stop.store(true, Ordering::SeqCst);
+        }
+        self.wake.notify_one();
+    }
 }
 
 /// Sends the deafen hints (ADR-0071) from its own task, so the call loop
@@ -6002,9 +6018,9 @@ impl DeafenSender {
 
     /// Tells the task to stop: it starts no new send, and one that runs
     /// ends within its own timeout. A hint that has not started is dropped.
+    /// A send has started once the task took its batch.
     fn signal_stop(&self) {
-        self.shared.stop.store(true, Ordering::SeqCst);
-        self.shared.wake.notify_one();
+        self.shared.signal_stop();
     }
 
     /// Stops the task and waits until it has ended. A hint that has not
@@ -6030,13 +6046,16 @@ impl Drop for DeafenSender {
 async fn deafen_task(shared: Arc<DeafenShared>, send: DeafenSend) {
     loop {
         shared.wake.notified().await;
-        // Checked after the take: `signal_stop` does not take the job's
-        // lock, so a stop that comes between a check and the take would
-        // otherwise still send a batch queued before it.
-        let batch = plain(&shared.job).take();
-        if shared.stop.load(Ordering::SeqCst) {
-            return;
-        }
+        // The stop is read under the job's lock, where `signal_stop` sets
+        // it: a stop before the take drops the batch, and a stop after it
+        // finds a send that has started, which ends within its timeout.
+        let batch = {
+            let mut job = plain(&shared.job);
+            if shared.stop.load(Ordering::SeqCst) {
+                return;
+            }
+            job.take()
+        };
         if let Some((recipients, content)) = batch {
             send(recipients, content).await;
         }
@@ -9903,6 +9922,34 @@ mod tests {
             .await
             .expect("the end finishes");
         assert_eq!(*plain(&order), vec!["helpers", "membership"]);
+    }
+
+    /// GIVEN the job's lock is held, as the task holds it while it reads
+    /// the stop and takes a batch, WHEN the stop is signalled from another
+    /// thread THEN the stop waits for the lock, so it never falls between
+    /// that read and the take. WHEN the lock is free THEN the stop is set.
+    #[test]
+    fn given_the_job_lock_held_when_the_stop_is_signalled_then_it_waits() {
+        let shared = Arc::new(DeafenShared::default());
+        let job = plain(&shared.job);
+        let (done_tx, done) = std::sync::mpsc::channel();
+        let stopper = {
+            let shared = shared.clone();
+            std::thread::spawn(move || {
+                shared.signal_stop();
+                let _ = done_tx.send(());
+            })
+        };
+        assert!(
+            done.recv_timeout(Duration::from_millis(100)).is_err(),
+            "the stop waits for the lock"
+        );
+        assert!(!shared.stop.load(Ordering::SeqCst));
+        drop(job);
+        done.recv_timeout(Duration::from_secs(5))
+            .expect("the stop goes once the lock is free");
+        assert!(shared.stop.load(Ordering::SeqCst));
+        stopper.join().expect("the stopper ends");
     }
 
     /// GIVEN a pending hint WHEN the call stops THEN the task ends and the

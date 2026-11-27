@@ -52,13 +52,13 @@ that we need, and does not touch the member state event.
   ignores a message whose `seq` is not higher than the last one it took
   from that sender device, so a late message cannot undo a newer one. The
   counter is not stored between runs of the app: a new run starts from the
-  device's clock. The earlier run's counters ran ahead of its clock by at
-  most one for each change and each call start, so a new run's counter is
-  above them, and a note that a receiver kept from the earlier run is
-  replaced, only when more milliseconds passed than that, and the clock did
-  not go back. Otherwise the receiver ignores the new run's messages, and
-  shows the old state, until the new counter passes the old one (see the
-  negative consequences).
+  device's clock. A receiver that kept a note from an earlier run takes the
+  new run's messages only when their counter is above that note. The note
+  is the counter at the start of its call plus the changes of that call;
+  that start is the clock then, or more after quick rejoins in that run.
+  So a new run is ignored when it starts before the clock passes the note,
+  or after the clock was set back. The receiver then shows the old state
+  until the new counter passes the note (see the negative consequences).
   The counter shows members roughly when the state changed, which they can
   already see from the call.
 * The core sends the message to the devices that get the frame key, with the
@@ -116,11 +116,12 @@ that we need, and does not touch the member state event.
   against it only until the clock is right; a clock set back between two
   runs of the app can hide the new state of the later call. In one run the
   counter only rises.
-* No counter is stored between runs. A run that starts before the clock
-  passed the earlier run's last counter (that run made more changes and
-  call starts than milliseconds passed until the new run) can hide its
-  state from a receiver that kept a note of the earlier run, until its
-  counter passes that note's.
+* No counter is stored between runs. A receiver that kept a note of an
+  earlier run ignores the new run's messages while their counter is not
+  above that note, and shows the old state. The note is its call's start
+  counter plus that call's changes, so this needs a new run within that
+  many milliseconds of that call's start (more after quick rejoins in the
+  earlier run), or a clock set back.
 * Not verified against a live homeserver or a second client yet.
 
 ## Pros and Cons of the Options
