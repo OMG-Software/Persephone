@@ -289,6 +289,8 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
         joined_sound,
         #[cfg(target_os = "linux")]
         pulse,
+        #[cfg(target_os = "linux")]
+        sound_retries: std::collections::VecDeque::new(),
         camera: None,
         stalled: None,
         gate: CameraGate::new(own_index),
@@ -440,6 +442,22 @@ async fn sound_paths(
         sound_path(recording, source.as_deref(), sources.as_deref())?,
         sound_path(playout, sink.as_deref(), sinks.as_deref())?,
     ])
+}
+
+/// The tries of a waiting sound target after an event that may open a stream.
+#[cfg(target_os = "linux")]
+const SOUND_RETRIES: [Duration; 3] = [
+    Duration::from_millis(250),
+    Duration::from_secs(1),
+    Duration::from_secs(3),
+];
+
+/// Waits until `at`; for ever when nothing waits.
+async fn retry_wait(at: Option<Instant>) {
+    match at {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
+    }
 }
 
 /// Opens the call's sound server connection on a blocking thread (Linux,
@@ -1145,6 +1163,9 @@ struct Call<'a> {
     /// streams on a change (ADR-0049). `None` when it could not open.
     #[cfg(target_os = "linux")]
     pulse: Option<Arc<crate::pulse::Session>>,
+    /// When a waiting sound target is tried next (`SOUND_RETRIES`).
+    #[cfg(target_os = "linux")]
+    sound_retries: std::collections::VecDeque<Instant>,
     camera: Option<LocalCamera>,
     /// A capture that did not end in time after a stop (a blocked read on a
     /// stalled camera). Its frames are already revoked. No new camera opens
@@ -1930,6 +1951,54 @@ impl ScreenFeed {
 }
 
 impl Call<'_> {
+    /// The time of the next try of a sound target that waits for a stream
+    /// (Linux, ADR-0049); `None` when nothing waits, so no timer runs.
+    fn retry_next(&self) -> Option<Instant> {
+        #[cfg(target_os = "linux")]
+        return self.sound_retries.front().copied();
+        #[cfg(not(target_os = "linux"))]
+        return None;
+    }
+
+    /// Starts the bounded tries after an event that may open a stream: remote
+    /// audio subscribed, or the own microphone published or unmuted. libwebrtc
+    /// may open its stream a little later. Nothing waits: no timer.
+    fn sound_trigger(&mut self) {
+        #[cfg(target_os = "linux")]
+        if self.pulse.as_ref().is_some_and(|pulse| pulse.has_pending()) {
+            let now = Instant::now();
+            self.sound_retries = SOUND_RETRIES.iter().map(|after| now + *after).collect();
+        }
+    }
+
+    /// One try of the waiting sound targets. A failed move has no request to
+    /// answer: it is noted by kind, and the target stays.
+    async fn retry_pending_sound(&mut self) {
+        #[cfg(target_os = "linux")]
+        {
+            self.sound_retries.pop_front();
+            let Some(pulse) = self.pulse.clone().filter(|pulse| pulse.has_pending()) else {
+                self.sound_retries.clear();
+                return;
+            };
+            let apply = tokio::task::spawn_blocking(move || pulse.apply_pending());
+            let (waiting, failed) =
+                match tokio::time::timeout(crate::pulse::CHANGE_TIMEOUT, apply).await {
+                    Ok(Ok(result)) => result,
+                    _ => (true, Vec::new()),
+                };
+            for kind in failed {
+                note_audio(
+                    crate::diagnostics::WARN,
+                    format_args!("a waiting {kind} move failed"),
+                );
+            }
+            if !waiting {
+                self.sound_retries.clear();
+            }
+        }
+    }
+
     /// Applies a microphone and speaker choice during the call and gives the
     /// failure, if any. On Linux the sound server connection moves the call's
     /// own streams on a blocking thread (ADR-0049); without it, only the
@@ -1941,12 +2010,14 @@ impl Call<'_> {
     ) -> Option<FailureCode> {
         #[cfg(target_os = "linux")]
         if let Some(pulse) = self.pulse.clone() {
-            return tokio::task::spawn_blocking(move || {
+            // The whole change is bound: the loop never waits longer.
+            let change = tokio::task::spawn_blocking(move || {
                 pulse.switch(recording.as_deref(), playout.as_deref())
-            })
-            .await
-            .unwrap_or(Err(FailureCode::AudioDevice))
-            .err();
+            });
+            return match tokio::time::timeout(crate::pulse::CHANGE_TIMEOUT, change).await {
+                Ok(Ok(result)) => result.err(),
+                _ => Some(FailureCode::AudioDevice),
+            };
         }
         if sound_unchanged_here(&self.joined_sound, &recording, &playout) {
             return None;
@@ -2955,6 +3026,15 @@ impl Call<'_> {
     /// Follows the remote tracks of any connection: audio gets the call's
     /// playout, video a tile.
     async fn on_event(&mut self, connection: u8, event: &RoomEvent) -> Result<(), Closed> {
+        if matches!(
+            event,
+            RoomEvent::TrackSubscribed {
+                track: RemoteTrack::Audio(_),
+                ..
+            } | RoomEvent::LocalTrackPublished { .. }
+        ) {
+            self.sound_trigger();
+        }
         match event {
             RoomEvent::TrackSubscribed {
                 track: RemoteTrack::Audio(track),
@@ -3131,6 +3211,7 @@ impl Call<'_> {
                     self.publication.mute();
                 } else {
                     self.publication.unmute();
+                    self.sound_trigger();
                 }
                 Ok(vec![FromWorker::Muted { muted }])
             }
@@ -3477,6 +3558,9 @@ async fn event_loop(
                         }
                     }
                 }
+            }
+            () = retry_wait(call.retry_next()) => {
+                call.retry_pending_sound().await;
             }
             Some(done) = others.connected.recv() => {
                 if call.other_connected(done, &mut others.events).await.is_err() {

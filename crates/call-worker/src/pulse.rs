@@ -17,12 +17,13 @@
 
 use std::cell::{Cell, RefCell};
 use std::ffi::{CStr, c_char, c_int, c_void};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use persephone_call_protocol::{FailureCode, MAX_PULSE_NAME_BYTES};
 
-use crate::mapping::{SoundKnown, SoundNow, own_streams, plan_sound_move};
+use crate::mapping::{SoundKnown, SoundNow, SoundTarget, own_streams, plan_sound_move};
 
 /// The longest the whole query may take.
 const QUERY_TIMEOUT: Duration = Duration::from_secs(3);
@@ -400,6 +401,9 @@ fn run(
 
 /// The longest one operation (a snapshot or a move) may take.
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(3);
+/// The longest a whole change (all its operations, and an undo) may take.
+/// The event loop waits for no longer.
+pub const CHANGE_TIMEOUT: Duration = Duration::from_secs(5);
 /// The most streams read from one listing; own streams are picked after.
 const MAX_STREAMS: usize = 4096;
 /// The property that holds the process ID of a stream's program.
@@ -695,6 +699,8 @@ impl Inner {
         if unsafe { (self.api.context_get_state)(self.context) } != PA_CONTEXT_READY {
             return false;
         }
+        // One operation never runs longer than `OPERATION_TIMEOUT`.
+        let deadline = deadline.min(Instant::now() + OPERATION_TIMEOUT);
         let operation = start(self);
         if operation.is_null() {
             return false;
@@ -832,15 +838,28 @@ fn state_ptr(state: &ServerDefaults) -> *mut c_void {
     std::ptr::from_ref(state).cast_mut().cast()
 }
 
+/// The devices the call's streams are on, and the targets that wait for a
+/// stream.
+#[derive(Default)]
+struct Devices {
+    /// The microphone and speaker the call's streams are on; `None` when
+    /// that is not known (a failed move that could not be undone). A name is
+    /// here only after a move worked (or the join chose it).
+    current: (Option<String>, Option<String>),
+    /// At most one waiting target per kind (`SoundTarget::Wait`).
+    pending: (Option<String>, Option<String>),
+}
+
 /// The call's sound server connection and what it knows of the devices.
 pub struct Session {
     inner: Mutex<Inner>,
     /// The server's default microphone and speaker when the call started.
     default_source: Option<String>,
     default_sink: Option<String>,
-    /// The microphone and speaker the call's streams are on; `None` when
-    /// that is not known (a failed move that could not be undone).
-    current: Mutex<(Option<String>, Option<String>)>,
+    devices: Mutex<Devices>,
+    /// Whether a target waits. Read without the lock, so the event loop
+    /// never waits for a running change to ask.
+    waiting: AtomicBool,
 }
 
 impl Session {
@@ -890,33 +909,45 @@ impl Session {
             inner: Mutex::new(inner),
             default_source,
             default_sink,
-            current: Mutex::new(current),
+            devices: Mutex::new(Devices {
+                current,
+                pending: (None, None),
+            }),
+            waiting: AtomicBool::new(false),
         })
     }
 
+    /// Whether a target waits for a stream.
+    pub fn has_pending(&self) -> bool {
+        self.waiting.load(Ordering::Relaxed)
+    }
+
+    /// The own record and playback streams now.
+    fn own(inner: &Inner, deadline: Instant) -> Option<(Vec<u32>, Vec<u32>)> {
+        let sources = inner.streams(deadline, Kind::Recording)?;
+        let sinks = inner.streams(deadline, Kind::Playout)?;
+        let own = std::process::id();
+        Some((own_streams(sources, own), own_streams(sinks, own)))
+    }
+
     /// Moves the call's own streams to the chosen microphone and speaker
-    /// (ADR-0059). It blocks for at most a few operation timeouts: call it
+    /// (ADR-0059). The whole change takes at most [`CHANGE_TIMEOUT`]; call it
     /// on a blocking thread. Both choices are checked before either stream
-    /// moves. A stream that cannot move stays where it was. `DeviceKept`
-    /// when every move is undone, `AudioDevice` when one is not.
+    /// moves. A kind with no own stream yet waits for one and counts as done
+    /// (`apply_pending` moves it later). A stream that cannot move stays
+    /// where it was. `DeviceKept` when every move is undone, `AudioDevice`
+    /// when one is not.
     pub fn switch(
         &self,
         recording: Option<&str>,
         playout: Option<&str>,
     ) -> Result<(), FailureCode> {
+        let deadline = Instant::now() + CHANGE_TIMEOUT;
         let inner = self.inner.lock().map_err(|_| FailureCode::AudioDevice)?;
-        let mut current = self.current.lock().map_err(|_| FailureCode::AudioDevice)?;
-        let deadline = Instant::now() + OPERATION_TIMEOUT;
+        let mut devices = self.devices.lock().map_err(|_| FailureCode::AudioDevice)?;
         let lists = inner.lists(deadline).ok_or(FailureCode::AudioDevice)?;
-        let sources = inner
-            .streams(deadline, Kind::Recording)
-            .ok_or(FailureCode::AudioDevice)?;
-        let sinks = inner
-            .streams(deadline, Kind::Playout)
-            .ok_or(FailureCode::AudioDevice)?;
-        let own = std::process::id();
-        let own_recording = own_streams(sources, own);
-        let own_playout = own_streams(sinks, own);
+        let (own_recording, own_playout) =
+            Self::own(&inner, deadline).ok_or(FailureCode::AudioDevice)?;
         let source_names: Vec<&str> = lists.sources.iter().map(|(n, _)| n.as_str()).collect();
         let sink_names: Vec<&str> = lists.sinks.iter().map(|(n, _)| n.as_str()).collect();
         let plan = plan_sound_move(
@@ -925,8 +956,8 @@ impl Session {
             &SoundKnown {
                 default_source: self.default_source.as_deref(),
                 default_sink: self.default_sink.as_deref(),
-                source: current.0.as_deref(),
-                sink: current.1.as_deref(),
+                source: devices.current.0.as_deref(),
+                sink: devices.current.1.as_deref(),
             },
             &SoundNow {
                 sources: &source_names,
@@ -935,31 +966,37 @@ impl Session {
                 own_playout: own_playout.len(),
             },
         )?;
-        // A fresh deadline for the moves: the checks are done.
-        let deadline = Instant::now() + OPERATION_TIMEOUT;
-        let old = current.clone();
+        // The choice replaces what waited before, per kind.
+        let waiting = |target: &SoundTarget| match target {
+            SoundTarget::Wait(name) => Some(name.clone()),
+            _ => None,
+        };
+        devices.pending = (waiting(&plan.source), waiting(&plan.sink));
+        self.waiting
+            .store(devices.pending != (None, None), Ordering::Relaxed);
+        let old = devices.current.clone();
         let mut source_moved = Vec::new();
-        if let Some(name) = &plan.source {
+        if let SoundTarget::Move(name) = &plan.source {
             let (moved, all) = inner.move_all(deadline, Kind::Recording, &own_recording, name);
             if all {
-                current.0 = Some(name.clone());
+                devices.current.0 = Some(name.clone());
             } else {
                 let undone = undo(&inner, deadline, Kind::Recording, &moved, old.0.as_deref());
                 if !undone {
-                    current.0 = None;
+                    devices.current.0 = None;
                 }
                 return Err(failure(undone));
             }
             source_moved = own_recording;
         }
-        if let Some(name) = &plan.sink {
+        if let SoundTarget::Move(name) = &plan.sink {
             let (moved, all) = inner.move_all(deadline, Kind::Playout, &own_playout, name);
             if all {
-                current.1 = Some(name.clone());
+                devices.current.1 = Some(name.clone());
             } else {
                 let undone = undo(&inner, deadline, Kind::Playout, &moved, old.1.as_deref());
                 if !undone {
-                    current.1 = None;
+                    devices.current.1 = None;
                 }
                 // The microphone goes back too, so the call keeps its devices.
                 let back = undo(
@@ -969,15 +1006,80 @@ impl Session {
                     &source_moved,
                     old.0.as_deref(),
                 );
-                current.0 = if source_moved.is_empty() || back {
+                devices.current.0 = if source_moved.is_empty() || back {
                     old.0
+                } else if let SoundTarget::Move(name) = plan.source {
+                    Some(name)
                 } else {
-                    plan.source
+                    None
                 };
                 return Err(failure(undone && back));
             }
         }
         Ok(())
+    }
+
+    /// Moves the streams of each kind that has a waiting target and an own
+    /// stream now. Gives whether a target still waits, and the kinds
+    /// (`"microphone"`, `"speaker"`) whose move failed; a failed target
+    /// stays for the next try. A kind without a stream is not a failure.
+    /// Same bound and thread rule as [`Session::switch`].
+    pub fn apply_pending(&self) -> (bool, Vec<&'static str>) {
+        let deadline = Instant::now() + CHANGE_TIMEOUT;
+        let (Ok(inner), Ok(mut devices)) = (self.inner.lock(), self.devices.lock()) else {
+            return (false, Vec::new());
+        };
+        if devices.pending == (None, None) {
+            return (false, Vec::new());
+        }
+        let Some((own_recording, own_playout)) = Self::own(&inner, deadline) else {
+            return (true, Vec::new());
+        };
+        let mut failed = Vec::new();
+        for (kind, label, streams) in [
+            (Kind::Recording, "microphone", own_recording),
+            (Kind::Playout, "speaker", own_playout),
+        ] {
+            let recording = matches!(kind, Kind::Recording);
+            let name = if recording {
+                devices.pending.0.clone()
+            } else {
+                devices.pending.1.clone()
+            };
+            let Some(name) = name.filter(|_| !streams.is_empty()) else {
+                continue;
+            };
+            let old = if recording {
+                devices.current.0.clone()
+            } else {
+                devices.current.1.clone()
+            };
+            let (moved, all) = inner.move_all(deadline, kind, &streams, &name);
+            let now = if all {
+                Some(name)
+            } else {
+                failed.push(label);
+                if undo(&inner, deadline, kind, &moved, old.as_deref()) {
+                    old
+                } else {
+                    None
+                }
+            };
+            if recording {
+                devices.current.0 = now;
+                if all {
+                    devices.pending.0 = None;
+                }
+            } else {
+                devices.current.1 = now;
+                if all {
+                    devices.pending.1 = None;
+                }
+            }
+        }
+        let waiting = devices.pending != (None, None);
+        self.waiting.store(waiting, Ordering::Relaxed);
+        (waiting, failed)
     }
 }
 

@@ -902,7 +902,7 @@ export const PARTICIPANT_MUTED_LABEL = 'Microphone off';
 export const DEVICE_CHANGE_TEXT: Record<CallDeviceChange, string> = {
   not_found: 'The chosen microphone or speaker is not connected. The call keeps the one it had.',
   unsupported: 'This change cannot be made during a call on this system. It applies to the next call.',
-  kept: 'The chosen microphone could not be opened. The call keeps the one it had.',
+  kept: 'The chosen microphone or speaker could not be used. The call keeps the one it had.',
   failed: 'The microphone or speaker could not be changed, and the sound may have stopped. Choose a device again, or leave and rejoin the call.'
 };
 
@@ -926,7 +926,7 @@ export const DEVICE_SAVE_FAILURE_TEXT = 'The call devices could not be saved.';
 export const DEVICE_SWITCH_TEXT: Record<CallDeviceChange, string> = {
   not_found: 'The chosen microphone or speaker is not connected. The call keeps the one it had.',
   unsupported: 'This call cannot switch the microphone or speaker now. Your choice applies from the next call.',
-  kept: 'The chosen microphone could not be opened. The call keeps the one it had.',
+  kept: 'The chosen microphone or speaker could not be used. The call keeps the one it had.',
   failed: 'The microphone or speaker could not be changed, and the sound may have stopped. A lost speaker needs a rejoin: leave the call and join it again.'
 };
 export const DEVICE_SAVED_TEXT =

@@ -266,8 +266,12 @@ Decision:
   `application.process.id` equals the worker's process ID. No other
   program's stream is read for any other purpose or moved. Both choices are
   checked before either stream moves. A non-`pulse:` ID or a name the server
-  lacks is `DeviceNotFound`. A kind that must move but has no own stream is
-  `AudioDevice`. A move that fails is undone: `DeviceKept` when all streams
+  lacks is `DeviceNotFound`. A kind that must move but has no own stream
+  yet (for example no playback stream while nobody else is in the call) is
+  not a failure: the target waits, the change counts as done, and the move
+  runs when a stream exists (after remote audio is subscribed or the own
+  microphone is published or unmuted, tried at 250 ms, 1 s and 3 s, and no
+  timer runs when nothing waits). One change takes at most 5 s. A move that fails is undone: `DeviceKept` when all streams
   are back, else `AudioDevice`.
 * libwebrtc's own device selection is not touched.
 

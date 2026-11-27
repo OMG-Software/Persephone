@@ -90,11 +90,14 @@ fn open_stream(direction: c_int) -> *mut c_void {
 #[test]
 #[ignore = "started by the parent test"]
 fn the_call_worker_side() {
-    if std::env::var_os(CHILD_FLAG).is_none() {
+    let Some(mode) = std::env::var_os(CHILD_FLAG) else {
         return;
-    }
+    };
+    // "late": no playback stream yet (nobody else is in the call), and only
+    // stage 1, because a stream opened later needs a new socket.
+    let late = mode == "late";
     let _record = open_stream(2);
-    let _playback = open_stream(1);
+    let mut _playback = (!late).then(|| open_stream(1));
     assert!(library().is_some());
     // The same order as the worker: the connection first, then containment.
     let session = Session::open(None, None).expect("the session opens");
@@ -103,14 +106,31 @@ fn the_call_worker_side() {
         libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
     }
     assert_eq!(crate::containment::missing_controls(), 0, "stage 1");
-    assert!(crate::containment::apply_stage2(), "stage 2");
+    if !late {
+        assert!(crate::containment::apply_stage2(), "stage 2");
+    }
     let mut out = std::io::stdout();
     writeln!(out, "READY").unwrap();
     out.flush().unwrap();
     for line in std::io::stdin().lock().lines() {
         let line = line.unwrap();
         let mut words = line.split_whitespace();
-        assert_eq!(words.next(), Some("SWITCH"));
+        match words.next() {
+            Some("OPEN_PLAYBACK") => {
+                _playback = Some(open_stream(1));
+                writeln!(out, "OK").unwrap();
+                out.flush().unwrap();
+                continue;
+            }
+            Some("APPLY") => {
+                let (waiting, failed) = session.apply_pending();
+                writeln!(out, "OK waiting={waiting} failed={failed:?}").unwrap();
+                out.flush().unwrap();
+                continue;
+            }
+            Some("SWITCH") => {}
+            other => panic!("unknown command {other:?}"),
+        }
         let choice = |word: Option<&str>| word.filter(|word| *word != "-").map(str::to_owned);
         let (recording, playout) = (choice(words.next()), choice(words.next()));
         match session.switch(recording.as_deref(), playout.as_deref()) {
@@ -119,6 +139,32 @@ fn the_call_worker_side() {
         }
         out.flush().unwrap();
     }
+}
+
+/// Starts the child in `mode` (`"1"` or `"late"`) and waits until it is
+/// ready.
+fn start_child(mode: &str) -> (Child, BufReader<std::process::ChildStdout>) {
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--ignored",
+            "--exact",
+            CHILD_TEST,
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(CHILD_FLAG, mode)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("the child starts");
+    let mut reader = BufReader::new(child.stdout.take().unwrap());
+    // The harness prints its own lines before ours.
+    let mut line = String::new();
+    while !line.trim().ends_with("READY") {
+        line.clear();
+        assert!(reader.read_line(&mut line).unwrap() > 0, "the child ended");
+    }
+    (child, reader)
 }
 
 /// `(process ID, device name)` of each stream that `pactl list <kind>`
@@ -211,26 +257,7 @@ fn given_a_call_session() {
         .spawn()
         .expect("parec");
     let mut foreign = [playing, recording];
-    let mut child = Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--ignored",
-            "--exact",
-            CHILD_TEST,
-            "--nocapture",
-            "--test-threads=1",
-        ])
-        .env(CHILD_FLAG, "1")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .expect("the child starts");
-    let mut reader = BufReader::new(child.stdout.take().unwrap());
-    // The harness prints its own lines before ours.
-    let mut line = String::new();
-    while !line.trim().ends_with("READY") {
-        line.clear();
-        assert!(reader.read_line(&mut line).unwrap() > 0, "the child ended");
-    }
+    let (mut child, mut reader) = start_child("1");
     std::thread::sleep(std::time::Duration::from_millis(300));
     let pid = child.id();
     let (playing_pid, recording_pid) = (foreign[0].id(), foreign[1].id());
@@ -286,4 +313,51 @@ fn given_a_call_session() {
         let _ = program.kill();
         let _ = program.wait();
     }
+}
+
+/// GIVEN a call with no playback stream yet and a new speaker, WHEN the
+/// change is made, THEN it answers done and the stream does not exist; WHEN
+/// the stream opens (on the default speaker) and the waiting target is
+/// applied, THEN the stream moves to the chosen speaker. The microphone
+/// moves at once. Stage 1 only: a stream that opens later needs a socket.
+#[test]
+#[ignore = "needs a sound server with two speakers and two microphones, pactl"]
+fn given_a_speaker_that_waits_for_its_stream() {
+    if std::env::var_os(CHILD_FLAG).is_some() {
+        return;
+    }
+    let other_sink =
+        std::env::var("PERSEPHONE_TEST_OTHER_SINK").expect("PERSEPHONE_TEST_OTHER_SINK");
+    let other_source =
+        std::env::var("PERSEPHONE_TEST_OTHER_SOURCE").expect("PERSEPHONE_TEST_OTHER_SOURCE");
+    let sink = other_sink.strip_prefix("pulse:").unwrap();
+    let source = other_source.strip_prefix("pulse:").unwrap();
+    let default_sink = pactl(&["get-default-sink"]).trim().to_owned();
+    let (mut child, mut reader) = start_child("late");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let pid = child.id();
+    assert!(on("sink-inputs", pid).is_empty(), "no playback stream yet");
+
+    let reply = ask(
+        &mut child,
+        &mut reader,
+        &format!("SWITCH {other_source} {other_sink}"),
+    );
+    assert_eq!(reply, "OK", "a missing stream is not a failure");
+    assert_eq!(on("source-outputs", pid), [source], "the microphone moved");
+    let reply = ask(&mut child, &mut reader, "APPLY");
+    assert_eq!(reply, "OK waiting=true failed=[]", "still no stream");
+
+    assert_eq!(ask(&mut child, &mut reader, "OPEN_PLAYBACK"), "OK");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert_eq!(on("sink-inputs", pid), [default_sink.as_str()]);
+    let reply = ask(&mut child, &mut reader, "APPLY");
+    assert_eq!(reply, "OK waiting=false failed=[]");
+    assert_eq!(on("sink-inputs", pid), [sink], "the stream moved");
+    // Nothing waits any more.
+    let reply = ask(&mut child, &mut reader, "APPLY");
+    assert_eq!(reply, "OK waiting=false failed=[]");
+
+    drop(child.stdin.take());
+    assert!(child.wait().unwrap().success());
 }
