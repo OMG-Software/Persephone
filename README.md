@@ -123,6 +123,11 @@ until the newest build ends. To see which build you have, read the revision
 in the app's version line. No signed release is available yet. See
 [Releases](docs/release.md).
 
+On Linux, install your distribution's package: the `.deb` on Debian and
+Ubuntu, the `.rpm` on Fedora and openSUSE, or the `.pkg.tar.zst` on Arch
+Linux (`sudo pacman -U <file>`). Use the AppImage only when none of these
+fits.
+
 ## Architecture
 
 Persephone runs as separate processes, so that the code that draws hostile

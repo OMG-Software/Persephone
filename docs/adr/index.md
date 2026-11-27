@@ -75,6 +75,7 @@
 * [0066 - Show call statistics on request](0066-show-call-statistics-on-request.md)
 * [0067 - Capture the Windows screen in a helper outside the call worker](0067-capture-the-windows-screen-in-a-helper-outside-the-call-worker.md)
 * [0068 - Add background blur, backgrounds, colour filters and a mirrored preview to call video](0068-add-background-blur-backgrounds-colour-filters-and-a-mirrored-preview-to-call-video.md)
+* [0069 - Build an Arch Linux package from the x86_64 .deb](0069-build-an-arch-linux-package-from-the-deb.md)
 
 ## Superseded Records
 

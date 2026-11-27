@@ -30,7 +30,8 @@ tools/
   matrix_restart.py                # Disposable Rust worker restart controller
   matrix_capabilities.py           # Controlled sync-capability integration runner
   audit_dependencies.py            # OSV Rust dependency audit
-  release.py                       # Release version, tag check and bundle configuration
+  release.py                       # Release version, tag check, bundle configuration and Arch PKGBUILD
+  arch/PKGBUILD.in                 # Template of the Arch Linux package (ADR-0069)
   sign_windows.ps1                 # Windows signing step of the release workflow
   about.toml, about.hbs            # cargo-about third-party notice configuration
   servers/                         # Disposable Merovingian/Synapse harness
@@ -174,7 +175,9 @@ signs and checksums the installers. A `v*` tag creates a draft pre-release; a
 manual run builds unsigned artifacts only. Each push to `main` builds the
 unsigned files, and the `latest` pre-release is replaced only if that commit
 is still the tip of `main` when the build ends. [Release guide](release.md)
-lists the secrets, how to cut a release and how users verify the files.
+lists the secrets, how to cut a release and how users verify the files. The
+`arch-package` job repackages the Linux x64 `.deb` as an Arch Linux package
+and checks it in an Arch Linux container (ADR-0069).
 
 The Linux release jobs build on Ubuntu 22.04, which sets the bundles' glibc
 floor. Its PipeWire 0.3.48 headers are too old for `libspa` 0.10.1, which
