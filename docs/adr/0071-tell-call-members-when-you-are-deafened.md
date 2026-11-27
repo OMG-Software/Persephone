@@ -47,9 +47,11 @@ that we need, and does not touch the member state event.
 * `seq` is a counter. It starts at the milliseconds since the Unix epoch
   when the call starts, and the sender adds 1 on each change. A receiver
   ignores a message whose `seq` is not higher than the last one it took
-  from that sender device, so a late message cannot undo a newer one. A new
-  call's counter is above any counter of an earlier call of the same
-  device, so a note that a receiver kept from an earlier call is replaced.
+  from that sender device, so a late message cannot undo a newer one. While
+  the device's clock does not go back between calls, a new call's counter is
+  above any counter of an earlier call of the same device, so a note that a
+  receiver kept from an earlier call is replaced (see the negative
+  consequences for a clock set back).
   The counter shows members roughly when the state changed, which they can
   already see from the call.
 * The core sends the message to the devices that get the frame key, with the
@@ -74,7 +76,9 @@ that we need, and does not touch the member state event.
   its owner signed, with an unchanged identity, with content that names that
   device, and from a current member of the running call. A message that
   arrives before the membership is parked, like an early key. The content is
-  bounded (1 KiB after the 8 KiB event bound).
+  bounded (4 KiB after the 8 KiB event bound). The longest user and room IDs
+  fit (255 bytes each); a sender whose content would be larger, through a very
+  long device ID, sends none, so no receiver refuses it.
 * The core keeps one note for each current member device, at most 32. A
   member that leaves is forgotten, and all notes end with the call. A change
   of the shown state updates the call status. `CallParticipant.deafened`

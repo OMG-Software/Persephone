@@ -13,33 +13,42 @@ use serde_json::{Value, json};
 /// The to-device event type.
 pub const EVENT_TYPE: &str = "io.github.omg-software.persephone.call.deafened";
 
-/// Longest content examined, in bytes of its JSON text. The content is
-/// small; a larger one is refused before it is read.
-pub const MAX_CONTENT_BYTES: usize = 1024;
+/// Longest content, in bytes of its JSON text. It holds the room ID, the
+/// sender's identity (`{user}:{device}`) twice and its device ID. Matrix
+/// bounds user and room IDs to 255 bytes, not device IDs: 4 KiB fits the
+/// longest user and room IDs with a device ID of 1000 bytes, inside the
+/// 8 KiB event bound. A sender sends no larger content (`outgoing_content`),
+/// and a receiver refuses it before it is read.
+pub const MAX_CONTENT_BYTES: usize = 4096;
 
-/// Content that says whether this device is `deafened`. `seq` is a counter
-/// that the sender raises on each change in one call.
+/// Content that says whether this device is `deafened`, or `None` when it
+/// is larger than [`MAX_CONTENT_BYTES`] (a very long device ID): every
+/// receiver would refuse it, so it is not sent. `seq` is a counter that the
+/// sender raises on each change in one call.
 pub fn outgoing_content(
     room_id: &RoomId,
     own_identity: &str,
     own_device_id: &DeviceId,
     deafened: bool,
     seq: u64,
-) -> Value {
-    json!({
+) -> Option<Value> {
+    let content = json!({
         "room_id": room_id.as_str(),
         "member_id": own_identity,
         "member": { "id": own_identity, "claimed_device_id": own_device_id.as_str() },
         "deafened": deafened,
         "seq": seq,
-    })
+    });
+    (content.to_string().len() <= MAX_CONTENT_BYTES).then_some(content)
 }
 
 /// The counter at the start of a call: the milliseconds since the Unix
-/// epoch at `now_ms`. A new call's counter is then above any counter of an
-/// earlier call of this device, so a receiver that kept an old note takes
-/// the new call's messages. It shows members roughly when the state
-/// changed, which they can already see from the call. Each change adds 1.
+/// epoch at `now_ms`. While the device's clock does not go back between
+/// calls, a new call's counter is above any counter of an earlier call of
+/// this device, so a receiver that kept an old note takes the new call's
+/// messages; a clock set back between the calls can leave that note in
+/// place (ADR-0071). It shows members roughly when the state changed, which
+/// they can already see from the call. Each change adds 1.
 pub fn first_seq(now_ms: u64) -> u64 {
     now_ms
 }
@@ -150,7 +159,7 @@ pub fn take(known: Option<Note>, message: &IncomingDeafen) -> Option<Note> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use matrix_sdk::ruma::{device_id, room_id, user_id};
+    use matrix_sdk::ruma::{OwnedDeviceId, device_id, room_id, user_id};
 
     const IDENTITY: &str = "@a:example.org:DEV";
 
@@ -162,6 +171,7 @@ mod tests {
             deafened,
             seq,
         )
+        .expect("a short content is within the bound")
     }
 
     fn parse(content: &Value) -> Result<IncomingDeafen, Refusal> {
@@ -249,6 +259,30 @@ mod tests {
         c["seq"] = json!("1");
         assert_eq!(parse(&c).unwrap_err(), Refusal::BadSeq);
         assert_eq!(parse(&json!([1])).unwrap_err(), Refusal::NotAnObject);
+    }
+
+    /// GIVEN the longest user ID and room ID that Matrix allows (255 bytes
+    /// each) and a device ID of 512 bytes WHEN the own content is made THEN
+    /// it is within the bound and a receiver takes it. GIVEN a device ID
+    /// that makes it larger THEN no content is made, so none is sent for
+    /// every receiver to refuse.
+    #[test]
+    fn given_the_longest_ids_then_the_content_fits_the_bound() {
+        let user = UserId::parse(format!("@{}:example.org", "u".repeat(242))).unwrap();
+        let room = RoomId::parse(format!("!{}:example.org", "r".repeat(242))).unwrap();
+        assert_eq!((user.as_str().len(), room.as_str().len()), (255, 255));
+        let device = OwnedDeviceId::from("D".repeat(512));
+        let identity = participant_identity(&user, &device);
+        let content =
+            outgoing_content(&room, &identity, &device, true, u64::MAX).expect("within the bound");
+        assert!(content.to_string().len() <= MAX_CONTENT_BYTES);
+        assert_eq!(
+            parse_incoming(&content, &room, &user, &device).map(|message| message.seq),
+            Ok(u64::MAX)
+        );
+        let device = OwnedDeviceId::from("D".repeat(1200));
+        let identity = participant_identity(&user, &device);
+        assert_eq!(outgoing_content(&room, &identity, &device, true, 1), None);
     }
 
     /// GIVEN content over the size limit WHEN parsed THEN it is refused before it is read.

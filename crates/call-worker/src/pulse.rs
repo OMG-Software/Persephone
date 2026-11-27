@@ -24,7 +24,8 @@ use std::time::{Duration, Instant};
 use persephone_call_protocol::{FailureCode, MAX_PULSE_NAME_BYTES};
 
 use crate::mapping::{
-    OwnStream, SoundKnown, SoundNow, SoundTarget, own_streams, plan_sound_move, routes_kept,
+    MAX_OWN_STREAMS, OwnStream, SoundKnown, SoundNow, SoundTarget, own_streams, plan_sound_move,
+    routes_kept,
 };
 
 /// The longest the whole query may take.
@@ -491,8 +492,6 @@ pub const REPORT_GRACE: Duration = Duration::from_millis(250);
 /// reads must end by `CHANGE_TIMEOUT - ROLLBACK_RESERVE`; the rollback and
 /// its check use the whole time. A move that has no time left is not sent.
 const ROLLBACK_RESERVE: Duration = Duration::from_millis(1500);
-/// The most streams read from one listing; own streams are picked after.
-const MAX_STREAMS: usize = 4096;
 /// The property that holds the process ID of a stream's program.
 const PROCESS_ID_KEY: &CStr = c"application.process.id";
 
@@ -655,24 +654,31 @@ unsafe extern "C" fn on_server_info(
 /// One stream as `(index, owner process ID, device index)`.
 type RawStream = (u32, Option<u32>, Option<u32>);
 
-/// A stream listing of [`RawStream`] entries.
-#[derive(Default)]
+/// A listing of this process's own streams as [`RawStream`] entries.
 struct StreamList {
+    /// This process's ID: only streams that name it are kept.
+    own_process: u32,
     entries: RefCell<Vec<RawStream>>,
     done: Cell<bool>,
     failed: Cell<bool>,
 }
 
 impl StreamList {
-    /// Copies one stream.
+    fn new(own_process: u32) -> Self {
+        Self {
+            own_process,
+            entries: RefCell::default(),
+            done: Cell::default(),
+            failed: Cell::default(),
+        }
+    }
+
+    /// Copies one stream, if it is this process's own (`keep`).
     ///
     /// # Safety
     ///
     /// `proplist` is null or a property list that lives for the call.
     unsafe fn add(&self, index: u32, device: u32, proplist: *const c_void) {
-        if self.entries.borrow().len() >= MAX_STREAMS {
-            return;
-        }
         let owner = session_api()
             .filter(|_| !proplist.is_null())
             .and_then(|api| {
@@ -682,7 +688,16 @@ impl StreamList {
                 (!value.is_null()).then(|| unsafe { CStr::from_ptr(value) }.to_bytes())
             })
             .and_then(parse_process_id);
-        let device = (device != PA_INVALID_INDEX).then_some(device);
+        self.keep(index, owner, (device != PA_INVALID_INDEX).then_some(device));
+    }
+
+    /// Keeps a stream of this process, at most [`MAX_OWN_STREAMS`]. A stream
+    /// of another program, or with no owner, is left out before the limit,
+    /// so other programs' streams never push the own ones out.
+    fn keep(&self, index: u32, owner: Option<u32>, device: Option<u32>) {
+        if owner != Some(self.own_process) || self.entries.borrow().len() >= MAX_OWN_STREAMS {
+            return;
+        }
         self.entries.borrow_mut().push((index, owner, device));
     }
 
@@ -906,7 +921,7 @@ impl Inner {
     /// The sound server's streams of one kind as
     /// `(index, process ID, device index)`.
     fn streams(&self, deadline: Instant, kind: Kind) -> Option<Vec<RawStream>> {
-        let list = StreamList::default();
+        let list = StreamList::new(std::process::id());
         let run = self.drive(
             deadline,
             // SAFETY: the context is live; the list outlives the operation.
@@ -1342,6 +1357,9 @@ fn run_change(
     let targets = [(Kind::Recording, &plan.source), (Kind::Playout, &plan.sink)];
     let mut touched: [Vec<OwnStream>; 2] = [Vec::new(), Vec::new()];
     let mut moved = true;
+    // A change is all or nothing: after a failed move the other kind is not
+    // moved, because the rollback below would put it back at once. (A try
+    // of waiting targets, `run_pending`, moves each kind on its own.)
     for (kind, target) in targets {
         if let SoundTarget::Move(name) = target {
             moved = moved
@@ -1559,13 +1577,33 @@ mod tests {
     }
 
     #[test]
-    fn given_a_stream_without_properties_when_listed_then_it_has_no_owner() {
-        // GIVEN a stream with a null property list, WHEN copied, THEN it is
-        // kept with no owner, so it is never picked as the call's own.
-        let list = StreamList::default();
+    fn given_a_stream_without_properties_when_listed_then_it_is_left_out() {
+        // GIVEN a stream with a null property list, WHEN copied, THEN it has
+        // no owner and is not kept, so it is never picked as the call's own.
+        let list = StreamList::new(7);
         // SAFETY: a null property list is allowed.
         unsafe { list.add(5, PA_INVALID_INDEX, std::ptr::null()) };
-        assert_eq!(list.entries.into_inner(), vec![(5, None, None)]);
+        assert!(list.entries.into_inner().is_empty());
+    }
+
+    #[test]
+    fn given_many_streams_of_other_programs_first_when_listed_then_the_own_ones_stay() {
+        // GIVEN thousands of other programs' streams and one with no owner
+        // before this process's streams, WHEN listed, THEN only own streams
+        // are kept, the first one with its device, at most MAX_OWN_STREAMS.
+        let list = StreamList::new(7);
+        for index in 0..5000 {
+            list.keep(index, Some(8), None);
+        }
+        list.keep(9000, None, None);
+        list.keep(9001, Some(7), Some(2));
+        for index in 0..u32::try_from(MAX_OWN_STREAMS).unwrap() + 3 {
+            list.keep(10_000 + index, Some(7), None);
+        }
+        let kept = list.entries.into_inner();
+        assert_eq!(kept.len(), MAX_OWN_STREAMS);
+        assert_eq!(kept[0], (9001, Some(7), Some(2)));
+        assert!(kept.iter().all(|(_, owner, _)| *owner == Some(7)));
     }
 
     #[test]

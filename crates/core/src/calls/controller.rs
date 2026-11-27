@@ -5250,13 +5250,17 @@ impl Call {
     /// not fatal and is not retried: the next change or a new member sends
     /// the state again.
     fn queue_deafen(&mut self, recipients: Vec<(OwnedUserId, OwnedDeviceId)>) {
-        let content = deafen::outgoing_content(
+        // Content over the bound (a very long device ID) would be refused by
+        // every receiver, so none is sent.
+        let Some(content) = deafen::outgoing_content(
             &self.view.room_id,
             &self.own_identity,
             &self.own_device,
             self.deafen_shared,
             self.deafen_seq,
-        );
+        ) else {
+            return;
+        };
         self.deafen_sender.queue(recipients, content);
     }
 

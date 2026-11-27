@@ -261,7 +261,12 @@ Decision:
   and source names, the stream lists, and (once, at join) the server's default
   names; then it moves streams with `pa_context_move_source_output_by_name`
   and `pa_context_move_sink_input_by_name`. "System default" during the call
-  means the default when the call started (ADR-0059).
+  means the default when the call started (ADR-0059). The worker's event
+  loop never waits for it: each sound job (a change, or a try of a waiting
+  target) runs on a task of its own, one at a time, and sends its result to
+  the loop, so `Leave` and keys are served while the sound server is slow. A
+  change asked while a job runs waits (the newest only) and is answered after
+  that job.
 * It moves only this process's own streams: those whose
   `application.process.id` equals the worker's process ID. No other
   program's stream is read for any other purpose or moved. Both choices are
@@ -300,7 +305,15 @@ streams, and also to move other programs' streams, because the sound server
 trusts any client of the user. The worker never sends such a request: the
 code selects own streams by process ID. A compromised worker could move other
 streams already, through the socket that the call needs; this change does not
-widen that.
+widen that. The process ID is the stream's `application.process.id`, which the
+client that opened the stream sets itself; PulseAudio does not check it.
+Another client of the same user can name the worker's process ID, and its
+stream then moves with the worker's, to the device the user chose. That gives
+it nothing it lacks, because it can already move any stream itself. PulseAudio
+gives no server-checked owner for a stream, and a PipeWire-only check was not
+reviewed, so this is a known limit. A listing keeps only streams that name the
+worker's process ID, before its limit, so other programs' streams never push
+the worker's own out of it.
 
 Verification: unit tests cover the stream and name choice, the routes check,
 the commit rule and the rollback with a fake sound server. The session test

@@ -186,7 +186,11 @@ no media permissions, and a browser test would prove nothing about the worker.
 * A camera that ran but was not released in time still ran: the test ends
   as `done`.
   `FailureCode::Unsupported` (10) is a test this platform does not have.
-* The call protocol is version 10.
+* This decision raised the call protocol to version 10. Later records raised
+  it again: it is version 16 since
+  [ADR-0070](0070-choose-the-camera-send-resolution.md) (`Join.video_quality`,
+  `SetVideoQuality`). `VERSION` in `crates/call-protocol` is the current
+  number.
 
 ### Positive Consequences
 

@@ -272,6 +272,8 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
     let (sound_tx, mut sound_done) = mpsc::channel::<Option<Levels>>(1);
     // The same for the statistics read (ADR-0066).
     let (stats_tx, mut stats_done) = mpsc::channel(1);
+    // At most one sound job runs (Linux, ADR-0049), so one end can wait.
+    let (sound_jobs_tx, mut sound_jobs) = mpsc::channel::<SoundDone>(1);
     let mut others_inbox = OtherInbox {
         events: OtherEvents::default(),
         connected: connect_done,
@@ -293,14 +295,12 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
         send_tier: Arc::new(SharedTier::new(SendTier::P360)),
         auto_quality: None,
         #[cfg(target_os = "linux")]
-        accepted_sound: Some(joined_sound.clone()),
+        sound_book: SoundBook::new(joined_sound.clone()),
         joined_sound,
         #[cfg(target_os = "linux")]
         pulse,
         #[cfg(target_os = "linux")]
         sound_retries: std::collections::VecDeque::new(),
-        #[cfg(target_os = "linux")]
-        sound_generation: 0,
         camera: None,
         stalled: None,
         waiting_grant: None,
@@ -326,6 +326,7 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
         microphone,
         sound: SoundProbe::new(sound_tx),
         stats: StatsProbe::new(stats_tx),
+        sound_jobs: sound_jobs_tx,
     };
     // Tracks subscribed during the connect get the volume now; later ones
     // when their subscription is handled.
@@ -352,6 +353,7 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
                 &mut tracker,
                 &mut sound_done,
                 &mut stats_done,
+                &mut sound_jobs,
             )
             .await
         }
@@ -749,63 +751,172 @@ fn tries_due(waiting: bool, session_generation: u64, accepted: u64) -> bool {
     waiting && session_generation == accepted
 }
 
-/// One sound change through `session` (`set_devices` on Linux). The
-/// accepted choice again (a camera-only change) does not reach the session
-/// and has no sound error (`sound_route`). Any other choice goes to the
-/// session on a blocking thread; the deadlines start here, so a task that
-/// starts late sends nothing, and no answer within `wait` is `AudioDevice`.
-/// `accepted` then follows the answer (`accepted_after`).
+/// One sound change through `session` on a blocking thread. The call runs
+/// it on a task of its own, never in the event loop (`Call::sound_step`).
+/// The deadlines start here, so a task that starts late sends nothing, and
+/// no answer within `wait` is `AudioDevice`, with no generation.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 async fn switch_sound<S: SoundSwitch>(
     session: Arc<S>,
-    accepted: &mut Option<(Option<String>, Option<String>)>,
     choice: (Option<String>, Option<String>),
     wait: Duration,
 ) -> SoundAnswer {
-    if sound_route(accepted.as_ref(), &choice.0, &choice.1) == SoundRoute::Skip {
-        return SoundAnswer {
-            failure: None,
-            generation: None,
-        };
-    }
     let started = std::time::Instant::now();
-    let (recording, playout) = choice.clone();
     let change = tokio::task::spawn_blocking(move || {
-        session.switch(started, recording.as_deref(), playout.as_deref())
+        session.switch(started, choice.0.as_deref(), choice.1.as_deref())
     });
     let (failure, generation) = match tokio::time::timeout(wait, change).await {
         Ok(Ok(Ok(generation))) => (None, Some(generation)),
         Ok(Ok(Err(code))) => (Some(code), None),
         _ => (Some(FailureCode::AudioDevice), None),
     };
-    *accepted = accepted_after(accepted.take(), choice, failure);
     SoundAnswer {
         failure,
         generation,
     }
 }
 
-/// A `SetDevices` on a call with a sound server connection
-/// (`Call::change_devices` on Linux). The camera choice is kept for the next
-/// camera start whatever the sound answer; the sound choice goes through
-/// `switch_sound`. Gives the answer for the core and the generation of a
-/// change that the session accepted in time.
+/// What a sound choice does now (`SoundBook`).
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-async fn set_devices<S: SoundSwitch>(
-    session: Arc<S>,
+#[derive(Debug, Eq, PartialEq)]
+enum SoundStep {
+    /// No sound change (the accepted choice again, a camera-only change):
+    /// `DevicesSet` with no sound error now.
+    Answer,
+    /// Start this change on a task of its own.
+    Start((Option<String>, Option<String>)),
+    /// A sound job runs: the choice waits, and its answer comes after that
+    /// job ends.
+    Wait,
+}
+
+/// The sound changes of a call with a sound server connection (Linux,
+/// ADR-0049). At most one sound job (a change, or a try of the waiting
+/// targets) runs at a time, on a task of its own, so the event loop serves
+/// `Leave` and keys while the sound server is slow. A change asked while a
+/// job runs waits, the newest only, and is decided when the job ends.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Debug)]
+struct SoundBook {
+    /// The sound choice that the call's streams follow: the join's, then
+    /// each change that `Session::switch` accepted. A choice equal to it (a
+    /// camera-only change) is no sound change (`sound_route`). `None` when
+    /// the routes are not known to follow it: a change failed with
+    /// `AudioDevice` or timed out, or the last try dropped a waiting target.
+    accepted: Option<(Option<String>, Option<String>)>,
+    /// The generation of the newest change that the core was told worked
+    /// (`SoundAnswer::generation`); tries run only for it (`tries_due`). The
+    /// join's targets have generation 0.
+    generation: u64,
+    /// Whether a sound job runs.
+    running: bool,
+    /// The newest sound choice asked while a job ran.
+    waiting: Option<(Option<String>, Option<String>)>,
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+impl SoundBook {
+    fn new(joined: (Option<String>, Option<String>)) -> Self {
+        Self {
+            accepted: Some(joined),
+            generation: 0,
+            running: false,
+            waiting: None,
+        }
+    }
+
+    /// Whether a sound job runs: no other one starts until it ends.
+    fn busy(&self) -> bool {
+        self.running
+    }
+
+    /// The sound choice of a `SetDevices`.
+    fn offer(&mut self, choice: (Option<String>, Option<String>)) -> SoundStep {
+        if self.running {
+            self.waiting = Some(choice);
+            return SoundStep::Wait;
+        }
+        self.decide(choice)
+    }
+
+    fn decide(&mut self, choice: (Option<String>, Option<String>)) -> SoundStep {
+        if sound_route(self.accepted.as_ref(), &choice.0, &choice.1) == SoundRoute::Skip {
+            return SoundStep::Answer;
+        }
+        self.running = true;
+        SoundStep::Start(choice)
+    }
+
+    /// A change of `choice` ended with `answer`: the accepted choice follows
+    /// it (`accepted_after`). `true` when the core is told that it worked:
+    /// its generation is taken, and its waiting targets are tried.
+    fn changed(&mut self, choice: (Option<String>, Option<String>), answer: &SoundAnswer) -> bool {
+        self.running = false;
+        self.accepted = accepted_after(self.accepted.take(), choice, answer.failure);
+        match answer.generation {
+            Some(generation) => {
+                self.generation = generation;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Starts a try of the waiting targets; `false` while a job runs.
+    fn begin_try(&mut self) -> bool {
+        if self.running {
+            return false;
+        }
+        self.running = true;
+        true
+    }
+
+    /// A try ended. `dropped` when the streams no longer follow the accepted
+    /// choice: the last try dropped a target, or gave no answer in time.
+    fn tried(&mut self, dropped: bool) {
+        self.running = false;
+        if dropped {
+            self.accepted = None;
+        }
+    }
+
+    /// The choice that waited, decided now that no job runs.
+    fn next(&mut self) -> Option<SoundStep> {
+        if self.running {
+            return None;
+        }
+        self.waiting.take().map(|choice| self.decide(choice))
+    }
+}
+
+/// The sound part of a `SetDevices` on a call with a sound server
+/// connection (`Call::change_devices` on Linux). The camera choice is kept
+/// for the next camera start at once, whatever the sound answer.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn set_devices(
     camera_device: &mut Option<String>,
-    accepted: &mut Option<(Option<String>, Option<String>)>,
+    book: &mut SoundBook,
     (recording, playout, camera): (Option<String>, Option<String>, Option<String>),
-    wait: Duration,
-) -> (FromWorker, Option<u64>) {
+) -> SoundStep {
     *camera_device = camera;
-    let answer = switch_sound(session, accepted, (recording, playout), wait).await;
-    (
-        FromWorker::DevicesSet {
-            failure: answer.failure,
-        },
-        answer.generation,
-    )
+    book.offer((recording, playout))
+}
+
+/// The end of one sound job, for the event loop (Linux, ADR-0049).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+enum SoundDone {
+    /// A change of `choice` and its answer.
+    Change {
+        choice: (Option<String>, Option<String>),
+        answer: SoundAnswer,
+    },
+    /// A try of the waiting targets; `run` is `None` when it gave no answer
+    /// in time.
+    #[cfg(target_os = "linux")]
+    Try {
+        last: bool,
+        run: Option<crate::pulse::PendingRun>,
+    },
 }
 
 /// Moves the running call to other devices (`SetDevices`, ADR-0059). Both
@@ -1333,14 +1444,14 @@ struct Call<'a> {
     /// changes during a call, so a `SetDevices` with this choice (a change of
     /// the camera only) is no sound change there.
     joined_sound: (Option<String>, Option<String>),
-    /// Linux with a sound server connection: the sound choice that the
-    /// call's streams follow, the join's at first and then each change that
-    /// `Session::switch` accepted. A `SetDevices` with this choice (a change
-    /// of the camera only) is no sound change (`sound_route`). `None` when
-    /// the routes are not known to follow it: a change failed with
-    /// `AudioDevice` or timed out, or the last try dropped a waiting target.
+    /// Linux with a sound server connection: the accepted sound choice, the
+    /// generation the tries are for, and the sound job that runs
+    /// (`SoundBook`).
     #[cfg(target_os = "linux")]
-    accepted_sound: Option<(Option<String>, Option<String>)>,
+    sound_book: SoundBook,
+    /// Where a sound job sends its end (`SoundDone`); one runs at a time.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    sound_jobs: mpsc::Sender<SoundDone>,
     /// Linux: the call's sound server connection, which moves the call's own
     /// streams on a change (ADR-0049). `None` when it could not open.
     #[cfg(target_os = "linux")]
@@ -1348,11 +1459,6 @@ struct Call<'a> {
     /// When a waiting sound target is tried next (`SOUND_RETRIES`).
     #[cfg(target_os = "linux")]
     sound_retries: std::collections::VecDeque<Instant>,
-    /// Linux: the generation of the newest sound change that the core was
-    /// told worked (`SoundAnswer::generation`); tries run only for it
-    /// (`tries_due`). The join's targets have generation 0.
-    #[cfg(target_os = "linux")]
-    sound_generation: u64,
     camera: Option<LocalCamera>,
     /// A capture that did not end in time after a stop (a blocked read on a
     /// stalled camera). Its frames are already revoked. No new camera opens
@@ -2156,8 +2262,13 @@ impl Call<'_> {
     /// The time of the next try of a sound target that waits for a stream
     /// (Linux, ADR-0049); `None` when nothing waits, so no timer runs.
     fn retry_next(&self) -> Option<Instant> {
+        // No try starts while a sound job runs; it is due when that ends.
         #[cfg(target_os = "linux")]
-        return self.sound_retries.front().copied();
+        return self
+            .sound_retries
+            .front()
+            .copied()
+            .filter(|_| !self.sound_book.busy());
         #[cfg(not(target_os = "linux"))]
         return None;
     }
@@ -2174,7 +2285,7 @@ impl Call<'_> {
             tries_due(
                 pulse.has_pending(),
                 pulse.generation(),
-                self.sound_generation,
+                self.sound_book.generation,
             )
         }) {
             let now = Instant::now();
@@ -2182,120 +2293,182 @@ impl Call<'_> {
         }
     }
 
-    /// One try of the waiting sound targets. A failed move has no request to
-    /// answer: every failure is noted by kind and the target stays. The last
-    /// try of a series drops a target whose move failed and answers with an
-    /// unasked `DevicesSet`, so the core shows it (`DeviceKept`, or
-    /// `AudioDevice` when a stream was lost or the routes could not be
-    /// read). A stream that is not open yet is no failure: the target keeps
-    /// waiting and nothing is sent. The task's deadlines start here, at
-    /// `started`, and end at `CHANGE_TIMEOUT`; the wait adds `REPORT_GRACE`.
-    /// A wait that still times out means that the blocking thread did not
-    /// run in time: an earlier try then runs again, and the last try answers
-    /// `AudioDevice`, as its outcome is not known.
-    async fn retry_pending_sound(&mut self) -> Vec<FromWorker> {
+    /// Starts one try of the waiting sound targets on a task of its own,
+    /// never in the event loop; its end comes back as `SoundDone::Try`
+    /// (`sound_done`). The try is for the change that the core was told
+    /// worked: one that runs late after a newer change touches nothing, and
+    /// the targets of a change answered too late are never tried. The task's
+    /// deadlines start here, at `started`, and end at `CHANGE_TIMEOUT`; the
+    /// task waits `REPORT_GRACE` more for the blocking thread.
+    fn begin_sound_try(&mut self) {
         #[cfg(target_os = "linux")]
         {
-            self.sound_retries.pop_front();
-            let accepted = self.sound_generation;
+            let accepted = self.sound_book.generation;
             let Some(pulse) = self
                 .pulse
                 .clone()
                 .filter(|pulse| tries_due(pulse.has_pending(), pulse.generation(), accepted))
             else {
                 self.sound_retries.clear();
-                return Vec::new();
+                return;
             };
+            // `retry_next` waits while a job runs, so this starts one.
+            if !self.sound_book.begin_try() {
+                return;
+            }
+            self.sound_retries.pop_front();
             let last = self.sound_retries.is_empty();
-            // The try is for the change that the core was told worked: one
-            // that runs late after a newer change touches nothing, and the
-            // targets of a change answered too late are never tried.
-            let generation = accepted;
             let started = std::time::Instant::now();
-            let apply =
-                tokio::task::spawn_blocking(move || pulse.apply_pending(started, last, generation));
+            let done = self.sound_jobs.clone();
             let wait = crate::pulse::CHANGE_TIMEOUT + crate::pulse::REPORT_GRACE;
-            let run = match tokio::time::timeout(wait, apply).await {
-                Ok(Ok(run)) => run,
-                _ if last => {
-                    self.sound_retries.clear();
-                    self.accepted_sound = None;
-                    return vec![FromWorker::DevicesSet {
-                        failure: Some(FailureCode::AudioDevice),
-                    }];
-                }
-                _ => crate::pulse::PendingRun {
-                    waiting: true,
-                    moves_failed: Vec::new(),
-                },
-            };
-            for (kind, _) in &run.moves_failed {
-                note_audio(
-                    crate::diagnostics::WARN,
-                    format_args!("a waiting {kind} move failed"),
-                );
-            }
-            if !run.waiting {
-                self.sound_retries.clear();
-            }
-            let lost = run
-                .moves_failed
-                .iter()
-                .any(|(_, code)| *code == FailureCode::AudioDevice);
-            match run.moves_failed.first() {
-                Some(_) if last => {
-                    // The waiting target was dropped: the streams do not
-                    // follow the accepted choice.
-                    self.accepted_sound = None;
-                    vec![FromWorker::DevicesSet {
-                        failure: Some(if lost {
-                            FailureCode::AudioDevice
-                        } else {
-                            FailureCode::DeviceKept
-                        }),
-                    }]
-                }
-                _ => Vec::new(),
-            }
+            tokio::spawn(async move {
+                let apply = tokio::task::spawn_blocking(move || {
+                    pulse.apply_pending(started, last, accepted)
+                });
+                let run = tokio::time::timeout(wait, apply)
+                    .await
+                    .ok()
+                    .and_then(Result::ok);
+                // One job runs at a time, so the slot is free.
+                let _ = done.send(SoundDone::Try { last, run }).await;
+            });
         }
-        #[cfg(not(target_os = "linux"))]
-        Vec::new()
     }
 
-    /// Applies a `SetDevices` during the call and gives its answer. The
-    /// camera choice applies from the next camera start. On Linux the sound
-    /// server connection moves the call's own streams on a blocking thread
-    /// (ADR-0049, `set_devices`); without it, only the join's own sound
-    /// choice is accepted. A change that leaves a target waiting starts the
-    /// tries (`sound_trigger`).
-    async fn change_devices(
+    /// What a try reports when it ends. A failed move has no request to
+    /// answer: every failure is noted by kind and the target stays. The last
+    /// try of a series drops a target whose move failed and answers with an
+    /// unasked `DevicesSet`, so the core shows it (`DeviceKept`, or
+    /// `AudioDevice` when a stream was lost or the routes could not be
+    /// read). A stream that is not open yet is no failure: the target keeps
+    /// waiting and nothing is sent. A try with no answer in time means that
+    /// the blocking thread did not run in time: the next try runs, and the
+    /// last one answers `AudioDevice`, as its outcome is not known.
+    #[cfg(target_os = "linux")]
+    fn sound_tried(
+        &mut self,
+        last: bool,
+        run: Option<crate::pulse::PendingRun>,
+    ) -> Vec<FromWorker> {
+        let Some(run) = run else {
+            if last {
+                self.sound_retries.clear();
+            }
+            self.sound_book.tried(last);
+            return if last {
+                vec![FromWorker::DevicesSet {
+                    failure: Some(FailureCode::AudioDevice),
+                }]
+            } else {
+                Vec::new()
+            };
+        };
+        for (kind, _) in &run.moves_failed {
+            note_audio(
+                crate::diagnostics::WARN,
+                format_args!("a waiting {kind} move failed"),
+            );
+        }
+        if !run.waiting {
+            self.sound_retries.clear();
+        }
+        let lost = run
+            .moves_failed
+            .iter()
+            .any(|(_, code)| *code == FailureCode::AudioDevice);
+        // At the last try a failed target was dropped: the streams do not
+        // follow the accepted choice.
+        let dropped = last && !run.moves_failed.is_empty();
+        self.sound_book.tried(dropped);
+        if !dropped {
+            return Vec::new();
+        }
+        vec![FromWorker::DevicesSet {
+            failure: Some(if lost {
+                FailureCode::AudioDevice
+            } else {
+                FailureCode::DeviceKept
+            }),
+        }]
+    }
+
+    /// The end of a sound job (Linux, ADR-0049): a change's `DevicesSet`, or
+    /// what a try reports. The choice that waited for the job is decided
+    /// then; a try that came due meanwhile starts after it.
+    fn sound_done(&mut self, done: SoundDone) -> Vec<FromWorker> {
+        #[cfg(target_os = "linux")]
+        {
+            let mut reply = match done {
+                SoundDone::Change { choice, answer } => {
+                    if self.sound_book.changed(choice, &answer) {
+                        // Waiting targets are tried only for this change,
+                        // and soon, also when no sound event follows.
+                        self.sound_trigger();
+                    }
+                    vec![FromWorker::DevicesSet {
+                        failure: answer.failure,
+                    }]
+                }
+                SoundDone::Try { last, run } => self.sound_tried(last, run),
+            };
+            if let Some(pulse) = self.pulse.clone()
+                && let Some(step) = self.sound_book.next()
+            {
+                reply.extend(self.sound_step(pulse, step));
+            }
+            reply
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = done;
+            Vec::new()
+        }
+    }
+
+    /// Carries out a sound step (`SoundBook`): answers a choice that is no
+    /// sound change, or starts a change on a task of its own, whose end
+    /// comes back as `SoundDone::Change`.
+    #[cfg(target_os = "linux")]
+    fn sound_step(&self, pulse: Arc<crate::pulse::Session>, step: SoundStep) -> Vec<FromWorker> {
+        match step {
+            SoundStep::Answer => vec![FromWorker::DevicesSet { failure: None }],
+            SoundStep::Wait => Vec::new(),
+            SoundStep::Start(choice) => {
+                let done = self.sound_jobs.clone();
+                let wait = crate::pulse::CHANGE_TIMEOUT + crate::pulse::REPORT_GRACE;
+                tokio::spawn(async move {
+                    let answer = switch_sound(pulse, choice.clone(), wait).await;
+                    // One job runs at a time, so the slot is free.
+                    let _ = done.send(SoundDone::Change { choice, answer }).await;
+                });
+                Vec::new()
+            }
+        }
+    }
+
+    /// Applies a `SetDevices` during the call. The camera choice applies
+    /// from the next camera start. On Linux with a sound server connection
+    /// the sound change runs on a task of its own, never in the event loop
+    /// (`set_devices`, `SoundBook`), and its `DevicesSet` comes when it ends
+    /// (`sound_done`); a choice that is no sound change is answered at once.
+    /// Without that connection, only the join's own sound choice is
+    /// accepted on Linux.
+    fn change_devices(
         &mut self,
         recording: Option<String>,
         playout: Option<String>,
         camera: Option<String>,
-    ) -> FromWorker {
+    ) -> Vec<FromWorker> {
         #[cfg(target_os = "linux")]
         if let Some(pulse) = self.pulse.clone() {
-            // The accepted choice again (a camera-only change) is no sound
-            // change. A real change is not resolved without the server's
-            // defaults: `Session::switch` then answers `Unsupported`. The
-            // loop waits for the change's deadlines to end, plus a grace.
-            let wait = crate::pulse::CHANGE_TIMEOUT + crate::pulse::REPORT_GRACE;
-            let (answer, generation) = set_devices(
-                pulse,
+            // A real change is not resolved without the server's defaults:
+            // `Session::switch` then answers `Unsupported`.
+            let step = set_devices(
                 &mut self.camera_device,
-                &mut self.accepted_sound,
+                &mut self.sound_book,
                 (recording, playout, camera),
-                wait,
-            )
-            .await;
-            if let Some(generation) = generation {
-                // Waiting targets are tried only for this change, and soon,
-                // also when no sound event follows.
-                self.sound_generation = generation;
-                self.sound_trigger();
-            }
-            return answer;
+            );
+            return self.sound_step(pulse, step);
         }
         self.camera_device = camera;
         let failure = if sound_unchanged_here(&self.joined_sound, &recording, &playout) {
@@ -2310,7 +2483,7 @@ impl Call<'_> {
             )
             .err()
         };
-        FromWorker::DevicesSet { failure }
+        vec![FromWorker::DevicesSet { failure }]
     }
 
     /// Applies a new video effect, at once for a running camera and for
@@ -3667,11 +3840,11 @@ impl Call<'_> {
                 playout,
                 camera,
             } => {
-                let answer = self.change_devices(recording, playout, camera).await;
+                let reply = self.change_devices(recording, playout, camera);
                 // A device change may reconfigure the capture path, so the
                 // microphone settings are applied again (ADR-0062).
                 self.apply_microphone();
-                Ok(vec![answer])
+                Ok(reply)
             }
             ToWorker::SetVideoEffect { effect } => Ok(vec![self.set_video_effect(effect)]),
             // ADR-0070: the quality applies at the next camera start; a camera
@@ -3900,6 +4073,7 @@ async fn event_loop(
     tracker: &mut SpeakingTracker,
     sound_done: &mut Receiver<Option<Levels>>,
     stats_done: &mut Receiver<(u64, Option<crate::mapping::stats::RawStats>)>,
+    sound_jobs: &mut Receiver<SoundDone>,
 ) -> End {
     let mut tick = interval(SPEAKING_TICK);
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -3944,8 +4118,11 @@ async fn event_loop(
                     }
                 }
             }
-            () = retry_wait(call.retry_next()) => {
-                outgoing.extend(call.retry_pending_sound().await);
+            () = retry_wait(call.retry_next()) => call.begin_sound_try(),
+            // A sound job ended (Linux, ADR-0049). It ran on a task of its
+            // own, so `Leave` and keys never waited for the sound server.
+            Some(done) = sound_jobs.recv() => {
+                outgoing.extend(call.sound_done(done));
             }
             Some(done) = others.connected.recv() => {
                 if call.other_connected(done, &mut others.events).await.is_err() {
@@ -4998,32 +5175,40 @@ mod tests {
 
     /// GIVEN a call that joined on "System default" with a session whose
     /// defaults read failed (every switch answers `Unsupported`) WHEN a
-    /// camera-only `SetDevices` comes THEN the session is not asked and there
-    /// is no sound error. WHEN a real choice comes THEN it is `Unsupported`,
-    /// the join's choice stays accepted, and a camera-only change after it
-    /// still gives no error. GIVEN a session that commits only after the
-    /// wait THEN the change is `AudioDevice`, no choice stays accepted, and
-    /// its generation is not taken, so its targets are never tried. GIVEN a
-    /// session that moves THEN the choice and its generation are accepted.
+    /// `SetDevices` changes only the camera THEN the camera is kept for the
+    /// next camera start, the session is not asked, and `DevicesSet` has no
+    /// sound error at once. WHEN a `SetDevices` also changes the speaker
+    /// THEN its camera is kept too, the change runs and answers
+    /// `Unsupported`, no generation is taken, and the join's choice stays
+    /// accepted, so a camera-only change after it still gives no error.
     #[tokio::test]
-    async fn given_unknown_defaults_when_a_camera_only_change_comes_then_it_gives_no_sound_error() {
+    async fn given_unknown_defaults_when_set_devices_changes_the_camera_then_it_is_kept() {
         let wait = Duration::from_secs(5);
-        let joined = (None, None);
-        let real = (None, Some("pulse:spk".to_owned()));
         let unknown = FakeSwitch::new(Err(FailureCode::Unsupported), Duration::ZERO);
-        let mut accepted = Some(joined.clone());
+        let mut camera = Some("v4l2:old".to_owned());
+        let mut book = SoundBook::new((None, None));
 
-        let answer = switch_sound(unknown.clone(), &mut accepted, joined.clone(), wait).await;
-        assert_eq!(
-            answer,
-            SoundAnswer {
-                failure: None,
-                generation: None
-            }
+        let step = set_devices(
+            &mut camera,
+            &mut book,
+            (None, None, Some("v4l2:new".to_owned())),
         );
-        assert_eq!(unknown.calls(), 0);
+        assert_eq!(step, SoundStep::Answer);
+        assert_eq!(camera.as_deref(), Some("v4l2:new"));
 
-        let answer = switch_sound(unknown.clone(), &mut accepted, real.clone(), wait).await;
+        let speaker = (None, Some("pulse:spk".to_owned()));
+        let step = set_devices(
+            &mut camera,
+            &mut book,
+            (
+                speaker.0.clone(),
+                speaker.1.clone(),
+                Some("v4l2:third".to_owned()),
+            ),
+        );
+        assert_eq!(step, SoundStep::Start(speaker.clone()));
+        assert_eq!(camera.as_deref(), Some("v4l2:third"));
+        let answer = switch_sound(unknown.clone(), speaker.clone(), wait).await;
         assert_eq!(
             answer,
             SoundAnswer {
@@ -5031,21 +5216,30 @@ mod tests {
                 generation: None
             }
         );
+        assert!(!book.changed(speaker, &answer));
         assert_eq!(unknown.calls(), 1);
-        assert_eq!(accepted, Some(joined.clone()));
+        assert_eq!(book.accepted, Some((None, None)));
 
-        let answer = switch_sound(unknown.clone(), &mut accepted, joined.clone(), wait).await;
-        assert_eq!(answer.failure, None);
+        let step = set_devices(
+            &mut camera,
+            &mut book,
+            (None, None, Some("v4l2:fourth".to_owned())),
+        );
+        assert_eq!(step, SoundStep::Answer);
         assert_eq!(unknown.calls(), 1);
+    }
 
+    /// GIVEN a session that commits only after the wait WHEN a change runs
+    /// THEN it is `AudioDevice`, no choice stays accepted, and its generation
+    /// is not taken, so its targets are never tried. GIVEN a session that
+    /// moves THEN the choice and its generation are accepted.
+    #[tokio::test]
+    async fn given_a_late_or_a_good_answer_then_the_sound_book_follows_it() {
+        let real = (None, Some("pulse:spk".to_owned()));
+        let mut book = SoundBook::new((None, None));
+        assert_eq!(book.offer(real.clone()), SoundStep::Start(real.clone()));
         let late = FakeSwitch::new(Ok(7), Duration::from_millis(300));
-        let answer = switch_sound(
-            late.clone(),
-            &mut accepted,
-            real.clone(),
-            Duration::from_millis(20),
-        )
-        .await;
+        let answer = switch_sound(late, real.clone(), Duration::from_millis(20)).await;
         assert_eq!(
             answer,
             SoundAnswer {
@@ -5053,10 +5247,13 @@ mod tests {
                 generation: None
             }
         );
-        assert_eq!(accepted, None);
+        assert!(!book.changed(real.clone(), &answer));
+        assert_eq!(book.accepted, None);
+        assert_eq!(book.generation, 0);
 
+        assert_eq!(book.offer(real.clone()), SoundStep::Start(real.clone()));
         let moves = FakeSwitch::new(Ok(3), Duration::ZERO);
-        let answer = switch_sound(moves.clone(), &mut accepted, real.clone(), wait).await;
+        let answer = switch_sound(moves, real.clone(), Duration::from_secs(5)).await;
         assert_eq!(
             answer,
             SoundAnswer {
@@ -5064,60 +5261,54 @@ mod tests {
                 generation: Some(3)
             }
         );
-        assert_eq!(accepted, Some(real));
+        assert!(book.changed(real.clone(), &answer));
+        assert_eq!(book.accepted, Some(real));
+        assert_eq!(book.generation, 3);
     }
 
-    /// GIVEN a call that joined on "System default" with a session whose
-    /// defaults read failed (every switch answers `Unsupported`) WHEN a
-    /// `SetDevices` changes only the camera THEN the camera is kept for the
-    /// next camera start, the session is not asked, and `DevicesSet` has no
-    /// sound error. WHEN a `SetDevices` also changes the speaker THEN its
-    /// camera is kept too, `DevicesSet` is `Unsupported`, and no generation
-    /// is taken.
-    #[tokio::test]
-    async fn given_unknown_defaults_when_set_devices_changes_the_camera_then_it_is_kept() {
-        let wait = Duration::from_secs(5);
-        let unknown = FakeSwitch::new(Err(FailureCode::Unsupported), Duration::ZERO);
-        let mut camera = Some("v4l2:old".to_owned());
-        let mut accepted = Some((None, None));
+    /// GIVEN a sound change that runs WHEN two more choices come THEN both
+    /// wait, the newer replaces the older, and no try starts. WHEN the change
+    /// ends THEN the waiting choice is decided against the new accepted one:
+    /// the same choice again is no sound change. GIVEN a try that runs THEN
+    /// a change waits for it and starts when it ends; a refused change keeps
+    /// the accepted choice, and a last try that dropped a target clears it.
+    #[test]
+    fn given_a_running_sound_job_then_a_new_choice_waits_for_it() {
+        let mic = (Some("pulse:mic".to_owned()), None);
+        let speaker = (None, Some("pulse:spk".to_owned()));
+        let mut book = SoundBook::new((None, None));
+        assert_eq!(book.offer(mic.clone()), SoundStep::Start(mic.clone()));
+        assert!(book.busy());
+        assert_eq!(book.offer(speaker.clone()), SoundStep::Wait);
+        assert_eq!(book.offer(mic.clone()), SoundStep::Wait);
+        assert!(!book.begin_try());
+        assert_eq!(book.next(), None);
 
-        let answer = set_devices(
-            unknown.clone(),
-            &mut camera,
-            &mut accepted,
-            (None, None, Some("v4l2:new".to_owned())),
-            wait,
-        )
-        .await;
-        assert_eq!(answer, (FromWorker::DevicesSet { failure: None }, None));
-        assert_eq!(camera.as_deref(), Some("v4l2:new"));
-        assert_eq!(unknown.calls(), 0);
-        assert_eq!(accepted, Some((None, None)));
+        let worked = SoundAnswer {
+            failure: None,
+            generation: Some(1),
+        };
+        assert!(book.changed(mic.clone(), &worked));
+        assert_eq!(book.next(), Some(SoundStep::Answer));
+        assert_eq!(book.next(), None);
+        assert!(!book.busy());
 
-        let answer = set_devices(
-            unknown.clone(),
-            &mut camera,
-            &mut accepted,
-            (
-                None,
-                Some("pulse:spk".to_owned()),
-                Some("v4l2:third".to_owned()),
-            ),
-            wait,
-        )
-        .await;
-        assert_eq!(
-            answer,
-            (
-                FromWorker::DevicesSet {
-                    failure: Some(FailureCode::Unsupported)
-                },
-                None
-            )
-        );
-        assert_eq!(camera.as_deref(), Some("v4l2:third"));
-        assert_eq!(unknown.calls(), 1);
-        assert_eq!(accepted, Some((None, None)));
+        assert!(book.begin_try());
+        assert_eq!(book.offer(speaker.clone()), SoundStep::Wait);
+        book.tried(false);
+        assert_eq!(book.next(), Some(SoundStep::Start(speaker.clone())));
+        let kept = SoundAnswer {
+            failure: Some(FailureCode::DeviceKept),
+            generation: None,
+        };
+        assert!(!book.changed(speaker, &kept));
+        assert_eq!(book.accepted, Some(mic));
+        assert_eq!(book.generation, 1);
+
+        assert!(book.begin_try());
+        book.tried(true);
+        assert_eq!(book.accepted, None);
+        assert!(!book.busy());
     }
 
     /// GIVEN waiting targets WHEN the session's generation is the one the
