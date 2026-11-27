@@ -299,6 +299,8 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
         pulse,
         #[cfg(target_os = "linux")]
         sound_retries: std::collections::VecDeque::new(),
+        #[cfg(target_os = "linux")]
+        sound_generation: 0,
         camera: None,
         stalled: None,
         waiting_grant: None,
@@ -701,14 +703,15 @@ fn accepted_after(
 /// `pulse::Session` on Linux (ADR-0049), a fake in the tests.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 trait SoundSwitch: Send + Sync + 'static {
-    /// Moves the streams; same contract as `pulse::Session::switch`, which
-    /// answers `Unsupported` while the server's defaults are unknown.
+    /// Moves the streams and gives the generation of the accepted change;
+    /// same contract as `pulse::Session::switch`, which answers
+    /// `Unsupported` while the server's defaults are unknown.
     fn switch(
         &self,
         started: std::time::Instant,
         recording: Option<&str>,
         playout: Option<&str>,
-    ) -> Result<(), FailureCode>;
+    ) -> Result<u64, FailureCode>;
 }
 
 #[cfg(target_os = "linux")]
@@ -718,7 +721,7 @@ impl SoundSwitch for crate::pulse::Session {
         started: std::time::Instant,
         recording: Option<&str>,
         playout: Option<&str>,
-    ) -> Result<(), FailureCode> {
+    ) -> Result<u64, FailureCode> {
         crate::pulse::Session::switch(self, started, recording, playout)
     }
 }
@@ -729,9 +732,21 @@ impl SoundSwitch for crate::pulse::Session {
 struct SoundAnswer {
     /// The sound error for `DevicesSet`.
     failure: Option<FailureCode>,
-    /// Whether the session accepted a real change, so a waiting target is
-    /// tried soon (`Call::sound_trigger`).
-    switched: bool,
+    /// The generation of the change that the session accepted and that the
+    /// core is told worked. Waiting targets are tried only for it
+    /// (`tries_due`), and soon (`Call::sound_trigger`). `None` when no
+    /// change was accepted in time: a change that answers too late may
+    /// still store targets, but they never move a stream unasked.
+    generation: Option<u64>,
+}
+
+/// Whether the waiting sound targets are tried: only those of the change
+/// that the core was told worked (`accepted`, the session's generation at
+/// that answer). A change whose answer came too late may have stored its
+/// own targets under a newer generation; they are not tried.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn tries_due(waiting: bool, session_generation: u64, accepted: u64) -> bool {
+    waiting && session_generation == accepted
 }
 
 /// One sound change through `session` (`Call::change_sound` on Linux). The
@@ -750,7 +765,7 @@ async fn switch_sound<S: SoundSwitch>(
     if sound_route(accepted.as_ref(), &choice.0, &choice.1) == SoundRoute::Skip {
         return SoundAnswer {
             failure: None,
-            switched: false,
+            generation: None,
         };
     }
     let started = std::time::Instant::now();
@@ -758,15 +773,15 @@ async fn switch_sound<S: SoundSwitch>(
     let change = tokio::task::spawn_blocking(move || {
         session.switch(started, recording.as_deref(), playout.as_deref())
     });
-    let failure = match tokio::time::timeout(wait, change).await {
-        Ok(Ok(Ok(()))) => None,
-        Ok(Ok(Err(code))) => Some(code),
-        _ => Some(FailureCode::AudioDevice),
+    let (failure, generation) = match tokio::time::timeout(wait, change).await {
+        Ok(Ok(Ok(generation))) => (None, Some(generation)),
+        Ok(Ok(Err(code))) => (Some(code), None),
+        _ => (Some(FailureCode::AudioDevice), None),
     };
     *accepted = accepted_after(accepted.take(), choice, failure);
     SoundAnswer {
         failure,
-        switched: failure.is_none(),
+        generation,
     }
 }
 
@@ -1310,6 +1325,11 @@ struct Call<'a> {
     /// When a waiting sound target is tried next (`SOUND_RETRIES`).
     #[cfg(target_os = "linux")]
     sound_retries: std::collections::VecDeque<Instant>,
+    /// Linux: the generation of the newest sound change that the core was
+    /// told worked (`SoundAnswer::generation`); tries run only for it
+    /// (`tries_due`). The join's targets have generation 0.
+    #[cfg(target_os = "linux")]
+    sound_generation: u64,
     camera: Option<LocalCamera>,
     /// A capture that did not end in time after a stop (a blocked read on a
     /// stalled camera). Its frames are already revoked. No new camera opens
@@ -2127,7 +2147,13 @@ impl Call<'_> {
     /// a report, and the next such event starts the tries again.
     fn sound_trigger(&mut self) {
         #[cfg(target_os = "linux")]
-        if self.pulse.as_ref().is_some_and(|pulse| pulse.has_pending()) {
+        if self.pulse.as_ref().is_some_and(|pulse| {
+            tries_due(
+                pulse.has_pending(),
+                pulse.generation(),
+                self.sound_generation,
+            )
+        }) {
             let now = Instant::now();
             self.sound_retries = SOUND_RETRIES.iter().map(|after| now + *after).collect();
         }
@@ -2148,14 +2174,20 @@ impl Call<'_> {
         #[cfg(target_os = "linux")]
         {
             self.sound_retries.pop_front();
-            let Some(pulse) = self.pulse.clone().filter(|pulse| pulse.has_pending()) else {
+            let accepted = self.sound_generation;
+            let Some(pulse) = self
+                .pulse
+                .clone()
+                .filter(|pulse| tries_due(pulse.has_pending(), pulse.generation(), accepted))
+            else {
                 self.sound_retries.clear();
                 return Vec::new();
             };
             let last = self.sound_retries.is_empty();
-            // The try is for the change accepted now: one that runs late
-            // after a newer change touches nothing.
-            let generation = pulse.generation();
+            // The try is for the change that the core was told worked: one
+            // that runs late after a newer change touches nothing, and the
+            // targets of a change answered too late are never tried.
+            let generation = accepted;
             let started = std::time::Instant::now();
             let apply =
                 tokio::task::spawn_blocking(move || pulse.apply_pending(started, last, generation));
@@ -2226,9 +2258,10 @@ impl Call<'_> {
             let wait = crate::pulse::CHANGE_TIMEOUT + crate::pulse::REPORT_GRACE;
             let answer =
                 switch_sound(pulse, &mut self.accepted_sound, (recording, playout), wait).await;
-            if answer.switched {
-                // A target that waits for a stream is tried soon, also when
-                // no sound event follows.
+            if let Some(generation) = answer.generation {
+                // Waiting targets are tried only for this change, and soon,
+                // also when no sound event follows.
+                self.sound_generation = generation;
                 self.sound_trigger();
             }
             return answer.failure;
@@ -4898,13 +4931,13 @@ mod tests {
     /// gives `answer`. `Unsupported` is what `pulse::Session::switch` gives
     /// when the server's defaults could not be read.
     struct FakeSwitch {
-        answer: Result<(), FailureCode>,
+        answer: Result<u64, FailureCode>,
         delay: Duration,
         calls: std::sync::atomic::AtomicUsize,
     }
 
     impl FakeSwitch {
-        fn new(answer: Result<(), FailureCode>, delay: Duration) -> Arc<Self> {
+        fn new(answer: Result<u64, FailureCode>, delay: Duration) -> Arc<Self> {
             Arc::new(Self {
                 answer,
                 delay,
@@ -4923,7 +4956,7 @@ mod tests {
             _started: std::time::Instant,
             _recording: Option<&str>,
             _playout: Option<&str>,
-        ) -> Result<(), FailureCode> {
+        ) -> Result<u64, FailureCode> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             std::thread::sleep(self.delay);
             self.answer
@@ -4935,9 +4968,10 @@ mod tests {
     /// camera-only `SetDevices` comes THEN the session is not asked and there
     /// is no sound error. WHEN a real choice comes THEN it is `Unsupported`,
     /// the join's choice stays accepted, and a camera-only change after it
-    /// still gives no error. GIVEN a session that does not answer in time
-    /// THEN the change is `AudioDevice` and no choice stays accepted. GIVEN
-    /// a session that moves THEN the choice is accepted and the tries start.
+    /// still gives no error. GIVEN a session that commits only after the
+    /// wait THEN the change is `AudioDevice`, no choice stays accepted, and
+    /// its generation is not taken, so its targets are never tried. GIVEN a
+    /// session that moves THEN the choice and its generation are accepted.
     #[tokio::test]
     async fn given_unknown_defaults_when_a_camera_only_change_comes_then_it_gives_no_sound_error() {
         let wait = Duration::from_secs(5);
@@ -4951,7 +4985,7 @@ mod tests {
             answer,
             SoundAnswer {
                 failure: None,
-                switched: false
+                generation: None
             }
         );
         assert_eq!(unknown.calls(), 0);
@@ -4961,7 +4995,7 @@ mod tests {
             answer,
             SoundAnswer {
                 failure: Some(FailureCode::Unsupported),
-                switched: false
+                generation: None
             }
         );
         assert_eq!(unknown.calls(), 1);
@@ -4971,7 +5005,7 @@ mod tests {
         assert_eq!(answer.failure, None);
         assert_eq!(unknown.calls(), 1);
 
-        let late = FakeSwitch::new(Ok(()), Duration::from_millis(300));
+        let late = FakeSwitch::new(Ok(7), Duration::from_millis(300));
         let answer = switch_sound(
             late.clone(),
             &mut accepted,
@@ -4979,19 +5013,36 @@ mod tests {
             Duration::from_millis(20),
         )
         .await;
-        assert_eq!(answer.failure, Some(FailureCode::AudioDevice));
+        assert_eq!(
+            answer,
+            SoundAnswer {
+                failure: Some(FailureCode::AudioDevice),
+                generation: None
+            }
+        );
         assert_eq!(accepted, None);
 
-        let moves = FakeSwitch::new(Ok(()), Duration::ZERO);
+        let moves = FakeSwitch::new(Ok(3), Duration::ZERO);
         let answer = switch_sound(moves.clone(), &mut accepted, real.clone(), wait).await;
         assert_eq!(
             answer,
             SoundAnswer {
                 failure: None,
-                switched: true
+                generation: Some(3)
             }
         );
         assert_eq!(accepted, Some(real));
+    }
+
+    /// GIVEN waiting targets WHEN the session's generation is the one the
+    /// core was told worked THEN they are tried. GIVEN a change that
+    /// answered too late and stored its own targets under a newer generation
+    /// THEN they are not tried. GIVEN nothing waiting THEN no try runs.
+    #[test]
+    fn given_a_change_answered_too_late_then_its_targets_are_not_tried() {
+        assert!(tries_due(true, 4, 4));
+        assert!(!tries_due(true, 5, 4));
+        assert!(!tries_due(false, 4, 4));
     }
 
     /// A sound device fake that keeps LiveKit 0.11's capture state: the

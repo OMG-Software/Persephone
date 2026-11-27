@@ -1048,14 +1048,18 @@ struct Devices {
 /// The deadlines of one change. Forward moves must end by `forward`, so
 /// the rollback still has time up to `full`. The forward time is in three
 /// parts: the routes are read by `read`, the microphone's moves end by
-/// `first`, and the speaker's by `forward` ([`Deadlines::forward_for`]). So
-/// neither a slow read nor a slow microphone move uses up a later step's
-/// time.
+/// `first`, and the speaker's by `forward` ([`Deadlines::forward_for`]).
+/// The rollback reserve is in three parts too: the microphone's undo ends
+/// by `first_back`, the speaker's by `back` ([`Deadlines::back_for`]), and
+/// the route read that checks them by `full`. So no step uses up a later
+/// step's time.
 #[derive(Clone, Copy)]
 struct Deadlines {
     read: Instant,
     first: Instant,
     forward: Instant,
+    first_back: Instant,
+    back: Instant,
     full: Instant,
 }
 
@@ -1065,11 +1069,25 @@ impl Deadlines {
         let full = start + CHANGE_TIMEOUT;
         let forward = full.checked_sub(ROLLBACK_RESERVE).unwrap_or(start);
         let part = forward.saturating_duration_since(start) / 3;
+        let back_part = full.saturating_duration_since(forward) / 3;
         Self {
             read: start + part,
             first: start + part * 2,
             forward,
+            first_back: forward + back_part,
+            back: forward + back_part * 2,
             full,
+        }
+    }
+
+    /// The end of the undo of `kind`'s moves. The microphone's goes first,
+    /// each kind has a third of the rollback reserve, and the route read
+    /// that checks both has the last third, so every needed undo is sent
+    /// before any route read.
+    fn back_for(&self, kind: Kind) -> Instant {
+        match kind {
+            Kind::Recording => self.first_back,
+            Kind::Playout => self.back,
         }
     }
 
@@ -1169,13 +1187,16 @@ impl Session {
     /// waits for one and counts as done (`apply_pending` moves it later). A
     /// stream that cannot move stays where it was. `DeviceKept` when every
     /// move is undone and the server shows every own stream on its old
-    /// device, `AudioDevice` when not.
+    /// device, `AudioDevice` when not. Gives the generation of the accepted
+    /// change ([`Session::generation`]): the caller tries waiting targets
+    /// only for the change it was told worked, so the targets of a change
+    /// whose answer came too late never move a stream unasked.
     pub fn switch(
         &self,
         started: Instant,
         recording: Option<&str>,
         playout: Option<&str>,
-    ) -> Result<(), FailureCode> {
+    ) -> Result<u64, FailureCode> {
         if !self.defaults_known {
             return Err(FailureCode::Unsupported);
         }
@@ -1190,7 +1211,7 @@ impl Session {
             deadlines,
         );
         self.publish(&devices);
-        result
+        result.map(|()| devices.generation)
     }
 
     /// Moves the streams of each kind that has a waiting target and an own
@@ -1352,8 +1373,18 @@ fn run_change(
     // Roll back every kind that moved or may have moved, then read the
     // routes again: only the server's answer shows that the streams are
     // back. A move whose reply timed out may have happened.
-    let back_playout = undo(server, deadlines.full, Kind::Playout, &touched[1]);
-    let back_recording = undo(server, deadlines.full, Kind::Recording, &touched[0]);
+    let back_recording = undo(
+        server,
+        deadlines.back_for(Kind::Recording),
+        Kind::Recording,
+        &touched[0],
+    );
+    let back_playout = undo(
+        server,
+        deadlines.back_for(Kind::Playout),
+        Kind::Playout,
+        &touched[1],
+    );
     let kept = back_playout
         && back_recording
         && server.snapshot(deadlines.full).is_some_and(|now| {
@@ -1431,11 +1462,26 @@ fn run_pending(
         devices.applied[slot] |= moved && (!touched.is_empty() || devices.lost[slot]);
         tries[slot] = Some((touched, moved));
     }
-    // Then the commit and the rollback of each kind, under the full
-    // deadline.
+    // Then every undo, each kind in its own part of the rollback reserve,
+    // and after them one route read under the full deadline, so neither an
+    // undo nor a read uses up the other kind's undo time.
+    let mut back = [true; 2];
     for kind in KINDS {
         let slot = kind.slot();
-        let Some((touched, moved)) = tries[slot].take() else {
+        if let Some((touched, false)) = &tries[slot] {
+            back[slot] = undo(server, deadlines.back_for(kind), kind, touched);
+        }
+    }
+    let now = tries
+        .iter()
+        .any(|tried| matches!(tried, Some((_, false))))
+        .then(|| server.snapshot(deadlines.full))
+        .flatten();
+    // Then the commit of each kind that moved, and the outcome of each that
+    // did not.
+    for kind in KINDS {
+        let slot = kind.slot();
+        let Some((_, moved)) = tries[slot].take() else {
             continue;
         };
         if moved {
@@ -1443,12 +1489,10 @@ fn run_pending(
             devices.lost[slot] = false;
             continue;
         }
-        let streams = snapshot.streams(kind);
-        let back = undo(server, deadlines.full, kind, &touched);
-        let kept = back
-            && server
-                .snapshot(deadlines.full)
-                .is_some_and(|now| routes_kept(streams, now.streams(kind)));
+        let kept = back[slot]
+            && now
+                .as_ref()
+                .is_some_and(|now| routes_kept(snapshot.streams(kind), now.streams(kind)));
         if last {
             // The routes that were read may already be split by an earlier
             // try: the kind is then lost, whatever they show now. A route of
@@ -1626,8 +1670,8 @@ mod tests {
         drift: Option<(Kind, u32, &'static str)>,
         /// Whether a read fails.
         unreadable: Cell<bool>,
-        /// Whether the first read takes all of its time.
-        slow_read: Cell<bool>,
+        /// The reads (counted from 1) that take all of their time.
+        slow_reads: Vec<usize>,
         reads: Cell<usize>,
         sent: RefCell<Vec<(Kind, u32, String)>>,
     }
@@ -1676,7 +1720,7 @@ mod tests {
             if self.unreadable.get() {
                 return None;
             }
-            if self.slow_read.get() && self.reads.get() == 1 {
+            if self.slow_reads.contains(&self.reads.get()) {
                 // A real read ends by its deadline, so it answers then.
                 std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
             }
@@ -1738,6 +1782,56 @@ mod tests {
         assert!(limits.forward - limits.first >= part);
         assert_eq!(limits.forward_for(Kind::Recording), limits.first);
         assert_eq!(limits.forward_for(Kind::Playout), limits.forward);
+        // Each undo has a third of the reserve, microphone first, and the
+        // route read that checks them the rest.
+        let back_part = ROLLBACK_RESERVE / 3;
+        assert_eq!(limits.first_back - limits.forward, back_part);
+        assert_eq!(limits.back - limits.first_back, back_part);
+        assert!(limits.full - limits.back >= back_part);
+        assert_eq!(limits.back_for(Kind::Recording), limits.first_back);
+        assert_eq!(limits.back_for(Kind::Playout), limits.back);
+    }
+
+    #[test]
+    fn given_a_slow_check_read_then_every_undo_is_sent_before_it() {
+        // GIVEN waiting targets of both kinds, a microphone that the server
+        // refuses, a speaker move that the server does but never answers,
+        // and a route read after the moves that takes all of its time, WHEN
+        // the last try runs, THEN the speaker's undo is sent before that
+        // read, so the speaker is back on its old device, and both kinds are
+        // reported as kept.
+        let server = Fake {
+            refuse: vec![(1, "mic-b")],
+            silent: vec![(2, "spk-b")],
+            slow_reads: vec![2],
+            ..Fake::with(vec![at(1, "mic-a")], vec![at(2, "spk-a")])
+        };
+        let mut devices = Devices {
+            pending: [Some("mic-b".to_owned()), Some("spk-b".to_owned())],
+            ..Devices::default()
+        };
+        let now = Instant::now();
+        let limits = Deadlines {
+            read: now + Duration::from_millis(400),
+            first: now + Duration::from_millis(500),
+            forward: now + Duration::from_millis(600),
+            first_back: now + Duration::from_millis(700),
+            back: now + Duration::from_millis(800),
+            full: now + Duration::from_millis(900),
+        };
+        let run = run_pending(&server, &mut devices, (true, 0), limits);
+        assert_eq!(server.route(Kind::Playout, 2).as_deref(), Some("spk-a"));
+        assert_eq!(server.route(Kind::Recording, 1).as_deref(), Some("mic-a"));
+        assert_eq!(
+            run,
+            PendingRun {
+                waiting: false,
+                moves_failed: vec![
+                    ("microphone", FailureCode::DeviceKept),
+                    ("speaker", FailureCode::DeviceKept),
+                ],
+            }
+        );
     }
 
     #[test]
@@ -1752,11 +1846,15 @@ mod tests {
                 read: now + Duration::from_millis(50),
                 first: now + Duration::from_secs(3),
                 forward: now + Duration::from_secs(4),
+                first_back: now + Duration::from_millis(4300),
+                back: now + Duration::from_millis(4600),
                 full: now + Duration::from_secs(5),
             }
         };
-        let server = Fake::with(vec![at(1, "mic-a")], vec![at(2, "spk-a")]);
-        server.slow_read.set(true);
+        let server = Fake {
+            slow_reads: vec![1],
+            ..Fake::with(vec![at(1, "mic-a")], vec![at(2, "spk-a")])
+        };
         let mut devices = Devices {
             pending: [Some("mic-b".to_owned()), Some("spk-b".to_owned())],
             ..Devices::default()
@@ -1772,8 +1870,10 @@ mod tests {
         assert_eq!(server.route(Kind::Recording, 1).as_deref(), Some("mic-b"));
         assert_eq!(server.route(Kind::Playout, 2).as_deref(), Some("spk-b"));
 
-        let server = Fake::with(vec![at(1, "mic-a")], vec![at(2, "spk-a")]);
-        server.slow_read.set(true);
+        let server = Fake {
+            slow_reads: vec![1],
+            ..Fake::with(vec![at(1, "mic-a")], vec![at(2, "spk-a")])
+        };
         let mut devices = Devices::default();
         let result = run_change(
             &server,
@@ -1802,6 +1902,8 @@ mod tests {
             read: Instant::now(),
             first: Instant::now() - Duration::from_secs(1),
             forward: Instant::now() + Duration::from_secs(5),
+            first_back: Instant::now() + Duration::from_millis(5300),
+            back: Instant::now() + Duration::from_millis(5600),
             full: Instant::now() + Duration::from_secs(6),
         };
         let run = run_pending(&server, &mut devices, (true, 0), limits);
@@ -1867,6 +1969,8 @@ mod tests {
             read: Instant::now(),
             first: Instant::now() - Duration::from_secs(1),
             forward: Instant::now() - Duration::from_secs(1),
+            first_back: Instant::now() + Duration::from_secs(3),
+            back: Instant::now() + Duration::from_secs(4),
             full: Instant::now() + Duration::from_secs(5),
         };
         let result = run_change(

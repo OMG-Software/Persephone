@@ -181,7 +181,7 @@ fn the_call_worker_side() {
             recording.as_deref(),
             playout.as_deref(),
         ) {
-            Ok(()) => writeln!(out, "OK").unwrap(),
+            Ok(_) => writeln!(out, "OK").unwrap(),
             Err(code) => writeln!(out, "ERR {code:?}").unwrap(),
         }
         out.flush().unwrap();
@@ -259,10 +259,15 @@ fn streams(kind: &str) -> Vec<(u32, String)> {
 }
 
 /// A command for `program` with no inherited device override, so its
-/// streams open on the private server's defaults.
+/// streams open on the private server's defaults, and the C locale, so
+/// `pactl` prints the English labels (`Sink:`, `Source:`) that `streams`
+/// reads.
 fn command(program: impl AsRef<std::ffi::OsStr>) -> Command {
     let mut command = Command::new(program);
-    command.env_remove("PULSE_SINK").env_remove("PULSE_SOURCE");
+    command
+        .env_remove("PULSE_SINK")
+        .env_remove("PULSE_SOURCE")
+        .env("LC_ALL", "C");
     command
 }
 

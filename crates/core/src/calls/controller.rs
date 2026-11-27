@@ -113,8 +113,9 @@ const PARK_TIME: Duration = Duration::from_secs(30);
 /// Wait before a key that did not fit in the worker queue goes again.
 const UNSENT_RETRY: Duration = Duration::from_millis(200);
 
-/// Free worker queue places that a restart of the Join's camera needs: the
-/// off, the devices, the resolution, the video effect and the on.
+/// Worker queue places that a restart of the Join's camera holds before its
+/// first command (`CallWorkerLink::hold_places`): the off, the devices, the
+/// resolution, the video effect and the on.
 const JOIN_RESTART_ROOM: usize = 5;
 
 /// Most remote keys of one member waiting for room in the worker queue: every
@@ -2289,7 +2290,10 @@ impl CallController {
             quality_seen: guard.video_quality.subscribe(),
             video_quality: guard.video_quality.clone(),
             join_quality: quality,
+            join_device: scope.devices.camera.clone(),
             join_camera: scope.video && !portal_camera,
+            worker_quality: quality,
+            worker_camera: scope.devices.camera.clone(),
             join_restart_due: None,
             unsent_quality: None,
             devices_seen: guard.devices.subscribe(),
@@ -3119,15 +3123,23 @@ struct Call {
     /// change that the task has not read yet, so a camera never starts at an
     /// older resolution.
     quality_seen: watch::Receiver<Option<VideoQuality>>,
-    /// The send resolution of the camera that the Join opened, and whether
-    /// that camera still runs (no camera command came since). Until the call
-    /// connects, the controller restarts no camera (`restart_camera` needs
-    /// `Active`), so a resolution chosen while the call joins does not reach
-    /// that camera. The task restarts it at the start, on each change before
-    /// the connect, and at the connect (`restart_join_camera`); a restart
-    /// records the new resolution here.
+    /// The send resolution and the camera of the camera that the Join
+    /// opened, and whether that camera still runs (no camera command came
+    /// since). Until the page sees the call active, the controller restarts
+    /// no camera (`restart_camera` needs `Active`), so a resolution or camera
+    /// chosen while the call joins does not reach that camera. The task
+    /// restarts it at the start, on each change before the connect, and at
+    /// the connect, before and after the call shows as active
+    /// (`restart_join_camera`); a restart records what the new camera starts
+    /// with here.
     join_quality: VideoQuality,
+    join_device: Option<String>,
     join_camera: bool,
+    /// The send resolution and the camera choice that the worker has now:
+    /// the Join's, then each `SetVideoQuality` and `SetDevices` queued. A
+    /// camera that starts now starts with them.
+    worker_quality: VideoQuality,
+    worker_camera: Option<String>,
     /// When an owed restart of the Join's camera tries again: the worker's
     /// queue had no room for it. Each try checks the camera intent again.
     join_restart_due: Option<Instant>,
@@ -4563,6 +4575,13 @@ impl Call {
         if changed || stream {
             self.publish(inner);
         }
+        if changed && matches!(event, FromWorker::Connected) {
+            // A choice made after the check above but before the page saw
+            // the call active reached neither the controller (it still saw
+            // the join) nor this check. The setters write the value before
+            // they read the state, so this check after the publish sees it.
+            self.restart_join_camera(inner)?;
+        }
         Ok(())
     }
 
@@ -4867,7 +4886,7 @@ impl Call {
     /// a retry, so a busy worker does not end the call; a newer choice
     /// replaces it.
     fn apply_devices(
-        &self,
+        &mut self,
         pending: &mut Option<(Instant, DeviceChoice)>,
     ) -> Result<(), EndReason> {
         if let Some((_, choice)) = pending.take() {
@@ -4876,7 +4895,9 @@ impl Call {
                 playout: choice.playout.clone(),
                 camera: choice.camera.clone(),
             };
-            if !self.queue_worker(message)? {
+            if self.queue_worker(message)? {
+                self.worker_camera = choice.camera;
+            } else {
                 *pending = Some((Instant::now() + UNSENT_RETRY, choice));
             }
         }
@@ -4973,36 +4994,44 @@ impl Call {
     /// so a busy worker does not end the call; a newer value replaces it.
     /// Only a closed queue is an error.
     fn send_quality(&mut self) -> Result<(), EndReason> {
-        if let Some((_, quality)) = self.unsent_quality.take()
-            && !self.queue_worker(ToWorker::SetVideoQuality { quality })?
-        {
-            self.unsent_quality = Some((Instant::now() + UNSENT_RETRY, quality));
+        if let Some((_, quality)) = self.unsent_quality.take() {
+            if self.queue_worker(ToWorker::SetVideoQuality { quality })? {
+                self.worker_quality = quality;
+            } else {
+                self.unsent_quality = Some((Instant::now() + UNSENT_RETRY, quality));
+            }
         }
         Ok(())
     }
 
-    /// A send resolution chosen while the call joins applies only at the
-    /// next camera start, but the Join already started the camera at its
-    /// own resolution. When the newest choice differs, that camera restarts
-    /// from here: off, then the settings, then on, and its resolution is
-    /// recorded. The view and the request numbers stay as they are; the
-    /// worker's answers update the view. A choice that equals the camera's
-    /// changes nothing. A restart needs room for all its commands
-    /// ([`JOIN_RESTART_ROOM`]), as a full queue would end the call; without
-    /// it, the restart stays owed and tries again after [`UNSENT_RETRY`]
-    /// (`join_restart_due`), also after the connect. Each try checks the
-    /// camera intent and the newest choice again, and a camera command ends
-    /// the debt.
+    /// A send resolution or a camera chosen while the call joins applies
+    /// only at the next camera start, but the Join already started the
+    /// camera with its own. When the newest choice differs, that camera
+    /// restarts from here: off, then the settings, then on, and what the new
+    /// camera starts with is recorded (the worker's resolution and camera
+    /// after the settings, so a newer value that the settings did not take
+    /// still restarts it). The view and the request numbers stay as they
+    /// are; the worker's answers update the view. A choice that equals the
+    /// camera's, or a change of the microphone or speaker only, changes
+    /// nothing. A restart holds every queue place it needs
+    /// ([`JOIN_RESTART_ROOM`]) before its first command, as a full queue
+    /// would end the call; without them, the restart stays owed and tries
+    /// again after [`UNSENT_RETRY`] (`join_restart_due`), also after the
+    /// connect. Each try checks the camera intent and the newest choice
+    /// again, and a camera command ends the debt.
     fn restart_join_camera(&mut self, inner: &Inner) -> Result<(), EndReason> {
         self.join_restart_due = None;
-        let Some(newest) = *self.quality_seen.borrow() else {
-            return Ok(());
-        };
         let wanted = self.camera_wanted.load(Ordering::SeqCst);
-        if !(self.join_camera && newest != self.join_quality && wanted) {
+        if !(self.join_camera && wanted && self.join_settings_changed()) {
             return Ok(());
         }
-        if self.link.room() < JOIN_RESTART_ROOM {
+        // The places are held, so another thread's command (a share's
+        // stop) cannot take one between these commands.
+        if !self
+            .link
+            .hold_places(JOIN_RESTART_ROOM)
+            .map_err(|_| EndReason::WorkerStopped)?
+        {
             self.join_restart_due = Some(Instant::now() + UNSENT_RETRY);
             return Ok(());
         }
@@ -5015,8 +5044,26 @@ impl Call {
             on: true,
             remote: false,
         })?;
-        self.join_quality = newest;
+        self.link.release_places();
+        self.join_quality = self.worker_quality;
+        self.join_device = self.worker_camera.clone();
         Ok(())
+    }
+
+    /// Whether the newest send resolution or camera choice differs from the
+    /// ones that the Join's camera runs with. A microphone or speaker change
+    /// alone is none.
+    fn join_settings_changed(&self) -> bool {
+        let quality = self
+            .quality_seen
+            .borrow()
+            .is_some_and(|quality| quality != self.join_quality);
+        let camera = self
+            .devices_seen
+            .borrow()
+            .as_ref()
+            .is_some_and(|choice| choice.camera != self.join_device);
+        quality || camera
     }
 
     /// A send resolution that the task read. Before the connect, the camera
@@ -5384,7 +5431,14 @@ impl Call {
                         None => std::future::pending().await,
                     }
                 } => self.restart_join_camera(inner)?,
-                Ok(()) = self.devices_seen.changed() => self.devices_changed()?,
+                Ok(()) = self.devices_seen.changed() => {
+                    self.devices_changed()?;
+                    // Before the connect, a new camera reaches the Join's
+                    // camera from here (`restart_join_camera`).
+                    if !self.view.connected {
+                        self.restart_join_camera(inner)?;
+                    }
+                }
                 () = async {
                     match devices_due {
                         Some(at) => time::sleep_until(at.into()).await,
@@ -8106,7 +8160,10 @@ mod tests {
             quality_seen: video_quality.subscribe(),
             video_quality,
             join_quality: VideoQuality::Auto,
+            join_device: None,
             join_camera: false,
+            worker_quality: VideoQuality::Auto,
+            worker_camera: None,
             join_restart_due: None,
             unsent_quality: None,
             devices_seen: devices.subscribe(),
@@ -8387,7 +8444,7 @@ mod tests {
             Arc::new(Flags::default()),
             Arc::new(AtomicBool::new(false)),
         );
-        let (call, mut to_worker) = (fixture.call, fixture.to_worker);
+        let (mut call, mut to_worker) = (fixture.call, fixture.to_worker);
         let now = Instant::now();
         let choice = DeviceChoice {
             recording: Some("mic-2".to_owned()),
@@ -9216,6 +9273,158 @@ mod tests {
         assert_eq!(call.camera_command(&inner, false, 1), Ok(()));
         assert_eq!(call.join_restart_due, None);
         assert!(!call.join_camera);
+    }
+
+    /// GIVEN a joining call whose Join started camera A WHEN camera B is
+    /// chosen before the connect THEN the worker gets the choice, then the
+    /// camera off and on, and camera B is recorded as the Join camera's.
+    /// GIVEN a change of the microphone only THEN the camera stays.
+    #[tokio::test]
+    async fn given_a_camera_chosen_during_the_join_then_the_join_camera_restarts() {
+        let fixture = test_call(
+            no_admission(),
+            Arc::new(Flags::default()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let inner = controller(FakeHost::new(true, None)).inner.clone();
+        let (mut call, mut to_worker) = (fixture.call, fixture.to_worker);
+        call.join_camera = true;
+        call.join_quality = VideoQuality::P480;
+        call.worker_quality = VideoQuality::P480;
+        call.join_device = Some("cam-a".to_owned());
+        call.worker_camera = Some("cam-a".to_owned());
+        call.camera_wanted.store(true, Ordering::SeqCst);
+        let choice = |recording: &str, camera: &str| {
+            Some(DeviceChoice {
+                recording: Some(recording.to_owned()),
+                playout: None,
+                camera: Some(camera.to_owned()),
+            })
+        };
+
+        call.devices.send_replace(choice("mic-a", "cam-b"));
+        assert_eq!(call.devices_changed(), Ok(()));
+        assert_eq!(call.restart_join_camera(&inner), Ok(()));
+        let sent: Vec<ToWorker> = std::iter::from_fn(|| to_worker.try_recv().ok()).collect();
+        assert_eq!(
+            sent,
+            vec![
+                ToWorker::SetDevices {
+                    recording: Some("mic-a".to_owned()),
+                    playout: None,
+                    camera: Some("cam-b".to_owned()),
+                },
+                ToWorker::SetCamera {
+                    on: false,
+                    remote: false
+                },
+                ToWorker::SetCamera {
+                    on: true,
+                    remote: false
+                },
+            ]
+        );
+        assert_eq!(call.join_device.as_deref(), Some("cam-b"));
+        assert_eq!(call.join_quality, VideoQuality::P480);
+
+        call.devices.send_replace(choice("mic-b", "cam-b"));
+        assert_eq!(call.devices_changed(), Ok(()));
+        assert_eq!(call.restart_join_camera(&inner), Ok(()));
+        let sent: Vec<ToWorker> = std::iter::from_fn(|| to_worker.try_recv().ok()).collect();
+        assert!(
+            !sent
+                .iter()
+                .any(|message| matches!(message, ToWorker::SetCamera { .. })),
+            "a microphone change keeps the camera: {sent:?}"
+        );
+    }
+
+    /// GIVEN a joining call whose Join started the camera at 480p and no
+    /// newer choice when the connect arrives WHEN 1440p is chosen while the
+    /// page is told that the call is active (the listener runs inside the
+    /// publish) THEN the check after the publish restarts the camera at
+    /// 1440p, as no controller restart saw the joining state change.
+    #[tokio::test]
+    async fn given_a_quality_chosen_at_the_active_publish_then_the_join_camera_restarts() {
+        let fixture = test_call(
+            no_admission(),
+            Arc::new(Flags::default()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let inner = controller(FakeHost::new(true, None)).inner.clone();
+        let (mut call, mut to_worker) = (fixture.call, fixture.to_worker);
+        call.join_camera = true;
+        call.join_quality = VideoQuality::P480;
+        call.worker_quality = VideoQuality::P480;
+        call.camera_wanted.store(true, Ordering::SeqCst);
+        let quality = call.video_quality.clone();
+        *plain(&inner.listener) = Some(Arc::new(move || {
+            quality.send_replace(Some(VideoQuality::P1440));
+        }));
+
+        assert_eq!(call.worker_event(&inner, &FromWorker::Connected), Ok(()));
+        let sent: Vec<ToWorker> = std::iter::from_fn(|| to_worker.try_recv().ok()).collect();
+        assert_eq!(
+            sent,
+            vec![
+                ToWorker::SetCamera {
+                    on: false,
+                    remote: false
+                },
+                ToWorker::SetVideoQuality {
+                    quality: VideoQuality::P1440
+                },
+                ToWorker::SetCamera {
+                    on: true,
+                    remote: false
+                },
+            ]
+        );
+        assert_eq!(call.join_quality, VideoQuality::P1440);
+    }
+
+    /// GIVEN a worker queue with five free places WHEN the task holds them
+    /// THEN another sender finds the queue full, the task's own commands go
+    /// through the held places in order, and the places that no command
+    /// used come back at the release. GIVEN four free places THEN holding
+    /// five holds nothing.
+    #[tokio::test]
+    async fn given_held_places_then_only_the_task_uses_them() {
+        let fixture = test_call(
+            no_admission(),
+            Arc::new(Flags::default()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let (call, mut to_worker) = (fixture.call, fixture.to_worker);
+        let other = call.link.command_sender();
+
+        fill_queue(&call, &mut to_worker, JOIN_RESTART_ROOM);
+        assert_eq!(call.link.hold_places(JOIN_RESTART_ROOM), Ok(true));
+        assert!(other.try_send(ToWorker::SetMuted { muted: false }).is_err());
+        assert_eq!(
+            call.link
+                .try_queue(ToWorker::SetDeafened { deafened: true }),
+            Ok(true)
+        );
+        assert_eq!(
+            call.link.send(ToWorker::SetDeafened { deafened: false }),
+            Ok(())
+        );
+        call.link.release_places();
+        assert!(other.try_send(ToWorker::SetMuted { muted: false }).is_ok());
+        let sent: Vec<ToWorker> = std::iter::from_fn(|| to_worker.try_recv().ok()).collect();
+        assert_eq!(
+            sent[sent.len() - 3..],
+            [
+                ToWorker::SetDeafened { deafened: true },
+                ToWorker::SetDeafened { deafened: false },
+                ToWorker::SetMuted { muted: false },
+            ]
+        );
+
+        fill_queue(&call, &mut to_worker, JOIN_RESTART_ROOM - 1);
+        assert_eq!(call.link.hold_places(JOIN_RESTART_ROOM), Ok(false));
+        assert!(other.try_send(ToWorker::SetMuted { muted: false }).is_ok());
     }
 
     /// GIVEN a worker queue with one free place and a device choice that

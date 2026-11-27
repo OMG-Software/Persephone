@@ -197,6 +197,9 @@ pub trait WorkerProcess: Send + Sync {
 /// One running, contained call worker.
 pub struct CallWorkerLink {
     commands: mpsc::Sender<ToWorker>,
+    /// Places held for commands that must go together (`hold_places`).
+    /// `send` and `try_queue` use them first, until `release_places`.
+    held: std::sync::Mutex<Vec<mpsc::OwnedPermit<ToWorker>>>,
     /// Messages from the worker. `None` after the worker exited or its
     /// channel failed.
     pub events: mpsc::Receiver<FromWorker>,
@@ -219,6 +222,7 @@ impl CallWorkerLink {
     ) -> Self {
         Self {
             commands,
+            held: std::sync::Mutex::new(Vec::new()),
             events,
             video: VideoStore::new(),
             process: Arc::from(process),
@@ -320,16 +324,15 @@ impl CallWorkerLink {
     /// worker runs but has not read its commands yet. Only a closed queue
     /// says the worker has gone.
     pub fn try_queue(&self, message: ToWorker) -> Result<bool, WorkerGone> {
+        if let Some(place) = self.take_held() {
+            place.send(message);
+            return Ok(true);
+        }
         match self.commands.try_send(message) {
             Ok(()) => Ok(true),
             Err(mpsc::error::TrySendError::Full(_)) => Ok(false),
             Err(mpsc::error::TrySendError::Closed(_)) => Err(WorkerGone),
         }
-    }
-
-    /// The free places in the command queue right now.
-    pub fn room(&self) -> usize {
-        self.commands.capacity()
     }
 
     /// Holds one place in the command queue for a command that must go, so
@@ -343,6 +346,39 @@ impl CallWorkerLink {
         }
     }
 
+    /// Holds `count` places in the command queue for commands that must go
+    /// together, so no other sender (a share's stop from another thread)
+    /// takes one of them in between. `Ok(false)` when fewer are free: then
+    /// nothing is held. Only a closed queue is an error. `send` and
+    /// `try_queue` use the held places first, in order, until
+    /// `release_places` gives back the ones left.
+    pub fn hold_places(&self, count: usize) -> Result<bool, WorkerGone> {
+        let mut places = Vec::with_capacity(count);
+        for _ in 0..count {
+            match self.hold_place()? {
+                Some(place) => places.push(place),
+                None => return Ok(false),
+            }
+        }
+        *self.held_places() = places;
+        Ok(true)
+    }
+
+    /// Gives back the held places that no command used.
+    pub fn release_places(&self) {
+        self.held_places().clear();
+    }
+
+    fn held_places(&self) -> std::sync::MutexGuard<'_, Vec<mpsc::OwnedPermit<ToWorker>>> {
+        self.held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn take_held(&self) -> Option<mpsc::OwnedPermit<ToWorker>> {
+        self.held_places().pop()
+    }
+
     /// A sender for the command queue, to wait for room in it.
     pub fn command_sender(&self) -> mpsc::Sender<ToWorker> {
         self.commands.clone()
@@ -350,6 +386,10 @@ impl CallWorkerLink {
 
     /// Queues `message` for the worker without blocking.
     pub fn send(&self, message: ToWorker) -> Result<(), WorkerGone> {
+        if let Some(place) = self.take_held() {
+            place.send(message);
+            return Ok(());
+        }
         self.commands.try_send(message).map_err(|_| WorkerGone)
     }
 
