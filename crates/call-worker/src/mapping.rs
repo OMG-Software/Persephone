@@ -153,6 +153,103 @@ pub fn sound_path(
     }
 }
 
+/// The most own sound server streams of one kind that a move touches.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub const MAX_OWN_STREAMS: usize = 8;
+
+/// The indexes of this process's own streams from a sound server listing of
+/// `(index, owner process ID)` pairs (Linux, ADR-0049). A stream with no
+/// owner, or with another owner, is never listed: no other program's stream
+/// is ever moved. At most [`MAX_OWN_STREAMS`] are kept.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn own_streams(
+    streams: impl IntoIterator<Item = (u32, Option<u32>)>,
+    own_process: u32,
+) -> Vec<u32> {
+    streams
+        .into_iter()
+        .filter(|(_, owner)| *owner == Some(own_process))
+        .map(|(index, _)| index)
+        .take(MAX_OWN_STREAMS)
+        .collect()
+}
+
+/// What the call knows about its sound server devices (Linux, ADR-0049).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SoundKnown<'a> {
+    /// The sound server's default microphone and speaker names when the
+    /// call started: what "System default" means during the call (ADR-0059).
+    pub default_source: Option<&'a str>,
+    pub default_sink: Option<&'a str>,
+    /// The microphone and speaker the call's streams are on now; `None`
+    /// when that is not known.
+    pub source: Option<&'a str>,
+    pub sink: Option<&'a str>,
+}
+
+/// What the sound server shows now (Linux, ADR-0049).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Clone, Copy, Debug)]
+pub struct SoundNow<'a> {
+    /// The names of the microphones and speakers (monitors left out).
+    pub sources: &'a [&'a str],
+    pub sinks: &'a [&'a str],
+    /// How many own record and playback streams the call has.
+    pub own_recording: usize,
+    pub own_playout: usize,
+}
+
+/// The sound server names to move the call's own streams to. `None` leaves
+/// that kind where it is.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SoundMove {
+    pub source: Option<String>,
+    pub sink: Option<String>,
+}
+
+/// The sound server name for one choice: the name of a `pulse:` ID that the
+/// server has now, else `DeviceNotFound`; for no choice the default when the
+/// call started (`Unsupported` if it is not known). A default is not looked
+/// up: it may be a monitor, which the lists leave out.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn pulse_target<'a>(
+    choice: Option<&'a str>,
+    start_default: Option<&'a str>,
+    present: &[&str],
+) -> Result<&'a str, FailureCode> {
+    match choice {
+        Some(id) => pulse_name(id)
+            .filter(|name| present.contains(name))
+            .ok_or(FailureCode::DeviceNotFound),
+        None => start_default.ok_or(FailureCode::Unsupported),
+    }
+}
+
+/// Plans a microphone and speaker change during a call on Linux (ADR-0049,
+/// ADR-0059). Both choices are checked before either stream moves: an ID
+/// that is not a `pulse:` ID, or a name the server lacks, is
+/// `DeviceNotFound`. A kind that already is on its target is left alone. A
+/// kind that must move but has no own stream is `AudioDevice`, because the
+/// stream the call needs cannot be moved.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn plan_sound_move(
+    recording: Option<&str>,
+    playout: Option<&str>,
+    known: &SoundKnown<'_>,
+    now: &SoundNow<'_>,
+) -> Result<SoundMove, FailureCode> {
+    let source = pulse_target(recording, known.default_source, now.sources)?;
+    let sink = pulse_target(playout, known.default_sink, now.sinks)?;
+    let source = (known.source != Some(source)).then(|| source.to_owned());
+    let sink = (known.sink != Some(sink)).then(|| sink.to_owned());
+    if (source.is_some() && now.own_recording == 0) || (sink.is_some() && now.own_playout == 0) {
+        return Err(FailureCode::AudioDevice);
+    }
+    Ok(SoundMove { source, sink })
+}
+
 /// What the worker saw in the room, reduced to what it reports.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RoomChange {
@@ -980,6 +1077,138 @@ mod tests {
         assert_eq!(
             choose_device(Some("pulse:bad name"), ["{guid}"]),
             Err(FailureCode::DeviceNotFound)
+        );
+    }
+
+    #[test]
+    fn given_a_stream_listing_when_own_streams_are_picked_then_only_this_process_counts() {
+        // GIVEN streams of this process, of another one and of none, WHEN
+        // picked, THEN only the own indexes stay, in order.
+        let listing = [(3, Some(100)), (4, Some(200)), (5, None), (9, Some(100))];
+        assert_eq!(own_streams(listing, 100), vec![3, 9]);
+        assert_eq!(own_streams(listing, 300), Vec::<u32>::new());
+        assert_eq!(own_streams([(1, None)], 0), Vec::<u32>::new());
+    }
+
+    #[test]
+    fn given_many_own_streams_then_at_most_the_limit_is_kept() {
+        // GIVEN more own streams than the limit, WHEN picked, THEN the rest
+        // are dropped.
+        let listing = (0..MAX_OWN_STREAMS as u32 + 5).map(|index| (index, Some(7)));
+        assert_eq!(own_streams(listing, 7).len(), MAX_OWN_STREAMS);
+    }
+
+    const NOW: SoundNow<'static> = SoundNow {
+        sources: &["mic-a", "mic-b"],
+        sinks: &["spk-a", "spk-b"],
+        own_recording: 1,
+        own_playout: 1,
+    };
+
+    fn known() -> SoundKnown<'static> {
+        SoundKnown {
+            default_source: Some("mic-a.monitor"),
+            default_sink: Some("spk-a"),
+            source: Some("mic-a"),
+            sink: Some("spk-a"),
+        }
+    }
+
+    #[test]
+    fn given_pulse_choices_when_planned_then_each_kind_moves_to_its_name() {
+        // GIVEN a new microphone and a new speaker that the server has,
+        // WHEN planned, THEN both names are to be moved to.
+        assert_eq!(
+            plan_sound_move(Some("pulse:mic-b"), Some("pulse:spk-b"), &known(), &NOW),
+            Ok(SoundMove {
+                source: Some("mic-b".to_owned()),
+                sink: Some("spk-b".to_owned()),
+            })
+        );
+    }
+
+    #[test]
+    fn given_no_choice_when_planned_then_the_default_at_call_start_is_used() {
+        // GIVEN the call on other devices than the defaults it started with
+        // and no choice ("System default"), WHEN planned, THEN both go to the
+        // start defaults, even a default that is a monitor the lists omit.
+        let mut known = known();
+        known.source = Some("mic-b");
+        known.sink = Some("spk-b");
+        assert_eq!(
+            plan_sound_move(None, None, &known, &NOW),
+            Ok(SoundMove {
+                source: Some("mic-a.monitor".to_owned()),
+                sink: Some("spk-a".to_owned()),
+            })
+        );
+        // WHEN the start default is not known, THEN the change is refused.
+        known.default_sink = None;
+        assert_eq!(
+            plan_sound_move(None, None, &known, &NOW),
+            Err(FailureCode::Unsupported)
+        );
+    }
+
+    #[test]
+    fn given_the_same_devices_when_planned_then_nothing_moves_and_no_stream_is_needed() {
+        // GIVEN choices equal to what the call uses and no own streams,
+        // WHEN planned, THEN nothing moves and nothing fails.
+        let now = SoundNow {
+            own_recording: 0,
+            own_playout: 0,
+            ..NOW
+        };
+        assert_eq!(
+            plan_sound_move(Some("pulse:mic-a"), None, &known(), &now),
+            Ok(SoundMove::default())
+        );
+    }
+
+    #[test]
+    fn given_a_bad_choice_when_planned_then_nothing_is_planned_for_either_kind() {
+        // GIVEN a good microphone and a speaker that is not a pulse: ID, one
+        // the server lacks, or an unsafe name, WHEN planned, THEN the whole
+        // change is DeviceNotFound, so the good microphone does not move.
+        for bad in [
+            "{guid}",
+            "index:0",
+            "pulse:gone",
+            "pulse:bad name",
+            "pulse:",
+        ] {
+            assert_eq!(
+                plan_sound_move(Some("pulse:mic-b"), Some(bad), &known(), &NOW),
+                Err(FailureCode::DeviceNotFound),
+                "{bad}"
+            );
+        }
+        assert_eq!(
+            plan_sound_move(Some("{guid}"), None, &known(), &NOW),
+            Err(FailureCode::DeviceNotFound)
+        );
+    }
+
+    #[test]
+    fn given_no_own_stream_when_a_kind_must_move_then_the_change_fails_for_both() {
+        // GIVEN no own playback stream and a new speaker, WHEN planned, THEN
+        // the change is AudioDevice and the microphone move is not planned.
+        let now = SoundNow {
+            own_playout: 0,
+            ..NOW
+        };
+        assert_eq!(
+            plan_sound_move(Some("pulse:mic-b"), Some("pulse:spk-b"), &known(), &now),
+            Err(FailureCode::AudioDevice)
+        );
+        // WHEN only the microphone changes, THEN the missing playback stream
+        // does not matter.
+        assert_eq!(
+            plan_sound_move(Some("pulse:mic-b"), Some("pulse:spk-a"), &known(), &now),
+            Ok(SoundMove {
+                source: Some("mic-b".to_owned()),
+                sink: None,
+            })
         );
     }
 

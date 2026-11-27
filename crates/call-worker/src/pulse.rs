@@ -6,6 +6,10 @@
 //! PulseAudio client library that libwebrtc already loads. It uses one
 //! short-lived connection, before containment stage 2, and only reads.
 //!
+//! A call also opens a [`Session`] before stage 2 and keeps it. It moves the
+//! call's own streams (this process ID only) to another microphone or
+//! speaker on that one connection, so it needs no new socket after stage 2.
+//!
 //! The library is opened with `dlopen` (as libwebrtc does), so the worker
 //! has no build or link dependency on it. A missing library, a failed
 //! connection or a slow server gives `None`; the caller then keeps the
@@ -13,10 +17,12 @@
 
 use std::cell::{Cell, RefCell};
 use std::ffi::{CStr, c_char, c_int, c_void};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use persephone_call_protocol::MAX_PULSE_NAME_BYTES;
+use persephone_call_protocol::{FailureCode, MAX_PULSE_NAME_BYTES};
+
+use crate::mapping::{SoundKnown, SoundNow, own_streams, plan_sound_move};
 
 /// The longest the whole query may take.
 const QUERY_TIMEOUT: Duration = Duration::from_secs(3);
@@ -317,15 +323,13 @@ pub fn query() -> Option<Lists> {
     })
 }
 
-/// Connects and reads both lists. `true` only when both lists ended well.
-fn run(
+/// Connects the context and waits until it is ready. `false` on a failed
+/// connection or when the time runs out.
+fn connect_ready(
     api: &Api,
     mainloop: *mut Mainloop,
     context: *mut Context,
     deadline: Instant,
-    sinks: &Collector,
-    sources: &Collector,
-    operations: &mut [*mut Operation; 2],
 ) -> bool {
     // SAFETY: the context is live. No server name: the client
     // configuration and environment choose it, as for libwebrtc.
@@ -343,13 +347,28 @@ fn run(
     loop {
         // SAFETY: the context is live.
         match unsafe { (api.context_get_state)(context) } {
-            PA_CONTEXT_READY => break,
+            PA_CONTEXT_READY => return true,
             PA_CONTEXT_FAILED | PA_CONTEXT_TERMINATED => return false,
             _ => {}
         }
         if Instant::now() >= deadline || !step(api, mainloop) {
             return false;
         }
+    }
+}
+
+/// Connects and reads both lists. `true` only when both lists ended well.
+fn run(
+    api: &Api,
+    mainloop: *mut Mainloop,
+    context: *mut Context,
+    deadline: Instant,
+    sinks: &Collector,
+    sources: &Collector,
+    operations: &mut [*mut Operation; 2],
+) -> bool {
+    if !connect_ready(api, mainloop, context, deadline) {
+        return false;
     }
     // SAFETY: the context is ready; each collector outlives its operation
     // (`query` cancels the operations before the collectors go).
@@ -368,6 +387,616 @@ fn run(
     !(sinks.failed.get() || sources.failed.get())
 }
 
+// ---------------------------------------------------------------------------
+// The call's own session (ADR-0049, amendment 2026-11-27)
+// ---------------------------------------------------------------------------
+//
+// One connection opened before containment stage 2 and kept for the call. It
+// moves this process's own streams to another microphone or speaker. Stage 2
+// forbids a new socket, so every later operation runs on this one context.
+// The main loop is the blocking `pa_mainloop`, which is not thread safe:
+// the lock lets one operation run at a time, each on a blocking thread, with
+// a deadline. The event loop never waits on it.
+
+/// The longest one operation (a snapshot or a move) may take.
+const OPERATION_TIMEOUT: Duration = Duration::from_secs(3);
+/// The most streams read from one listing; own streams are picked after.
+const MAX_STREAMS: usize = 4096;
+/// The property that holds the process ID of a stream's program.
+const PROCESS_ID_KEY: &CStr = c"application.process.id";
+
+type ServerCallback = unsafe extern "C" fn(*mut Context, *const ServerInfoPrefix, *mut c_void);
+type StreamCallback = unsafe extern "C" fn(*mut Context, *const c_void, c_int, *mut c_void);
+type SuccessCallback = unsafe extern "C" fn(*mut Context, c_int, *mut c_void);
+
+/// The leading fields of `pa_server_info` up to `default_source_name`
+/// (pulse/introspect.h).
+#[repr(C)]
+struct ServerInfoPrefix {
+    user_name: *const c_char,
+    host_name: *const c_char,
+    server_version: *const c_char,
+    server_name: *const c_char,
+    sample_spec: SampleSpec,
+    default_sink_name: *const c_char,
+    default_source_name: *const c_char,
+}
+
+/// The leading fields of `pa_sink_input_info` up to `proplist`.
+#[repr(C)]
+struct SinkInputPrefix {
+    index: u32,
+    name: *const c_char,
+    owner_module: u32,
+    client: u32,
+    sink: u32,
+    sample_spec: SampleSpec,
+    channel_map: ChannelMap,
+    volume: CVolume,
+    buffer_usec: u64,
+    sink_usec: u64,
+    resample_method: *const c_char,
+    driver: *const c_char,
+    mute: c_int,
+    proplist: *const c_void,
+}
+
+/// The leading fields of `pa_source_output_info` up to `proplist`.
+#[repr(C)]
+struct SourceOutputPrefix {
+    index: u32,
+    name: *const c_char,
+    owner_module: u32,
+    client: u32,
+    source: u32,
+    sample_spec: SampleSpec,
+    channel_map: ChannelMap,
+    buffer_usec: u64,
+    source_usec: u64,
+    resample_method: *const c_char,
+    driver: *const c_char,
+    proplist: *const c_void,
+}
+
+/// The extra library functions the session needs. A missing one makes the
+/// session unavailable, and nothing else.
+struct SessionApi {
+    get_server_info:
+        unsafe extern "C" fn(*mut Context, ServerCallback, *mut c_void) -> *mut Operation,
+    get_sink_input_info_list:
+        unsafe extern "C" fn(*mut Context, StreamCallback, *mut c_void) -> *mut Operation,
+    get_source_output_info_list:
+        unsafe extern "C" fn(*mut Context, StreamCallback, *mut c_void) -> *mut Operation,
+    move_sink_input_by_name: unsafe extern "C" fn(
+        *mut Context,
+        u32,
+        *const c_char,
+        SuccessCallback,
+        *mut c_void,
+    ) -> *mut Operation,
+    move_source_output_by_name: unsafe extern "C" fn(
+        *mut Context,
+        u32,
+        *const c_char,
+        SuccessCallback,
+        *mut c_void,
+    ) -> *mut Operation,
+    proplist_gets: unsafe extern "C" fn(*const c_void, *const c_char) -> *const c_char,
+}
+
+fn session_api() -> Option<&'static SessionApi> {
+    static API: OnceLock<Option<SessionApi>> = OnceLock::new();
+    API.get_or_init(|| {
+        let handle = library()?;
+        // SAFETY: each type below is the C signature from pulse/*.h.
+        unsafe {
+            Some(SessionApi {
+                get_server_info: symbol(handle, c"pa_context_get_server_info")?,
+                get_sink_input_info_list: symbol(handle, c"pa_context_get_sink_input_info_list")?,
+                get_source_output_info_list: symbol(
+                    handle,
+                    c"pa_context_get_source_output_info_list",
+                )?,
+                move_sink_input_by_name: symbol(handle, c"pa_context_move_sink_input_by_name")?,
+                move_source_output_by_name: symbol(
+                    handle,
+                    c"pa_context_move_source_output_by_name",
+                )?,
+                proplist_gets: symbol(handle, c"pa_proplist_gets")?,
+            })
+        }
+    })
+    .as_ref()
+}
+
+/// The process ID in a `application.process.id` value. Only plain digits.
+fn parse_process_id(value: &[u8]) -> Option<u32> {
+    if value.is_empty() || value.len() > 10 || !value.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    std::str::from_utf8(value).ok()?.parse().ok()
+}
+
+/// A short name from the library, or `None` when it is null, too long or
+/// not UTF-8.
+///
+/// # Safety
+///
+/// `name` is null or a C string that lives for the call.
+unsafe fn copy_name(name: *const c_char) -> Option<String> {
+    if name.is_null() {
+        return None;
+    }
+    // SAFETY: a C string from the library, as the caller states.
+    let bytes = unsafe { CStr::from_ptr(name) }.to_bytes();
+    if bytes.len() > MAX_PULSE_NAME_BYTES {
+        return None;
+    }
+    std::str::from_utf8(bytes).ok().map(str::to_owned)
+}
+
+/// The server's default names, as its callback fills them.
+#[derive(Default)]
+struct ServerDefaults {
+    sink: RefCell<Option<String>>,
+    source: RefCell<Option<String>>,
+    done: Cell<bool>,
+}
+
+unsafe extern "C" fn on_server_info(
+    _context: *mut Context,
+    info: *const ServerInfoPrefix,
+    userdata: *mut c_void,
+) {
+    // SAFETY: userdata is the ServerDefaults that `Inner::defaults` passes
+    // and keeps alive until the operation is cancelled.
+    let state = unsafe { &*userdata.cast::<ServerDefaults>() };
+    if !info.is_null() {
+        // SAFETY: the library gives a valid pa_server_info for this call.
+        unsafe {
+            *state.sink.borrow_mut() = copy_name((*info).default_sink_name);
+            *state.source.borrow_mut() = copy_name((*info).default_source_name);
+        }
+    }
+    state.done.set(true);
+}
+
+/// A stream listing as `(index, owner process ID)` pairs.
+#[derive(Default)]
+struct StreamList {
+    entries: RefCell<Vec<(u32, Option<u32>)>>,
+    done: Cell<bool>,
+    failed: Cell<bool>,
+}
+
+impl StreamList {
+    /// Copies one stream.
+    ///
+    /// # Safety
+    ///
+    /// `proplist` is null or a property list that lives for the call.
+    unsafe fn add(&self, index: u32, proplist: *const c_void) {
+        if self.entries.borrow().len() >= MAX_STREAMS {
+            return;
+        }
+        let owner = session_api()
+            .filter(|_| !proplist.is_null())
+            .and_then(|api| {
+                // SAFETY: the property list is live, as the caller states.
+                let value = unsafe { (api.proplist_gets)(proplist, PROCESS_ID_KEY.as_ptr()) };
+                // SAFETY: null or a C string owned by the property list.
+                (!value.is_null()).then(|| unsafe { CStr::from_ptr(value) }.to_bytes())
+            })
+            .and_then(parse_process_id);
+        self.entries.borrow_mut().push((index, owner));
+    }
+
+    fn userdata(&self) -> *mut c_void {
+        std::ptr::from_ref(self).cast_mut().cast()
+    }
+}
+
+unsafe extern "C" fn on_sink_input(
+    _context: *mut Context,
+    info: *const c_void,
+    eol: c_int,
+    userdata: *mut c_void,
+) {
+    // SAFETY: userdata is the StreamList that `Inner::streams` passes and
+    // keeps alive until the operation is cancelled.
+    let list = unsafe { &*userdata.cast::<StreamList>() };
+    if eol != 0 {
+        list.done.set(true);
+        list.failed.set(eol < 0);
+    } else if !info.is_null() {
+        // SAFETY: the library gives a valid pa_sink_input_info.
+        let info = unsafe { &*info.cast::<SinkInputPrefix>() };
+        // SAFETY: the property list lives for this call.
+        unsafe { list.add(info.index, info.proplist) };
+    }
+}
+
+unsafe extern "C" fn on_source_output(
+    _context: *mut Context,
+    info: *const c_void,
+    eol: c_int,
+    userdata: *mut c_void,
+) {
+    // SAFETY: as in `on_sink_input`.
+    let list = unsafe { &*userdata.cast::<StreamList>() };
+    if eol != 0 {
+        list.done.set(true);
+        list.failed.set(eol < 0);
+    } else if !info.is_null() {
+        // SAFETY: the library gives a valid pa_source_output_info.
+        let info = unsafe { &*info.cast::<SourceOutputPrefix>() };
+        // SAFETY: the property list lives for this call.
+        unsafe { list.add(info.index, info.proplist) };
+    }
+}
+
+/// The answer to one move.
+#[derive(Default)]
+struct Success {
+    done: Cell<bool>,
+    ok: Cell<bool>,
+}
+
+unsafe extern "C" fn on_success(_context: *mut Context, success: c_int, userdata: *mut c_void) {
+    // SAFETY: userdata is the Success that `Inner::move_one` passes and keeps
+    // alive until the operation is cancelled.
+    let state = unsafe { &*userdata.cast::<Success>() };
+    state.ok.set(success != 0);
+    state.done.set(true);
+}
+
+/// The connection of one call. Every use holds the session lock.
+struct Inner {
+    api: &'static Api,
+    ext: &'static SessionApi,
+    mainloop: *mut Mainloop,
+    context: *mut Context,
+}
+
+// SAFETY: the main loop and the context are used by one thread at a time (the
+// session lock), and neither has thread affinity.
+unsafe impl Send for Inner {}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        // SAFETY: both are owned here and not used again. Disconnecting
+        // closes the existing socket and opens nothing.
+        unsafe {
+            (self.api.context_disconnect)(self.context);
+            (self.api.context_unref)(self.context);
+            (self.api.mainloop_free)(self.mainloop);
+        }
+    }
+}
+
+/// Which kind of own stream.
+#[derive(Clone, Copy)]
+enum Kind {
+    Recording,
+    Playout,
+}
+
+impl Inner {
+    /// Starts one operation with `start` and runs the main loop until `done`
+    /// or the deadline, then cancels it, so its callback never runs after
+    /// the caller's state is gone. `true` when `done` held in time.
+    fn drive(
+        &self,
+        deadline: Instant,
+        start: impl FnOnce(&Self) -> *mut Operation,
+        done: impl Fn() -> bool,
+    ) -> bool {
+        // SAFETY: the context is live.
+        if unsafe { (self.api.context_get_state)(self.context) } != PA_CONTEXT_READY {
+            return false;
+        }
+        let operation = start(self);
+        if operation.is_null() {
+            return false;
+        }
+        while !done() && Instant::now() < deadline && step(self.api, self.mainloop) {}
+        // SAFETY: the operation is owned here.
+        unsafe {
+            (self.api.operation_cancel)(operation);
+            (self.api.operation_unref)(operation);
+        }
+        done()
+    }
+
+    /// The server's default microphone and speaker names now.
+    fn defaults(&self, deadline: Instant) -> (Option<String>, Option<String>) {
+        let state = ServerDefaults::default();
+        let ok = self.drive(
+            deadline,
+            // SAFETY: the context is live; the state outlives the operation.
+            |me| unsafe { (me.ext.get_server_info)(me.context, on_server_info, state_ptr(&state)) },
+            || state.done.get(),
+        );
+        if ok {
+            (state.source.into_inner(), state.sink.into_inner())
+        } else {
+            (None, None)
+        }
+    }
+
+    /// The sound server's streams of one kind as `(index, process ID)`.
+    fn streams(&self, deadline: Instant, kind: Kind) -> Option<Vec<(u32, Option<u32>)>> {
+        let list = StreamList::default();
+        let ok = self.drive(
+            deadline,
+            // SAFETY: the context is live; the list outlives the operation.
+            |me| unsafe {
+                match kind {
+                    Kind::Recording => (me.ext.get_source_output_info_list)(
+                        me.context,
+                        on_source_output,
+                        list.userdata(),
+                    ),
+                    Kind::Playout => (me.ext.get_sink_input_info_list)(
+                        me.context,
+                        on_sink_input,
+                        list.userdata(),
+                    ),
+                }
+            },
+            || list.done.get(),
+        );
+        (ok && !list.failed.get()).then(|| list.entries.into_inner())
+    }
+
+    /// The device lists, as the one-shot query reads them, on this context.
+    fn lists(&self, deadline: Instant) -> Option<Lists> {
+        let sinks = Collector::default();
+        let sources = Collector::default();
+        let sinks_ok = self.drive(
+            deadline,
+            // SAFETY: the context is live; the collector outlives the call.
+            |me| unsafe { (me.api.get_sink_info_list)(me.context, on_sink, sinks.userdata()) },
+            || sinks.done.get(),
+        );
+        let sources_ok = sinks_ok
+            && self.drive(
+                deadline,
+                // SAFETY: as above.
+                |me| unsafe {
+                    (me.api.get_source_info_list)(me.context, on_source, sources.userdata())
+                },
+                || sources.done.get(),
+            );
+        (sources_ok && !sinks.failed.get() && !sources.failed.get()).then(|| Lists {
+            sinks: sinks.entries.into_inner(),
+            sources: sources.entries.into_inner(),
+        })
+    }
+
+    /// Moves one stream to the device with this name. `true` when the server
+    /// accepted the move.
+    fn move_one(&self, deadline: Instant, kind: Kind, index: u32, name: &CStr) -> bool {
+        let state = Success::default();
+        let userdata = std::ptr::from_ref(&state).cast_mut().cast();
+        self.drive(
+            deadline,
+            // SAFETY: the context is live; the name and the state outlive the
+            // operation.
+            |me| unsafe {
+                match kind {
+                    Kind::Recording => (me.ext.move_source_output_by_name)(
+                        me.context,
+                        index,
+                        name.as_ptr(),
+                        on_success,
+                        userdata,
+                    ),
+                    Kind::Playout => (me.ext.move_sink_input_by_name)(
+                        me.context,
+                        index,
+                        name.as_ptr(),
+                        on_success,
+                        userdata,
+                    ),
+                }
+            },
+            || state.done.get(),
+        ) && state.ok.get()
+    }
+
+    /// Moves each stream, in order, and stops at the first failure. Gives the
+    /// indexes that moved and whether all did.
+    fn move_all(
+        &self,
+        deadline: Instant,
+        kind: Kind,
+        indexes: &[u32],
+        name: &str,
+    ) -> (Vec<u32>, bool) {
+        let mut moved = Vec::new();
+        let Ok(name) = std::ffi::CString::new(name) else {
+            return (moved, false);
+        };
+        for &index in indexes {
+            if !self.move_one(deadline, kind, index, &name) {
+                return (moved, false);
+            }
+            moved.push(index);
+        }
+        (moved, true)
+    }
+}
+
+fn state_ptr(state: &ServerDefaults) -> *mut c_void {
+    std::ptr::from_ref(state).cast_mut().cast()
+}
+
+/// The call's sound server connection and what it knows of the devices.
+pub struct Session {
+    inner: Mutex<Inner>,
+    /// The server's default microphone and speaker when the call started.
+    default_source: Option<String>,
+    default_sink: Option<String>,
+    /// The microphone and speaker the call's streams are on; `None` when
+    /// that is not known (a failed move that could not be undone).
+    current: Mutex<(Option<String>, Option<String>)>,
+}
+
+impl Session {
+    /// Opens the connection and reads the defaults. `None` when the library
+    /// or a function is missing, the server does not answer, or the time runs
+    /// out. It blocks for at most about [`OPERATION_TIMEOUT`]. Call it before
+    /// containment stage 2: it opens a new sound server socket. `recording`
+    /// and `playout` are the join's choices.
+    pub fn open(recording: Option<&str>, playout: Option<&str>) -> Option<Self> {
+        let (api, ext) = (api()?, session_api()?);
+        let deadline = Instant::now() + OPERATION_TIMEOUT;
+        // SAFETY: plain constructor.
+        let mainloop = unsafe { (api.mainloop_new)() };
+        if mainloop.is_null() {
+            return None;
+        }
+        // SAFETY: the main loop is live; the name is a C string.
+        let context =
+            unsafe { (api.context_new)((api.mainloop_get_api)(mainloop), c"Persephone".as_ptr()) };
+        if context.is_null() {
+            // SAFETY: owned here.
+            unsafe { (api.mainloop_free)(mainloop) };
+            return None;
+        }
+        // From here `Inner` owns both and frees them.
+        let inner = Inner {
+            api,
+            ext,
+            mainloop,
+            context,
+        };
+        if !connect_ready(api, mainloop, context, deadline) {
+            return None;
+        }
+        let (default_source, default_sink) = inner.defaults(deadline);
+        let chosen = |choice: Option<&str>, default: &Option<String>| {
+            choice
+                .and_then(persephone_call_protocol::pulse_name)
+                .map(str::to_owned)
+                .or_else(|| default.clone())
+        };
+        let current = (
+            chosen(recording, &default_source),
+            chosen(playout, &default_sink),
+        );
+        Some(Self {
+            inner: Mutex::new(inner),
+            default_source,
+            default_sink,
+            current: Mutex::new(current),
+        })
+    }
+
+    /// Moves the call's own streams to the chosen microphone and speaker
+    /// (ADR-0059). It blocks for at most a few operation timeouts: call it
+    /// on a blocking thread. Both choices are checked before either stream
+    /// moves. A stream that cannot move stays where it was. `DeviceKept`
+    /// when every move is undone, `AudioDevice` when one is not.
+    pub fn switch(
+        &self,
+        recording: Option<&str>,
+        playout: Option<&str>,
+    ) -> Result<(), FailureCode> {
+        let inner = self.inner.lock().map_err(|_| FailureCode::AudioDevice)?;
+        let mut current = self.current.lock().map_err(|_| FailureCode::AudioDevice)?;
+        let deadline = Instant::now() + OPERATION_TIMEOUT;
+        let lists = inner.lists(deadline).ok_or(FailureCode::AudioDevice)?;
+        let sources = inner
+            .streams(deadline, Kind::Recording)
+            .ok_or(FailureCode::AudioDevice)?;
+        let sinks = inner
+            .streams(deadline, Kind::Playout)
+            .ok_or(FailureCode::AudioDevice)?;
+        let own = std::process::id();
+        let own_recording = own_streams(sources, own);
+        let own_playout = own_streams(sinks, own);
+        let source_names: Vec<&str> = lists.sources.iter().map(|(n, _)| n.as_str()).collect();
+        let sink_names: Vec<&str> = lists.sinks.iter().map(|(n, _)| n.as_str()).collect();
+        let plan = plan_sound_move(
+            recording,
+            playout,
+            &SoundKnown {
+                default_source: self.default_source.as_deref(),
+                default_sink: self.default_sink.as_deref(),
+                source: current.0.as_deref(),
+                sink: current.1.as_deref(),
+            },
+            &SoundNow {
+                sources: &source_names,
+                sinks: &sink_names,
+                own_recording: own_recording.len(),
+                own_playout: own_playout.len(),
+            },
+        )?;
+        // A fresh deadline for the moves: the checks are done.
+        let deadline = Instant::now() + OPERATION_TIMEOUT;
+        let old = current.clone();
+        let mut source_moved = Vec::new();
+        if let Some(name) = &plan.source {
+            let (moved, all) = inner.move_all(deadline, Kind::Recording, &own_recording, name);
+            if all {
+                current.0 = Some(name.clone());
+            } else {
+                let undone = undo(&inner, deadline, Kind::Recording, &moved, old.0.as_deref());
+                if !undone {
+                    current.0 = None;
+                }
+                return Err(failure(undone));
+            }
+            source_moved = own_recording;
+        }
+        if let Some(name) = &plan.sink {
+            let (moved, all) = inner.move_all(deadline, Kind::Playout, &own_playout, name);
+            if all {
+                current.1 = Some(name.clone());
+            } else {
+                let undone = undo(&inner, deadline, Kind::Playout, &moved, old.1.as_deref());
+                if !undone {
+                    current.1 = None;
+                }
+                // The microphone goes back too, so the call keeps its devices.
+                let back = undo(
+                    &inner,
+                    deadline,
+                    Kind::Recording,
+                    &source_moved,
+                    old.0.as_deref(),
+                );
+                current.0 = if source_moved.is_empty() || back {
+                    old.0
+                } else {
+                    plan.source
+                };
+                return Err(failure(undone && back));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// `DeviceKept` when the streams are back on their old device, else
+/// `AudioDevice`.
+fn failure(undone: bool) -> FailureCode {
+    if undone {
+        FailureCode::DeviceKept
+    } else {
+        FailureCode::AudioDevice
+    }
+}
+
+/// Moves streams that moved back to `old`. `true` when there is nothing to
+/// undo or all are back.
+fn undo(inner: &Inner, deadline: Instant, kind: Kind, moved: &[u32], old: Option<&str>) -> bool {
+    moved.is_empty() || old.is_some_and(|old| inner.move_all(deadline, kind, moved, old).1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -383,6 +1012,44 @@ mod tests {
         assert_eq!(offset_of!(SourceInfoPrefix, name), 0);
         assert_eq!(offset_of!(SourceInfoPrefix, description), 16);
         assert_eq!(offset_of!(SourceInfoPrefix, monitor_of_sink), 308);
+    }
+
+    #[test]
+    fn given_the_c_headers_then_the_session_prefixes_have_their_offsets() {
+        // GIVEN the C layout of pa_server_info, pa_sink_input_info and
+        // pa_source_output_info on 64-bit Linux (computed from
+        // pulse/introspect.h with the C alignment rules, and checked live on
+        // PipeWire in the contained sound tests), WHEN the Rust prefixes are
+        // laid out, THEN each read field is in place.
+        assert_eq!(offset_of!(ServerInfoPrefix, default_sink_name), 48);
+        assert_eq!(offset_of!(ServerInfoPrefix, default_source_name), 56);
+        assert_eq!(offset_of!(SinkInputPrefix, index), 0);
+        assert_eq!(offset_of!(SinkInputPrefix, proplist), 344);
+        assert_eq!(offset_of!(SourceOutputPrefix, index), 0);
+        assert_eq!(offset_of!(SourceOutputPrefix, proplist), 208);
+    }
+
+    #[test]
+    fn given_process_id_values_then_only_plain_numbers_parse() {
+        // GIVEN property values, WHEN parsed, THEN only 1 to 10 digits that
+        // fit a u32 give an ID.
+        assert_eq!(parse_process_id(b"4242"), Some(4242));
+        assert_eq!(parse_process_id(b""), None);
+        assert_eq!(parse_process_id(b"-1"), None);
+        assert_eq!(parse_process_id(b"12a"), None);
+        assert_eq!(parse_process_id(b" 1"), None);
+        assert_eq!(parse_process_id(b"99999999999"), None);
+        assert_eq!(parse_process_id(b"4294967296"), None);
+    }
+
+    #[test]
+    fn given_a_stream_without_properties_when_listed_then_it_has_no_owner() {
+        // GIVEN a stream with a null property list, WHEN copied, THEN it is
+        // kept with no owner, so it is never picked as the call's own.
+        let list = StreamList::default();
+        // SAFETY: a null property list is allowed.
+        unsafe { list.add(5, std::ptr::null()) };
+        assert_eq!(list.entries.into_inner(), vec![(5, None)]);
     }
 
     #[test]

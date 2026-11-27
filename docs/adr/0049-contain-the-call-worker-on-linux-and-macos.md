@@ -239,6 +239,53 @@ The worker applies two stages itself.
   [the live call test plan](../planning/live-call-test.md#linux-and-macos-containment-checks-adr-0049-not-yet-run).
   Those checks have not been run.
 
+### Linux: microphone and speaker changes during a call (amended 27 November 2026)
+
+Amendment status: proposed, needs owner approval.
+
+Problem: the worker's sound target is fixed at launch (`PULSE_SOURCE` and
+`PULSE_SINK`), libwebrtc gives only `index:` IDs on Linux, and stage 2 allows
+no new socket. A change of microphone or speaker during a call therefore
+answered `Unsupported`, and every change made in the call window is a change
+during a call. The call kept the system default or the join's choice.
+
+Decision:
+
+* The worker opens one PulseAudio connection before stage 2, in the `Join`
+  path next to the device check, and keeps it for the call (`pulse::Session`).
+  It uses the same `libpulse.so.0` handle and a blocking `pa_mainloop`.
+  Dropping the call closes it. If it cannot open, the call still starts and a
+  sound change answers `Unsupported` as before.
+* A `SetDevices` sound change runs on that one connection, on a blocking
+  thread, one operation at a time, each with a 3 s deadline. It reads the sink
+  and source names, the stream lists, and (once, at join) the server's default
+  names; then it moves streams with `pa_context_move_source_output_by_name`
+  and `pa_context_move_sink_input_by_name`. "System default" during the call
+  means the default when the call started (ADR-0059).
+* It moves only this process's own streams: those whose
+  `application.process.id` equals the worker's process ID. No other
+  program's stream is read for any other purpose or moved. Both choices are
+  checked before either stream moves. A non-`pulse:` ID or a name the server
+  lacks is `DeviceNotFound`. A kind that must move but has no own stream is
+  `AudioDevice`. A move that fails is undone: `DeviceKept` when all streams
+  are back, else `AudioDevice`.
+* libwebrtc's own device selection is not touched.
+
+Containment: this adds no capability after stage 2. It creates no socket and
+opens no file after stage 2; every later request is a read and a write on the
+socket that was open at stage 2. The seccomp deny list and the Landlock rules
+are unchanged. The connection can ask the sound server to move the worker's
+streams, and also to move other programs' streams, because the sound server
+trusts any client of the user. The worker never sends such a request: the
+code selects own streams by process ID. A compromised worker could move other
+streams already, through the socket that the call needs; this change does not
+widen that.
+
+Verification: unit tests cover the stream and name choice. The contained
+sound tests on Linux Mint 22.3 with `pipewire-pulse` cover the move. See
+[the device test evidence](../evidence/device-tests-linux-macos.md). This
+amendment is not accepted until the owner approves it.
+
 ### Positive Consequences
 
 * One call path on all three systems, with no Matrix secret in the worker.

@@ -24,6 +24,8 @@ mod native_volume_tests;
 mod output;
 #[cfg(target_os = "linux")]
 mod pulse;
+#[cfg(all(test, target_os = "linux"))]
+mod pulse_session_test;
 mod screen;
 mod segmenter;
 mod session;

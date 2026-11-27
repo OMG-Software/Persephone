@@ -172,6 +172,11 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
         Ok(paths) => paths,
         Err(code) => return fail(output, code).await,
     };
+    // Linux (ADR-0049): the call's own sound server connection, opened here
+    // because stage 2 allows no new socket. A failure only means that a
+    // microphone or speaker change during the call is `Unsupported`.
+    #[cfg(target_os = "linux")]
+    let pulse = open_pulse(recording_device.as_deref(), playout_device.as_deref()).await;
     let audio = match start_audio() {
         Ok(audio) => audio,
         Err(code) => return fail(output, code).await,
@@ -282,6 +287,8 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
         video_effect,
         shared_effect: SharedEffect::new(video_effect),
         joined_sound,
+        #[cfg(target_os = "linux")]
+        pulse,
         camera: None,
         stalled: None,
         gate: CameraGate::new(own_index),
@@ -435,6 +442,29 @@ async fn sound_paths(
     ])
 }
 
+/// Opens the call's sound server connection on a blocking thread (Linux,
+/// ADR-0049). `None` when it cannot open; the call goes on without it.
+#[cfg(target_os = "linux")]
+async fn open_pulse(
+    recording: Option<&str>,
+    playout: Option<&str>,
+) -> Option<Arc<crate::pulse::Session>> {
+    let (recording, playout) = (recording.map(str::to_owned), playout.map(str::to_owned));
+    let opened = tokio::task::spawn_blocking(move || {
+        crate::pulse::Session::open(recording.as_deref(), playout.as_deref())
+    })
+    .await
+    .ok()
+    .flatten();
+    if opened.is_none() {
+        note_audio(
+            crate::diagnostics::WARN,
+            format_args!("no sound server connection: a device change needs a new call"),
+        );
+    }
+    opened.map(Arc::new)
+}
+
 /// One sound server name from the environment. A value that is not UTF-8
 /// cannot match any choice.
 #[cfg(target_os = "linux")]
@@ -585,9 +615,9 @@ fn device_switch(
 }
 
 /// Whether a `SetDevices` sound choice is no change where no device changes
-/// during a call (Linux, ADR-0049): the same choice as the join. Elsewhere
-/// every choice goes to `switch_devices`, which finds what changes and
-/// switches a lost device again.
+/// during a call (Linux without a sound server connection, ADR-0049): the
+/// same choice as the join. Elsewhere every choice goes to `switch_devices`
+/// or the sound server connection, which find what changes.
 fn sound_unchanged_here(
     joined: &(Option<String>, Option<String>),
     recording: &Option<String>,
@@ -598,8 +628,10 @@ fn sound_unchanged_here(
 
 /// Moves the running call to other devices (`SetDevices`, ADR-0059). Both
 /// choices are checked before either device changes; `apply_switch` then
-/// changes them. On Linux the sound server stream was chosen when the
-/// worker started (ADR-0049), so a change applies to the next call only.
+/// changes them. On Linux libwebrtc has no device IDs, so a change goes
+/// through the call's sound server connection (`Call::change_sound`); this
+/// function is only the fallback where that connection could not open
+/// (ADR-0049), and a change then applies to the next call only.
 fn switch_devices(
     audio: &PlatformAudio,
     defaults: &MediaDefaults,
@@ -1109,6 +1141,10 @@ struct Call<'a> {
     /// changes during a call, so a `SetDevices` with this choice (a change of
     /// the camera only) is no sound change there.
     joined_sound: (Option<String>, Option<String>),
+    /// Linux: the call's sound server connection, which moves the call's own
+    /// streams on a change (ADR-0049). `None` when it could not open.
+    #[cfg(target_os = "linux")]
+    pulse: Option<Arc<crate::pulse::Session>>,
     camera: Option<LocalCamera>,
     /// A capture that did not end in time after a stop (a blocked read on a
     /// stalled camera). Its frames are already revoked. No new camera opens
@@ -1894,6 +1930,37 @@ impl ScreenFeed {
 }
 
 impl Call<'_> {
+    /// Applies a microphone and speaker choice during the call and gives the
+    /// failure, if any. On Linux the sound server connection moves the call's
+    /// own streams on a blocking thread (ADR-0049); without it, only the
+    /// join's own choice is accepted.
+    async fn change_sound(
+        &mut self,
+        recording: Option<String>,
+        playout: Option<String>,
+    ) -> Option<FailureCode> {
+        #[cfg(target_os = "linux")]
+        if let Some(pulse) = self.pulse.clone() {
+            return tokio::task::spawn_blocking(move || {
+                pulse.switch(recording.as_deref(), playout.as_deref())
+            })
+            .await
+            .unwrap_or(Err(FailureCode::AudioDevice))
+            .err();
+        }
+        if sound_unchanged_here(&self.joined_sound, &recording, &playout) {
+            return None;
+        }
+        switch_devices(
+            self.audio,
+            &self.media_defaults,
+            &mut self.sound_devices,
+            recording.as_deref(),
+            playout.as_deref(),
+        )
+        .err()
+    }
+
     /// Applies a new video effect, at once for a running camera and for
     /// later camera starts, unless it cannot run here: the old one then
     /// stays (ADR-0068). The answer names the effect in use.
@@ -3157,18 +3224,7 @@ impl Call<'_> {
                 camera,
             } => {
                 self.camera_device = camera;
-                let failure = if sound_unchanged_here(&self.joined_sound, &recording, &playout) {
-                    None
-                } else {
-                    switch_devices(
-                        self.audio,
-                        &self.media_defaults,
-                        &mut self.sound_devices,
-                        recording.as_deref(),
-                        playout.as_deref(),
-                    )
-                    .err()
-                };
+                let failure = self.change_sound(recording, playout).await;
                 // A device change may reconfigure the capture path, so the
                 // microphone settings are applied again (ADR-0062).
                 self.apply_microphone();
