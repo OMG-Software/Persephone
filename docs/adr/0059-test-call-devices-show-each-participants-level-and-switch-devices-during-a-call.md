@@ -119,7 +119,9 @@ no media permissions, and a browser test would prove nothing about the worker.
   rejoin. Linux moves the call's own sound server streams on a connection
   that the worker opened before stage 2 (ADR-0049, amended 27 November 2026,
   proposed). Where that connection could not open, Linux reports
-  `unsupported`.
+  `unsupported`. On Linux, `kept` also needs the routes read again: every own
+  stream is on its old device, else `failed`. A waiting speaker target whose
+  move is refused at the last try is reported the same way, unasked.
 * `SetDevices` also carries the camera choice. The worker keeps it, and the
   call's next camera start opens it. Since 27 November 2026 the core restarts
   a camera that is on or starting when the saved camera changes, so the

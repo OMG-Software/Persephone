@@ -1998,31 +1998,54 @@ impl Call<'_> {
     }
 
     /// One try of the waiting sound targets. A failed move has no request to
-    /// answer: it is noted by kind, and the target stays.
-    async fn retry_pending_sound(&mut self) {
+    /// answer: every failure is noted by kind and the target stays. The last
+    /// try of a series drops a target whose move failed and answers with an
+    /// unasked `DevicesSet`, so the core shows it (`DeviceKept`, or
+    /// `AudioDevice` when a stream was lost). A stream that is not open yet
+    /// is no failure: the target keeps waiting and nothing is sent.
+    async fn retry_pending_sound(&mut self) -> Vec<FromWorker> {
         #[cfg(target_os = "linux")]
         {
             self.sound_retries.pop_front();
             let Some(pulse) = self.pulse.clone().filter(|pulse| pulse.has_pending()) else {
                 self.sound_retries.clear();
-                return;
+                return Vec::new();
             };
-            let apply = tokio::task::spawn_blocking(move || pulse.apply_pending());
-            let (waiting, failed) =
-                match tokio::time::timeout(crate::pulse::CHANGE_TIMEOUT, apply).await {
-                    Ok(Ok(result)) => result,
-                    _ => (true, Vec::new()),
-                };
-            for kind in failed {
+            let last = self.sound_retries.is_empty();
+            let apply = tokio::task::spawn_blocking(move || pulse.apply_pending(last));
+            let run = match tokio::time::timeout(crate::pulse::CHANGE_TIMEOUT, apply).await {
+                Ok(Ok(run)) => run,
+                _ => crate::pulse::PendingRun {
+                    waiting: true,
+                    moves_failed: Vec::new(),
+                },
+            };
+            for (kind, _) in &run.moves_failed {
                 note_audio(
                     crate::diagnostics::WARN,
                     format_args!("a waiting {kind} move failed"),
                 );
             }
-            if !waiting {
+            if !run.waiting {
                 self.sound_retries.clear();
             }
+            let lost = run
+                .moves_failed
+                .iter()
+                .any(|(_, code)| *code == FailureCode::AudioDevice);
+            return match run.moves_failed.first() {
+                Some(_) if last => vec![FromWorker::DevicesSet {
+                    failure: Some(if lost {
+                        FailureCode::AudioDevice
+                    } else {
+                        FailureCode::DeviceKept
+                    }),
+                }],
+                _ => Vec::new(),
+            };
         }
+        #[cfg(not(target_os = "linux"))]
+        Vec::new()
     }
 
     /// Applies a microphone and speaker choice during the call and gives the
@@ -2036,6 +2059,15 @@ impl Call<'_> {
     ) -> Option<FailureCode> {
         #[cfg(target_os = "linux")]
         if let Some(pulse) = self.pulse.clone() {
+            // The defaults query failed at the join and nothing changed
+            // since: a choice equal to the join's is no sound change (a
+            // camera-only change), as without a session. A real change is
+            // not resolved without the defaults and stays `Unsupported`.
+            if pulse.defaults_unresolved()
+                && sound_unchanged_here(&self.joined_sound, &recording, &playout)
+            {
+                return None;
+            }
             // The whole change is bound: the loop never waits longer.
             let change = tokio::task::spawn_blocking(move || {
                 pulse.switch(recording.as_deref(), playout.as_deref())
@@ -3651,7 +3683,7 @@ async fn event_loop(
                 }
             }
             () = retry_wait(call.retry_next()) => {
-                call.retry_pending_sound().await;
+                outgoing.extend(call.retry_pending_sound().await);
             }
             Some(done) = others.connected.recv() => {
                 if call.other_connected(done, &mut others.events).await.is_err() {

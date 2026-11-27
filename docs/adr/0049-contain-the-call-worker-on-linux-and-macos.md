@@ -271,8 +271,20 @@ Decision:
   not a failure: the target waits, the change counts as done, and the move
   runs when a stream exists (after remote audio is subscribed or the own
   microphone is published or unmuted, tried at 250 ms, 1 s and 3 s, and no
-  timer runs when nothing waits). One change takes at most 5 s. A move that fails is undone: `DeviceKept` when all streams
-  are back, else `AudioDevice`.
+  timer runs when nothing waits). One change takes at most 5 s. The forward
+  moves must end 1.5 s before that (`ROLLBACK_RESERVE`), so the undo has time;
+  an operation that has no time left is not sent. A stream is where the
+  server shows it: the worker reads each own stream's sink or source index
+  and resolves it to a device name, and plans from that, not from what it last
+  asked for, because the server moves streams by itself when a device goes
+  away. A move whose reply is late is not a refusal: the server may have done
+  it, so the stream is undone too. A move that fails is undone, and the routes
+  are read again: `DeviceKept` only when every own stream is on its old
+  device, else `AudioDevice`. The new waiting targets are stored only when
+  every immediate move worked. A waiting target whose move is refused at the
+  last try is dropped and reported with an unasked `DevicesSet`; a stream that
+  is not open yet only waits. If the defaults query failed at the join, a
+  choice equal to the join's is no change; any other change is `Unsupported`.
 * libwebrtc's own device selection is not touched.
 
 Containment: this adds no capability after stage 2. It creates no socket and
@@ -285,10 +297,15 @@ code selects own streams by process ID. A compromised worker could move other
 streams already, through the socket that the call needs; this change does not
 widen that.
 
-Verification: unit tests cover the stream and name choice. The contained
-sound tests on Linux Mint 22.3 with `pipewire-pulse` cover the move. See
-[the device test evidence](../evidence/device-tests-linux-macos.md). This
-amendment is not accepted until the owner approves it.
+Verification: unit tests cover the stream and name choice, the routes check,
+the commit rule and the rollback with a fake sound server. The in-call move
+(a change during a running call, both containment stages, real streams) is
+not run yet: its live test, `pulse_session_test.rs`, is ignored and needs a
+disposable sound server with two speakers and two microphones. The contained
+sound tests on Linux Mint 22.3 with `pipewire-pulse` show only that the
+worker checks and opens devices at launch (`PULSE_SOURCE`, `PULSE_SINK`). See
+[the device test evidence](../evidence/device-tests-linux-macos.md) for that.
+This amendment is not accepted until the owner approves it.
 
 ### Positive Consequences
 

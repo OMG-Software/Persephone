@@ -23,7 +23,9 @@ use std::time::{Duration, Instant};
 
 use persephone_call_protocol::{FailureCode, MAX_PULSE_NAME_BYTES};
 
-use crate::mapping::{SoundKnown, SoundNow, SoundTarget, own_streams, plan_sound_move};
+use crate::mapping::{
+    OwnStream, SoundKnown, SoundNow, SoundTarget, own_streams, plan_sound_move, routes_kept,
+};
 
 /// The longest the whole query may take.
 const QUERY_TIMEOUT: Duration = Duration::from_secs(3);
@@ -172,11 +174,14 @@ fn api() -> Option<&'static Api> {
 }
 
 /// The sound server's sinks (speakers) and sources (microphones) as
-/// (name, description) pairs. Monitor sources are left out.
+/// (name, description) pairs. Monitor sources are left out. The index lists
+/// hold the server's device index of each entry, in the same order.
 #[derive(Debug, Default)]
 pub struct Lists {
     pub sinks: Vec<(String, String)>,
     pub sources: Vec<(String, String)>,
+    pub sink_indexes: Vec<u32>,
+    pub source_indexes: Vec<u32>,
 }
 
 /// One list as the callbacks fill it. The library calls back through a
@@ -185,6 +190,8 @@ pub struct Lists {
 #[derive(Default)]
 struct Collector {
     entries: RefCell<Vec<(String, String)>>,
+    /// The device index of each entry, in the same order.
+    indexes: RefCell<Vec<u32>>,
     done: Cell<bool>,
     failed: Cell<bool>,
 }
@@ -196,7 +203,7 @@ impl Collector {
     /// # Safety
     ///
     /// Each pointer is null or a C string that lives for the call.
-    unsafe fn add(&self, name: *const c_char, description: *const c_char) {
+    unsafe fn add(&self, name: *const c_char, description: *const c_char, index: u32) {
         if name.is_null() || self.entries.borrow().len() >= MAX_ENTRIES {
             return;
         }
@@ -218,6 +225,7 @@ impl Collector {
         self.entries
             .borrow_mut()
             .push((name.to_owned(), description));
+        self.indexes.borrow_mut().push(index);
     }
 
     fn end(&self, eol: c_int) {
@@ -243,7 +251,7 @@ unsafe extern "C" fn on_sink(
         collector.end(eol);
     } else if !info.is_null() {
         // SAFETY: the library gives a valid pa_sink_info for this call.
-        unsafe { collector.add((*info).name, (*info).description) };
+        unsafe { collector.add((*info).name, (*info).description, (*info).index) };
     }
 }
 
@@ -262,7 +270,7 @@ unsafe extern "C" fn on_source(
         let info = unsafe { &*info };
         if info.monitor_of_sink == PA_INVALID_INDEX {
             // SAFETY: as above.
-            unsafe { collector.add(info.name, info.description) };
+            unsafe { collector.add(info.name, info.description, info.index) };
         }
     }
 }
@@ -321,6 +329,8 @@ pub fn query() -> Option<Lists> {
     complete.then_some(Lists {
         sinks: sinks.entries.into_inner(),
         sources: sources.entries.into_inner(),
+        sink_indexes: sinks.indexes.into_inner(),
+        source_indexes: sources.indexes.into_inner(),
     })
 }
 
@@ -404,6 +414,10 @@ const OPERATION_TIMEOUT: Duration = Duration::from_secs(3);
 /// The longest a whole change (all its operations, and an undo) may take.
 /// The event loop waits for no longer.
 pub const CHANGE_TIMEOUT: Duration = Duration::from_secs(5);
+/// The part of [`CHANGE_TIMEOUT`] kept for the rollback. Forward moves and
+/// reads must end by `CHANGE_TIMEOUT - ROLLBACK_RESERVE`; the rollback and
+/// its check use the whole time. A move that has no time left is not sent.
+const ROLLBACK_RESERVE: Duration = Duration::from_millis(1500);
 /// The most streams read from one listing; own streams are picked after.
 const MAX_STREAMS: usize = 4096;
 /// The property that holds the process ID of a stream's program.
@@ -565,10 +579,10 @@ unsafe extern "C" fn on_server_info(
     state.done.set(true);
 }
 
-/// A stream listing as `(index, owner process ID)` pairs.
+/// A stream listing as `(index, owner process ID, device index)` triples.
 #[derive(Default)]
 struct StreamList {
-    entries: RefCell<Vec<(u32, Option<u32>)>>,
+    entries: RefCell<Vec<(u32, Option<u32>, Option<u32>)>>,
     done: Cell<bool>,
     failed: Cell<bool>,
 }
@@ -579,7 +593,7 @@ impl StreamList {
     /// # Safety
     ///
     /// `proplist` is null or a property list that lives for the call.
-    unsafe fn add(&self, index: u32, proplist: *const c_void) {
+    unsafe fn add(&self, index: u32, device: u32, proplist: *const c_void) {
         if self.entries.borrow().len() >= MAX_STREAMS {
             return;
         }
@@ -592,7 +606,8 @@ impl StreamList {
                 (!value.is_null()).then(|| unsafe { CStr::from_ptr(value) }.to_bytes())
             })
             .and_then(parse_process_id);
-        self.entries.borrow_mut().push((index, owner));
+        let device = (device != PA_INVALID_INDEX).then_some(device);
+        self.entries.borrow_mut().push((index, owner, device));
     }
 
     fn userdata(&self) -> *mut c_void {
@@ -616,7 +631,7 @@ unsafe extern "C" fn on_sink_input(
         // SAFETY: the library gives a valid pa_sink_input_info.
         let info = unsafe { &*info.cast::<SinkInputPrefix>() };
         // SAFETY: the property list lives for this call.
-        unsafe { list.add(info.index, info.proplist) };
+        unsafe { list.add(info.index, info.sink, info.proplist) };
     }
 }
 
@@ -635,7 +650,7 @@ unsafe extern "C" fn on_source_output(
         // SAFETY: the library gives a valid pa_source_output_info.
         let info = unsafe { &*info.cast::<SourceOutputPrefix>() };
         // SAFETY: the property list lives for this call.
-        unsafe { list.add(info.index, info.proplist) };
+        unsafe { list.add(info.index, info.source, info.proplist) };
     }
 }
 
@@ -652,6 +667,22 @@ unsafe extern "C" fn on_success(_context: *mut Context, success: c_int, userdata
     let state = unsafe { &*userdata.cast::<Success>() };
     state.ok.set(success != 0);
     state.done.set(true);
+}
+
+/// The own streams of one listing with the name of the device each is on.
+/// `indexes` and `names` are the device list of the same kind, in order.
+fn route_streams(
+    streams: Vec<(u32, Option<u32>, Option<u32>)>,
+    own_process: u32,
+    indexes: &[u32],
+    names: &[(String, String)],
+) -> Vec<OwnStream> {
+    let devices: Vec<(u32, &str)> = indexes
+        .iter()
+        .copied()
+        .zip(names.iter().map(|(name, _)| name.as_str()))
+        .collect();
+    own_streams(streams, own_process, &devices)
 }
 
 /// The connection of one call. Every use holds the session lock.
@@ -679,31 +710,103 @@ impl Drop for Inner {
 }
 
 /// Which kind of own stream.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kind {
     Recording,
     Playout,
 }
 
+impl Kind {
+    /// The place of this kind in a pair of per-kind values.
+    fn slot(self) -> usize {
+        match self {
+            Self::Recording => 0,
+            Self::Playout => 1,
+        }
+    }
+
+    /// The name used in diagnostic notes.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Recording => "microphone",
+            Self::Playout => "speaker",
+        }
+    }
+}
+
+/// How far one operation got.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Run {
+    /// The request never went to the server: no ready context, no time left
+    /// or the library refused it.
+    NotSent,
+    /// The request went out and no answer came in time. The server may still
+    /// act on it: cancelling an operation only drops its callback.
+    TimedOut,
+    /// The answer came.
+    Done,
+}
+
+/// The result of one move.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MoveOutcome {
+    /// The server accepted the move.
+    Moved,
+    /// The server refused it, or it was never sent: the stream did not move.
+    Rejected,
+    /// The request went out and no answer came: the stream may have moved.
+    Unknown,
+}
+
+/// The own streams and the device names, as one read shows them.
+struct Snapshot {
+    sources: Vec<String>,
+    sinks: Vec<String>,
+    recording: Vec<OwnStream>,
+    playout: Vec<OwnStream>,
+}
+
+impl Snapshot {
+    fn streams(&self, kind: Kind) -> &[OwnStream] {
+        match kind {
+            Kind::Recording => &self.recording,
+            Kind::Playout => &self.playout,
+        }
+    }
+}
+
+/// What a change needs from the sound server. `Inner` is the real one; the
+/// tests use a fake.
+trait Server {
+    /// Reads the device names and the own streams with their routes.
+    fn snapshot(&self, deadline: Instant) -> Option<Snapshot>;
+    /// Moves one stream to the device with this name.
+    fn move_stream(&self, deadline: Instant, kind: Kind, index: u32, name: &str) -> MoveOutcome;
+}
+
 impl Inner {
     /// Starts one operation with `start` and runs the main loop until `done`
     /// or the deadline, then cancels it, so its callback never runs after
-    /// the caller's state is gone. `true` when `done` held in time.
+    /// the caller's state is gone. Nothing is started when no time is left.
     fn drive(
         &self,
         deadline: Instant,
         start: impl FnOnce(&Self) -> *mut Operation,
         done: impl Fn() -> bool,
-    ) -> bool {
+    ) -> Run {
         // SAFETY: the context is live.
         if unsafe { (self.api.context_get_state)(self.context) } != PA_CONTEXT_READY {
-            return false;
+            return Run::NotSent;
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return Run::NotSent;
         }
         // One operation never runs longer than `OPERATION_TIMEOUT`.
-        let deadline = deadline.min(Instant::now() + OPERATION_TIMEOUT);
+        let deadline = deadline.min(now + OPERATION_TIMEOUT);
         let operation = start(self);
         if operation.is_null() {
-            return false;
+            return Run::NotSent;
         }
         while !done() && Instant::now() < deadline && step(self.api, self.mainloop) {}
         // SAFETY: the operation is owned here.
@@ -711,29 +814,32 @@ impl Inner {
             (self.api.operation_cancel)(operation);
             (self.api.operation_unref)(operation);
         }
-        done()
+        if done() { Run::Done } else { Run::TimedOut }
     }
 
-    /// The server's default microphone and speaker names now.
-    fn defaults(&self, deadline: Instant) -> (Option<String>, Option<String>) {
+    /// The server's default microphone and speaker names now. `None` when
+    /// the query failed; `Some` with `None` names when the server has no
+    /// default.
+    fn defaults(&self, deadline: Instant) -> Option<(Option<String>, Option<String>)> {
         let state = ServerDefaults::default();
-        let ok = self.drive(
+        let run = self.drive(
             deadline,
             // SAFETY: the context is live; the state outlives the operation.
             |me| unsafe { (me.ext.get_server_info)(me.context, on_server_info, state_ptr(&state)) },
             || state.done.get(),
         );
-        if ok {
-            (state.source.into_inner(), state.sink.into_inner())
-        } else {
-            (None, None)
-        }
+        (run == Run::Done).then(|| (state.source.into_inner(), state.sink.into_inner()))
     }
 
-    /// The sound server's streams of one kind as `(index, process ID)`.
-    fn streams(&self, deadline: Instant, kind: Kind) -> Option<Vec<(u32, Option<u32>)>> {
+    /// The sound server's streams of one kind as
+    /// `(index, process ID, device index)`.
+    fn streams(
+        &self,
+        deadline: Instant,
+        kind: Kind,
+    ) -> Option<Vec<(u32, Option<u32>, Option<u32>)>> {
         let list = StreamList::default();
-        let ok = self.drive(
+        let run = self.drive(
             deadline,
             // SAFETY: the context is live; the list outlives the operation.
             |me| unsafe {
@@ -752,7 +858,7 @@ impl Inner {
             },
             || list.done.get(),
         );
-        (ok && !list.failed.get()).then(|| list.entries.into_inner())
+        (run == Run::Done && !list.failed.get()).then(|| list.entries.into_inner())
     }
 
     /// The device lists, as the one-shot query reads them, on this context.
@@ -764,7 +870,7 @@ impl Inner {
             // SAFETY: the context is live; the collector outlives the call.
             |me| unsafe { (me.api.get_sink_info_list)(me.context, on_sink, sinks.userdata()) },
             || sinks.done.get(),
-        );
+        ) == Run::Done;
         let sources_ok = sinks_ok
             && self.drive(
                 deadline,
@@ -773,19 +879,37 @@ impl Inner {
                     (me.api.get_source_info_list)(me.context, on_source, sources.userdata())
                 },
                 || sources.done.get(),
-            );
+            ) == Run::Done;
         (sources_ok && !sinks.failed.get() && !sources.failed.get()).then(|| Lists {
             sinks: sinks.entries.into_inner(),
             sources: sources.entries.into_inner(),
+            sink_indexes: sinks.indexes.into_inner(),
+            source_indexes: sources.indexes.into_inner(),
+        })
+    }
+}
+
+impl Server for Inner {
+    fn snapshot(&self, deadline: Instant) -> Option<Snapshot> {
+        let lists = self.lists(deadline)?;
+        let recording = self.streams(deadline, Kind::Recording)?;
+        let playout = self.streams(deadline, Kind::Playout)?;
+        let own = std::process::id();
+        Some(Snapshot {
+            recording: route_streams(recording, own, &lists.source_indexes, &lists.sources),
+            playout: route_streams(playout, own, &lists.sink_indexes, &lists.sinks),
+            sources: lists.sources.into_iter().map(|(name, _)| name).collect(),
+            sinks: lists.sinks.into_iter().map(|(name, _)| name).collect(),
         })
     }
 
-    /// Moves one stream to the device with this name. `true` when the server
-    /// accepted the move.
-    fn move_one(&self, deadline: Instant, kind: Kind, index: u32, name: &CStr) -> bool {
+    fn move_stream(&self, deadline: Instant, kind: Kind, index: u32, name: &str) -> MoveOutcome {
+        let Ok(name) = std::ffi::CString::new(name) else {
+            return MoveOutcome::Rejected;
+        };
         let state = Success::default();
         let userdata = std::ptr::from_ref(&state).cast_mut().cast();
-        self.drive(
+        let run = self.drive(
             deadline,
             // SAFETY: the context is live; the name and the state outlive the
             // operation.
@@ -808,29 +932,13 @@ impl Inner {
                 }
             },
             || state.done.get(),
-        ) && state.ok.get()
-    }
-
-    /// Moves each stream, in order, and stops at the first failure. Gives the
-    /// indexes that moved and whether all did.
-    fn move_all(
-        &self,
-        deadline: Instant,
-        kind: Kind,
-        indexes: &[u32],
-        name: &str,
-    ) -> (Vec<u32>, bool) {
-        let mut moved = Vec::new();
-        let Ok(name) = std::ffi::CString::new(name) else {
-            return (moved, false);
-        };
-        for &index in indexes {
-            if !self.move_one(deadline, kind, index, &name) {
-                return (moved, false);
-            }
-            moved.push(index);
+        );
+        match run {
+            Run::NotSent => MoveOutcome::Rejected,
+            Run::TimedOut => MoveOutcome::Unknown,
+            Run::Done if state.ok.get() => MoveOutcome::Moved,
+            Run::Done => MoveOutcome::Rejected,
         }
-        (moved, true)
     }
 }
 
@@ -842,12 +950,35 @@ fn state_ptr(state: &ServerDefaults) -> *mut c_void {
 /// stream.
 #[derive(Default)]
 struct Devices {
-    /// The microphone and speaker the call's streams are on; `None` when
-    /// that is not known (a failed move that could not be undone). A name is
-    /// here only after a move worked (or the join chose it).
-    current: (Option<String>, Option<String>),
+    /// Where a new stream of each kind (microphone, speaker; see
+    /// [`Kind::slot`]) opens. `None` when that is not known (a change that
+    /// could not be undone). Only a kind with no own stream reads it: the
+    /// server's own route of a stream is the truth, as the server moves
+    /// streams by itself when a device goes away.
+    current: [Option<String>; 2],
     /// At most one waiting target per kind (`SoundTarget::Wait`).
-    pending: (Option<String>, Option<String>),
+    pending: [Option<String>; 2],
+    /// Whether any change was tried, whatever its result.
+    changed: bool,
+}
+
+/// The two deadlines of one change. Forward moves must end by `forward`, so
+/// the rollback still has time up to `full`.
+#[derive(Clone, Copy)]
+struct Deadlines {
+    forward: Instant,
+    full: Instant,
+}
+
+impl Deadlines {
+    /// The deadlines of a change that starts at `start`.
+    fn starting_at(start: Instant) -> Self {
+        let full = start + CHANGE_TIMEOUT;
+        Self {
+            forward: full.checked_sub(ROLLBACK_RESERVE).unwrap_or(start),
+            full,
+        }
+    }
 }
 
 /// The call's sound server connection and what it knows of the devices.
@@ -856,16 +987,22 @@ pub struct Session {
     /// The server's default microphone and speaker when the call started.
     default_source: Option<String>,
     default_sink: Option<String>,
+    /// Whether the defaults query worked. `false` is unknown, not "none".
+    defaults_known: bool,
     devices: Mutex<Devices>,
     /// Whether a target waits. Read without the lock, so the event loop
     /// never waits for a running change to ask.
     waiting: AtomicBool,
+    /// Whether any change was tried. Same rule as `waiting`.
+    changed: AtomicBool,
 }
 
 impl Session {
     /// Opens the connection and reads the defaults. `None` when the library
     /// or a function is missing, the server does not answer, or the time runs
-    /// out. It blocks for at most about [`OPERATION_TIMEOUT`]. Call it before
+    /// out. A defaults query that fails does not end the session: the
+    /// defaults are then unknown (see [`Session::defaults_unresolved`]). It
+    /// blocks for at most about [`OPERATION_TIMEOUT`]. Call it before
     /// containment stage 2: it opens a new sound server socket. `recording`
     /// and `playout` are the join's choices.
     pub fn open(recording: Option<&str>, playout: Option<&str>) -> Option<Self> {
@@ -894,26 +1031,31 @@ impl Session {
         if !connect_ready(api, mainloop, context, deadline) {
             return None;
         }
-        let (default_source, default_sink) = inner.defaults(deadline);
+        let defaults = inner.defaults(deadline);
+        let defaults_known = defaults.is_some();
+        let (default_source, default_sink) = defaults.unwrap_or((None, None));
         let chosen = |choice: Option<&str>, default: &Option<String>| {
             choice
                 .and_then(persephone_call_protocol::pulse_name)
                 .map(str::to_owned)
                 .or_else(|| default.clone())
         };
-        let current = (
+        let current = [
             chosen(recording, &default_source),
             chosen(playout, &default_sink),
-        );
+        ];
         Some(Self {
             inner: Mutex::new(inner),
             default_source,
             default_sink,
+            defaults_known,
             devices: Mutex::new(Devices {
                 current,
-                pending: (None, None),
+                pending: [None, None],
+                changed: false,
             }),
             waiting: AtomicBool::new(false),
+            changed: AtomicBool::new(false),
         })
     }
 
@@ -922,12 +1064,13 @@ impl Session {
         self.waiting.load(Ordering::Relaxed)
     }
 
-    /// The own record and playback streams now.
-    fn own(inner: &Inner, deadline: Instant) -> Option<(Vec<u32>, Vec<u32>)> {
-        let sources = inner.streams(deadline, Kind::Recording)?;
-        let sinks = inner.streams(deadline, Kind::Playout)?;
-        let own = std::process::id();
-        Some((own_streams(sources, own), own_streams(sinks, own)))
+    /// Whether the call still runs on what the join chose, and the server's
+    /// defaults are unknown (the query failed at the join). A choice equal
+    /// to the join's is then no change, so a camera-only change gives no
+    /// sound error. A real change cannot be resolved without the defaults:
+    /// it stays `Unsupported`.
+    pub fn defaults_unresolved(&self) -> bool {
+        !self.defaults_known && !self.changed.load(Ordering::Relaxed)
     }
 
     /// Moves the call's own streams to the chosen microphone and speaker
@@ -935,168 +1078,255 @@ impl Session {
     /// on a blocking thread. Both choices are checked before either stream
     /// moves. A kind with no own stream yet waits for one and counts as done
     /// (`apply_pending` moves it later). A stream that cannot move stays
-    /// where it was. `DeviceKept` when every move is undone, `AudioDevice`
-    /// when one is not.
+    /// where it was. `DeviceKept` when every move is undone and the server
+    /// shows every own stream on its old device, `AudioDevice` when not.
     pub fn switch(
         &self,
         recording: Option<&str>,
         playout: Option<&str>,
     ) -> Result<(), FailureCode> {
-        let deadline = Instant::now() + CHANGE_TIMEOUT;
+        let deadlines = Deadlines::starting_at(Instant::now());
         let inner = self.inner.lock().map_err(|_| FailureCode::AudioDevice)?;
         let mut devices = self.devices.lock().map_err(|_| FailureCode::AudioDevice)?;
-        let lists = inner.lists(deadline).ok_or(FailureCode::AudioDevice)?;
-        let (own_recording, own_playout) =
-            Self::own(&inner, deadline).ok_or(FailureCode::AudioDevice)?;
-        let source_names: Vec<&str> = lists.sources.iter().map(|(n, _)| n.as_str()).collect();
-        let sink_names: Vec<&str> = lists.sinks.iter().map(|(n, _)| n.as_str()).collect();
-        let plan = plan_sound_move(
-            recording,
-            playout,
-            &SoundKnown {
-                default_source: self.default_source.as_deref(),
-                default_sink: self.default_sink.as_deref(),
-                source: devices.current.0.as_deref(),
-                sink: devices.current.1.as_deref(),
-            },
-            &SoundNow {
-                sources: &source_names,
-                sinks: &sink_names,
-                own_recording: own_recording.len(),
-                own_playout: own_playout.len(),
-            },
-        )?;
-        // The choice replaces what waited before, per kind.
-        let waiting = |target: &SoundTarget| match target {
-            SoundTarget::Wait(name) => Some(name.clone()),
-            _ => None,
-        };
-        devices.pending = (waiting(&plan.source), waiting(&plan.sink));
-        self.waiting
-            .store(devices.pending != (None, None), Ordering::Relaxed);
-        let old = devices.current.clone();
-        let mut source_moved = Vec::new();
-        if let SoundTarget::Move(name) = &plan.source {
-            let (moved, all) = inner.move_all(deadline, Kind::Recording, &own_recording, name);
-            if all {
-                devices.current.0 = Some(name.clone());
-            } else {
-                let undone = undo(&inner, deadline, Kind::Recording, &moved, old.0.as_deref());
-                if !undone {
-                    devices.current.0 = None;
-                }
-                return Err(failure(undone));
-            }
-            source_moved = own_recording;
-        }
-        if let SoundTarget::Move(name) = &plan.sink {
-            let (moved, all) = inner.move_all(deadline, Kind::Playout, &own_playout, name);
-            if all {
-                devices.current.1 = Some(name.clone());
-            } else {
-                let undone = undo(&inner, deadline, Kind::Playout, &moved, old.1.as_deref());
-                if !undone {
-                    devices.current.1 = None;
-                }
-                // The microphone goes back too, so the call keeps its devices.
-                let back = undo(
-                    &inner,
-                    deadline,
-                    Kind::Recording,
-                    &source_moved,
-                    old.0.as_deref(),
-                );
-                devices.current.0 = if source_moved.is_empty() || back {
-                    old.0
-                } else if let SoundTarget::Move(name) = plan.source {
-                    Some(name)
-                } else {
-                    None
-                };
-                return Err(failure(undone && back));
-            }
-        }
-        Ok(())
+        let result = run_change(
+            &*inner,
+            (self.default_source.as_deref(), self.default_sink.as_deref()),
+            &mut devices,
+            (recording, playout),
+            deadlines,
+        );
+        self.publish(&devices);
+        result
     }
 
     /// Moves the streams of each kind that has a waiting target and an own
-    /// stream now. Gives whether a target still waits, and the kinds
-    /// (`"microphone"`, `"speaker"`) whose move failed; a failed target
-    /// stays for the next try. A kind without a stream is not a failure.
-    /// Same bound and thread rule as [`Session::switch`].
-    pub fn apply_pending(&self) -> (bool, Vec<&'static str>) {
-        let deadline = Instant::now() + CHANGE_TIMEOUT;
+    /// stream now. Gives whether a target still waits, and the moves that
+    /// failed. A kind without a stream is not a failure. A failed target
+    /// stays for the next try, except when `last` is set (the last try of a
+    /// series): then it is dropped, and the caller reports the failure. Same
+    /// bound and thread rule as [`Session::switch`].
+    pub fn apply_pending(&self, last: bool) -> PendingRun {
+        let deadlines = Deadlines::starting_at(Instant::now());
         let (Ok(inner), Ok(mut devices)) = (self.inner.lock(), self.devices.lock()) else {
-            return (false, Vec::new());
+            return PendingRun::default();
         };
-        if devices.pending == (None, None) {
-            return (false, Vec::new());
-        }
-        let Some((own_recording, own_playout)) = Self::own(&inner, deadline) else {
-            return (true, Vec::new());
-        };
-        let mut failed = Vec::new();
-        for (kind, label, streams) in [
-            (Kind::Recording, "microphone", own_recording),
-            (Kind::Playout, "speaker", own_playout),
-        ] {
-            let recording = matches!(kind, Kind::Recording);
-            let name = if recording {
-                devices.pending.0.clone()
-            } else {
-                devices.pending.1.clone()
-            };
-            let Some(name) = name.filter(|_| !streams.is_empty()) else {
-                continue;
-            };
-            let old = if recording {
-                devices.current.0.clone()
-            } else {
-                devices.current.1.clone()
-            };
-            let (moved, all) = inner.move_all(deadline, kind, &streams, &name);
-            let now = if all {
-                Some(name)
-            } else {
-                failed.push(label);
-                if undo(&inner, deadline, kind, &moved, old.as_deref()) {
-                    old
-                } else {
-                    None
-                }
-            };
-            if recording {
-                devices.current.0 = now;
-                if all {
-                    devices.pending.0 = None;
-                }
-            } else {
-                devices.current.1 = now;
-                if all {
-                    devices.pending.1 = None;
-                }
-            }
-        }
-        let waiting = devices.pending != (None, None);
-        self.waiting.store(waiting, Ordering::Relaxed);
-        (waiting, failed)
+        let run = run_pending(&*inner, &mut devices, last, deadlines);
+        self.publish(&devices);
+        run
     }
+
+    /// Copies what the event loop reads without the lock.
+    fn publish(&self, devices: &Devices) {
+        self.waiting.store(
+            devices.pending.iter().any(Option::is_some),
+            Ordering::Relaxed,
+        );
+        if devices.changed {
+            self.changed.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
+/// The result of one try of the waiting targets.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct PendingRun {
+    /// Whether a target still waits.
+    pub waiting: bool,
+    /// The kinds (`"microphone"`, `"speaker"`) whose move was refused or
+    /// lost, with the code to report. A kind whose stream is not open yet is
+    /// not here: it only waits.
+    pub moves_failed: Vec<(&'static str, FailureCode)>,
 }
 
 /// `DeviceKept` when the streams are back on their old device, else
 /// `AudioDevice`.
-fn failure(undone: bool) -> FailureCode {
-    if undone {
+fn failure(kept: bool) -> FailureCode {
+    if kept {
         FailureCode::DeviceKept
     } else {
         FailureCode::AudioDevice
     }
 }
 
-/// Moves streams that moved back to `old`. `true` when there is nothing to
-/// undo or all are back.
-fn undo(inner: &Inner, deadline: Instant, kind: Kind, moved: &[u32], old: Option<&str>) -> bool {
-    moved.is_empty() || old.is_some_and(|old| inner.move_all(deadline, kind, moved, old).1)
+/// Moves each own stream of `kind` that is not on `name`, in order, and
+/// stops at the first failure. `touched` gets each stream that moved or may
+/// have moved, with the device it was on, so the caller can undo it. A
+/// stream whose request was refused did not move and is not listed. `true`
+/// when every stream is on `name` now.
+fn move_to(
+    server: &impl Server,
+    deadline: Instant,
+    kind: Kind,
+    name: &str,
+    streams: &[OwnStream],
+    touched: &mut Vec<OwnStream>,
+) -> bool {
+    for stream in streams
+        .iter()
+        .filter(|stream| stream.device.as_deref() != Some(name))
+    {
+        match server.move_stream(deadline, kind, stream.index, name) {
+            MoveOutcome::Moved => touched.push(stream.clone()),
+            MoveOutcome::Unknown => {
+                touched.push(stream.clone());
+                return false;
+            }
+            MoveOutcome::Rejected => return false,
+        }
+    }
+    true
+}
+
+/// Moves each touched stream back to the device it was on. A stream whose
+/// old device was not known cannot go back. Every stream is tried. `true`
+/// when all went back.
+fn undo(server: &impl Server, deadline: Instant, kind: Kind, touched: &[OwnStream]) -> bool {
+    touched.iter().fold(true, |all, stream| {
+        let back = stream.device.as_deref().is_some_and(|old| {
+            server.move_stream(deadline, kind, stream.index, old) == MoveOutcome::Moved
+        });
+        all && back
+    })
+}
+
+/// One change of microphone and speaker. The new targets are local: they
+/// replace `devices.pending` only when every immediate move worked, so a
+/// refused change leaves the earlier accepted state alone.
+fn run_change(
+    server: &impl Server,
+    defaults: (Option<&str>, Option<&str>),
+    devices: &mut Devices,
+    choice: (Option<&str>, Option<&str>),
+    deadlines: Deadlines,
+) -> Result<(), FailureCode> {
+    let snapshot = server
+        .snapshot(deadlines.forward)
+        .ok_or(FailureCode::AudioDevice)?;
+    let source_names: Vec<&str> = snapshot.sources.iter().map(String::as_str).collect();
+    let sink_names: Vec<&str> = snapshot.sinks.iter().map(String::as_str).collect();
+    let plan = plan_sound_move(
+        choice.0,
+        choice.1,
+        &SoundKnown {
+            default_source: defaults.0,
+            default_sink: defaults.1,
+            source: devices.current[0].as_deref(),
+            sink: devices.current[1].as_deref(),
+        },
+        &SoundNow {
+            sources: &source_names,
+            sinks: &sink_names,
+            own_recording: &snapshot.recording,
+            own_playout: &snapshot.playout,
+        },
+    )?;
+    devices.changed |= plan.source != SoundTarget::Keep || plan.sink != SoundTarget::Keep;
+    let targets = [(Kind::Recording, &plan.source), (Kind::Playout, &plan.sink)];
+    let mut touched: [Vec<OwnStream>; 2] = [Vec::new(), Vec::new()];
+    let mut moved = true;
+    for (kind, target) in targets {
+        if let SoundTarget::Move(name) = target {
+            moved = moved
+                && move_to(
+                    server,
+                    deadlines.forward,
+                    kind,
+                    name,
+                    snapshot.streams(kind),
+                    &mut touched[kind.slot()],
+                );
+        }
+    }
+    if moved {
+        // Commit: every immediate move worked.
+        for (kind, target) in targets {
+            let slot = kind.slot();
+            devices.pending[slot] = None;
+            match target {
+                SoundTarget::Move(name) => devices.current[slot] = Some(name.clone()),
+                SoundTarget::Wait(name) => devices.pending[slot] = Some(name.clone()),
+                SoundTarget::Keep => {
+                    if let Some(stream) = snapshot.streams(kind).first() {
+                        devices.current[slot].clone_from(&stream.device);
+                    }
+                }
+            }
+        }
+        return Ok(());
+    }
+    // Roll back every kind that moved or may have moved, then read the
+    // routes again: only the server's answer shows that the streams are
+    // back. A move whose reply timed out may have happened.
+    let back_playout = undo(server, deadlines.full, Kind::Playout, &touched[1]);
+    let back_recording = undo(server, deadlines.full, Kind::Recording, &touched[0]);
+    let kept = back_playout
+        && back_recording
+        && server.snapshot(deadlines.full).is_some_and(|now| {
+            routes_kept(&snapshot.recording, &now.recording)
+                && routes_kept(&snapshot.playout, &now.playout)
+        });
+    if !kept {
+        // No cached route may make a later request answer `Keep`.
+        devices.current = [None, None];
+    }
+    Err(failure(kept))
+}
+
+/// One try of the waiting targets. Same commit rule as [`run_change`].
+fn run_pending(
+    server: &impl Server,
+    devices: &mut Devices,
+    last: bool,
+    deadlines: Deadlines,
+) -> PendingRun {
+    let mut run = PendingRun::default();
+    if devices.pending.iter().all(Option::is_none) {
+        return run;
+    }
+    let Some(snapshot) = server.snapshot(deadlines.forward) else {
+        run.waiting = true;
+        return run;
+    };
+    for kind in [Kind::Recording, Kind::Playout] {
+        let slot = kind.slot();
+        let streams = snapshot.streams(kind);
+        // No stream yet: the target waits and nothing failed.
+        let Some(name) = devices.pending[slot]
+            .clone()
+            .filter(|_| !streams.is_empty())
+        else {
+            continue;
+        };
+        let mut touched = Vec::new();
+        let moved = move_to(
+            server,
+            deadlines.forward,
+            kind,
+            &name,
+            streams,
+            &mut touched,
+        );
+        devices.changed |= !touched.is_empty();
+        if moved {
+            devices.current[slot] = Some(name);
+            devices.pending[slot] = None;
+            continue;
+        }
+        let back = undo(server, deadlines.full, kind, &touched);
+        let kept = back
+            && server
+                .snapshot(deadlines.full)
+                .is_some_and(|now| routes_kept(streams, now.streams(kind)));
+        if !kept {
+            devices.current[slot] = None;
+        }
+        run.moves_failed.push((kind.label(), failure(kept)));
+        if last {
+            devices.pending[slot] = None;
+        }
+    }
+    run.waiting = devices.pending.iter().any(Option::is_some);
+    run
 }
 
 #[cfg(test)]
@@ -1129,6 +1359,8 @@ mod tests {
         assert_eq!(offset_of!(SinkInputPrefix, proplist), 344);
         assert_eq!(offset_of!(SourceOutputPrefix, index), 0);
         assert_eq!(offset_of!(SourceOutputPrefix, proplist), 208);
+        assert_eq!(offset_of!(SinkInputPrefix, sink), 24);
+        assert_eq!(offset_of!(SourceOutputPrefix, source), 24);
     }
 
     #[test]
@@ -1150,8 +1382,8 @@ mod tests {
         // kept with no owner, so it is never picked as the call's own.
         let list = StreamList::default();
         // SAFETY: a null property list is allowed.
-        unsafe { list.add(5, std::ptr::null()) };
-        assert_eq!(list.entries.into_inner(), vec![(5, None)]);
+        unsafe { list.add(5, PA_INVALID_INDEX, std::ptr::null()) };
+        assert_eq!(list.entries.into_inner(), vec![(5, None, None)]);
     }
 
     #[test]
@@ -1162,11 +1394,11 @@ mod tests {
         let long = std::ffi::CString::new("a".repeat(MAX_PULSE_NAME_BYTES + 1)).unwrap();
         // SAFETY: each pointer is null or a live C string.
         unsafe {
-            collector.add(c"vmic".as_ptr(), c"Virtual mic".as_ptr());
-            collector.add(long.as_ptr(), c"Long".as_ptr());
-            collector.add(c"\xff\xfe".as_ptr(), c"Bad".as_ptr());
-            collector.add(std::ptr::null(), c"Null".as_ptr());
-            collector.add(c"nodesc".as_ptr(), std::ptr::null());
+            collector.add(c"vmic".as_ptr(), c"Virtual mic".as_ptr(), 1);
+            collector.add(long.as_ptr(), c"Long".as_ptr(), 2);
+            collector.add(c"\xff\xfe".as_ptr(), c"Bad".as_ptr(), 3);
+            collector.add(std::ptr::null(), c"Null".as_ptr(), 4);
+            collector.add(c"nodesc".as_ptr(), std::ptr::null(), 5);
         }
         assert_eq!(
             collector.entries.into_inner(),
@@ -1184,7 +1416,7 @@ mod tests {
         let collector = Collector::default();
         for _ in 0..MAX_ENTRIES + 3 {
             // SAFETY: live C strings.
-            unsafe { collector.add(c"s".as_ptr(), c"d".as_ptr()) };
+            unsafe { collector.add(c"s".as_ptr(), c"d".as_ptr(), 0) };
         }
         collector.end(1);
         assert_eq!(collector.entries.borrow().len(), MAX_ENTRIES);
@@ -1235,5 +1467,343 @@ mod tests {
             collector.entries.into_inner(),
             vec![("vmic".to_owned(), "Mic".to_owned())]
         );
+    }
+
+    // ----- a fake sound server for the change logic -----
+
+    /// A sound server in memory. `refuse` and `silent` name moves (by stream
+    /// index and target) that the server refuses, or that it does but never
+    /// answers. `drift` moves a stream by itself at the second read.
+    #[derive(Default)]
+    struct Fake {
+        recording: RefCell<Vec<OwnStream>>,
+        playout: RefCell<Vec<OwnStream>>,
+        refuse: Vec<(u32, &'static str)>,
+        silent: Vec<(u32, &'static str)>,
+        drift: Option<(Kind, u32, &'static str)>,
+        reads: Cell<usize>,
+        sent: RefCell<Vec<(Kind, u32, String)>>,
+    }
+
+    fn at(index: u32, device: &str) -> OwnStream {
+        OwnStream {
+            index,
+            device: Some(device.to_owned()),
+        }
+    }
+
+    impl Fake {
+        fn with(recording: Vec<OwnStream>, playout: Vec<OwnStream>) -> Self {
+            Self {
+                recording: RefCell::new(recording),
+                playout: RefCell::new(playout),
+                ..Self::default()
+            }
+        }
+
+        fn place(&self, kind: Kind, index: u32, name: &str) {
+            let streams = match kind {
+                Kind::Recording => &self.recording,
+                Kind::Playout => &self.playout,
+            };
+            for stream in streams.borrow_mut().iter_mut().filter(|s| s.index == index) {
+                stream.device = Some(name.to_owned());
+            }
+        }
+
+        fn route(&self, kind: Kind, index: u32) -> Option<String> {
+            let streams = match kind {
+                Kind::Recording => self.recording.borrow(),
+                Kind::Playout => self.playout.borrow(),
+            };
+            streams
+                .iter()
+                .find(|s| s.index == index)
+                .and_then(|s| s.device.clone())
+        }
+    }
+
+    impl Server for Fake {
+        fn snapshot(&self, _deadline: Instant) -> Option<Snapshot> {
+            self.reads.set(self.reads.get() + 1);
+            if self.reads.get() == 2 {
+                if let Some((kind, index, name)) = self.drift {
+                    self.place(kind, index, name);
+                }
+            }
+            Some(Snapshot {
+                sources: vec!["mic-a".to_owned(), "mic-b".to_owned()],
+                sinks: vec!["spk-a".to_owned(), "spk-b".to_owned()],
+                recording: self.recording.borrow().clone(),
+                playout: self.playout.borrow().clone(),
+            })
+        }
+
+        fn move_stream(
+            &self,
+            deadline: Instant,
+            kind: Kind,
+            index: u32,
+            name: &str,
+        ) -> MoveOutcome {
+            if deadline <= Instant::now() {
+                return MoveOutcome::Rejected;
+            }
+            self.sent.borrow_mut().push((kind, index, name.to_owned()));
+            if self.refuse.iter().any(|(i, n)| *i == index && *n == name) {
+                return MoveOutcome::Rejected;
+            }
+            self.place(kind, index, name);
+            if self.silent.iter().any(|(i, n)| *i == index && *n == name) {
+                return MoveOutcome::Unknown;
+            }
+            MoveOutcome::Moved
+        }
+    }
+
+    fn deadlines() -> Deadlines {
+        Deadlines::starting_at(Instant::now())
+    }
+
+    fn devices_on(source: &str, sink: &str) -> Devices {
+        Devices {
+            current: [Some(source.to_owned()), Some(sink.to_owned())],
+            ..Devices::default()
+        }
+    }
+
+    const DEFAULTS: (Option<&str>, Option<&str>) = (Some("mic-a"), Some("spk-a"));
+
+    #[test]
+    fn given_a_change_then_the_forward_moves_end_before_the_rollback_reserve() {
+        // GIVEN a change that starts now, WHEN its deadlines are set, THEN
+        // the forward moves end the reserve before the whole change does.
+        let limits = deadlines();
+        assert_eq!(limits.full - limits.forward, ROLLBACK_RESERVE);
+        assert!(ROLLBACK_RESERVE < CHANGE_TIMEOUT);
+    }
+
+    #[test]
+    fn given_no_time_left_when_a_move_is_asked_then_it_is_not_sent() {
+        // GIVEN a forward deadline that has passed, WHEN a change must move
+        // a stream, THEN the move is not sent, nothing is touched, and the
+        // routes read again show the call kept its devices.
+        let server = Fake::with(vec![at(1, "mic-a")], vec![at(2, "spk-a")]);
+        let mut devices = devices_on("mic-a", "spk-a");
+        let limits = Deadlines {
+            forward: Instant::now() - Duration::from_secs(1),
+            full: Instant::now() + Duration::from_secs(5),
+        };
+        let result = run_change(
+            &server,
+            DEFAULTS,
+            &mut devices,
+            (Some("pulse:mic-b"), None),
+            limits,
+        );
+        assert_eq!(result, Err(FailureCode::DeviceKept));
+        assert!(server.sent.borrow().is_empty());
+    }
+
+    #[test]
+    fn given_a_good_change_then_both_streams_move_and_the_targets_are_committed() {
+        // GIVEN a microphone stream and no speaker stream, WHEN both devices
+        // change, THEN the microphone moves, the speaker target waits, and
+        // both are recorded.
+        let server = Fake::with(vec![at(1, "mic-a")], vec![]);
+        let mut devices = devices_on("mic-a", "spk-a");
+        let result = run_change(
+            &server,
+            DEFAULTS,
+            &mut devices,
+            (Some("pulse:mic-b"), Some("pulse:spk-b")),
+            deadlines(),
+        );
+        assert_eq!(result, Ok(()));
+        assert_eq!(server.route(Kind::Recording, 1).as_deref(), Some("mic-b"));
+        assert_eq!(devices.current[0].as_deref(), Some("mic-b"));
+        assert_eq!(devices.pending[1].as_deref(), Some("spk-b"));
+        assert!(devices.changed);
+    }
+
+    #[test]
+    fn given_a_rejected_move_when_a_new_target_waits_then_the_old_state_stays() {
+        // GIVEN an earlier accepted waiting speaker, and a change whose
+        // microphone move the server refuses while it would also queue a new
+        // speaker target, WHEN the change runs, THEN it fails as kept, the
+        // earlier waiting target stays, and the new one is not stored.
+        let mut server = Fake::with(vec![at(1, "mic-a")], vec![]);
+        server.refuse = vec![(1, "mic-b")];
+        let mut devices = devices_on("mic-a", "spk-a");
+        devices.pending[1] = Some("spk-old".to_owned());
+        let result = run_change(
+            &server,
+            DEFAULTS,
+            &mut devices,
+            (Some("pulse:mic-b"), Some("pulse:spk-b")),
+            deadlines(),
+        );
+        assert_eq!(result, Err(FailureCode::DeviceKept));
+        assert_eq!(devices.pending[1].as_deref(), Some("spk-old"));
+        assert_eq!(devices.current[0].as_deref(), Some("mic-a"));
+    }
+
+    #[test]
+    fn given_a_move_with_no_reply_then_it_is_rolled_back_like_a_move_that_worked() {
+        // GIVEN a speaker move that the server did but never answered, after
+        // a microphone move that worked, WHEN the change runs, THEN both
+        // streams go back and the routes read again show it: DeviceKept.
+        let mut server = Fake::with(vec![at(1, "mic-a")], vec![at(2, "spk-a")]);
+        server.silent = vec![(2, "spk-b")];
+        let mut devices = devices_on("mic-a", "spk-a");
+        let result = run_change(
+            &server,
+            DEFAULTS,
+            &mut devices,
+            (Some("pulse:mic-b"), Some("pulse:spk-b")),
+            deadlines(),
+        );
+        assert_eq!(result, Err(FailureCode::DeviceKept));
+        assert_eq!(server.route(Kind::Playout, 2).as_deref(), Some("spk-a"));
+        assert_eq!(server.route(Kind::Recording, 1).as_deref(), Some("mic-a"));
+        assert!(
+            server
+                .sent
+                .borrow()
+                .contains(&(Kind::Playout, 2, "spk-a".to_owned()))
+        );
+    }
+
+    #[test]
+    fn given_a_failed_rollback_then_the_answer_is_a_lost_device_and_no_route_is_cached() {
+        // GIVEN a speaker move with no reply, and a server that refuses the
+        // move back, WHEN the change runs, THEN the answer is AudioDevice,
+        // and the cache holds no route, so a later request for the old
+        // device waits and never answers Keep.
+        let mut server = Fake::with(vec![at(1, "mic-a")], vec![at(2, "spk-a")]);
+        server.silent = vec![(2, "spk-b")];
+        server.refuse = vec![(2, "spk-a")];
+        let mut devices = devices_on("mic-a", "spk-a");
+        let result = run_change(
+            &server,
+            DEFAULTS,
+            &mut devices,
+            (None, Some("pulse:spk-b")),
+            deadlines(),
+        );
+        assert_eq!(result, Err(FailureCode::AudioDevice));
+        assert_eq!(devices.current, [None, None]);
+        // WHEN the stream is gone and the old speaker is asked for, THEN the
+        // target waits.
+        server.playout.borrow_mut().clear();
+        assert_eq!(
+            run_change(
+                &server,
+                DEFAULTS,
+                &mut devices,
+                (None, Some("pulse:spk-a")),
+                deadlines()
+            ),
+            Ok(())
+        );
+        assert_eq!(devices.pending[1].as_deref(), Some("spk-a"));
+    }
+
+    #[test]
+    fn given_a_stream_that_the_server_moved_elsewhere_then_kept_is_not_reported() {
+        // GIVEN a refused speaker move and a microphone stream that the
+        // server moves by itself while the change runs, WHEN the routes are
+        // read again, THEN they differ from the start, so the answer is
+        // AudioDevice and not DeviceKept.
+        let mut server = Fake::with(vec![at(1, "mic-a")], vec![at(2, "spk-a")]);
+        server.refuse = vec![(2, "spk-b")];
+        server.drift = Some((Kind::Recording, 1, "mic-b"));
+        let mut devices = devices_on("mic-a", "spk-a");
+        let result = run_change(
+            &server,
+            DEFAULTS,
+            &mut devices,
+            (None, Some("pulse:spk-b")),
+            deadlines(),
+        );
+        assert_eq!(result, Err(FailureCode::AudioDevice));
+    }
+
+    #[test]
+    fn given_a_stream_that_the_server_moved_to_the_target_then_no_move_is_sent() {
+        // GIVEN a cache that says the call is on the old speaker, and a
+        // stream that the server already shows on the chosen one, WHEN the
+        // change runs, THEN nothing is sent.
+        let server = Fake::with(vec![at(1, "mic-a")], vec![at(2, "spk-b")]);
+        let mut devices = devices_on("mic-a", "spk-a");
+        let result = run_change(
+            &server,
+            DEFAULTS,
+            &mut devices,
+            (None, Some("pulse:spk-b")),
+            deadlines(),
+        );
+        assert_eq!(result, Ok(()));
+        assert!(server.sent.borrow().is_empty());
+        assert_eq!(devices.current[1].as_deref(), Some("spk-b"));
+    }
+
+    #[test]
+    fn given_a_waiting_target_when_every_try_is_refused_then_the_last_one_reports_it() {
+        // GIVEN a speaker target that waits and a stream that the server
+        // refuses to move, WHEN a try that is not the last runs, THEN the
+        // failure is listed and the target stays; WHEN the last try runs,
+        // THEN the failure is listed and the target is dropped.
+        let mut server = Fake::with(vec![at(1, "mic-a")], vec![at(2, "spk-a")]);
+        server.refuse = vec![(2, "spk-b")];
+        let mut devices = devices_on("mic-a", "spk-a");
+        devices.pending[1] = Some("spk-b".to_owned());
+        let early = run_pending(&server, &mut devices, false, deadlines());
+        assert_eq!(
+            early,
+            PendingRun {
+                waiting: true,
+                moves_failed: vec![("speaker", FailureCode::DeviceKept)],
+            }
+        );
+        let last = run_pending(&server, &mut devices, true, deadlines());
+        assert_eq!(
+            last,
+            PendingRun {
+                waiting: false,
+                moves_failed: vec![("speaker", FailureCode::DeviceKept)],
+            }
+        );
+        assert_eq!(devices.pending, [None, None]);
+    }
+
+    #[test]
+    fn given_a_waiting_target_and_no_stream_yet_then_nothing_fails_and_it_keeps_waiting() {
+        // GIVEN a speaker target and no playback stream, WHEN the last try
+        // runs, THEN it is no failure and the target still waits.
+        let server = Fake::with(vec![at(1, "mic-a")], vec![]);
+        let mut devices = devices_on("mic-a", "spk-a");
+        devices.pending[1] = Some("spk-b".to_owned());
+        let run = run_pending(&server, &mut devices, true, deadlines());
+        assert_eq!(
+            run,
+            PendingRun {
+                waiting: true,
+                moves_failed: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn given_a_waiting_target_and_a_stream_then_it_moves_and_the_wait_ends() {
+        // GIVEN a speaker target and a playback stream that opened, WHEN a
+        // try runs, THEN the stream moves and nothing waits.
+        let server = Fake::with(vec![], vec![at(2, "spk-a")]);
+        let mut devices = devices_on("mic-a", "spk-a");
+        devices.pending[1] = Some("spk-b".to_owned());
+        let run = run_pending(&server, &mut devices, false, deadlines());
+        assert_eq!(run, PendingRun::default());
+        assert_eq!(server.route(Kind::Playout, 2).as_deref(), Some("spk-b"));
+        assert_eq!(devices.current[1].as_deref(), Some("spk-b"));
     }
 }
