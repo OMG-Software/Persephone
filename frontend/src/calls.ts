@@ -30,7 +30,8 @@ import type {
   CallRings,
   CallStatus,
   CallUnavailable,
-  CallVideoEffect
+  CallVideoEffect,
+  CallVideoQuality
 } from '../../crates/contracts/generated/contracts';
 import type { DesktopPlatform } from './modules';
 
@@ -547,6 +548,33 @@ export const BACKGROUND_EFFECTS_UNAVAILABLE_TEXT =
 export const EFFECT_REFUSED_TEXT = 'This effect cannot run here. Your camera keeps the effect it had.';
 export const EFFECT_SAVE_TEXT = 'The video effect could not be saved.';
 
+// The own camera's send resolution (ADR-0070). The values are a closed set;
+// the host and the core check them again. The camera and the computer limit
+// the highest size, and a camera is never enlarged.
+export const VIDEO_QUALITY_LABEL = 'Video quality';
+export const VIDEO_QUALITY_HELP =
+  'Your camera and computer limit the highest resolution. Auto changes it with the connection.';
+export const VIDEO_QUALITY_SAVE_TEXT = 'The video quality could not be saved.';
+
+/** The video quality menu: Auto first, then the largest size to the smallest. */
+export const VIDEO_QUALITY_OPTIONS: readonly { value: CallVideoQuality; label: string }[] = [
+  { value: 'auto', label: 'Auto (best for the connection)' },
+  { value: '1440p', label: '1440p' },
+  { value: '1080p', label: '1080p' },
+  { value: '720p', label: '720p' },
+  { value: '480p', label: '480p' }
+];
+
+/** The menu's value as a send resolution; anything else is Auto. */
+export function videoQualityValue(value: unknown): CallVideoQuality {
+  return VIDEO_QUALITY_OPTIONS.find((option) => option.value === value)?.value ?? 'auto';
+}
+
+/** The device record after a saved send resolution. */
+export function withVideoQuality(devices: CallDevices, videoQuality: CallVideoQuality): CallDevices {
+  return { ...devices, videoQuality };
+}
+
 /** The background menu's texts, in menu order. */
 export const BACKGROUND_TEXT: Record<CallBackground, string> = {
   none: 'None',
@@ -757,7 +785,7 @@ export class LatestOnly<T> {
 export const DEVICES_UNSUPPORTED_TEXT = 'Calls are not available on this system yet.';
 export const DEVICES_UNREADABLE_TEXT = 'The saved call devices could not be read. Choose them again.';
 export const DEVICES_NOTE_TEXT =
-  'A microphone or speaker change applies to a running call at once, except on Linux, where it applies from the next call. A camera change applies from the next camera start. The volume changes at once.';
+  'A microphone or speaker change applies to a running call at once, except on Linux, where it applies from the next call. A camera change restarts a camera that is on, so it applies at once. The volume changes at once.';
 
 /** The note under the menus, for a device reply. */
 export function devicesNote(devices: CallDevices): string {
@@ -930,7 +958,7 @@ export const DEVICE_SWITCH_TEXT: Record<CallDeviceChange, string> = {
   failed: 'The microphone or speaker could not be changed, and the sound may have stopped. A lost speaker needs a rejoin: leave the call and join it again.'
 };
 export const DEVICE_SAVED_TEXT =
-  'Saved. If the call cannot use it, this line tells you. A camera change applies the next time you turn the camera on.';
+  'Saved. If the call cannot use it, this line tells you. A camera change restarts a camera that is on, so it applies at once.';
 export const DEVICE_SWITCHING_TEXT = 'Switching…';
 export const DEVICES_BUTTON_LABEL = 'Device settings';
 export const DEVICES_PANEL_LABEL = 'Call devices';

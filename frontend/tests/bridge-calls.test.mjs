@@ -251,6 +251,8 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
       'call_video_effect',
       { effect: { background: 'none', blur: 50, filter: 'warm' }, mirror: true }
     ],
+    [() => bridge.callVideoQuality('auto'), 'call_video_quality', { quality: 'auto' }],
+    [() => bridge.callVideoQuality('1440p'), 'call_video_quality', { quality: '1440p' }],
     [() => bridge.callStatus(), 'call_status', {}],
     [() => bridge.callRings(), 'call_rings', {}],
     [() => bridge.callDeclineRing('!r:s'), 'call_decline_ring', { roomId: '!r:s' }],

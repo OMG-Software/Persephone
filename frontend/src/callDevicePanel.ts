@@ -1,12 +1,14 @@
-import type { CallDevices } from '../../crates/contracts/generated/contracts';
+import type { CallDevices, CallVideoQuality } from '../../crates/contracts/generated/contracts';
 import {
   DEVICE_FAILURE_TEXT,
   DEVICE_SAVE_FAILURE_TEXT,
   EFFECT_SAVE_TEXT,
+  VIDEO_QUALITY_SAVE_TEXT,
   deviceChoice,
   deviceValue,
   plainEffect,
   withVideoEffectChange,
+  withVideoQuality,
   type VideoEffectChange,
   type VideoEffectPart
 } from './calls.ts';
@@ -39,11 +41,18 @@ export interface EffectState {
   failure: string | null;
 }
 
+/** What the panel shows about saving the send resolution (ADR-0070). */
+export interface QualityState {
+  saving: boolean;
+  failure: string | null;
+}
+
 /** The bridge calls the panel uses; the component passes the real ones. */
 export interface DevicePanelBridge {
   list: () => Promise<CallDevices>;
   save: (recording: string | null, playout: string | null, camera: string | null) => Promise<unknown>;
   effect: (change: VideoEffectChange) => Promise<unknown>;
+  quality: (quality: CallVideoQuality) => Promise<unknown>;
 }
 
 const failureText = (reason: unknown, fallback: string) => DEVICE_FAILURE_TEXT[String(reason)] ?? fallback;
@@ -68,6 +77,10 @@ const failureText = (reason: unknown, fallback: string) => DEVICE_FAILURE_TEXT[S
  *   value, as in the main window. The reply comes
  *   before the worker has answered, so whether the worker refused the
  *   effect is read from the call status, not from the reply.
+ * - The send resolution (ADR-0070) goes into the same queue. Only the
+ *   newest change sets the result; when it fails, the menu goes back to the
+ *   panel's copy of the saved value (`onquality`). A camera that is on
+ *   restarts in the core, so the picture may stop for a moment.
  * - After `close`, no answer changes the panel.
  */
 export class DevicePanel {
@@ -76,8 +89,13 @@ export class DevicePanel {
   readonly #onmenus: (menus: DeviceMenus) => void;
   readonly #oneffect: (state: EffectState) => void;
   readonly #oncontrols: (saved: VideoEffectChange) => void;
+  readonly #onquality: (state: QualityState) => void;
+  readonly #onqualityback: (saved: CallVideoQuality) => void;
   #state: DevicePanelState = { devices: null, loading: false, saving: false, saved: false, failure: null };
   #effect: EffectState = { saving: false, failure: null };
+  #quality: QualityState = { saving: false, failure: null };
+  #qualitySaves = 0;
+  #qualityRequests = 0;
   #queue: Promise<unknown> = Promise.resolve();
   #saves = 0;
   #newest = 0;
@@ -93,13 +111,17 @@ export class DevicePanel {
     onstate: (state: DevicePanelState) => void,
     onmenus: (menus: DeviceMenus) => void,
     oneffect: (state: EffectState) => void = () => {},
-    oncontrols: (saved: VideoEffectChange) => void = () => {}
+    oncontrols: (saved: VideoEffectChange) => void = () => {},
+    onquality: (state: QualityState) => void = () => {},
+    onqualityback: (saved: CallVideoQuality) => void = () => {}
   ) {
     this.#bridge = bridge;
     this.#onstate = onstate;
     this.#onmenus = onmenus;
     this.#oneffect = oneffect;
     this.#oncontrols = oncontrols;
+    this.#onquality = onquality;
+    this.#onqualityback = onqualityback;
   }
 
   get state(): DevicePanelState {
@@ -108,6 +130,10 @@ export class DevicePanel {
 
   get effect(): EffectState {
     return this.#effect;
+  }
+
+  get quality(): QualityState {
+    return this.#quality;
   }
 
   #setEffect(saving: boolean) {
@@ -121,7 +147,7 @@ export class DevicePanel {
   }
 
   async load(): Promise<void> {
-    if (!this.#open || this.#state.loading || this.#saves > 0 || this.#effectSaves > 0) return;
+    if (!this.#open || this.#state.loading || this.#saves > 0 || this.#effectSaves > 0 || this.#qualitySaves > 0) return;
     this.#set({ loading: true, failure: null });
     try {
       const devices = await this.#bridge.list();
@@ -205,6 +231,37 @@ export class DevicePanel {
     if (newest.includes('effect')) back.effect = saved.effect;
     if (newest.includes('mirror')) back.mirror = saved.mirror;
     this.#oncontrols(back);
+  }
+
+  /**
+   * Sends the send resolution (ADR-0070) after the saves before it. A saved
+   * change goes into the panel's copy of the record. When the newest change
+   * fails, the menu goes back to that copy (`onquality`).
+   */
+  async saveQuality(quality: CallVideoQuality): Promise<void> {
+    if (!this.#open) return;
+    const mine = ++this.#qualityRequests;
+    this.#qualitySaves += 1;
+    this.#quality = { saving: true, failure: null };
+    this.#onquality(this.#quality);
+    const run = () => this.#bridge.quality(quality);
+    const turn = this.#queue.then(run, run);
+    this.#queue = turn.catch(() => undefined);
+    let failure: string | null = null;
+    try {
+      await turn;
+      const devices = this.#state.devices;
+      if (this.#open && devices) this.#set({ devices: withVideoQuality(devices, quality) });
+    } catch (reason) {
+      failure = failureText(reason, VIDEO_QUALITY_SAVE_TEXT);
+    }
+    this.#qualitySaves -= 1;
+    if (!this.#open) return;
+    const newest = mine === this.#qualityRequests;
+    this.#quality = { saving: this.#qualitySaves > 0, failure: newest ? failure : this.#quality.failure };
+    this.#onquality(this.#quality);
+    const saved = this.#state.devices;
+    if (newest && failure !== null && saved) this.#onqualityback(saved.videoQuality);
   }
 
   close(): void {
