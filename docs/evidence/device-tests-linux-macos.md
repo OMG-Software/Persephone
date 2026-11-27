@@ -192,6 +192,14 @@ project's VM, which did not answer.
   "pipewire-pulse.conf"`: the `pipewire-pulse` process, not the application.
 * Conclusion: on PipeWire, `pipewire.sec.pid` of every PulseAudio client
   names `pipewire-pulse`, so it cannot pick the worker's streams.
+* PulseAudio 17.0 (`gitlab.freedesktop.org/pulseaudio/pulseaudio`, tag
+  `v17.0`): `src/pulsecore/protocol-native.c` uses the peer credentials only
+  to authorise the client's user or group (`command_auth`), and names a new
+  client only `Native client (UNIX socket client)` with
+  `native-protocol.peer` (`pa_socket_peer_to_string` in `socket-util.c`
+  gives no process ID for `AF_UNIX`). `pa_client_update_proplist` in
+  `client.c` applies any client update. So a PulseAudio daemon gives no
+  server-checked process ID, and a client may set any property.
 * libwebrtc, `webrtc-sdk/webrtc` at `a545de4` (the commit named by the
   pinned build tag `webrtc-a545de4`, by its name only), and the `m125` and
   `m137` release branches:
