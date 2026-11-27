@@ -6,14 +6,25 @@
 //! The icons are the bundle's PNG files, compiled in, so nothing is read
 //! from the image or the disk to write them.
 //!
-//! Every file is written to a new file in the same folder (`O_EXCL`), synced
-//! and then put in place in one step: a rename over Persephone's own older
-//! file, or a hard link where no file was, which fails when a file appeared
-//! meanwhile. A reader never sees part of a file, and a link at the target
-//! is never followed. An existing entry is read with `O_NOFOLLOW`, at most
-//! [`MAX_ENTRY_BYTES`]. The folders above the files are the user's own and
-//! may be links (for example from a dotfile manager), as the XDG rules
-//! allow. No other program is started.
+//! Persephone writes a file only where no file is, and removes only its own
+//! file, so no other program's file is replaced or deleted:
+//!
+//! * A file is written to a new file with a random name in the same folder
+//!   (`O_EXCL`), synced, and hard-linked to its name, which fails when a
+//!   file appeared meanwhile. A reader never sees part of a file.
+//! * A file is removed (also an outdated entry before its new one) only
+//!   after it was renamed to a random name in the same folder and found to
+//!   be exactly Persephone's: the entry's exact text ([`app_menu::is_ours`])
+//!   or the icon's exact bytes. So the file that is checked is the one that
+//!   is removed. Anything else is linked back.
+//! * An icon place that holds another file stops the add before anything
+//!   is written. When an add ends without Persephone's entry, the icons
+//!   that it wrote are removed again.
+//!
+//! Existing files are read with `O_NOFOLLOW` and a size limit, and no link
+//! is followed. The folders above the files are the user's own and may be
+//! links (for example from a dotfile manager), as the XDG rules allow. No
+//! other program is started.
 
 use crate::app_menu::{
     self, AppMenu, AppMenuError, DESKTOP_FILE, Found, ICON_NAME, MAX_ENTRY_BYTES, Place,
@@ -107,6 +118,10 @@ impl Places {
         self.data_home.join("icons").join("hicolor")
     }
 
+    fn icon_dir(&self, size: &str) -> PathBuf {
+        self.hicolor().join(size).join("apps")
+    }
+
     fn state(&self) -> AppMenuState {
         let user = read_entry(&self.applications().join(DESKTOP_FILE));
         let elsewhere = self.data_dirs.iter().any(|dir| {
@@ -117,53 +132,109 @@ impl Places {
         app_menu::state(&user, elsewhere, &self.appimage)
     }
 
-    /// Writes the icons and then the entry, when the state is `absent` or
-    /// `outdated`; returns the new state.
+    /// Writes the missing icons and then the entry, when the state is
+    /// `absent` or `outdated`; returns the new state. An icon place that
+    /// holds another file stops the add before anything is written
+    /// (`AlreadyExists`). When the add ends without Persephone's entry, the
+    /// icons that it wrote are removed again.
     fn add(&self) -> io::Result<AppMenuState> {
-        let replace = match self.state() {
+        let outdated = match self.state() {
             AppMenuState::Absent => false,
             AppMenuState::Outdated => true,
             other => return Ok(other),
         };
         let entry = app_menu::entry(&self.appimage)
             .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
-        let hicolor = self.hicolor();
-        let icon = format!("{ICON_NAME}.png");
+        let icon = icon_file();
+        let mut missing = Vec::new();
         for (size, bytes) in ICONS {
-            let dir = hicolor.join(size).join("apps");
-            make_dirs(&dir)?;
-            put_file(&dir, &icon, bytes, true)?;
+            let dir = self.icon_dir(size);
+            match read_file(&dir.join(&icon), bytes.len() as u64) {
+                Found::Missing => missing.push((dir, bytes)),
+                // Persephone's icon, from an earlier add: it stays.
+                Found::Content(content) if content == bytes => {}
+                _ => return Err(io::Error::from(io::ErrorKind::AlreadyExists)),
+            }
         }
-        // GTK and Qt skip an `icon-theme.cache` that is older than its
-        // theme folder; one there would not list the new icons.
-        let _ = File::open(&hicolor).and_then(|dir| dir.set_modified(SystemTime::now()));
-        let applications = self.applications();
-        make_dirs(&applications)?;
-        match put_file(&applications, DESKTOP_FILE, entry.as_bytes(), replace) {
-            // A file appeared after the check: it is not replaced.
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-            result => result?,
+        let mut created = Vec::new();
+        let added = self.put_icons_and_entry(&entry, outdated, missing, &mut created);
+        if !matches!(added, Ok(true)) {
+            for (dir, bytes) in &created {
+                // An icon that another program put there meanwhile stays.
+                let _ = take_own(dir, &icon, bytes.len() as u64, |content| content == *bytes);
+            }
         }
+        added?;
         Ok(self.state())
     }
 
-    /// Removes the entry and the icons when the entry is Persephone's own;
-    /// returns the new state.
+    /// Writes each `missing` icon, records it in `created`, and then the
+    /// entry, after it takes away the outdated one. Returns whether the
+    /// entry was written.
+    fn put_icons_and_entry(
+        &self,
+        entry: &str,
+        outdated: bool,
+        missing: Vec<(PathBuf, &'static [u8])>,
+        created: &mut Vec<(PathBuf, &'static [u8])>,
+    ) -> io::Result<bool> {
+        let icon = icon_file();
+        for (dir, bytes) in missing {
+            make_dirs(&dir)?;
+            put_file(&dir, &icon, bytes)?;
+            created.push((dir, bytes));
+        }
+        // GTK and Qt skip an `icon-theme.cache` that is older than its
+        // theme folder; one there would not list the new icons.
+        let _ = File::open(self.hicolor()).and_then(|dir| dir.set_modified(SystemTime::now()));
+        let applications = self.applications();
+        make_dirs(&applications)?;
+        if outdated
+            && !take_own(
+                &applications,
+                DESKTOP_FILE,
+                MAX_ENTRY_BYTES,
+                app_menu::is_ours,
+            )?
+        {
+            // The entry changed after the check and is not Persephone's.
+            return Ok(false);
+        }
+        match put_file(&applications, DESKTOP_FILE, entry.as_bytes()) {
+            Ok(()) => Ok(true),
+            // A file appeared after the check: it is not replaced.
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Removes the entry when it is Persephone's own, and then the icons
+    /// that are exactly Persephone's; returns the new state. Another
+    /// program's file is not touched.
     fn remove(&self) -> io::Result<AppMenuState> {
         let applications = self.applications();
-        let entry = applications.join(DESKTOP_FILE);
-        if let Found::Content(content) = read_entry(&entry)
+        if let Found::Content(content) = read_entry(&applications.join(DESKTOP_FILE))
             && app_menu::is_ours(&content)
+            && take_own(
+                &applications,
+                DESKTOP_FILE,
+                MAX_ENTRY_BYTES,
+                app_menu::is_ours,
+            )?
         {
-            remove_present(&entry)?;
-            sync_dir(&applications);
-            let icon = format!("{ICON_NAME}.png");
-            for (size, _) in ICONS {
-                remove_present(&self.hicolor().join(size).join("apps").join(&icon))?;
+            let icon = icon_file();
+            for (size, bytes) in ICONS {
+                take_own(&self.icon_dir(size), &icon, bytes.len() as u64, |content| {
+                    content == bytes
+                })?;
             }
         }
         Ok(self.state())
     }
+}
+
+fn icon_file() -> String {
+    format!("{ICON_NAME}.png")
 }
 
 /// The AppImage path and its mount folder when the core runs from it:
@@ -212,32 +283,43 @@ fn is_appimage_file(path: &Path) -> bool {
     file.read_exact(&mut head).is_ok() && head[..4] == *b"\x7fELF" && head[8..] == *b"AI\x02"
 }
 
-/// The absolute folders of `$XDG_DATA_DIRS` (else the XDG default), at most
-/// [`MAX_DATA_DIRS`], without the user's own data folder and without the
-/// folders inside the image's mount folder `appdir`. The AppImage's GTK hook
-/// puts `$APPDIR/usr/share` first in this process's list; the image's own
-/// `Persephone.desktop` there is not in the desktop's menu.
+/// The absolute folders among the first [`MAX_DATA_DIRS`] entries of
+/// `$XDG_DATA_DIRS` (else the XDG default), without the user's own data
+/// folder and without the folders inside the image's mount folder
+/// `appdir`. The AppImage's GTK hook puts `$APPDIR/usr/share` first in
+/// this process's list; the image's own `Persephone.desktop` there is not
+/// in the desktop's menu. Entries after the limit are not split or kept.
 fn data_dirs(value: Option<OsString>, data_home: &Path, appdir: &Path) -> Vec<PathBuf> {
     let listed: Vec<PathBuf> = value
         .filter(|value| !value.is_empty())
-        .map(|value| env::split_paths(&value).collect())
+        .map(|value| {
+            env::split_paths(&value)
+                .take(MAX_DATA_DIRS)
+                .filter(|dir| dir.is_absolute())
+                .collect()
+        })
         .unwrap_or_default();
-    let dirs = if listed.iter().any(|dir| dir.is_absolute()) {
-        listed
-    } else {
+    let dirs = if listed.is_empty() {
         vec![
             PathBuf::from("/usr/local/share"),
             PathBuf::from("/usr/share"),
         ]
+    } else {
+        listed
     };
     dirs.into_iter()
-        .filter(|dir| dir.is_absolute() && dir != data_home && !dir.starts_with(appdir))
-        .take(MAX_DATA_DIRS)
+        .filter(|dir| dir != data_home && !dir.starts_with(appdir))
         .collect()
 }
 
-/// What is at `path`, read without following a link.
+/// What is at `path`, read without following a link, at most
+/// [`MAX_ENTRY_BYTES`].
 fn read_entry(path: &Path) -> Found {
+    read_file(path, MAX_ENTRY_BYTES)
+}
+
+/// What is at `path`, read without following a link, at most `limit` bytes.
+fn read_file(path: &Path, limit: u64) -> Found {
     let file = match OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY)
@@ -251,13 +333,13 @@ fn read_entry(path: &Path) -> Found {
     let Ok(metadata) = file.metadata() else {
         return Found::Other;
     };
-    if !metadata.file_type().is_file() || metadata.len() > MAX_ENTRY_BYTES {
+    if !metadata.file_type().is_file() || metadata.len() > limit {
         return Found::Other;
     }
     let mut content = Vec::new();
     // Bounded again while it is read: the file can grow meanwhile.
-    match file.take(MAX_ENTRY_BYTES + 1).read_to_end(&mut content) {
-        Ok(read) if read as u64 <= MAX_ENTRY_BYTES => Found::Content(content),
+    match file.take(limit + 1).read_to_end(&mut content) {
+        Ok(read) if read as u64 <= limit => Found::Content(content),
         _ => Found::Other,
     }
 }
@@ -269,53 +351,64 @@ fn make_dirs(dir: &Path) -> io::Result<()> {
         .create(dir)
 }
 
-/// Puts `bytes` at `dir/name` in one step: a new file next to it, synced,
-/// then renamed over the target (`replace`) or linked to it, which fails
-/// with `AlreadyExists` when the target exists. The new file is removed on
-/// every path but a rename.
-fn put_file(dir: &Path, name: &str, bytes: &[u8], replace: bool) -> io::Result<()> {
-    let target = dir.join(name);
-    let partial = dir.join(format!(".{name}.{}.partial", std::process::id()));
-    let create = || {
-        OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o644)
-            .open(&partial)
-    };
-    // A file of this name is left from an earlier core with the same
-    // process ID that stopped while it wrote.
-    let mut file = match create() {
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-            fs::remove_file(&partial)?;
-            create()?
-        }
-        result => result?,
-    };
+/// Puts `bytes` at `dir/name` only where no file is: a new file with a
+/// random name next to it (`O_EXCL`), synced, then hard-linked to the name,
+/// which fails with `AlreadyExists` when a file is there. The random name
+/// is removed in every case; no existing file is ever removed to make room.
+fn put_file(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
+    let partial = dir.join(random_name(name, "partial")?);
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o644)
+        .open(&partial)?;
     let result = file
         .write_all(bytes)
         .and_then(|()| file.sync_all())
-        .and_then(|()| {
-            if replace {
-                fs::rename(&partial, &target)
-            } else {
-                fs::hard_link(&partial, &target)
-            }
-        });
-    if result.is_err() || !replace {
-        let _ = fs::remove_file(&partial);
-    }
+        .and_then(|()| fs::hard_link(&partial, dir.join(name)));
+    let _ = fs::remove_file(&partial);
     result?;
     sync_dir(dir);
     Ok(())
 }
 
-/// Deletes `path` itself (a link is not followed); a missing file is fine.
-fn remove_present(path: &Path) -> io::Result<()> {
-    match fs::remove_file(path) {
-        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
-        _ => Ok(()),
+/// Removes `dir/name` only when it is Persephone's own file. The file (or
+/// link) is first renamed to a random name in the same folder, so the file
+/// that `own` checks is the one that is removed, also when another program
+/// writes the name meanwhile. A file that is not `own` is linked back; when
+/// that fails (another file took the name meanwhile), it is kept under the
+/// random name, and the error is returned. A folder is not moved, because
+/// it could not be linked back. Returns whether an own file was removed; a
+/// missing file is `false`.
+fn take_own(dir: &Path, name: &str, limit: u64, own: impl Fn(&[u8]) -> bool) -> io::Result<bool> {
+    let path = dir.join(name);
+    if fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_dir()) {
+        return Ok(false);
     }
+    let aside = dir.join(random_name(name, "old")?);
+    match fs::rename(&path, &aside) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        result => result?,
+    }
+    if matches!(read_file(&aside, limit), Found::Content(content) if own(content.as_slice())) {
+        fs::remove_file(&aside)?;
+        sync_dir(dir);
+        return Ok(true);
+    }
+    // `linkat` without `AT_SYMLINK_FOLLOW`: a link goes back as a link.
+    fs::hard_link(&aside, &path)?;
+    fs::remove_file(&aside)?;
+    Ok(false)
+}
+
+/// `.{name}.{32 random hex digits}.{kind}`: a hidden name that no existing
+/// file has, and that no desktop or icon reader takes for an entry or an
+/// icon, since it does not end in `.desktop` or `.png`.
+fn random_name(name: &str, kind: &str) -> io::Result<String> {
+    let mut random = [0_u8; 16];
+    getrandom::fill(&mut random).map_err(|_| io::Error::other("no random bytes"))?;
+    let hex: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
+    Ok(format!(".{name}.{hex}.{kind}"))
 }
 
 /// Syncs a folder so a new or removed name survives a crash. A folder that
@@ -532,8 +625,19 @@ mod tests {
         }
     }
 
+    /// The names in a folder, sorted.
+    fn names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+    }
+
     /// GIVEN Persephone's entry for another AppImage path WHEN added THEN
-    /// it is replaced with this path's entry.
+    /// it is replaced with this path's entry, and no set-aside or partial
+    /// file is left.
     #[test]
     fn given_an_outdated_own_entry_when_added_then_it_is_replaced() {
         let layout = Layout::new();
@@ -551,6 +655,130 @@ mod tests {
                 .unwrap()
                 .contains(&format!("\nTryExec={}\n", places.appimage))
         );
+        assert_eq!(names(layout.entry().parent().unwrap()), [DESKTOP_FILE]);
+    }
+
+    /// GIVEN another file at one icon place WHEN added THEN the add fails
+    /// with `AlreadyExists` before anything is written: that file is
+    /// unchanged, and no other icon and no entry is there.
+    #[test]
+    fn given_another_icon_when_added_then_nothing_is_written() {
+        let layout = Layout::new();
+        let places = layout.places();
+        let theirs = layout.icon("128x128");
+        fs::create_dir_all(theirs.parent().unwrap()).unwrap();
+        fs::write(&theirs, b"another program's icon").unwrap();
+        let error = places.add().unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&theirs).unwrap(), b"another program's icon");
+        assert!(!layout.icon("32x32").exists());
+        assert!(!layout.icon("256x256").exists());
+        assert!(!layout.entry().exists());
+        assert_eq!(places.state(), AppMenuState::Absent);
+    }
+
+    /// GIVEN Persephone's icon already at one place WHEN added and removed
+    /// THEN it is kept by the add and removed with the others.
+    #[test]
+    fn given_an_own_icon_when_added_then_it_is_kept() {
+        let layout = Layout::new();
+        let places = layout.places();
+        let (size, bytes) = ICONS[0];
+        fs::create_dir_all(layout.icon(size).parent().unwrap()).unwrap();
+        fs::write(layout.icon(size), bytes).unwrap();
+        assert_eq!(places.add().unwrap(), AppMenuState::Added);
+        assert_eq!(fs::read(layout.icon(size)).unwrap(), bytes);
+        assert_eq!(places.remove().unwrap(), AppMenuState::Absent);
+        assert!(!layout.icon(size).exists());
+    }
+
+    /// GIVEN an added entry whose icon another program then replaced, and
+    /// one icon that it replaced with a link, WHEN removed THEN the entry
+    /// and the remaining own icon go, the other file and the link stay as
+    /// they are, and no set-aside file is left.
+    #[test]
+    fn given_replaced_icons_when_removed_then_they_stay() {
+        let layout = Layout::new();
+        let places = layout.places();
+        assert_eq!(places.add().unwrap(), AppMenuState::Added);
+        fs::write(layout.icon("32x32"), b"another program's icon").unwrap();
+        let target = layout.data_home.join("elsewhere.png");
+        fs::write(&target, ICONS[1].1).unwrap();
+        fs::remove_file(layout.icon("128x128")).unwrap();
+        symlink(&target, layout.icon("128x128")).unwrap();
+        assert_eq!(places.remove().unwrap(), AppMenuState::Absent);
+        assert!(!layout.entry().exists());
+        assert!(!layout.icon("256x256").exists());
+        assert_eq!(
+            fs::read(layout.icon("32x32")).unwrap(),
+            b"another program's icon"
+        );
+        assert!(
+            fs::symlink_metadata(layout.icon("128x128"))
+                .unwrap()
+                .is_symlink()
+        );
+        assert_eq!(fs::read(&target).unwrap(), ICONS[1].1);
+        for size in ["32x32", "128x128"] {
+            assert_eq!(
+                names(layout.icon(size).parent().unwrap()),
+                [format!("{ICON_NAME}.png")]
+            );
+        }
+    }
+
+    /// GIVEN an applications folder that cannot be written WHEN added THEN
+    /// the add fails, and the icons that it wrote are removed again.
+    #[test]
+    fn given_an_entry_that_cannot_be_written_when_added_then_the_new_icons_go() {
+        let layout = Layout::new();
+        let places = layout.places();
+        let applications = layout.data_home.join("applications");
+        fs::create_dir_all(&applications).unwrap();
+        fs::set_permissions(&applications, fs::Permissions::from_mode(0o555)).unwrap();
+        // Root (or `CAP_DAC_OVERRIDE`) may write anyway: there is no failure
+        // to test then.
+        if fs::write(applications.join("probe"), b"").is_ok() {
+            fs::set_permissions(&applications, fs::Permissions::from_mode(0o755)).unwrap();
+            return;
+        }
+        let result = places.add();
+        fs::set_permissions(&applications, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(result.is_err());
+        for (size, _) in ICONS {
+            assert!(!layout.icon(size).exists(), "{size}");
+            assert!(
+                names(layout.icon(size).parent().unwrap()).is_empty(),
+                "{size}"
+            );
+        }
+        assert_eq!(places.state(), AppMenuState::Absent);
+    }
+
+    /// GIVEN a file that is not Persephone's, a link, and Persephone's own
+    /// file WHEN each is taken THEN only the own file is removed; the other
+    /// file and the link are back under their name, unchanged, and no
+    /// set-aside name is left.
+    #[test]
+    fn given_files_when_taken_then_only_the_own_file_goes() {
+        let layout = Layout::new();
+        let dir = layout.data_home.clone();
+        let own = |content: &[u8]| content == b"own";
+        fs::write(dir.join("a"), b"theirs").unwrap();
+        assert!(!take_own(&dir, "a", 16, own).unwrap());
+        assert_eq!(fs::read(dir.join("a")).unwrap(), b"theirs");
+        fs::write(dir.join("target"), b"own").unwrap();
+        symlink(dir.join("target"), dir.join("b")).unwrap();
+        assert!(!take_own(&dir, "b", 16, own).unwrap(), "a link is not read");
+        assert!(fs::symlink_metadata(dir.join("b")).unwrap().is_symlink());
+        fs::write(dir.join("c"), b"own").unwrap();
+        assert!(take_own(&dir, "c", 16, own).unwrap());
+        assert!(!take_own(&dir, "missing", 16, own).unwrap());
+        fs::create_dir(dir.join("d")).unwrap();
+        assert!(!take_own(&dir, "d", 16, own).unwrap(), "a folder");
+        assert!(dir.join("d").is_dir());
+        assert_eq!(names(&dir), ["a", "b", "d", "target"]);
+        assert_eq!(fs::read(dir.join("target")).unwrap(), b"own");
     }
 
     /// GIVEN a package's `Persephone.desktop` in a system data folder WHEN
@@ -621,7 +849,7 @@ mod tests {
         let dir = layout.data_home.join("applications");
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join(DESKTOP_FILE), "theirs").unwrap();
-        let error = put_file(&dir, DESKTOP_FILE, b"ours", false).unwrap_err();
+        let error = put_file(&dir, DESKTOP_FILE, b"ours").unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
         assert_eq!(
             fs::read_to_string(dir.join(DESKTOP_FILE)).unwrap(),
@@ -630,22 +858,42 @@ mod tests {
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
     }
 
-    /// GIVEN a partial file left by an earlier core with this process ID,
-    /// even a link to a file elsewhere, WHEN a file is put THEN the link is
-    /// removed, its target is unchanged, and the new file is written.
+    /// GIVEN other files in the folder, among them one and a link with the
+    /// partial name of this process that an earlier version used, WHEN a
+    /// file is put THEN the new file is written under its name, the other
+    /// files stay as they are, and no new name is left.
     #[test]
-    fn given_a_left_partial_link_when_put_then_its_target_is_unchanged() {
+    fn given_other_files_when_put_then_none_is_removed_or_replaced() {
         let layout = Layout::new();
         let dir = layout.data_home.join("applications");
         fs::create_dir_all(&dir).unwrap();
         let target = layout.data_home.join("victim");
         fs::write(&target, "keep").unwrap();
-        let partial = dir.join(format!(".{DESKTOP_FILE}.{}.partial", std::process::id()));
-        symlink(&target, &partial).unwrap();
-        put_file(&dir, DESKTOP_FILE, b"new", true).unwrap();
-        assert_eq!(fs::read_to_string(&target).unwrap(), "keep");
+        let old_partial = format!(".{DESKTOP_FILE}.{}.partial", std::process::id());
+        symlink(&target, dir.join(&old_partial)).unwrap();
+        fs::write(dir.join("other.desktop"), "theirs").unwrap();
+        put_file(&dir, DESKTOP_FILE, b"new").unwrap();
         assert_eq!(fs::read_to_string(dir.join(DESKTOP_FILE)).unwrap(), "new");
-        assert!(fs::symlink_metadata(&partial).is_err());
+        assert_eq!(fs::read_to_string(&target).unwrap(), "keep");
+        assert!(
+            fs::symlink_metadata(dir.join(&old_partial))
+                .unwrap()
+                .is_symlink()
+        );
+        assert_eq!(
+            fs::read_to_string(dir.join("other.desktop")).unwrap(),
+            "theirs"
+        );
+        let mut expected = vec![
+            old_partial,
+            DESKTOP_FILE.to_owned(),
+            "other.desktop".to_owned(),
+        ];
+        expected.sort();
+        assert_eq!(names(&dir), expected);
+        let first = random_name(DESKTOP_FILE, "partial").unwrap();
+        assert_ne!(first, random_name(DESKTOP_FILE, "partial").unwrap());
+        assert!(first.starts_with(".Persephone.desktop.") && first.ends_with(".partial"));
     }
 
     /// GIVEN `XDG_DATA_DIRS` values WHEN read THEN only absolute folders
@@ -687,6 +935,12 @@ mod tests {
         assert_eq!(
             data_dirs(Some(many.into()), home, appdir).len(),
             MAX_DATA_DIRS
+        );
+        let late = format!("{}/opt/share", "rel:".repeat(MAX_DATA_DIRS));
+        assert_eq!(
+            data_dirs(Some(late.into()), home, appdir),
+            default,
+            "an entry after the limit is not looked at"
         );
     }
 

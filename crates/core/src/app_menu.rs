@@ -21,7 +21,8 @@ pub const DESKTOP_FILE: &str = "Persephone.desktop";
 /// The entry's icon name. It is not the packages' `persephone-ui`, so the
 /// core never replaces a package's icons and removes only its own.
 pub const ICON_NAME: &str = "persephone-appimage";
-/// The line that marks an entry as Persephone's own.
+/// A line of the entry that tells a reader whose file it is. The whole
+/// exact text, not this line, makes a file Persephone's own ([`is_ours`]).
 pub const MARK: &str = "X-Persephone-AppImage=true";
 /// Longest AppImage path, in bytes (Linux `PATH_MAX`).
 pub const MAX_PATH_BYTES: usize = 4096;
@@ -162,16 +163,44 @@ fn string_value(text: &str) -> String {
     text.replace('\\', "\\\\")
 }
 
-/// Whether an entry's bytes carry Persephone's mark, on a line of its own.
+/// Whether an entry's bytes are exactly the text that [`entry`] makes for
+/// the path in the entry's own `TryExec` line. The mark line alone is not
+/// enough: a file with any other change is another program's, or one the
+/// user edited, and is never replaced or removed.
 pub fn is_ours(content: &[u8]) -> bool {
-    std::str::from_utf8(content).is_ok_and(|text| text.lines().any(|line| line == MARK))
+    std::str::from_utf8(content).is_ok_and(|text| {
+        text.lines()
+            .find_map(|line| line.strip_prefix("TryExec="))
+            .and_then(unescape_string)
+            .and_then(|path| entry(&path))
+            .is_some_and(|expected| expected == text)
+    })
 }
 
-/// What is at the user's `Persephone.desktop`.
+/// Undoes [`string_value`]: `\\` is one backslash. Any other escape is not
+/// one that Persephone writes.
+fn unescape_string(value: &str) -> Option<String> {
+    let mut text = String::with_capacity(value.len());
+    let mut chars = value.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if chars.next()? != '\\' {
+                return None;
+            }
+            text.push('\\');
+        } else {
+            text.push(c);
+        }
+    }
+    Some(text)
+}
+
+/// What is at a path that Persephone may write: the user's
+/// `Persephone.desktop`, or one of its icons.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Found {
     Missing,
-    /// A regular file of at most [`MAX_ENTRY_BYTES`], read whole.
+    /// A regular file within the read limit, read whole.
     Content(Vec<u8>),
     /// A link, a folder, a larger or unreadable file: another program's.
     Other,
@@ -354,28 +383,55 @@ mod tests {
         assert!(nameable("/tmp/ x.AppImage"), "inner spaces are quoted");
     }
 
-    /// GIVEN Persephone's own entry for this path, for another path, and
-    /// for this path with a changed line WHEN the state is read THEN it is
-    /// `added`, `outdated` and `outdated`.
+    /// GIVEN Persephone's own entry for this path and for another path WHEN
+    /// the state is read THEN it is `added` and `outdated`. GIVEN either
+    /// with any changed, added or removed line, or other line ends, THEN it
+    /// is `provided`: the mark line alone does not make a file Persephone's.
     #[test]
-    fn given_own_entries_when_read_then_only_the_exact_text_is_added() {
-        let own = entry(APP).unwrap().into_bytes();
+    fn given_own_entries_when_read_then_only_the_exact_text_is_ours() {
+        let own = entry(APP).unwrap();
         assert_eq!(
-            state(&Found::Content(own.clone()), false, APP),
+            state(&Found::Content(own.clone().into_bytes()), false, APP),
             AppMenuState::Added
         );
-        let other = entry("/opt/Persephone.AppImage").unwrap().into_bytes();
+        let other = entry("/opt/Persephone.AppImage").unwrap();
         assert_eq!(
-            state(&Found::Content(other), false, APP),
+            state(&Found::Content(other.clone().into_bytes()), false, APP),
             AppMenuState::Outdated
         );
-        let edited = String::from_utf8(own)
-            .unwrap()
-            .replace("Terminal=false", "Terminal=true");
-        assert_eq!(
-            state(&Found::Content(edited.into_bytes()), false, APP),
-            AppMenuState::Outdated
-        );
+        for edited in [
+            own.replace("Terminal=false", "Terminal=true"),
+            own.replace("Exec=\"", "Exec=env X=1 \""),
+            other.replace("TryExec=/opt", "TryExec=/srv"),
+            format!("{own}Hidden=true\n"),
+            own.replace("Comment=Matrix desktop client\n", ""),
+            own.replace('\n', "\r\n"),
+            format!("[Desktop Entry]\nName=Persephone\nExec=x\n{MARK}\n"),
+        ] {
+            assert!(!is_ours(edited.as_bytes()), "{edited}");
+            assert_eq!(
+                state(&Found::Content(edited.into_bytes()), false, APP),
+                AppMenuState::Provided
+            );
+        }
+    }
+
+    /// GIVEN the own entry for paths with backslashes and other hostile
+    /// characters WHEN read back THEN it is Persephone's; GIVEN a `TryExec`
+    /// with an escape that Persephone never writes THEN it is not.
+    #[test]
+    fn given_hostile_paths_when_the_own_entry_is_read_back_then_it_is_ours() {
+        for path in [
+            "/tmp/back\\slash\\\\/x.AppImage",
+            "/tmp/\"q\"/`id`/$x/%f.AppImage",
+            "/tmp/caf\u{e9}/x.AppImage",
+        ] {
+            assert!(is_ours(entry(path).unwrap().as_bytes()), "{path}");
+        }
+        let own = entry(APP).unwrap();
+        let escaped = own.replace("TryExec=/home", "TryExec=\\s/home");
+        assert!(!is_ours(escaped.as_bytes()));
+        assert_eq!(unescape_string("a\\"), None, "a lone backslash at the end");
     }
 
     /// GIVEN a package's entry in a system folder, or a user file without

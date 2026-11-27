@@ -108,13 +108,20 @@ these states:
   offers "Add to app menu".
 * `added`: Persephone's own entry for this AppImage. The page offers
   "Remove from app menu".
-* `outdated`: Persephone's own entry, but for another path or from another
-  version. The page offers to update or remove it.
+* `outdated`: Persephone's own entry, but for another path. The page offers
+  to update or remove it.
 * `provided`: a `Persephone.desktop` that Persephone did not write: a
-  package in an `$XDG_DATA_DIRS` folder, or a user file without
-  Persephone's mark (also a link or a file over 16 KiB). The page offers
-  nothing. A user entry with the same desktop ID would hide the package's
-  entry, so the menu would start the AppImage instead of the package.
+  package in an `$XDG_DATA_DIRS` folder, or a user file that is not exactly
+  Persephone's text (also an edited copy, a link or a file over 16 KiB).
+  The page offers nothing. A user entry with the same desktop ID would hide
+  the package's entry, so the menu would start the AppImage instead of the
+  package.
+
+A user file is Persephone's own only when it is exactly the text below for
+the path in its own `TryExec` line. The `X-Persephone-AppImage=true` line
+alone is not enough, so the core never replaces or removes a copy that the
+user or another program changed. A later version that changes the text must
+also accept the earlier exact texts.
 
 The folders inside `APPDIR` do not count. The AppImage's GTK hook
 (`apprun-hooks/linuxdeploy-plugin-gtk.sh`) puts `$APPDIR/usr/share` first in
@@ -134,9 +141,12 @@ The core then writes, under `$XDG_DATA_HOME` (else `~/.local/share`):
 * the icons `icons/hicolor/{32x32,128x128,256x256}/apps/persephone-appimage.png`,
   first. They are the bundle's PNG files, compiled into the core, so no
   file is read from the image or the disk. The name is not the packages'
-  `persephone-ui`, so the core never replaces their icons and removes only
-  its own. It then sets the time of the `hicolor` folder, so an
-  out-of-date `icon-theme.cache` there is not used;
+  `persephone-ui`. An icon is written only where no file is, and one that
+  is already exactly Persephone's icon stays. Another file at one of the
+  three places stops the add before anything is written, and the page
+  shows that the entry could not be changed. The core then sets the time of
+  the `hicolor` folder, so an out-of-date `icon-theme.cache` there is not
+  used;
 * then `applications/Persephone.desktop`:
 
   ```ini
@@ -161,20 +171,35 @@ The core then writes, under `$XDG_DATA_HOME` (else `~/.local/share`):
   hide the entry when the AppImage is no longer there; KWin still finds the
   file and its icon.
 
-Each file is written to a new temporary file in the same folder (created
-with `O_EXCL`, mode `0644`), synced, and renamed over the target. So a reader
-sees the old file or the new one, never part of one, and a link at the
-target is replaced, not followed. Existing entries are read with
-`O_NOFOLLOW`, at most 16 KiB. The core makes the folders when they are
-missing. It does not run `update-desktop-database`, `kbuildsycoca6` or any
-other program; the desktops watch these folders. A window that is already
-open keeps the generic icon until Persephone starts again, because KWin reads
-the icon when the window gets its app ID.
+The core writes a file only where no file is, and removes only a file that
+is exactly its own:
 
-"Remove" asks no question: it deletes only `Persephone.desktop` when that
-file has the line `X-Persephone-AppImage=true`, and the three
-`persephone-appimage.png` icons. It never deletes a package's file or
-another program's file.
+* Each file is written to a new file with a random name in the same folder
+  (`O_EXCL`, mode `0644`), synced, and hard-linked to its name. The link
+  fails when a file appeared there meanwhile, and that file stays. So a
+  reader never sees part of a file, and no file is replaced.
+* A file is removed (also an outdated entry, before its new one is written)
+  only after it was renamed to a random name in the same folder and found
+  to be exactly Persephone's: the exact entry text, or the exact icon bytes.
+  So the file that is checked is the one that is removed, also when another
+  program writes the name meanwhile. Anything else is linked back under its
+  name. A folder at the name is not moved.
+* When an add ends without Persephone's entry (a failed write, or a file
+  that appeared at the entry's name), the icons that this add wrote are
+  removed again in the same way.
+
+Existing files are read with `O_NOFOLLOW` and a size limit (16 KiB for the
+entry, the icon's own size for an icon), and no link is followed. The core
+makes the folders when they are missing. It does not run
+`update-desktop-database`, `kbuildsycoca6` or any other program; the
+desktops watch these folders. A window that is already open keeps the generic
+icon until Persephone starts again, because KWin reads the icon when the
+window gets its app ID.
+
+"Remove" asks no question: it removes `Persephone.desktop` when it is
+exactly Persephone's, and then each `persephone-appimage.png` icon that is
+exactly Persephone's. It never removes a package's file or another
+program's file, also one that replaced Persephone's file.
 
 ### Dolphin's file icon
 
@@ -221,6 +246,11 @@ entry does not change Dolphin's file icon.
 * An entry for a moved or deleted AppImage stays until the user updates or
   removes it. Its icon still works, and `TryExec` hides it from menus.
 * The core binary carries about 14 KiB of PNG icons on Linux.
+* Another file named `persephone-appimage.png` in the user's icon folders
+  stops the add, and an entry that the user edited can no longer be updated
+  or removed from Settings. Both are left to the user.
+* A file system without hard links cannot take the entry; the add then
+  fails and writes nothing that stays.
 * AppImageLauncher or Gear Lever can still add their own entries beside it.
   The menu can then list Persephone twice.
 
