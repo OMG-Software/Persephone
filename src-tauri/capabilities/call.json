@@ -15,6 +15,7 @@
     "allow-call-devices",
     "allow-set-call-devices",
     "allow-call-video-effect",
+    "allow-call-video-quality",
     "allow-call-stats",
     "allow-call-stats-read",
     "allow-close-call-window",

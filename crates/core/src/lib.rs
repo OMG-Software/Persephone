@@ -1563,6 +1563,7 @@ impl Core {
                 }
                 self.call_video_effect(*effect, *mirror)
             }
+            Call::CallVideoQuality { quality } => self.call_video_quality(*quality),
             Call::CallStats { on } => self.call_stats(*on),
             Call::CallCamera { on } => self.call_camera(*on),
             Call::CallScreen { on } => self.call_screen(*on),
@@ -2863,6 +2864,59 @@ impl Core {
         ok(&calls::status::status(&self.calls.state()))
     }
 
+    /// Sets the own camera's send resolution (ADR-0070): saved in the
+    /// profile's call device record for later calls, then given to a running
+    /// or joining call, which restarts a camera that is on. A choice that
+    /// equals the saved one changes nothing, so the camera does not restart
+    /// for it. A record that cannot be read is not replaced; the reply is
+    /// then `unavailable`, and nothing changes. The save comes first, so a
+    /// join that read the record before it gets the value from the
+    /// controller (`CallController::video_asked`).
+    fn call_video_quality(&self, quality: persephone_contracts::CallVideoQuality) -> Outcome {
+        if let Err(code) = self.calls_open() {
+            return Outcome::Error(code);
+        }
+        let worker = calls::devices::worker_quality(quality);
+        let changed = if self.session.is_configured() {
+            let lease = match self.session.admit() {
+                Ok(lease) => lease,
+                Err(session::AdmissionError::Locked) => return Outcome::Error(ErrorCode::Locked),
+                Err(session::AdmissionError::Saturated) => {
+                    return Outcome::Error(ErrorCode::LimitExceeded);
+                }
+            };
+            let stores = lease.stores();
+            let saved = stores.block_on(async {
+                let Ok(mut selection) = calls::devices::load(stores).await else {
+                    return Err(ErrorCode::Unavailable);
+                };
+                let before = selection.video_quality();
+                selection.video_quality = Some(quality);
+                if calls::devices::save(stores, &selection).await {
+                    Ok(before != quality)
+                } else {
+                    Err(ErrorCode::Internal)
+                }
+            });
+            match saved {
+                Ok(changed) => changed,
+                Err(code) => return Outcome::Error(code),
+            }
+        } else {
+            // Without a profile nothing is saved: the value asked last, else
+            // Auto, is the one in use.
+            self.calls
+                .asked_video_quality()
+                .unwrap_or(persephone_call_protocol::VideoQuality::Auto)
+                != worker
+        };
+        if changed {
+            // `NotInCall` is no failure: the saved value is for the next call.
+            let _ = self.calls.set_video_quality(worker);
+        }
+        ok(&calls::status::status(&self.calls.state()))
+    }
+
     /// Turns the call's technical details on or off (ADR-0066). They are
     /// read and sent only while on, which needs a call; turning them off
     /// also drops a reading that waits.
@@ -2993,6 +3047,7 @@ impl Core {
         let volume = selection.volume();
         let (auto_level, mic_gain) = (selection.auto_level(), selection.mic_gain());
         let (effect, mirror) = (selection.effect(), selection.mirror());
+        let video_quality = selection.video_quality();
         let devices = persephone_contracts::CallDevices {
             supported: listing.supported,
             recording: listing.recording.into_iter().map(device).collect(),
@@ -3006,6 +3061,7 @@ impl Core {
             mic_gain,
             effect,
             mirror,
+            video_quality,
             background_effects: listing.background_effects,
             unreadable,
         };
@@ -3054,6 +3110,7 @@ impl Core {
             mic_gain: None,
             effect: None,
             mirror: None,
+            video_quality: None,
         };
         if !selection.is_valid() {
             return Outcome::Error(ErrorCode::InvalidArgument);
@@ -3069,26 +3126,36 @@ impl Core {
             }
         };
         let stores = lease.stores();
+        let mut camera_changed = false;
         if stores.block_on(async {
-            // The volume, the microphone settings and the video effect are
-            // kept.
+            // The volume, the microphone settings, the video effect and the
+            // send resolution are kept.
             if let Ok(saved) = calls::devices::load(stores).await {
                 selection.volume = saved.volume;
                 selection.auto_level = saved.auto_level;
                 selection.mic_gain = saved.mic_gain;
                 selection.effect = saved.effect;
                 selection.mirror = saved.mirror;
+                selection.video_quality = saved.video_quality;
+                // A record that cannot be read gives no old camera to
+                // compare with, so it restarts nothing.
+                camera_changed = saved.camera != selection.camera;
             }
             calls::devices::save(stores, &selection).await
         }) {
-            // A running call moves to the new microphone and speaker at once,
-            // and opens the new camera at its next camera start (ADR-0059);
-            // without a call the choice waits for the next one.
+            // A running call moves to the new microphone and speaker at once
+            // (ADR-0059). A camera that is on or starting restarts with the
+            // new camera: the call task sends the choice before the
+            // camera-on (ADR-0070). Without a call the choice waits for the
+            // next one.
             let _ = self.calls.set_devices(
                 selection.recording.as_deref(),
                 selection.playout.as_deref(),
                 selection.camera.as_deref(),
             );
+            if camera_changed {
+                let _ = self.calls.restart_camera();
+            }
             Outcome::Ok(serde_json::Value::Null)
         } else {
             Outcome::Error(ErrorCode::Internal)
@@ -4436,6 +4503,7 @@ mod tests {
             mic_gain: 100,
             effect: persephone_contracts::CallVideoEffect::default(),
             mirror: false,
+            video_quality: persephone_contracts::CallVideoQuality::Auto,
             background_effects: false,
             unreadable: false,
         };
