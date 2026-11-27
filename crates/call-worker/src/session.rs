@@ -649,7 +649,7 @@ fn sound_unchanged_here(
     cfg!(target_os = "linux") && joined.0 == *recording && joined.1 == *playout
 }
 
-/// What `Call::change_sound` does with a sound change when the call has a
+/// What `Call::change_devices` does with a sound change when the call has a
 /// sound server connection (Linux, ADR-0049).
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -749,7 +749,7 @@ fn tries_due(waiting: bool, session_generation: u64, accepted: u64) -> bool {
     waiting && session_generation == accepted
 }
 
-/// One sound change through `session` (`Call::change_sound` on Linux). The
+/// One sound change through `session` (`set_devices` on Linux). The
 /// accepted choice again (a camera-only change) does not reach the session
 /// and has no sound error (`sound_route`). Any other choice goes to the
 /// session on a blocking thread; the deadlines start here, so a task that
@@ -785,10 +785,33 @@ async fn switch_sound<S: SoundSwitch>(
     }
 }
 
+/// A `SetDevices` on a call with a sound server connection
+/// (`Call::change_devices` on Linux). The camera choice is kept for the next
+/// camera start whatever the sound answer; the sound choice goes through
+/// `switch_sound`. Gives the answer for the core and the generation of a
+/// change that the session accepted in time.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+async fn set_devices<S: SoundSwitch>(
+    session: Arc<S>,
+    camera_device: &mut Option<String>,
+    accepted: &mut Option<(Option<String>, Option<String>)>,
+    (recording, playout, camera): (Option<String>, Option<String>, Option<String>),
+    wait: Duration,
+) -> (FromWorker, Option<u64>) {
+    *camera_device = camera;
+    let answer = switch_sound(session, accepted, (recording, playout), wait).await;
+    (
+        FromWorker::DevicesSet {
+            failure: answer.failure,
+        },
+        answer.generation,
+    )
+}
+
 /// Moves the running call to other devices (`SetDevices`, ADR-0059). Both
 /// choices are checked before either device changes; `apply_switch` then
 /// changes them. On Linux libwebrtc has no device IDs, so a change goes
-/// through the call's sound server connection (`Call::change_sound`); this
+/// through the call's sound server connection (`Call::change_devices`); this
 /// function is only the fallback where that connection could not open
 /// (ADR-0049), and a change then applies to the next call only.
 fn switch_devices(
@@ -2141,7 +2164,7 @@ impl Call<'_> {
 
     /// Starts the bounded tries after an event that may open a stream: remote
     /// audio subscribed, the own microphone published or unmuted, or a
-    /// device change that left a target waiting (`change_sound`). libwebrtc
+    /// device change that left a target waiting (`change_devices`). libwebrtc
     /// may open its stream a little later. When nothing waits, no timer runs.
     /// A stream that is still not open after the tries keeps waiting without
     /// a report, and the next such event starts the tries again.
@@ -2239,16 +2262,18 @@ impl Call<'_> {
         Vec::new()
     }
 
-    /// Applies a microphone and speaker choice during the call and gives the
-    /// failure, if any. On Linux the sound server connection moves the call's
-    /// own streams on a blocking thread (ADR-0049); without it, only the
-    /// join's own choice is accepted. A change that leaves a target waiting
-    /// starts the tries (`sound_trigger`).
-    async fn change_sound(
+    /// Applies a `SetDevices` during the call and gives its answer. The
+    /// camera choice applies from the next camera start. On Linux the sound
+    /// server connection moves the call's own streams on a blocking thread
+    /// (ADR-0049, `set_devices`); without it, only the join's own sound
+    /// choice is accepted. A change that leaves a target waiting starts the
+    /// tries (`sound_trigger`).
+    async fn change_devices(
         &mut self,
         recording: Option<String>,
         playout: Option<String>,
-    ) -> Option<FailureCode> {
+        camera: Option<String>,
+    ) -> FromWorker {
         #[cfg(target_os = "linux")]
         if let Some(pulse) = self.pulse.clone() {
             // The accepted choice again (a camera-only change) is no sound
@@ -2256,27 +2281,36 @@ impl Call<'_> {
             // defaults: `Session::switch` then answers `Unsupported`. The
             // loop waits for the change's deadlines to end, plus a grace.
             let wait = crate::pulse::CHANGE_TIMEOUT + crate::pulse::REPORT_GRACE;
-            let answer =
-                switch_sound(pulse, &mut self.accepted_sound, (recording, playout), wait).await;
-            if let Some(generation) = answer.generation {
+            let (answer, generation) = set_devices(
+                pulse,
+                &mut self.camera_device,
+                &mut self.accepted_sound,
+                (recording, playout, camera),
+                wait,
+            )
+            .await;
+            if let Some(generation) = generation {
                 // Waiting targets are tried only for this change, and soon,
                 // also when no sound event follows.
                 self.sound_generation = generation;
                 self.sound_trigger();
             }
-            return answer.failure;
+            return answer;
         }
-        if sound_unchanged_here(&self.joined_sound, &recording, &playout) {
-            return None;
-        }
-        switch_devices(
-            self.audio,
-            &self.media_defaults,
-            &mut self.sound_devices,
-            recording.as_deref(),
-            playout.as_deref(),
-        )
-        .err()
+        self.camera_device = camera;
+        let failure = if sound_unchanged_here(&self.joined_sound, &recording, &playout) {
+            None
+        } else {
+            switch_devices(
+                self.audio,
+                &self.media_defaults,
+                &mut self.sound_devices,
+                recording.as_deref(),
+                playout.as_deref(),
+            )
+            .err()
+        };
+        FromWorker::DevicesSet { failure }
     }
 
     /// Applies a new video effect, at once for a running camera and for
@@ -3633,12 +3667,11 @@ impl Call<'_> {
                 playout,
                 camera,
             } => {
-                self.camera_device = camera;
-                let failure = self.change_sound(recording, playout).await;
+                let answer = self.change_devices(recording, playout, camera).await;
                 // A device change may reconfigure the capture path, so the
                 // microphone settings are applied again (ADR-0062).
                 self.apply_microphone();
-                Ok(vec![FromWorker::DevicesSet { failure }])
+                Ok(vec![answer])
             }
             ToWorker::SetVideoEffect { effect } => Ok(vec![self.set_video_effect(effect)]),
             // ADR-0070: the quality applies at the next camera start; a camera
@@ -5032,6 +5065,59 @@ mod tests {
             }
         );
         assert_eq!(accepted, Some(real));
+    }
+
+    /// GIVEN a call that joined on "System default" with a session whose
+    /// defaults read failed (every switch answers `Unsupported`) WHEN a
+    /// `SetDevices` changes only the camera THEN the camera is kept for the
+    /// next camera start, the session is not asked, and `DevicesSet` has no
+    /// sound error. WHEN a `SetDevices` also changes the speaker THEN its
+    /// camera is kept too, `DevicesSet` is `Unsupported`, and no generation
+    /// is taken.
+    #[tokio::test]
+    async fn given_unknown_defaults_when_set_devices_changes_the_camera_then_it_is_kept() {
+        let wait = Duration::from_secs(5);
+        let unknown = FakeSwitch::new(Err(FailureCode::Unsupported), Duration::ZERO);
+        let mut camera = Some("v4l2:old".to_owned());
+        let mut accepted = Some((None, None));
+
+        let answer = set_devices(
+            unknown.clone(),
+            &mut camera,
+            &mut accepted,
+            (None, None, Some("v4l2:new".to_owned())),
+            wait,
+        )
+        .await;
+        assert_eq!(answer, (FromWorker::DevicesSet { failure: None }, None));
+        assert_eq!(camera.as_deref(), Some("v4l2:new"));
+        assert_eq!(unknown.calls(), 0);
+        assert_eq!(accepted, Some((None, None)));
+
+        let answer = set_devices(
+            unknown.clone(),
+            &mut camera,
+            &mut accepted,
+            (
+                None,
+                Some("pulse:spk".to_owned()),
+                Some("v4l2:third".to_owned()),
+            ),
+            wait,
+        )
+        .await;
+        assert_eq!(
+            answer,
+            (
+                FromWorker::DevicesSet {
+                    failure: Some(FailureCode::Unsupported)
+                },
+                None
+            )
+        );
+        assert_eq!(camera.as_deref(), Some("v4l2:third"));
+        assert_eq!(unknown.calls(), 1);
+        assert_eq!(accepted, Some((None, None)));
     }
 
     /// GIVEN waiting targets WHEN the session's generation is the one the
