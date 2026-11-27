@@ -1901,8 +1901,10 @@ mod tests {
         // each kind is reported as AudioDevice and both targets are dropped.
         let server = Fake::with(vec![], vec![]);
         server.unreadable.set(true);
-        let mut devices = Devices::default();
-        devices.pending = [Some("mic-b".to_owned()), Some("spk-b".to_owned())];
+        let mut devices = Devices {
+            pending: [Some("mic-b".to_owned()), Some("spk-b".to_owned())],
+            ..Devices::default()
+        };
         assert_eq!(
             run_pending(&server, &mut devices, false, deadlines()),
             PendingRun {
@@ -1956,8 +1958,10 @@ mod tests {
         // and only the microphone is reported.
         let mut server = Fake::with(vec![at(1, "mic-a"), at(4, "mic-a")], vec![at(2, "spk-a")]);
         server.refuse = vec![(4, "mic-b")];
-        let mut devices = Devices::default();
-        devices.pending = [Some("mic-b".to_owned()), Some("spk-b".to_owned())];
+        let mut devices = Devices {
+            pending: [Some("mic-b".to_owned()), Some("spk-b".to_owned())],
+            ..Devices::default()
+        };
         let run = run_pending(&server, &mut devices, false, deadlines());
         assert_eq!(
             *server.sent.borrow(),
