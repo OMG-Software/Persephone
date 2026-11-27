@@ -116,6 +116,11 @@ these states:
   nothing. A user entry with the same desktop ID would hide the package's
   entry, so the menu would start the AppImage instead of the package.
 
+The folders inside `APPDIR` do not count. The AppImage's GTK hook
+(`apprun-hooks/linuxdeploy-plugin-gtk.sh`) puts `$APPDIR/usr/share` first in
+the process's `XDG_DATA_DIRS`. The image's own `Persephone.desktop` is there,
+but the desktop does not read that folder, so it is not in the menu.
+
 ### The question and the write
 
 "Add" (and "Update") asks in the core's own window first. The window shows

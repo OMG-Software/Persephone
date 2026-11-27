@@ -88,9 +88,10 @@ impl Places {
     /// checked AppImage and the user has a data folder.
     fn from_env() -> Option<Self> {
         let exe = env::current_exe().ok()?;
-        let appimage = checked_appimage(env::var_os("APPIMAGE"), env::var_os("APPDIR"), &exe)?;
+        let (appimage, appdir) =
+            checked_appimage(env::var_os("APPIMAGE"), env::var_os("APPDIR"), &exe)?;
         let data_home = super::data_home(env::var_os("XDG_DATA_HOME"), env::var_os("HOME"))?;
-        let data_dirs = data_dirs(env::var_os("XDG_DATA_DIRS"), &data_home);
+        let data_dirs = data_dirs(env::var_os("XDG_DATA_DIRS"), &data_home, &appdir);
         Some(Self {
             appimage,
             data_home,
@@ -165,15 +166,16 @@ impl Places {
     }
 }
 
-/// The AppImage path when the core runs from it: `APPIMAGE` is
-/// [`app_menu::nameable`] and its own canonical path, the file there is an
-/// executable type 2 AppImage, and `exe` (the core's own canonical path) is
-/// inside `APPDIR`, the image's mount folder, which is canonical too.
+/// The AppImage path and its mount folder when the core runs from it:
+/// `APPIMAGE` is [`app_menu::nameable`] and its own canonical path, the file
+/// there is an executable type 2 AppImage, and `exe` (the core's own
+/// canonical path) is inside `APPDIR`, the image's mount folder, which is
+/// canonical too.
 fn checked_appimage(
     appimage: Option<OsString>,
     appdir: Option<OsString>,
     exe: &Path,
-) -> Option<String> {
+) -> Option<(String, PathBuf)> {
     let appimage = appimage?.into_string().ok()?;
     if !app_menu::nameable(&appimage) {
         return None;
@@ -186,7 +188,7 @@ fn checked_appimage(
     if !appdir.is_absolute() || fs::canonicalize(&appdir).ok()? != appdir {
         return None;
     }
-    (exe != appdir && exe.starts_with(&appdir)).then_some(appimage)
+    (exe != appdir && exe.starts_with(&appdir)).then_some((appimage, appdir))
 }
 
 /// Whether `path`, opened without following a link, is a regular file with
@@ -211,8 +213,11 @@ fn is_appimage_file(path: &Path) -> bool {
 }
 
 /// The absolute folders of `$XDG_DATA_DIRS` (else the XDG default), at most
-/// [`MAX_DATA_DIRS`], without the user's own data folder.
-fn data_dirs(value: Option<OsString>, data_home: &Path) -> Vec<PathBuf> {
+/// [`MAX_DATA_DIRS`], without the user's own data folder and without the
+/// folders inside the image's mount folder `appdir`. The AppImage's GTK hook
+/// puts `$APPDIR/usr/share` first in this process's list; the image's own
+/// `Persephone.desktop` there is not in the desktop's menu.
+fn data_dirs(value: Option<OsString>, data_home: &Path, appdir: &Path) -> Vec<PathBuf> {
     let listed: Vec<PathBuf> = value
         .filter(|value| !value.is_empty())
         .map(|value| env::split_paths(&value).collect())
@@ -226,7 +231,7 @@ fn data_dirs(value: Option<OsString>, data_home: &Path) -> Vec<PathBuf> {
         ]
     };
     dirs.into_iter()
-        .filter(|dir| dir.is_absolute() && dir != data_home)
+        .filter(|dir| dir.is_absolute() && dir != data_home && !dir.starts_with(appdir))
         .take(MAX_DATA_DIRS)
         .collect()
 }
@@ -382,6 +387,7 @@ mod tests {
                 Some(self.appdir.as_os_str().to_owned()),
                 &self.exe,
             )
+            .map(|(appimage, _)| appimage)
         }
 
         fn entry(&self) -> PathBuf {
@@ -398,14 +404,45 @@ mod tests {
     }
 
     /// GIVEN the core inside the mount folder of a canonical, executable
-    /// type 2 AppImage WHEN checked THEN its path is used.
+    /// type 2 AppImage WHEN checked THEN its path and the mount folder are
+    /// used.
     #[test]
     fn given_a_mounted_appimage_when_checked_then_its_path_is_used() {
         let layout = Layout::new();
         assert_eq!(
-            layout.check(&layout.appimage).as_deref(),
-            layout.appimage.to_str()
+            checked_appimage(
+                Some(layout.appimage.clone().into()),
+                Some(layout.appdir.clone().into()),
+                &layout.exe,
+            ),
+            Some((
+                layout.appimage.to_str().unwrap().to_owned(),
+                layout.appdir.clone()
+            ))
         );
+    }
+
+    /// GIVEN the image's own `Persephone.desktop` under `$APPDIR/usr/share`,
+    /// which the AppImage's GTK hook puts first in `XDG_DATA_DIRS`, WHEN the
+    /// state is read THEN that folder does not count and the state is
+    /// `absent`.
+    #[test]
+    fn given_the_images_own_entry_when_read_then_it_does_not_count() {
+        let layout = Layout::new();
+        let inside = layout.appdir.join("usr/share");
+        fs::create_dir_all(inside.join("applications")).unwrap();
+        fs::write(
+            inside.join("applications").join(DESKTOP_FILE),
+            "[Desktop Entry]\nName=Persephone\nExec=AppRun\n",
+        )
+        .unwrap();
+        let listed = env::join_paths([&inside, &layout.system]).unwrap();
+        let places = Places {
+            data_dirs: data_dirs(Some(listed), &layout.data_home, &layout.appdir),
+            ..layout.places()
+        };
+        assert_eq!(places.data_dirs, [layout.system.clone()]);
+        assert_eq!(places.state(), AppMenuState::Absent);
     }
 
     /// GIVEN no APPIMAGE, a relative, non-canonical or linked path, a file
@@ -612,27 +649,45 @@ mod tests {
     }
 
     /// GIVEN `XDG_DATA_DIRS` values WHEN read THEN only absolute folders
-    /// other than the user's own count, an unset, empty or wholly relative
-    /// value gives the XDG default, and the list is bounded.
+    /// other than the user's own and outside the image's mount folder count,
+    /// an unset, empty or wholly relative value gives the XDG default, and
+    /// the list is bounded.
     #[test]
     fn given_data_dirs_values_when_read_then_they_follow_the_xdg_rules() {
         let home = Path::new("/home/a/.local/share");
+        let appdir = Path::new("/tmp/.mount_Persep");
         let default = vec![
             PathBuf::from("/usr/local/share"),
             PathBuf::from("/usr/share"),
         ];
-        assert_eq!(data_dirs(None, home), default);
-        assert_eq!(data_dirs(Some("".into()), home), default);
-        assert_eq!(data_dirs(Some("rel:other".into()), home), default);
+        assert_eq!(data_dirs(None, home, appdir), default);
+        assert_eq!(data_dirs(Some("".into()), home, appdir), default);
+        assert_eq!(data_dirs(Some("rel:other".into()), home, appdir), default);
         assert_eq!(
             data_dirs(
                 Some("/opt/share:rel:/home/a/.local/share:/usr/share".into()),
-                home
+                home,
+                appdir
             ),
             [PathBuf::from("/opt/share"), PathBuf::from("/usr/share")]
         );
+        assert_eq!(
+            data_dirs(
+                Some("/tmp/.mount_Persep/usr/share:/tmp/.mount_Persepx/share:/usr/share".into()),
+                home,
+                appdir
+            ),
+            [
+                PathBuf::from("/tmp/.mount_Persepx/share"),
+                PathBuf::from("/usr/share")
+            ],
+            "only folders inside the mount folder are left out"
+        );
         let many = vec!["/d"; MAX_DATA_DIRS + 5].join(":");
-        assert_eq!(data_dirs(Some(many.into()), home).len(), MAX_DATA_DIRS);
+        assert_eq!(
+            data_dirs(Some(many.into()), home, appdir).len(),
+            MAX_DATA_DIRS
+        );
     }
 
     /// GIVEN the compiled icons THEN each is a PNG of its folder's size, so
