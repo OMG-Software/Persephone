@@ -113,7 +113,12 @@ sharing: boolean,
  * Its microphone is muted, or it sends no sound (ADR-0059). Its own
  * claim: shown as a hint only.
  */
-muted: boolean, };
+muted: boolean, 
+/**
+ * It said it is deafened: it hears nobody (ADR-0071). Its own claim:
+ * shown as a hint only.
+ */
+deafened: boolean, };
 
 export type CallParticipantLevel = { userId: string, deviceId: string, level: number, };
 

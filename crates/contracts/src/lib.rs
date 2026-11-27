@@ -2459,6 +2459,10 @@ pub struct CallParticipant {
     /// claim: shown as a hint only.
     #[serde(default)]
     pub muted: bool,
+    /// It said it is deafened: it hears nobody (ADR-0071). Its own claim:
+    /// shown as a hint only.
+    #[serde(default)]
+    pub deafened: bool,
 }
 
 /// The top of a call sound level meter (ADR-0055): 0 dBFS. 0 is -60 dBFS
@@ -3541,6 +3545,7 @@ mod personal_contract_tests {
         )
         .unwrap();
         assert!(!older.participants[0].muted);
+        assert!(!older.participants[0].deafened);
         assert_eq!(older.device_change, None);
         for wire in [
             r#"{"phase":"idle","roomId":null,"muted":false,"deafened":false,"volume":100,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[],"token":"x"}"#,

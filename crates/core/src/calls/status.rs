@@ -117,6 +117,7 @@ pub fn status(state: &CallState) -> CallStatus {
                     keyed: p.keyed,
                     sharing: p.sharing,
                     muted: p.muted,
+                    deafened: p.deafened,
                 })
                 .collect(),
             ended: None,
@@ -535,6 +536,7 @@ mod tests {
             keyed: true,
             sharing: true,
             muted: true,
+            deafened: true,
         };
         let many = vec![participant; CALL_PARTICIPANTS_MAX + 5];
         let active = status(&CallState::Active {
@@ -572,6 +574,7 @@ mod tests {
             Some(persephone_contracts::CallDeviceChange::NotFound)
         );
         assert!(active.participants.iter().all(|p| p.muted));
+        assert!(active.participants.iter().all(|p| p.deafened));
         assert!(!CallStatus::idle().ring_declined);
         assert_eq!(active.camera, CallCamera::On);
         assert_eq!(active.screen, CallScreen::On);

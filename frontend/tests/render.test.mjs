@@ -311,12 +311,12 @@ test('GIVEN an active call and a sound level WHEN the call bar renders THEN a me
 
 test('GIVEN a call with a camera on and one off WHEN the call window renders THEN each device has a cell and a roster row with a meter and a mute mark', async () => {
   const { default: CallWindow } = await vite.ssrLoadModule('/src/CallWindow.svelte');
-  const person = (userId, deviceId, muted) => ({ userId, deviceId, speaking: false, reachable: true, keyed: true, sharing: false, muted });
+  const person = (userId, deviceId, muted, deafened = false) => ({ userId, deviceId, speaking: false, reachable: true, keyed: true, sharing: false, muted, deafened });
   const hostile = '@<img src=x onerror=alert(1)>:s';
   const initialStatus = {
     phase: 'active', roomId: '!r:s', muted: true, deafened: false, volume: 100, ended: null, joinError: null,
     camera: 'off', screen: 'off', ringDeclined: false, deviceChange: null,
-    participants: [person('@a:s', 'A', false), person(hostile, 'B', true)],
+    participants: [person('@a:s', 'A', false), person(hostile, 'B', true, true)],
     video: [{ tile: 2, participant: { userId: '@a:s', deviceId: 'A' }, own: false, stream: 3 }]
   };
   const { body: html } = render(CallWindow, { props: { initialStatus } });
@@ -335,6 +335,8 @@ test('GIVEN a call with a camera on and one off WHEN the call window renders THE
   assert.match(roster, /aria-labelledby="call-roster-name-1"/);
   // Muted: you and B, in the grid and in the roster.
   assert.equal((html.match(/aria-label="Microphone off"/g) ?? []).length, 4);
+  // Deafened: B only, in the grid and in the roster, beside the mic mark.
+  assert.equal((html.match(/aria-label="Deafened"/g) ?? []).length, 2);
   // User IDs are inert text.
   assert.match(html, /&lt;img/);
   assert.doesNotMatch(html, /<img\b/i);

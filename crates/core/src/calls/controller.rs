@@ -16,6 +16,7 @@
 //! does the same for a lock, a sign-out or any other end of the session.
 
 use super::alone::Alone;
+use super::deafen::{self, IncomingDeafen};
 use super::delayed::{DelayedLeave, RestartHealth};
 use super::encryption_keys::{self, IncomingKey};
 use super::incoming::{self, Candidate};
@@ -60,7 +61,7 @@ use persephone_contracts::{
     CallVideoTile,
 };
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     future::Future,
     sync::{
         Arc, Mutex, MutexGuard,
@@ -203,6 +204,8 @@ pub struct Participant {
     /// Its microphone is muted or it has none (ADR-0059); a hint from the
     /// sender.
     pub muted: bool,
+    /// It said it is deafened (ADR-0071); a hint from the sender.
+    pub deafened: bool,
 }
 
 /// The call as the page sees it. It holds no secret and no peer text.
@@ -430,6 +433,11 @@ struct View {
     /// while the connection is the one that speaks for the member. At most
     /// `MAX_PARTICIPANTS` are kept.
     mic_muted: HashSet<(u8, String)>,
+    /// What each current member's device last said about being deafened,
+    /// by `{user}:{device}` (ADR-0071), with its counter. Only current
+    /// members are kept, so a member that leaves is forgotten, and at most
+    /// `MAX_PARTICIPANTS`.
+    deafen_notes: HashMap<String, deafen::Note>,
     keyed: HashSet<String>,
     camera: CallCamera,
     /// The own screen share.
@@ -479,6 +487,7 @@ impl View {
             members: Vec::new(),
             speaking: HashSet::new(),
             mic_muted: HashSet::new(),
+            deafen_notes: HashMap::new(),
             keyed: HashSet::new(),
             camera: if video {
                 CallCamera::Starting
@@ -560,9 +569,27 @@ impl View {
             .collect();
         self.speaking.retain(|id| backends.contains(id.as_str()));
         self.keyed.retain(|id| present.contains(id.as_str()));
+        self.deafen_notes
+            .retain(|id, _| present.contains(id.as_str()));
         // `sharing` and `mic_muted` keep hints of identities that are not
         // members yet: the worker can hear of a share or a muted microphone
         // before the membership arrives. `ParticipantLeft` removes them.
+    }
+
+    /// Takes a deafened message from a current member's device. Returns
+    /// true when the state that the page shows changed. A stale counter
+    /// changes nothing.
+    fn take_deafen(&mut self, message: &IncomingDeafen) -> bool {
+        let known = self.deafen_notes.get(&message.identity).copied();
+        if known.is_none() && self.deafen_notes.len() >= persephone_call_protocol::MAX_PARTICIPANTS
+        {
+            return false;
+        }
+        let Some(note) = deafen::take(known, message) else {
+            return false;
+        };
+        self.deafen_notes.insert(message.identity.clone(), note);
+        known.is_some_and(|before| before.deafened) != note.deafened
     }
 
     /// The page asked for the screen share on or off. The state shows
@@ -965,6 +992,10 @@ impl View {
                     muted: self.mic_muted.iter().any(|(connection, id)| {
                         m.backend_identities.contains(id) && self.accepts(*connection, id)
                     }),
+                    deafened: self
+                        .deafen_notes
+                        .get(&participant_identity(&m.user_id, &m.device_id))
+                        .is_some_and(|note| note.deafened),
                 })
                 .collect(),
             camera: self.camera,
@@ -2159,6 +2190,8 @@ impl CallController {
             state_key,
             own_identity,
             own_device: device_id,
+            deafen_seq: 0,
+            deafen_shared: false,
             own_keys,
             remote: RemoteKeys::new(),
             unsent: BTreeMap::new(),
@@ -2828,6 +2861,10 @@ struct Call {
     state_key: String,
     own_identity: String,
     own_device: OwnedDeviceId,
+    /// The counter of the own deafened messages in this call (ADR-0071).
+    deafen_seq: u64,
+    /// The deafen state that the other members were last sent.
+    deafen_shared: bool,
     own_keys: OwnKeys,
     remote: RemoteKeys,
     /// Remote keys the worker queue had no room for, by member device
@@ -4748,6 +4785,80 @@ impl Call {
             .map_err(|_| EndReason::SessionEnded)
     }
 
+    /// Sends the own deafen state and counter to `recipients` (ADR-0071), in
+    /// the way and to the devices that frame keys go to. A failure is not
+    /// fatal and is not retried: the next change or a new member sends the
+    /// state again.
+    async fn send_deafen(
+        &self,
+        recipients: Vec<(OwnedUserId, OwnedDeviceId)>,
+    ) -> Result<(), EndReason> {
+        if recipients.is_empty() {
+            return Ok(());
+        }
+        let room_id = self.view.room_id.clone();
+        let content = deafen::outgoing_content(
+            &room_id,
+            &self.own_identity,
+            &self.own_device,
+            self.deafen_shared,
+            self.deafen_seq,
+        );
+        self.access
+            .run(|client| async move {
+                if let Some(room) = client.get_room(&room_id) {
+                    let _ = time::timeout(
+                        SEND_TIMEOUT,
+                        encryption_keys::send_event(
+                            &room,
+                            &recipients,
+                            deafen::EVENT_TYPE,
+                            content,
+                        ),
+                    )
+                    .await;
+                }
+            })
+            .await
+            .map_err(|_| EndReason::SessionEnded)
+    }
+
+    /// Tells every other member when the own deafen state changed since it
+    /// was last shared (ADR-0071). The state is the worker's answer
+    /// (`View::deafened`), so it follows what the call really does.
+    async fn share_deafen(&mut self) -> Result<(), EndReason> {
+        if self.view.deafened == self.deafen_shared {
+            return Ok(());
+        }
+        self.deafen_shared = self.view.deafened;
+        self.deafen_seq = self.deafen_seq.saturating_add(1);
+        let all = self
+            .view
+            .members
+            .iter()
+            .take(MAX_CALL_MEMBERS)
+            .map(|m| (m.user_id.clone(), m.device_id.clone()))
+            .collect();
+        self.send_deafen(all).await
+    }
+
+    /// Tells the members that just joined that this device is deafened. Not
+    /// deafened is the default and is not sent.
+    async fn share_deafen_with_new(&self, joined: &[MemberKey]) -> Result<(), EndReason> {
+        if !self.deafen_shared {
+            return Ok(());
+        }
+        let to = self
+            .view
+            .members
+            .iter()
+            .filter(|m| joined.contains(&member_key(m)))
+            .take(MAX_CALL_MEMBERS)
+            .map(|m| (m.user_id.clone(), m.device_id.clone()))
+            .collect();
+        self.send_deafen(to).await
+    }
+
     /// Reads the members and gives the current key to all of them.
     async fn start_keys(&mut self, inner: &Inner) -> Result<(), EndReason> {
         if let Some(members) = self.read_members().await? {
@@ -4931,6 +5042,7 @@ impl Call {
                         return Err(EndReason::WorkerStopped);
                     };
                     self.worker_event(inner, &event)?;
+                    self.share_deafen().await?;
                 }
                 (host, connect) = consent_done(&mut self.consent) => {
                     self.consent_answered(inner, &host, connect)?;
@@ -5037,6 +5149,8 @@ impl Call {
                 *pending_own = Some((outgoing.use_at, worker_key(&outgoing.key)));
             }
         }
+        // A new member does not know that this device is deafened.
+        self.share_deafen_with_new(&diff.joined).await?;
         // Keys that came before their sender's membership may fit now.
         for candidate in std::mem::take(parked) {
             self.key_received(inner, candidate, parked)?;
@@ -5053,6 +5167,10 @@ impl Call {
         candidate: Candidate,
         parked: &mut Vec<Candidate>,
     ) -> Result<(), EndReason> {
+        if candidate.kind == incoming::Kind::Deafened {
+            self.deafen_received(inner, candidate, parked);
+            return Ok(());
+        }
         let view = &self.view;
         let result = incoming::accept(
             &candidate,
@@ -5092,16 +5210,30 @@ impl Call {
                 self.send_unsent()?;
                 self.publish(inner);
             }
-            Err(refusal) if refusal.is_early() => {
-                parked.retain(|c| c.received.elapsed() < PARK_TIME);
-                if parked.len() >= MAX_PARKED {
-                    parked.remove(0);
-                }
-                parked.push(candidate);
-            }
+            Err(refusal) if refusal.is_early() => park(parked, candidate),
             Err(_) => {}
         }
         Ok(())
+    }
+
+    /// Takes a deafened message from a current member's device, or parks it
+    /// until the membership arrives (ADR-0071).
+    fn deafen_received(
+        &mut self,
+        inner: &Inner,
+        candidate: Candidate,
+        parked: &mut Vec<Candidate>,
+    ) {
+        let view = &self.view;
+        match incoming::accept_deafened(&candidate, &view.room_id, &|id| view.is_member(id)) {
+            Ok(message) => {
+                if self.view.take_deafen(&message) {
+                    self.publish(inner);
+                }
+            }
+            Err(refusal) if refusal.is_early() => park(parked, candidate),
+            Err(_) => {}
+        }
     }
 
     /// Ends the call: the keeper, the worker, then the screen pick and the
@@ -5170,6 +5302,16 @@ impl Call {
             membership
         );
     }
+}
+
+/// Keeps `candidate` until the membership of its sender may have arrived.
+/// At most [`MAX_PARKED`] young ones are kept; the oldest goes first.
+fn park(parked: &mut Vec<Candidate>, candidate: Candidate) {
+    parked.retain(|c| c.received.elapsed() < PARK_TIME);
+    if parked.len() >= MAX_PARKED {
+        parked.remove(0);
+    }
+    parked.push(candidate);
 }
 
 /// The keys to give under a member's new backend identities `added`: every
@@ -7303,6 +7445,8 @@ mod tests {
             state_key: "key".to_owned(),
             own_identity: "@a:example.org:A".to_owned(),
             own_device: owned_device_id!("A"),
+            deafen_seq: 0,
+            deafen_shared: false,
             own_keys: OwnKeys::new(Instant::now()).unwrap(),
             remote: RemoteKeys::new(),
             unsent: BTreeMap::new(),
@@ -10913,6 +11057,82 @@ mod tests {
             view.apply(&muted(0, &format!("@s{index}:example.org:S"), true));
         }
         assert!(view.mic_muted.len() <= persephone_call_protocol::MAX_PARTICIPANTS);
+    }
+
+    fn said(identity: &str, deafened: bool, seq: u64) -> IncomingDeafen {
+        IncomingDeafen {
+            identity: identity.to_owned(),
+            deafened,
+            seq,
+        }
+    }
+
+    fn deafened_ids(view: &View) -> Vec<String> {
+        let CallState::Active { participants, .. } = view.state() else {
+            panic!("the call is active");
+        };
+        participants
+            .iter()
+            .filter(|p| p.deafened)
+            .map(|p| format!("{}:{}", p.user_id, p.device_id))
+            .collect()
+    }
+
+    /// GIVEN a member that says it is deafened WHEN taken, repeated, made
+    /// stale and then undone THEN the view changes only when the shown value
+    /// changes, and a stale counter changes nothing.
+    #[test]
+    fn given_deafened_messages_then_the_view_changes_only_on_a_new_value() {
+        let mut view = view();
+        view.apply(&FromWorker::Connected);
+        assert!(deafened_ids(&view).is_empty());
+        assert!(view.take_deafen(&said("@a:example.org:A", true, 1)));
+        assert_eq!(deafened_ids(&view), ["@a:example.org:A"]);
+        // The same value with a higher counter shows nothing new.
+        assert!(!view.take_deafen(&said("@a:example.org:A", true, 2)));
+        // An older counter is ignored, whatever it says.
+        assert!(!view.take_deafen(&said("@a:example.org:A", false, 2)));
+        assert!(!view.take_deafen(&said("@a:example.org:A", false, 1)));
+        assert_eq!(deafened_ids(&view), ["@a:example.org:A"]);
+        assert!(view.take_deafen(&said("@a:example.org:A", false, 3)));
+        assert!(deafened_ids(&view).is_empty());
+        // A first message that says "not deafened" shows nothing new.
+        assert!(!view.take_deafen(&said("@b:example.org:B", false, 1)));
+    }
+
+    /// GIVEN a deafened member WHEN it leaves, and returns THEN the mark is
+    /// gone and its counter starts again.
+    #[test]
+    fn given_a_deafened_member_leaves_then_its_mark_is_cleared() {
+        let mut view = view();
+        view.apply(&FromWorker::Connected);
+        view.take_deafen(&said("@a:example.org:A", true, 5));
+        view.set_members(vec![member(
+            "@b:example.org",
+            "B",
+            "https://other.example.org",
+        )]);
+        assert!(view.deafen_notes.is_empty());
+        view.set_members(vec![
+            member("@a:example.org", "A", "https://sfu.example.org"),
+            member("@b:example.org", "B", "https://other.example.org"),
+        ]);
+        assert!(deafened_ids(&view).is_empty());
+        assert!(view.take_deafen(&said("@a:example.org:A", true, 1)));
+    }
+
+    /// GIVEN many senders WHEN their messages are taken THEN at most
+    /// `MAX_PARTICIPANTS` notes are kept.
+    #[test]
+    fn given_many_senders_then_the_notes_are_bounded() {
+        let mut view = view();
+        for index in 0..persephone_call_protocol::MAX_PARTICIPANTS + 4 {
+            view.take_deafen(&said(&format!("@s{index}:example.org:S"), true, 1));
+        }
+        assert_eq!(
+            view.deafen_notes.len(),
+            persephone_call_protocol::MAX_PARTICIPANTS
+        );
     }
 
     /// GIVEN each worker screen state WHEN applied THEN the page's state
