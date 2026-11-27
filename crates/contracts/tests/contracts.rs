@@ -867,6 +867,7 @@ fn call_devices_use_camel_case_and_reject_unknown_fields() {
             filter: persephone_contracts::CallColourFilter::Brighten,
         },
         mirror: true,
+        video_quality: persephone_contracts::CallVideoQuality::P1080,
         background_effects: false,
         unreadable: false,
     };
@@ -886,6 +887,7 @@ fn call_devices_use_camel_case_and_reject_unknown_fields() {
             "micGain": 250,
             "effect": {"background": "blur", "blur": 70, "filter": "brighten"},
             "mirror": true,
+            "videoQuality": "1080p",
             "backgroundEffects": false,
             "unreadable": false
         })
@@ -907,6 +909,41 @@ fn call_devices_use_camel_case_and_reject_unknown_fields() {
         assert!(
             serde_json::from_value::<persephone_contracts::CallDevices>(without).is_err(),
             "{field}"
+        );
+    }
+    // A device list without the send resolution reads as Auto (ADR-0070); a
+    // name outside the closed set is refused.
+    let mut no_quality = json.clone();
+    no_quality.as_object_mut().unwrap().remove("videoQuality");
+    assert_eq!(
+        serde_json::from_value::<persephone_contracts::CallDevices>(no_quality)
+            .unwrap()
+            .video_quality,
+        persephone_contracts::CallVideoQuality::Auto
+    );
+    for (name, quality) in [
+        ("auto", persephone_contracts::CallVideoQuality::Auto),
+        ("480p", persephone_contracts::CallVideoQuality::P480),
+        ("720p", persephone_contracts::CallVideoQuality::P720),
+        ("1080p", persephone_contracts::CallVideoQuality::P1080),
+        ("1440p", persephone_contracts::CallVideoQuality::P1440),
+    ] {
+        let mut set = json.clone();
+        set["videoQuality"] = name.into();
+        assert_eq!(
+            serde_json::from_value::<persephone_contracts::CallDevices>(set)
+                .unwrap()
+                .video_quality,
+            quality,
+            "{name}"
+        );
+    }
+    for name in ["Auto", "360p", "2160p", "1080", ""] {
+        let mut bad = json.clone();
+        bad["videoQuality"] = name.into();
+        assert!(
+            serde_json::from_value::<persephone_contracts::CallDevices>(bad).is_err(),
+            "{name}"
         );
     }
     let mut no_camera = json.clone();

@@ -2848,11 +2848,33 @@ pub struct CallDevices {
     /// nothing is saved, as before the choice existed. Others always see
     /// the picture as it is.
     pub mirror: bool,
+    /// The saved send resolution of the own camera (ADR-0070). Auto when
+    /// nothing is saved.
+    #[serde(default)]
+    pub video_quality: CallVideoQuality,
     /// Whether this build can run the background effects that need the
     /// person mask: blur and pictures (ADR-0068). The page offers them only
     /// when it is true.
     pub background_effects: bool,
     pub unreadable: bool,
+}
+
+/// The resolution at which the own camera is sent (ADR-0070). `Auto` takes
+/// the highest size that the connection allows. The others are fixed;
+/// the camera's best mode limits them, and a camera is never enlarged.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, TS, PartialEq, Eq)]
+pub enum CallVideoQuality {
+    #[default]
+    #[serde(rename = "auto")]
+    Auto,
+    #[serde(rename = "480p")]
+    P480,
+    #[serde(rename = "720p")]
+    P720,
+    #[serde(rename = "1080p")]
+    P1080,
+    #[serde(rename = "1440p")]
+    P1440,
 }
 
 /// What the own camera shows behind the person (ADR-0068). `blur` blurs
@@ -3276,6 +3298,7 @@ pub fn generated_typescript() -> String {
         format!("export {}", CallBackground::decl(&config)),
         format!("export {}", CallColourFilter::decl(&config)),
         format!("export {}", CallVideoEffect::decl(&config)),
+        format!("export {}", CallVideoQuality::decl(&config)),
         format!("export {}", CallDevices::decl(&config)),
         format!("export {}", ContactTrust::decl(&config)),
         format!("export {}", ContactStatus::decl(&config)),
