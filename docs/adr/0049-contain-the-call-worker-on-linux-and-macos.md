@@ -365,7 +365,12 @@ PipeWire connection of its own for each PulseAudio client, so PipeWire takes
 refuses every client update of `pipewire.sec.*`. Every PulseAudio client,
 the worker included, therefore shows the process ID of `pipewire-pulse`, and
 a check by it would leave out the worker's own streams on every PipeWire
-system. A PulseAudio daemon gives no server-checked process ID, and a client
+system. A narrower form is open for the owner's choice and not built: use
+`pipewire.sec.pid` only when the worker's own `pulse::Session` client shows
+the worker's process ID in it (a server that records each PulseAudio
+client's own process ID), else the one-client rule. No server known on
+27 November 2026 passes that check, so today it would always fall back to
+the one-client rule. A PulseAudio daemon gives no server-checked process ID, and a client
 can set any property there, `pipewire.sec.pid` included. These facts come
 from source reading and one published output, not from a run on the project's
 VM; see [the device test evidence](../evidence/device-tests-linux-macos.md).
