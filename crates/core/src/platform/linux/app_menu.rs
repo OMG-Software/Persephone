@@ -441,7 +441,7 @@ mod tests {
             data_dirs: data_dirs(Some(listed), &layout.data_home, &layout.appdir),
             ..layout.places()
         };
-        assert_eq!(places.data_dirs, [layout.system.clone()]);
+        assert_eq!(places.data_dirs, std::slice::from_ref(&layout.system));
         assert_eq!(places.state(), AppMenuState::Absent);
     }
 
