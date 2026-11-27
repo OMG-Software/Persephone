@@ -266,7 +266,8 @@ Decision:
   target) runs on a task of its own, one at a time, and sends its result to
   the loop, so `Leave` and keys are served while the sound server is slow. A
   change asked while a job runs waits (the newest only) and is answered after
-  that job.
+  that job. A job is over only when its blocking thread has ended, also when
+  its answer went out at the deadline, so two never run at once.
 * It moves only this process's own streams: those whose
   `application.process.id` equals the worker's process ID. No other
   program's stream is read for any other purpose or moved. Both choices are

@@ -45,10 +45,13 @@ that we need, and does not touch the member state event.
   `member.claimed_device_id` as the frame key event has them, and
   `deafened` (boolean) and `seq` (unsigned integer).
 * `seq` is a counter. It starts at the milliseconds since the Unix epoch
-  when the call starts, and the sender adds 1 on each change. A receiver
+  when the call starts, and the sender adds 1 on each change. In one run of
+  the app every counter is above all the ones given before, so a call that
+  starts in the same milliseconds as an earlier one, or rejoins after many
+  changes, starts above the earlier call's last counter. A receiver
   ignores a message whose `seq` is not higher than the last one it took
   from that sender device, so a late message cannot undo a newer one. While
-  the device's clock does not go back between calls, a new call's counter is
+  the device's clock does not go back between runs, a new call's counter is
   above any counter of an earlier call of the same device, so a note that a
   receiver kept from an earlier call is replaced (see the negative
   consequences for a clock set back).
@@ -106,8 +109,9 @@ that we need, and does not touch the member state event.
   This replaces a note that a receiver kept when it did not read a leave.
 * The counter is a clock reading, so it shows roughly when the state
   changed. A clock set far ahead makes later calls of that device lose
-  against it only until the clock is right; a restart of the clock backwards
-  between two calls can hide the new state of the later call.
+  against it only until the clock is right; a clock set back between two
+  runs of the app can hide the new state of the later call. In one run the
+  counter only rises.
 * Not verified against a live homeserver or a second client yet.
 
 ## Pros and Cons of the Options

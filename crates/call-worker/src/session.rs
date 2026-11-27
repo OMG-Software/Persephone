@@ -751,29 +751,76 @@ fn tries_due(waiting: bool, session_generation: u64, accepted: u64) -> bool {
     waiting && session_generation == accepted
 }
 
+/// Waits at most `wait` for a sound job's blocking thread. It gives the
+/// thread's result (`None` when the thread failed or did not end in time)
+/// and, when it did not end in time, its handle: the thread still runs, so
+/// the job is not over yet (`end_late`).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+async fn wait_blocking<T>(
+    mut job: JoinHandle<T>,
+    wait: Duration,
+) -> (Option<T>, Option<JoinHandle<T>>) {
+    match tokio::time::timeout(wait, &mut job).await {
+        Ok(result) => (result.ok(), None),
+        Err(_) => (None, Some(job)),
+    }
+}
+
+/// After a sound job answered before its blocking thread ended
+/// (`wait_blocking` gave the handle): waits until the thread ends, then
+/// tells the loop that the job is over (`SoundDone::Ended`). No other sound
+/// job starts before that (`SoundBook`), so a late thread never runs beside
+/// a newer one and threads do not add up while the sound server is slow. A
+/// late thread finds its deadlines passed and sends nothing more.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+async fn end_late<T>(late: Option<JoinHandle<T>>, done: &mpsc::Sender<SoundDone>) {
+    if let Some(late) = late {
+        let _ = late.await;
+        // One job runs at a time, so the slot is free.
+        let _ = done.send(SoundDone::Ended).await;
+    }
+}
+
 /// One sound change through `session` on a blocking thread. The call runs
 /// it on a task of its own, never in the event loop (`Call::sound_step`).
-/// The deadlines start here, so a task that starts late sends nothing, and
-/// no answer within `wait` is `AudioDevice`, with no generation.
+/// The deadlines start here, so a thread that starts late sends nothing. It
+/// sends `SoundDone::Change` when the thread ends or after `wait`, which is
+/// `AudioDevice` with no generation, and then `SoundDone::Ended` when the
+/// thread ends after that answer (`end_late`).
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-async fn switch_sound<S: SoundSwitch>(
+async fn run_change<S: SoundSwitch>(
     session: Arc<S>,
     choice: (Option<String>, Option<String>),
     wait: Duration,
-) -> SoundAnswer {
+    done: mpsc::Sender<SoundDone>,
+) {
     let started = std::time::Instant::now();
-    let change = tokio::task::spawn_blocking(move || {
-        session.switch(started, choice.0.as_deref(), choice.1.as_deref())
-    });
-    let (failure, generation) = match tokio::time::timeout(wait, change).await {
-        Ok(Ok(Ok(generation))) => (None, Some(generation)),
-        Ok(Ok(Err(code))) => (Some(code), None),
-        _ => (Some(FailureCode::AudioDevice), None),
+    let change = {
+        let choice = choice.clone();
+        tokio::task::spawn_blocking(move || {
+            session.switch(started, choice.0.as_deref(), choice.1.as_deref())
+        })
     };
-    SoundAnswer {
+    let (outcome, late) = wait_blocking(change, wait).await;
+    let (failure, generation) = match outcome {
+        Some(Ok(generation)) => (None, Some(generation)),
+        Some(Err(code)) => (Some(code), None),
+        None => (Some(FailureCode::AudioDevice), None),
+    };
+    let answer = SoundAnswer {
         failure,
         generation,
-    }
+    };
+    let ended = late.is_none();
+    // One job runs at a time, so the slot is free.
+    let _ = done
+        .send(SoundDone::Change {
+            choice,
+            answer,
+            ended,
+        })
+        .await;
+    end_late(late, &done).await;
 }
 
 /// What a sound choice does now (`SoundBook`).
@@ -794,7 +841,9 @@ enum SoundStep {
 /// ADR-0049). At most one sound job (a change, or a try of the waiting
 /// targets) runs at a time, on a task of its own, so the event loop serves
 /// `Leave` and keys while the sound server is slow. A change asked while a
-/// job runs waits, the newest only, and is decided when the job ends.
+/// job runs waits, the newest only, and is decided when the job ends. A job
+/// ends when its blocking thread ended, also when its answer went out
+/// before that, at its deadline (`end_late`).
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 #[derive(Debug)]
 struct SoundBook {
@@ -808,7 +857,8 @@ struct SoundBook {
     /// (`SoundAnswer::generation`); tries run only for it (`tries_due`). The
     /// join's targets have generation 0.
     generation: u64,
-    /// Whether a sound job runs.
+    /// Whether a sound job runs: from its start until its blocking thread
+    /// ended, also after its answer went out.
     running: bool,
     /// The newest sound choice asked while a job ran.
     waiting: Option<(Option<String>, Option<String>)>,
@@ -847,11 +897,18 @@ impl SoundBook {
         SoundStep::Start(choice)
     }
 
-    /// A change of `choice` ended with `answer`: the accepted choice follows
+    /// A change of `choice` answered `answer`: the accepted choice follows
     /// it (`accepted_after`). `true` when the core is told that it worked:
-    /// its generation is taken, and its waiting targets are tried.
-    fn changed(&mut self, choice: (Option<String>, Option<String>), answer: &SoundAnswer) -> bool {
-        self.running = false;
+    /// its generation is taken, and its waiting targets are tried. `ended`
+    /// is `false` when the answer came at the deadline, before the blocking
+    /// thread ended: the job runs on until `ended()`.
+    fn changed(
+        &mut self,
+        choice: (Option<String>, Option<String>),
+        answer: &SoundAnswer,
+        ended: bool,
+    ) -> bool {
+        self.running = !ended;
         self.accepted = accepted_after(self.accepted.take(), choice, answer.failure);
         match answer.generation {
             Some(generation) => {
@@ -871,13 +928,20 @@ impl SoundBook {
         true
     }
 
-    /// A try ended. `dropped` when the streams no longer follow the accepted
-    /// choice: the last try dropped a target, or gave no answer in time.
-    fn tried(&mut self, dropped: bool) {
-        self.running = false;
+    /// A try answered. `dropped` when the streams no longer follow the
+    /// accepted choice: the last try dropped a target, or gave no answer in
+    /// time. `ended` as for `changed`.
+    fn tried(&mut self, dropped: bool, ended: bool) {
+        self.running = !ended;
         if dropped {
             self.accepted = None;
         }
+    }
+
+    /// The blocking thread of a job that answered before it ended has ended
+    /// (`SoundDone::Ended`): the job is over.
+    fn ended(&mut self) {
+        self.running = false;
     }
 
     /// The choice that waited, decided now that no job runs.
@@ -905,18 +969,25 @@ fn set_devices(
 /// The end of one sound job, for the event loop (Linux, ADR-0049).
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 enum SoundDone {
-    /// A change of `choice` and its answer.
+    /// A change of `choice` and its answer. `ended` is `false` when the
+    /// answer came at the deadline, before the blocking thread ended:
+    /// `Ended` follows when it does.
     Change {
         choice: (Option<String>, Option<String>),
         answer: SoundAnswer,
+        ended: bool,
     },
     /// A try of the waiting targets; `run` is `None` when it gave no answer
-    /// in time.
+    /// in time. `ended` as for a change.
     #[cfg(target_os = "linux")]
     Try {
         last: bool,
         run: Option<crate::pulse::PendingRun>,
+        ended: bool,
     },
+    /// The blocking thread of a job that answered before it ended has
+    /// ended, so the next sound job may start.
+    Ended,
 }
 
 /// Moves the running call to other devices (`SetDevices`, ADR-0059). Both
@@ -2299,7 +2370,9 @@ impl Call<'_> {
     /// worked: one that runs late after a newer change touches nothing, and
     /// the targets of a change answered too late are never tried. The task's
     /// deadlines start here, at `started`, and end at `CHANGE_TIMEOUT`; the
-    /// task waits `REPORT_GRACE` more for the blocking thread.
+    /// task waits `REPORT_GRACE` more for the blocking thread, and a thread
+    /// that has not ended then keeps the job running until it ends
+    /// (`end_late`).
     fn begin_sound_try(&mut self) {
         #[cfg(target_os = "linux")]
         {
@@ -2325,12 +2398,11 @@ impl Call<'_> {
                 let apply = tokio::task::spawn_blocking(move || {
                     pulse.apply_pending(started, last, accepted)
                 });
-                let run = tokio::time::timeout(wait, apply)
-                    .await
-                    .ok()
-                    .and_then(Result::ok);
+                let (run, late) = wait_blocking(apply, wait).await;
+                let ended = late.is_none();
                 // One job runs at a time, so the slot is free.
-                let _ = done.send(SoundDone::Try { last, run }).await;
+                let _ = done.send(SoundDone::Try { last, run, ended }).await;
+                end_late(late, &done).await;
             });
         }
     }
@@ -2343,18 +2415,20 @@ impl Call<'_> {
     /// read). A stream that is not open yet is no failure: the target keeps
     /// waiting and nothing is sent. A try with no answer in time means that
     /// the blocking thread did not run in time: the next try runs, and the
-    /// last one answers `AudioDevice`, as its outcome is not known.
+    /// last one answers `AudioDevice`, as its outcome is not known. `ended`
+    /// is `false` when the try's blocking thread still runs (`SoundBook`).
     #[cfg(target_os = "linux")]
     fn sound_tried(
         &mut self,
         last: bool,
         run: Option<crate::pulse::PendingRun>,
+        ended: bool,
     ) -> Vec<FromWorker> {
         let Some(run) = run else {
             if last {
                 self.sound_retries.clear();
             }
-            self.sound_book.tried(last);
+            self.sound_book.tried(last, ended);
             return if last {
                 vec![FromWorker::DevicesSet {
                     failure: Some(FailureCode::AudioDevice),
@@ -2379,7 +2453,7 @@ impl Call<'_> {
         // At the last try a failed target was dropped: the streams do not
         // follow the accepted choice.
         let dropped = last && !run.moves_failed.is_empty();
-        self.sound_book.tried(dropped);
+        self.sound_book.tried(dropped, ended);
         if !dropped {
             return Vec::new();
         }
@@ -2392,15 +2466,21 @@ impl Call<'_> {
         }]
     }
 
-    /// The end of a sound job (Linux, ADR-0049): a change's `DevicesSet`, or
-    /// what a try reports. The choice that waited for the job is decided
-    /// then; a try that came due meanwhile starts after it.
+    /// The answer or the end of a sound job (Linux, ADR-0049): a change's
+    /// `DevicesSet`, what a try reports, or the end of a blocking thread
+    /// that ended after its job's answer (`Ended`). The choice that waited
+    /// for the job is decided once the job is over; a try that came due
+    /// meanwhile starts after it.
     fn sound_done(&mut self, done: SoundDone) -> Vec<FromWorker> {
         #[cfg(target_os = "linux")]
         {
             let mut reply = match done {
-                SoundDone::Change { choice, answer } => {
-                    if self.sound_book.changed(choice, &answer) {
+                SoundDone::Change {
+                    choice,
+                    answer,
+                    ended,
+                } => {
+                    if self.sound_book.changed(choice, &answer, ended) {
                         // Waiting targets are tried only for this change,
                         // and soon, also when no sound event follows.
                         self.sound_trigger();
@@ -2409,7 +2489,11 @@ impl Call<'_> {
                         failure: answer.failure,
                     }]
                 }
-                SoundDone::Try { last, run } => self.sound_tried(last, run),
+                SoundDone::Try { last, run, ended } => self.sound_tried(last, run, ended),
+                SoundDone::Ended => {
+                    self.sound_book.ended();
+                    Vec::new()
+                }
             };
             if let Some(pulse) = self.pulse.clone()
                 && let Some(step) = self.sound_book.next()
@@ -2434,13 +2518,8 @@ impl Call<'_> {
             SoundStep::Answer => vec![FromWorker::DevicesSet { failure: None }],
             SoundStep::Wait => Vec::new(),
             SoundStep::Start(choice) => {
-                let done = self.sound_jobs.clone();
                 let wait = crate::pulse::CHANGE_TIMEOUT + crate::pulse::REPORT_GRACE;
-                tokio::spawn(async move {
-                    let answer = switch_sound(pulse, choice.clone(), wait).await;
-                    // One job runs at a time, so the slot is free.
-                    let _ = done.send(SoundDone::Change { choice, answer }).await;
-                });
+                tokio::spawn(run_change(pulse, choice, wait, self.sound_jobs.clone()));
                 Vec::new()
             }
         }
@@ -5138,12 +5217,14 @@ mod tests {
     }
 
     /// A sound session fake: each switch is counted, waits `delay`, then
-    /// gives `answer`. `Unsupported` is what `pulse::Session::switch` gives
-    /// when the server's defaults could not be read.
+    /// gives `answer`, and each return is counted (`ends`). `Unsupported` is
+    /// what `pulse::Session::switch` gives when the server's defaults could
+    /// not be read.
     struct FakeSwitch {
         answer: Result<u64, FailureCode>,
         delay: Duration,
         calls: std::sync::atomic::AtomicUsize,
+        ends: std::sync::atomic::AtomicUsize,
     }
 
     impl FakeSwitch {
@@ -5152,12 +5233,39 @@ mod tests {
                 answer,
                 delay,
                 calls: std::sync::atomic::AtomicUsize::new(0),
+                ends: std::sync::atomic::AtomicUsize::new(0),
             })
         }
 
         fn calls(&self) -> usize {
             self.calls.load(Ordering::SeqCst)
         }
+
+        fn ends(&self) -> usize {
+            self.ends.load(Ordering::SeqCst)
+        }
+    }
+
+    /// Runs one change as the call does (`run_change`) and gives its first
+    /// message: the answer, and whether the blocking thread had ended. The
+    /// receiver gets `Ended` later when it had not.
+    async fn change_end(
+        session: Arc<FakeSwitch>,
+        choice: (Option<String>, Option<String>),
+        wait: Duration,
+    ) -> (SoundAnswer, bool, Receiver<SoundDone>) {
+        let (done, mut ends) = mpsc::channel(1);
+        tokio::spawn(run_change(session, choice.clone(), wait, done));
+        let Some(SoundDone::Change {
+            choice: changed,
+            answer,
+            ended,
+        }) = ends.recv().await
+        else {
+            panic!("a change sends its answer first");
+        };
+        assert_eq!(changed, choice);
+        (answer, ended, ends)
     }
 
     impl SoundSwitch for FakeSwitch {
@@ -5169,6 +5277,7 @@ mod tests {
         ) -> Result<u64, FailureCode> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             std::thread::sleep(self.delay);
+            self.ends.fetch_add(1, Ordering::SeqCst);
             self.answer
         }
     }
@@ -5208,7 +5317,7 @@ mod tests {
         );
         assert_eq!(step, SoundStep::Start(speaker.clone()));
         assert_eq!(camera.as_deref(), Some("v4l2:third"));
-        let answer = switch_sound(unknown.clone(), speaker.clone(), wait).await;
+        let (answer, ended, _) = change_end(unknown.clone(), speaker.clone(), wait).await;
         assert_eq!(
             answer,
             SoundAnswer {
@@ -5216,7 +5325,9 @@ mod tests {
                 generation: None
             }
         );
-        assert!(!book.changed(speaker, &answer));
+        assert!(ended);
+        assert!(!book.changed(speaker, &answer, ended));
+        assert!(!book.busy());
         assert_eq!(unknown.calls(), 1);
         assert_eq!(book.accepted, Some((None, None)));
 
@@ -5231,15 +5342,19 @@ mod tests {
 
     /// GIVEN a session that commits only after the wait WHEN a change runs
     /// THEN it is `AudioDevice`, no choice stays accepted, and its generation
-    /// is not taken, so its targets are never tried. GIVEN a session that
-    /// moves THEN the choice and its generation are accepted.
+    /// is not taken, so its targets are never tried. The job still runs
+    /// until its blocking thread ended: a choice meanwhile waits, and `Ended`
+    /// comes only after the thread returned; the choice is decided then.
+    /// GIVEN a session that moves THEN the choice and its generation are
+    /// accepted, and the job is over with its answer.
     #[tokio::test]
     async fn given_a_late_or_a_good_answer_then_the_sound_book_follows_it() {
         let real = (None, Some("pulse:spk".to_owned()));
         let mut book = SoundBook::new((None, None));
         assert_eq!(book.offer(real.clone()), SoundStep::Start(real.clone()));
         let late = FakeSwitch::new(Ok(7), Duration::from_millis(300));
-        let answer = switch_sound(late, real.clone(), Duration::from_millis(20)).await;
+        let (answer, ended, mut ends) =
+            change_end(late.clone(), real.clone(), Duration::from_millis(20)).await;
         assert_eq!(
             answer,
             SoundAnswer {
@@ -5247,13 +5362,21 @@ mod tests {
                 generation: None
             }
         );
-        assert!(!book.changed(real.clone(), &answer));
+        assert!(!ended);
+        assert!(!book.changed(real.clone(), &answer, ended));
         assert_eq!(book.accepted, None);
         assert_eq!(book.generation, 0);
+        assert!(book.busy());
+        assert_eq!(book.offer(real.clone()), SoundStep::Wait);
+        assert_eq!(book.next(), None);
 
-        assert_eq!(book.offer(real.clone()), SoundStep::Start(real.clone()));
+        assert!(matches!(ends.recv().await, Some(SoundDone::Ended)));
+        assert_eq!(late.ends(), 1);
+        book.ended();
+        assert_eq!(book.next(), Some(SoundStep::Start(real.clone())));
+
         let moves = FakeSwitch::new(Ok(3), Duration::ZERO);
-        let answer = switch_sound(moves, real.clone(), Duration::from_secs(5)).await;
+        let (answer, ended, _) = change_end(moves, real.clone(), Duration::from_secs(5)).await;
         assert_eq!(
             answer,
             SoundAnswer {
@@ -5261,9 +5384,11 @@ mod tests {
                 generation: Some(3)
             }
         );
-        assert!(book.changed(real.clone(), &answer));
+        assert!(ended);
+        assert!(book.changed(real.clone(), &answer, ended));
         assert_eq!(book.accepted, Some(real));
         assert_eq!(book.generation, 3);
+        assert!(!book.busy());
     }
 
     /// GIVEN a sound change that runs WHEN two more choices come THEN both
@@ -5288,27 +5413,47 @@ mod tests {
             failure: None,
             generation: Some(1),
         };
-        assert!(book.changed(mic.clone(), &worked));
+        assert!(book.changed(mic.clone(), &worked, true));
         assert_eq!(book.next(), Some(SoundStep::Answer));
         assert_eq!(book.next(), None);
         assert!(!book.busy());
 
         assert!(book.begin_try());
         assert_eq!(book.offer(speaker.clone()), SoundStep::Wait);
-        book.tried(false);
+        book.tried(false, true);
         assert_eq!(book.next(), Some(SoundStep::Start(speaker.clone())));
         let kept = SoundAnswer {
             failure: Some(FailureCode::DeviceKept),
             generation: None,
         };
-        assert!(!book.changed(speaker, &kept));
+        assert!(!book.changed(speaker, &kept, true));
         assert_eq!(book.accepted, Some(mic));
         assert_eq!(book.generation, 1);
 
         assert!(book.begin_try());
-        book.tried(true);
+        book.tried(true, true);
         assert_eq!(book.accepted, None);
         assert!(!book.busy());
+    }
+
+    /// GIVEN a try whose blocking thread had not ended at its deadline WHEN
+    /// its answer comes THEN the job still runs: a new choice waits, no other
+    /// try starts, and the retries wait (`busy`). WHEN the thread ends THEN
+    /// the waiting choice is decided.
+    #[test]
+    fn given_a_try_answered_before_its_thread_ended_then_the_next_job_waits() {
+        let speaker = (None, Some("pulse:spk".to_owned()));
+        let mut book = SoundBook::new((None, None));
+        assert!(book.begin_try());
+        book.tried(true, false);
+        assert_eq!(book.accepted, None);
+        assert!(book.busy());
+        assert!(!book.begin_try());
+        assert_eq!(book.offer(speaker.clone()), SoundStep::Wait);
+        assert_eq!(book.next(), None);
+        book.ended();
+        assert!(!book.busy());
+        assert_eq!(book.next(), Some(SoundStep::Start(speaker)));
     }
 
     /// GIVEN waiting targets WHEN the session's generation is the one the

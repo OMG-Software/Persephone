@@ -9,6 +9,7 @@
 use super::membership::participant_identity;
 use matrix_sdk::ruma::{DeviceId, RoomId, UserId};
 use serde_json::{Value, json};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// The to-device event type.
 pub const EVENT_TYPE: &str = "io.github.omg-software.persephone.call.deafened";
@@ -42,15 +43,40 @@ pub fn outgoing_content(
     (content.to_string().len() <= MAX_CONTENT_BYTES).then_some(content)
 }
 
+/// The highest counter that this process gave (`first_seq`, `next_seq`).
+static LAST_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// A counter of at least `floor` and above every counter that `last` holds,
+/// which it then holds.
+fn take_seq(last: &AtomicU64, floor: u64) -> u64 {
+    let above = |previous: u64| floor.max(previous.saturating_add(1));
+    let previous = last
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |previous| {
+            Some(above(previous))
+        })
+        .unwrap_or_else(|previous| previous);
+    above(previous)
+}
+
 /// The counter at the start of a call: the milliseconds since the Unix
-/// epoch at `now_ms`. While the device's clock does not go back between
-/// calls, a new call's counter is above any counter of an earlier call of
-/// this device, so a receiver that kept an old note takes the new call's
-/// messages; a clock set back between the calls can leave that note in
-/// place (ADR-0071). It shows members roughly when the state changed, which
-/// they can already see from the call. Each change adds 1.
+/// epoch at `now_ms`, or more when this process already gave that counter
+/// (a call that starts in the same milliseconds as an earlier one, or a
+/// quick rejoin after many changes). Every counter of this process is above
+/// all the ones it gave before (`next_seq`), so a receiver that kept a note
+/// of an earlier call of this process takes the new call's messages. A new
+/// process starts from its clock: while the device's clock does not go back
+/// between the runs, it starts above the earlier run's counters, which run
+/// ahead of the clock only by their changes; a clock set back between the
+/// runs can leave an old note in place (ADR-0071). It shows members roughly
+/// when the state changed, which they can already see from the call.
 pub fn first_seq(now_ms: u64) -> u64 {
-    now_ms
+    take_seq(&LAST_SEQ, now_ms)
+}
+
+/// The counter of the next change in a call whose counter is `current`:
+/// above it and above every counter that this process gave.
+pub fn next_seq(current: u64) -> u64 {
+    take_seq(&LAST_SEQ, current.saturating_add(1))
 }
 
 /// A checked deafened message.
@@ -299,8 +325,10 @@ mod tests {
     /// replaced.
     #[test]
     fn given_a_later_call_then_its_counter_is_above_the_earlier_one() {
-        let earlier = first_seq(1_000_000) + 500;
-        let later = first_seq(1_060_000);
+        let last = AtomicU64::new(0);
+        let earlier = take_seq(&last, 1_000_000) + 500;
+        let later = take_seq(&last, 1_060_000);
+        assert_eq!(later, 1_060_000);
         assert!(later > earlier);
         let old = Note {
             deafened: true,
@@ -312,6 +340,47 @@ mod tests {
             seq: later,
         };
         assert_eq!(take(Some(old), &message).map(|n| n.deafened), Some(false));
+    }
+
+    /// GIVEN an earlier call of this process that changed its state five
+    /// times WHEN a new call starts within the same milliseconds THEN its
+    /// first counter is above every counter of the earlier call, and a note
+    /// of the earlier call is replaced. GIVEN a later clock THEN the counter
+    /// starts at the clock again.
+    #[test]
+    fn given_a_quick_rejoin_then_the_counter_still_rises() {
+        let last = AtomicU64::new(0);
+        let mut seq = take_seq(&last, 1_000_000);
+        assert_eq!(seq, 1_000_000);
+        for _ in 0..5 {
+            seq = take_seq(&last, seq + 1);
+        }
+        assert_eq!(seq, 1_000_005);
+        let rejoin = take_seq(&last, 1_000_002);
+        assert_eq!(rejoin, 1_000_006);
+        let old = Note {
+            deafened: true,
+            seq,
+        };
+        let message = IncomingDeafen {
+            identity: IDENTITY.to_owned(),
+            deafened: false,
+            seq: rejoin,
+        };
+        assert_eq!(take(Some(old), &message).map(|n| n.deafened), Some(false));
+        assert_eq!(take_seq(&last, 1_060_000), 1_060_000);
+    }
+
+    /// GIVEN the process's counter WHEN calls start and change, also at the
+    /// same clock reading THEN every counter is above the one before.
+    #[test]
+    fn given_the_process_counter_then_each_counter_is_higher() {
+        let first = first_seq(1);
+        let change = next_seq(first);
+        let again = first_seq(1);
+        assert!(change > first);
+        assert!(again > change);
+        assert!(next_seq(0) > again);
     }
 
     /// GIVEN a known counter WHEN a message with a lower or equal counter comes THEN it is stale.

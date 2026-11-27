@@ -5272,7 +5272,7 @@ impl Call {
             return;
         }
         self.deafen_shared = self.view.deafened;
-        self.deafen_seq = self.deafen_seq.saturating_add(1);
+        self.deafen_seq = deafen::next_seq(self.deafen_seq);
         let all = self
             .view
             .members
