@@ -9952,6 +9952,53 @@ mod tests {
         stopper.join().expect("the stopper ends");
     }
 
+    /// Polls `task` once with a waker that does nothing, so a test decides
+    /// the order of every step.
+    fn poll_once(task: Pin<&mut impl Future<Output = ()>>) -> std::task::Poll<()> {
+        Future::poll(
+            task,
+            &mut std::task::Context::from_waker(std::task::Waker::noop()),
+        )
+    }
+
+    /// GIVEN a waiting batch WHEN the stop goes before the task takes it
+    /// THEN the task ends and nothing is sent. GIVEN a batch that the task
+    /// took, so its send has started, WHEN the stop goes during that send
+    /// THEN the send still runs, finishes when its homeserver answers, and
+    /// the task ends after it. The task is polled by hand, so each order is
+    /// exact.
+    #[tokio::test]
+    async fn given_a_stop_before_or_after_the_take_then_the_send_follows_the_order() {
+        // The stop goes first: the batch is never sent.
+        let (fake, send) = fake_deafen();
+        let shared = Arc::new(DeafenShared::default());
+        plain(&shared.job).merge(vec![deafen_pair(1)], serde_json::json!({ "seq": 1 }));
+        shared.signal_stop();
+        let mut task = std::pin::pin!(deafen_task(shared.clone(), send));
+        assert!(poll_once(task.as_mut()).is_ready(), "the task ends at once");
+        assert_eq!(fake.started.load(Ordering::SeqCst), 0, "nothing is sent");
+
+        // The take goes first: the send has started, and it finishes.
+        let (fake, send) = fake_deafen();
+        let shared = Arc::new(DeafenShared::default());
+        plain(&shared.job).merge(vec![deafen_pair(2)], serde_json::json!({ "seq": 2 }));
+        shared.wake.notify_one();
+        let mut task = std::pin::pin!(deafen_task(shared.clone(), send));
+        assert!(poll_once(task.as_mut()).is_pending(), "the send waits");
+        assert_eq!(fake.started.load(Ordering::SeqCst), 1, "the send started");
+        shared.signal_stop();
+        assert!(poll_once(task.as_mut()).is_pending(), "the send still runs");
+        fake.gate.add_permits(1);
+        assert!(
+            poll_once(task.as_mut()).is_ready(),
+            "the task ends after it"
+        );
+        assert_eq!(
+            plain(&fake.batches).clone(),
+            vec![(1, serde_json::json!({ "seq": 2 }))]
+        );
+    }
+
     /// GIVEN a pending hint WHEN the call stops THEN the task ends and the
     /// hint is not sent.
     #[tokio::test]
