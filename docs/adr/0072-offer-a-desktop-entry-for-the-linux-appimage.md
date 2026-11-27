@@ -175,7 +175,9 @@ The core writes a file only where no file is, and removes only a file that
 is exactly its own:
 
 * Each file is written to a new file with a random name in the same folder
-  (`O_EXCL`, mode `0644`), synced, and hard-linked to its name. The link
+  (`O_EXCL`, mode `0600`; new folders get `0700`, because only the user's
+  own desktop reads them and the entry names the AppImage's path), synced,
+  and hard-linked to its name. The link
   fails when a file appeared there meanwhile, and that file stays. So a
   reader never sees part of a file, and no file is replaced.
 * A file is removed (also an outdated entry, before its new one is written)

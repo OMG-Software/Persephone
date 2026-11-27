@@ -344,10 +344,12 @@ fn read_file(path: &Path, limit: u64) -> Found {
     }
 }
 
+/// Makes the missing folders, for the user alone: only the user's own
+/// desktop reads them, and the entry names the AppImage's path.
 fn make_dirs(dir: &Path) -> io::Result<()> {
     fs::DirBuilder::new()
         .recursive(true)
-        .mode(0o755)
+        .mode(0o700)
         .create(dir)
 }
 
@@ -355,12 +357,13 @@ fn make_dirs(dir: &Path) -> io::Result<()> {
 /// random name next to it (`O_EXCL`), synced, then hard-linked to the name,
 /// which fails with `AlreadyExists` when a file is there. The random name
 /// is removed in every case; no existing file is ever removed to make room.
+/// The file is for the user alone, as in [`make_dirs`].
 fn put_file(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
     let partial = dir.join(random_name(name, "partial")?);
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
-        .mode(0o644)
+        .mode(0o600)
         .open(&partial)?;
     let result = file
         .write_all(bytes)
