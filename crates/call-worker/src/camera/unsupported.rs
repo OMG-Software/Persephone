@@ -8,6 +8,7 @@ use std::sync::mpsc::Sender;
 use persephone_call_protocol::CameraState;
 
 use super::CapturedFrame;
+use crate::send_tier::SendTier;
 
 pub fn list() -> Vec<(String, String)> {
     Vec::new()
@@ -15,6 +16,7 @@ pub fn list() -> Vec<(String, String)> {
 
 pub fn capture<F, E>(
     _device_id: &str,
+    _target: SendTier,
     _stop: &AtomicBool,
     open_result: Sender<Result<(), CameraState>>,
     _on_frame: F,

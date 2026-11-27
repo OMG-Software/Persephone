@@ -3,7 +3,11 @@
 //!
 //! Like [`super::SoundProbe`] it runs one read at a time, on its own task and
 //! under a deadline, so the event loop never waits for it. It reads only
-//! while the core has turned the statistics on, and at most once a second.
+//! while the core has turned the statistics on (at most once a second) or
+//! while the own camera runs in Auto quality (at most once in 2 seconds, own
+//! camera track only, ADR-0070), and then it gives each reading's link
+//! numbers to the Auto controller. The core gets a message only while the
+//! statistics are on.
 //! The task gives back plain numbers (`RawStats`); `mapping::stats` makes
 //! the message from them. Nothing here keeps a track handle, an address or a
 //! name: only the numbers that the message carries, and each track's ID with
@@ -30,8 +34,11 @@ use crate::mapping::stats::{
     RawRemoteVideo, RawStats, StatsBook,
 };
 
-/// The shortest time between two reads.
+/// The shortest time between two reads while the statistics are on.
 pub const STATS_INTERVAL: Duration = Duration::from_secs(1);
+/// The shortest time between two reads that only the Auto camera quality
+/// needs.
+pub const AUTO_INTERVAL: Duration = Duration::from_secs(2);
 /// The time one read has for all its statistics. It is shorter than
 /// [`STATS_TIMEOUT`], so the task reports what it has.
 const STATS_READ_BUDGET: Duration = Duration::from_millis(700);
@@ -127,6 +134,9 @@ impl Drop for Report {
 pub struct StatsProbe {
     done: mpsc::Sender<(u64, Option<RawStats>)>,
     on: bool,
+    /// The own camera runs in Auto quality: reads go on without the core's
+    /// switch, for the controller only.
+    auto: bool,
     /// Numbers the reads, so the report of a read that was stopped never
     /// frees the slot of a newer one.
     generation: u64,
@@ -142,6 +152,7 @@ impl StatsProbe {
         Self {
             done,
             on: false,
+            auto: false,
             generation: 0,
             task: None,
             started: None,
@@ -164,24 +175,55 @@ impl StatsProbe {
         // dropped by its number. The slot is freed only by that report.
     }
 
+    /// Turns the reads for the Auto camera quality on or off. They read the
+    /// own camera track only, unless the statistics are on too. The reads
+    /// that were started keep their numbers: a switch here never drops one.
+    pub fn set_auto(&mut self, auto: bool) {
+        self.auto = auto;
+    }
+
+    /// The link numbers of a reading, when the Auto camera quality needs
+    /// them: the first connection's estimate of the outgoing bandwidth and
+    /// round-trip time. A read that did not finish gives none, and a
+    /// reading from before a switch is as good as any other here.
+    pub fn link(&self, raw: Option<&RawStats>) -> Option<LinkReading> {
+        if !self.auto {
+            return None;
+        }
+        let connection = raw?.connections.iter().find(|c| c.connection == 0)?;
+        Some(LinkReading {
+            outgoing_bits_per_second: connection.outgoing_bits_per_second,
+            rtt_seconds: connection.rtt_seconds,
+        })
+    }
+
     /// Stops a read that runs, for the end of the call.
     pub fn shutdown(&mut self) {
         self.on = false;
+        self.auto = false;
         self.generation += 1;
         if let Some(task) = self.task.take() {
             task.abort();
         }
     }
 
-    /// Starts a read when they are on, none runs and a second has gone since
-    /// the last start. `sources` is only called then.
-    pub fn tick(&mut self, now: Instant, sources: impl FnOnce() -> Sources) {
-        if !self.on || self.task.is_some() {
+    /// Starts a read when the statistics or the Auto quality need one, none
+    /// runs and the interval has gone since the last start (a second with
+    /// the statistics on, else 2 seconds). `sources` is only called then; it
+    /// gets `true` when the statistics are on (all tracks) and `false` for
+    /// the Auto quality alone (the own camera only).
+    pub fn tick(&mut self, now: Instant, sources: impl FnOnce(bool) -> Sources) {
+        if !(self.on || self.auto) || self.task.is_some() {
             return;
         }
+        let interval = if self.on {
+            STATS_INTERVAL
+        } else {
+            AUTO_INTERVAL
+        };
         if self
             .started
-            .is_some_and(|at| now.saturating_duration_since(at) < STATS_INTERVAL)
+            .is_some_and(|at| now.saturating_duration_since(at) < interval)
         {
             return;
         }
@@ -189,7 +231,7 @@ impl StatsProbe {
         let done = self.done.clone();
         let generation = self.generation;
         let base = self.base;
-        let sources = sources();
+        let sources = sources(self.on);
         self.task = Some(tokio::spawn(async move {
             let mut report = Report {
                 done,
@@ -203,14 +245,22 @@ impl StatsProbe {
     }
 
     /// A read reported, so the slot is free. The message to send, when the
-    /// read belongs to the current series and finished.
+    /// statistics are on and the read belongs to the current series and
+    /// finished.
     pub fn end(&mut self, generation: u64, stats: Option<RawStats>) -> Option<FromWorker> {
         self.task = None;
-        if generation != self.generation {
+        if !self.on || generation != self.generation {
             return None;
         }
         stats.map(|raw| FromWorker::Stats(self.book.next(&raw)))
     }
+}
+
+/// The link numbers of one reading for the Auto camera quality.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LinkReading {
+    pub outgoing_bits_per_second: Option<f64>,
+    pub rtt_seconds: Option<f64>,
 }
 
 /// Reads every track at once, each under one deadline.
@@ -609,7 +659,7 @@ mod tests {
     /// Starts a read at `now` and counts the calls of the source builder.
     fn tick(probe: &mut StatsProbe, now: Instant) -> usize {
         let mut built = 0;
-        probe.tick(now, || {
+        probe.tick(now, |_| {
             built += 1;
             Sources::default()
         });
@@ -712,6 +762,93 @@ mod tests {
         probe.set(true);
         probe.shutdown();
         assert_eq!(tick(&mut probe, Instant::now()), 0);
+    }
+
+    /// A reading whose first connection has these link numbers.
+    fn linked(bits: f64, rtt: f64) -> RawStats {
+        RawStats {
+            connections: vec![RawConnection {
+                connection: 0,
+                outgoing_bits_per_second: Some(bits),
+                rtt_seconds: Some(rtt),
+                ..RawConnection::default()
+            }],
+            ..RawStats::default()
+        }
+    }
+
+    /// GIVEN the Auto quality is on and the statistics are off WHEN ticks
+    /// come THEN reads run every 2 seconds on the own camera only, they give
+    /// the controller the link numbers and the core no message.
+    #[tokio::test]
+    async fn given_auto_quality_alone_when_ticked_then_it_reads_the_link_only() {
+        let (mut probe, mut reports) = probe();
+        probe.set_auto(true);
+        let start = Instant::now();
+        let mut full = None;
+        probe.tick(start, |on| {
+            full = Some(on);
+            Sources::default()
+        });
+        assert_eq!(full, Some(false), "the own camera only");
+        assert_eq!(tick(&mut probe, start), 0, "one read at a time");
+        let (generation, _raw) = reports.recv().await.unwrap();
+        let reading = linked(2_000_000.0, 0.03);
+        assert_eq!(
+            probe.link(Some(&reading)),
+            Some(LinkReading {
+                outgoing_bits_per_second: Some(2_000_000.0),
+                rtt_seconds: Some(0.03),
+            })
+        );
+        assert!(
+            probe.end(generation, Some(reading)).is_none(),
+            "the core gets no message"
+        );
+        assert_eq!(tick(&mut probe, start + STATS_INTERVAL), 0, "2 seconds");
+        assert_eq!(tick(&mut probe, start + AUTO_INTERVAL), 1);
+        probe.shutdown();
+    }
+
+    /// GIVEN the Auto quality is off WHEN a reading comes THEN it gives no
+    /// link numbers, and a reading with no first connection gives none.
+    #[tokio::test]
+    async fn given_no_auto_quality_then_no_link_numbers() {
+        let (mut probe, _reports) = probe();
+        assert!(probe.link(Some(&linked(1.0, 1.0))).is_none());
+        probe.set_auto(true);
+        assert!(probe.link(None).is_none());
+        assert!(probe.link(Some(&RawStats::default())).is_none());
+        probe.set_auto(false);
+        assert!(probe.link(Some(&linked(1.0, 1.0))).is_none());
+    }
+
+    /// GIVEN the statistics and the Auto quality are both on WHEN ticks come
+    /// THEN reads run every second on all tracks and give both the message
+    /// and the link numbers; the statistics going off keeps the Auto reads.
+    #[tokio::test]
+    async fn given_both_on_then_reads_are_full_and_off_keeps_the_auto_reads() {
+        let (mut probe, mut reports) = probe();
+        probe.set(true);
+        probe.set_auto(true);
+        let start = Instant::now();
+        let mut full = None;
+        probe.tick(start, |on| {
+            full = Some(on);
+            Sources::default()
+        });
+        assert_eq!(full, Some(true));
+        let (generation, raw) = reports.recv().await.unwrap();
+        assert!(matches!(
+            probe.end(generation, raw),
+            Some(FromWorker::Stats(_))
+        ));
+        assert_eq!(tick(&mut probe, start + STATS_INTERVAL), 1, "a second");
+        probe.set(false);
+        let (generation, raw) = reports.recv().await.unwrap();
+        assert!(probe.end(generation, raw).is_none(), "the view is off");
+        assert_eq!(tick(&mut probe, start + 3 * AUTO_INTERVAL), 1, "Auto reads");
+        probe.shutdown();
     }
 
     /// GIVEN reads that hold no statistics WHEN the reading is assembled THEN
