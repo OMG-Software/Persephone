@@ -537,7 +537,6 @@ struct StreamData<F> {
     shared: Rc<RefCell<Shared>>,
     mainloop: MainLoopWeak,
     negotiated: Option<Negotiated>,
-    converted: Vec<u8>,
     on_frame: F,
 }
 
@@ -625,7 +624,6 @@ impl<F: FnMut(CapturedFrame<'_>)> StreamData<F> {
                 negotiated.height,
                 stride,
                 &bytes[range],
-                &mut self.converted,
                 &mut self.on_frame,
             );
         }
@@ -705,7 +703,6 @@ fn run<F: FnMut(CapturedFrame<'_>) + 'static>(
         shared: shared.clone(),
         mainloop: remote.mainloop.downgrade(),
         negotiated: None,
-        converted: Vec::new(),
         on_frame,
     };
     let Ok(_listener) = stream

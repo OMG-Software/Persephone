@@ -52,8 +52,9 @@ during a call. The worker has no answer to it.
 
 * Send tiers: 640x360, 854x480, 1280x720, 1920x1080 and 2560x1440, with VP8
   bitrates of 0.6, 0.9, 1.5, 2.5 and 4 Mbit/s at 15 frames a second.
-* A fixed choice sends that tier. The camera's best mode limits it. A camera
-  is never enlarged.
+* A fixed choice sends that tier. The camera's best mode limits it, by the
+  short side of its picture, because a tier is named by that side: a 640x480
+  camera reaches 480p and sends 640x480. A camera is never enlarged.
 * Auto starts at 480p and climbs up to 1440p.
 * Auto steps up one tier after 3 good samples (about 6 seconds). A sample is
   good when the available outgoing bandwidth is at least the tier's bitrate,
@@ -68,7 +69,8 @@ during a call. The worker has no answer to it.
   one-second reads do not speed Auto up. The hold goes back to 10 seconds only
   after a tier reached by a step up has held for 60 seconds.
 * Auto's top tier is 1440p. A fixed choice's top tier is that tier. The size
-  of the camera's first picture caps either one. The open thread waits up to
+  of the camera's first picture caps either one, at the largest tier whose
+  short side the picture's short side reaches. The open thread waits up to
   2 seconds for that picture, so the publish knows the real top tier.
 * While the camera is on, Auto reads the WebRTC statistics every 2 seconds,
   also with the statistics view off. With the view off, it reads only the
@@ -100,8 +102,10 @@ keeps its size until it restarts.
   the next quality or device request of the same call, and the core answers
   `limit_exceeded` after it saved the value.
   The call task sends the new device choice and quality to the worker before
-  the camera-on. A joining call has no camera to restart. A camera that is off
-  stays off. If the camera is starting, the worker ends the open that is in
+  the camera-on. A quality or a camera chosen while the call joins restarts
+  the camera that the `Join` started: the call task does it, before and
+  after the connect, with queue room held for both commands, and only while
+  the user still wants the camera. A camera that is off stays off. If the camera is starting, the worker ends the open that is in
   flight, releases it, and opens again with the new device and quality.
 * The page offers a "Video quality" menu next to the camera menu, in the
   main window's call settings and in the call window's device panel. The
@@ -115,8 +119,15 @@ keeps its size until it restarts.
   up. The macOS code was not compiled for this record.
 * While any effect runs, the send box is 640x360, also with a fixed 1440p,
   because the effect works at that size.
+* Windows lists every native camera type up to 3840x2160, MJPEG included,
+  and Media Foundation decodes it to NV12 for every frame. The worker leaves
+  out modes larger than 2560x1440 (1440x2560 when tall) while the camera has
+  another mode, so Auto and 1440p never open a 4K mode that no tier sends.
+  A camera with only larger modes opens at its smallest. Speed comes first:
+  a 4K mode at 30 frames a second still beats a 1080p mode at 5.
 * Linux V4L2 takes raw YUYV, NV12 and I420 only, up to 2560x1440. MJPEG is
-  refused. The worker reads each mode's frame intervals and asks the driver
+  refused. YUYV is converted to I420 only for the pictures that the 15
+  frames a second limit lets through, not in the capture loop. The worker reads each mode's frame intervals and asks the driver
   for the chosen rate, at most 30. Among modes of at least 15 frames a second,
   it picks the smallest that covers the tier, else the largest of those. An
   unknown rate counts as fast enough. Buffers are bounded: at most 16 MiB each

@@ -2448,8 +2448,10 @@ impl CallController {
     /// joining call. Only the newest value is kept, and the call task sends
     /// it to the worker, always before a camera-on. The worker applies it at
     /// its next camera start, so a camera that is on or starting restarts at
-    /// once (`restart_camera`). A joining call has no camera to restart; it
-    /// sends the value after the join. `NotInCall` without a call. The
+    /// once (`restart_camera`). For a joining call this only writes the
+    /// value: the call task sends it after the join and restarts the camera
+    /// that the `Join` started (`Call::restart_join_camera`). `NotInCall`
+    /// without a call. The
     /// caller saves the value for later calls before it calls this, so a
     /// join that read the saved record before the save gets it from here
     /// (`video_asked`).

@@ -49,6 +49,8 @@ pub(crate) mod linux_portal;
 mod v4l2;
 #[cfg(any(target_os = "linux", test))]
 mod yuyv;
+#[cfg(any(target_os = "linux", test))]
+pub use yuyv::yuyv_to_i420;
 
 /// What one camera-on brought for its open: on the Linux portal path, the
 /// PipeWire remote the core sent with it. Empty everywhere else. Dropping
@@ -125,6 +127,12 @@ pub enum Format {
     /// `ceil(stride / 2) * ceil(height / 2)` bytes each.
     #[allow(dead_code)] // for backends that deliver I420
     I420,
+    /// Packed `Y0 U Y1 V`, `stride` bytes per row, an even width (Linux).
+    /// The worker converts it only when it takes the picture
+    /// (`fitted_i420`, after the rate limit), so a picture that the limit
+    /// drops is never converted.
+    #[cfg(any(target_os = "linux", test))]
+    Yuyv,
 }
 
 /// One camera picture. The bytes live until the callback returns.
@@ -134,7 +142,7 @@ pub struct CapturedFrame<'a> {
     pub format: Format,
     pub width: u32,
     pub height: u32,
-    /// Bytes per row of the Y plane.
+    /// Bytes per row of the Y plane (of the packed picture for YUYV).
     pub stride: u32,
     pub data: &'a [u8],
 }
@@ -147,17 +155,25 @@ impl<'a> CapturedFrame<'a> {
         if !capture_size_ok(width, height) || stride < width {
             return None;
         }
-        let (stride, height) = (stride as usize, height as usize);
-        let y = stride.checked_mul(height)?;
-        let chroma_rows = height.div_ceil(2);
+        let (stride, rows) = (stride as usize, height as usize);
+        let chroma_rows = rows.div_ceil(2);
         let chroma = match format {
             Format::Nv12 => stride.checked_mul(chroma_rows)?,
             Format::I420 => stride
                 .div_ceil(2)
                 .checked_mul(chroma_rows)?
                 .checked_mul(2)?,
+            // Two bytes a pixel; the last row needs no padding after it.
+            #[cfg(any(target_os = "linux", test))]
+            Format::Yuyv => {
+                let row = (width as usize).checked_mul(2)?;
+                if !width.is_multiple_of(2) || stride < row {
+                    return None;
+                }
+                return (rows - 1).checked_mul(stride)?.checked_add(row);
+            }
         };
-        y.checked_add(chroma)
+        stride.checked_mul(rows)?.checked_add(chroma)
     }
 
     /// A frame over `data`, or `None` when `data` is shorter than a whole
@@ -528,6 +544,20 @@ mod tests {
         assert_eq!(CapturedFrame::expected_len(Format::Nv12, 1, 1, 1), None);
         assert_eq!(
             CapturedFrame::expected_len(Format::I420, 9000, 9000, 9000),
+            None
+        );
+        // YUYV: every row but the last at its stride, then one row of two
+        // bytes a pixel; an odd width or a stride under a row gives none.
+        assert_eq!(
+            CapturedFrame::expected_len(Format::Yuyv, 640, 360, 1300),
+            Some(359 * 1300 + 1280)
+        );
+        assert_eq!(
+            CapturedFrame::expected_len(Format::Yuyv, 641, 360, 1300),
+            None
+        );
+        assert_eq!(
+            CapturedFrame::expected_len(Format::Yuyv, 640, 360, 1279),
             None
         );
     }

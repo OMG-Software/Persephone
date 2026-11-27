@@ -4355,6 +4355,28 @@ fn fitted_i420(frame: &CapturedFrame<'_>, tier: SendTier) -> Option<I420Buffer> 
             };
             VideoFrameBufferExt::to_i420(&buffer)
         }
+        // Converted here, after the rate limit, so a YUYV picture that the
+        // limit drops costs no conversion (Linux).
+        #[cfg(any(target_os = "linux", test))]
+        Format::Yuyv => {
+            let chroma_stride = width.div_ceil(2);
+            let mut buffer =
+                I420Buffer::with_strides(width, height, width, chroma_stride, chroma_stride);
+            if !camera::yuyv_to_i420(
+                frame.data,
+                width,
+                height,
+                stride as usize,
+                buffer.data_mut(),
+            ) {
+                return None;
+            }
+            if scaled {
+                buffer.scale(fit_w as i32, fit_h as i32)
+            } else {
+                buffer
+            }
+        }
         Format::I420 => {
             let chroma_stride = stride.div_ceil(2);
             let mut buffer =
@@ -6216,6 +6238,47 @@ mod tests {
         let data = nv12_data(34, 66);
         let frame = CapturedFrame::checked(Format::Nv12, 65, 34, 66, &data).expect("fits");
         assert!(fitted_i420(&frame, SendTier::P360).is_none());
+    }
+
+    /// GIVEN a YUYV camera frame WHEN made I420 THEN it is converted here,
+    /// with the planes of the conversion, and fitted to the tier; a frame
+    /// with a stride shorter than a row is refused.
+    #[test]
+    fn given_yuyv_frame_when_made_i420_then_it_is_converted_and_fitted() {
+        // Row 0: (Y0 U Y1 V) x2; row 1 has different chroma.
+        let src = [
+            10, 100, 11, 200, 12, 110, 13, 210, // row 0
+            20, 102, 21, 202, 22, 112, 23, 212, // row 1
+        ];
+        let frame = CapturedFrame::checked(Format::Yuyv, 4, 2, 8, &src).expect("fits");
+        let picture = fitted_i420(&frame, SendTier::P360).expect("converted");
+        assert_eq!((picture.width(), picture.height()), (4, 2));
+        let (y, u, v) = picture.data();
+        assert_eq!(&y[..8], &[10, 11, 12, 13, 20, 21, 22, 23]);
+        assert_eq!((&u[..2], &v[..2]), (&[101, 111][..], &[201, 211][..]));
+        let len = CapturedFrame::expected_len(Format::Yuyv, 1280, 720, 2560).unwrap();
+        let data = vec![90_u8; len];
+        let frame = CapturedFrame::checked(Format::Yuyv, 1280, 720, 2560, &data).expect("fits");
+        let picture = fitted_i420(&frame, SendTier::P360).expect("converted");
+        assert_eq!((picture.width(), picture.height()), (640, 360));
+        let short = CapturedFrame {
+            stride: 6,
+            ..CapturedFrame::checked(Format::Yuyv, 4, 2, 8, &src).expect("fits")
+        };
+        assert!(fitted_i420(&short, SendTier::P360).is_none());
+    }
+
+    /// GIVEN a 640x480 camera and a fixed 480p WHEN the top tier is capped by
+    /// its first picture and the picture is fitted THEN it goes as 640x480:
+    /// a 4:3 camera is not held one tier down.
+    #[test]
+    fn given_a_4_by_3_camera_at_480p_then_it_is_sent_at_its_own_size() {
+        let tier = SendTier::P480.capped_by_capture(Some((640, 480)));
+        assert_eq!(tier, SendTier::P480);
+        let data = nv12_data(480, 640);
+        let frame = CapturedFrame::checked(Format::Nv12, 640, 480, 640, &data).expect("fits");
+        let picture = fitted_i420(&frame, tier).expect("converted");
+        assert_eq!((picture.width(), picture.height()), (640, 480));
     }
 
     /// GIVEN an I420 camera frame WHEN converted THEN the size follows the fit

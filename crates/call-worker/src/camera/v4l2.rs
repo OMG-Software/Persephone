@@ -654,7 +654,6 @@ fn read_frames<F: FnMut(CapturedFrame<'_>)>(
     on_frame: &mut F,
 ) -> bool {
     let raw = stream.fd.as_raw_fd();
-    let mut converted = Vec::new();
     while !stop.load(Ordering::Acquire) {
         let mut wait = libc::pollfd {
             fd: raw,
@@ -684,7 +683,7 @@ fn read_frames<F: FnMut(CapturedFrame<'_>)>(
             Err(_) => return true,
         }
         let index = buffer.index;
-        deliver(stream, &buffer, &mut converted, on_frame);
+        deliver(stream, &buffer, on_frame);
         if queue(raw, index).is_err() {
             return true;
         }
@@ -692,14 +691,10 @@ fn read_frames<F: FnMut(CapturedFrame<'_>)>(
     false
 }
 
-/// Hands one picture to the callback as NV12 or I420. A picture with the error
-/// flag, a bad buffer index or too few bytes is skipped.
-fn deliver<F: FnMut(CapturedFrame<'_>)>(
-    stream: &Stream,
-    buffer: &Buffer,
-    converted: &mut Vec<u8>,
-    on_frame: &mut F,
-) {
+/// Hands one picture to the callback as NV12, I420 or YUYV (converted only
+/// when the callback takes it). A picture with the error flag, a bad buffer
+/// index or too few bytes is skipped.
+fn deliver<F: FnMut(CapturedFrame<'_>)>(stream: &Stream, buffer: &Buffer, on_frame: &mut F) {
     let Some(map) = stream.maps.get(buffer.index as usize) else {
         return;
     };
@@ -715,15 +710,7 @@ fn deliver<F: FnMut(CapturedFrame<'_>)>(
     // it is queued again, which happens after this slice is gone.
     let bytes = unsafe { std::slice::from_raw_parts(map.ptr.cast::<u8>(), used) };
     let (width, height, stride) = (stream.width, stream.height, stream.stride);
-    yuyv::deliver_frame(
-        stream.format,
-        width,
-        height,
-        stride,
-        bytes,
-        converted,
-        on_frame,
-    );
+    yuyv::deliver_frame(stream.format, width, height, stride, bytes, on_frame);
 }
 
 #[cfg(test)]
