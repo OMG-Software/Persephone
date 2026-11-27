@@ -34,6 +34,7 @@ pub mod account;
 pub mod account_changes;
 pub mod account_details;
 pub mod activity;
+pub mod app_menu;
 pub mod backup_restore;
 mod bounded;
 pub mod calls;
@@ -86,8 +87,8 @@ use homeserver::Homeserver;
 use matrix_views::MatrixViews;
 use media::{Encoded, ImageWorker, MediaService};
 use persephone_contracts::{
-    AccountStatus, AppStatus, ImagePick, ImageView, RoomList, RoomPicture, StoreState,
-    ThirdPartyModules, UnixMillis,
+    AccountStatus, AppMenuState, AppStatus, ImagePick, ImageView, RoomList, RoomPicture,
+    StoreState, ThirdPartyModules, UnixMillis,
 };
 use persephone_core_protocol::{
     Call, CoreMessage, ErrorCode, Event, MAX_CALL_SOUND_LEVEL, MAX_EVENT_ID_BYTES,
@@ -581,6 +582,10 @@ pub struct Core {
     /// An "off" drains the writer: a second one is refused meanwhile, so
     /// repeated requests cannot start a thread each.
     diagnostics_stopping: AtomicBool,
+    /// The desktop's app menu entry for an AppImage (ADR-0072).
+    app_menu: Arc<dyn app_menu::AppMenu>,
+    /// One add (with its question) or remove at a time.
+    app_menu_change: conversations::Busy,
 }
 
 /// Counts one running long call until it is dropped, with its thread or with
@@ -844,6 +849,8 @@ impl Core {
             diagnostics_path: None,
             diagnostics_asking: AtomicBool::new(false),
             diagnostics_stopping: AtomicBool::new(false),
+            app_menu: app_menu::platform(),
+            app_menu_change: conversations::Busy::default(),
         }
     }
 
@@ -884,6 +891,53 @@ impl Core {
     pub fn with_credentials(mut self, source: Arc<dyn CredentialSource>) -> Self {
         self.credentials = source;
         self
+    }
+
+    /// Replaces the platform's app menu entry (tests).
+    pub fn with_app_menu(mut self, menu: Arc<dyn app_menu::AppMenu>) -> Self {
+        self.app_menu = menu;
+        self
+    }
+
+    /// Adds Persephone's app menu entry after the core's own question, or
+    /// removes it (ADR-0072). One change at a time; the reply is the new
+    /// state.
+    fn app_menu_change(&self, on: bool) -> Result<LongCall<'_>, ErrorCode> {
+        let slot = self.app_menu_change.begin()?;
+        Ok(Box::new(move || {
+            let _slot = slot;
+            let result = if on {
+                self.add_to_app_menu()
+            } else {
+                self.app_menu.remove()
+            };
+            match result {
+                Ok(state) => ok(&persephone_contracts::AppMenuStatus { state }),
+                Err(app_menu::AppMenuError::Unavailable) => Outcome::Error(ErrorCode::Unavailable),
+                Err(app_menu::AppMenuError::Failed) => Outcome::Error(ErrorCode::Internal),
+            }
+        }))
+    }
+
+    /// Asks only when there is something to add, and adds only after a yes.
+    /// The add checks the state again, because the question can stay open
+    /// for minutes.
+    fn add_to_app_menu(&self) -> Result<AppMenuState, app_menu::AppMenuError> {
+        match self.app_menu.state() {
+            AppMenuState::Absent | AppMenuState::Outdated => {}
+            AppMenuState::Unavailable => return Err(app_menu::AppMenuError::Unavailable),
+            state => return Ok(state),
+        }
+        let place = self
+            .app_menu
+            .place()
+            .ok_or(app_menu::AppMenuError::Unavailable)?;
+        match self.credentials.confirm_app_menu(&place) {
+            Ok(true) => self.app_menu.add(),
+            Ok(false) | Err(credentials::PromptError::Cancelled) => Ok(self.app_menu.state()),
+            Err(credentials::PromptError::Unsupported) => Err(app_menu::AppMenuError::Unavailable),
+            Err(_) => Err(app_menu::AppMenuError::Failed),
+        }
     }
 
     /// Where the diagnostic log goes when the user turns it on (ADR-0058);
@@ -1122,6 +1176,10 @@ impl Core {
                     id,
                     outcome: Outcome::Ok(serde_json::Value::Bool(true)),
                 }),
+                Err(code) => error(code),
+            },
+            Call::SetAppMenu { on } => match self.app_menu_change(*on) {
+                Ok(call) => Answer::Later(id, call),
                 Err(code) => error(code),
             },
             Call::SetDiagnostics { on: false } => match self.diagnostics_off() {
@@ -1407,6 +1465,11 @@ impl Core {
                 }
             }
             Call::DiagnosticsStatus {} => ok(&self.diagnostics_status()),
+            Call::AppMenuStatus {} => ok(&persephone_contracts::AppMenuStatus {
+                state: self.app_menu.state(),
+            }),
+            // It can ask first, so only `answer` runs it, as a long call.
+            Call::SetAppMenu { .. } => Outcome::Error(ErrorCode::Unavailable),
             // Turning on asks first and turning off waits for the writer,
             // so only `answer` runs them, as long calls.
             Call::SetDiagnostics { .. } => Outcome::Error(ErrorCode::Unavailable),
@@ -5736,6 +5799,256 @@ mod tests {
         core.hub.account_changed();
         assert_eq!(core.take_events(), Some(vec![Event::AccountChanged {}]));
         assert!(!lock(&core.hub.notifications).account_changed);
+    }
+
+    /// An app menu with a set state that counts its adds and removes.
+    struct FakeMenu {
+        state: Mutex<AppMenuState>,
+        adds: AtomicUsize,
+        removes: AtomicUsize,
+        write: Result<(), app_menu::AppMenuError>,
+    }
+
+    impl FakeMenu {
+        fn new(state: AppMenuState) -> Arc<Self> {
+            Self::failing(state, Ok(()))
+        }
+
+        fn failing(state: AppMenuState, write: Result<(), app_menu::AppMenuError>) -> Arc<Self> {
+            Arc::new(Self {
+                state: Mutex::new(state),
+                adds: AtomicUsize::new(0),
+                removes: AtomicUsize::new(0),
+                write,
+            })
+        }
+    }
+
+    const MENU_APPIMAGE: &str = "/home/example/Persephone (1).AppImage";
+
+    impl app_menu::AppMenu for FakeMenu {
+        fn state(&self) -> AppMenuState {
+            *lock(&self.state)
+        }
+
+        fn place(&self) -> Option<app_menu::Place> {
+            (self.state() != AppMenuState::Unavailable).then(|| app_menu::Place {
+                appimage: MENU_APPIMAGE.into(),
+                data_home: "/home/example/.local/share".into(),
+            })
+        }
+
+        fn add(&self) -> Result<AppMenuState, app_menu::AppMenuError> {
+            self.adds.fetch_add(1, Ordering::SeqCst);
+            self.write?;
+            *lock(&self.state) = AppMenuState::Added;
+            Ok(AppMenuState::Added)
+        }
+
+        fn remove(&self) -> Result<AppMenuState, app_menu::AppMenuError> {
+            if self.state() == AppMenuState::Unavailable {
+                return Err(app_menu::AppMenuError::Unavailable);
+            }
+            self.removes.fetch_add(1, Ordering::SeqCst);
+            self.write?;
+            *lock(&self.state) = AppMenuState::Absent;
+            Ok(AppMenuState::Absent)
+        }
+    }
+
+    /// Answers the app menu question with a fixed answer and counts it.
+    struct MenuAnswer {
+        answer: Result<bool, credentials::PromptError>,
+        asked: AtomicUsize,
+    }
+
+    impl MenuAnswer {
+        fn new(answer: Result<bool, credentials::PromptError>) -> Arc<Self> {
+            Arc::new(Self {
+                answer,
+                asked: AtomicUsize::new(0),
+            })
+        }
+    }
+
+    impl CredentialSource for MenuAnswer {
+        fn ask(&self, _: &str) -> Result<credentials::Credentials, credentials::PromptError> {
+            Err(credentials::PromptError::Unsupported)
+        }
+
+        fn confirm_open_link(
+            &self,
+            caption: &str,
+            message: &str,
+        ) -> Result<bool, credentials::PromptError> {
+            assert_eq!(caption, "Add Persephone to the app menu?");
+            assert!(
+                message.contains(&format!("\n\n{MENU_APPIMAGE}\n\n")),
+                "{message}"
+            );
+            assert!(
+                message.contains("Persephone.desktop to /home/example/.local/share/applications"),
+                "{message}"
+            );
+            self.asked.fetch_add(1, Ordering::SeqCst);
+            self.answer
+        }
+    }
+
+    fn menu_core(menu: &Arc<FakeMenu>, answer: &Arc<MenuAnswer>) -> Core {
+        Core::default()
+            .with_app_menu(menu.clone())
+            .with_credentials(answer.clone())
+    }
+
+    /// Sends one app menu change and runs its long call.
+    fn set_app_menu(core: &Core, on: bool) -> Outcome {
+        let Answer::Later(4, call) = core.answer(&Request {
+            id: 4,
+            call: Call::SetAppMenu { on },
+        }) else {
+            panic!("an app menu change must be a long call");
+        };
+        call()
+    }
+
+    fn menu_state(state: AppMenuState) -> Outcome {
+        ok(&persephone_contracts::AppMenuStatus { state })
+    }
+
+    /// GIVEN no entry WHEN the page asks for one and the user says no THEN
+    /// nothing is added and the reply is `absent`; WHEN the user says yes
+    /// THEN it is added once, the reply is `added`, and the status says so.
+    #[test]
+    fn given_no_entry_when_the_user_answers_then_only_a_yes_adds_it() {
+        let menu = FakeMenu::new(AppMenuState::Absent);
+        let no = MenuAnswer::new(Ok(false));
+        let core = menu_core(&menu, &no);
+        assert_eq!(set_app_menu(&core, true), menu_state(AppMenuState::Absent));
+        assert_eq!(no.asked.load(Ordering::SeqCst), 1);
+        assert_eq!(menu.adds.load(Ordering::SeqCst), 0);
+
+        let yes = MenuAnswer::new(Ok(true));
+        let core = menu_core(&menu, &yes);
+        assert_eq!(set_app_menu(&core, true), menu_state(AppMenuState::Added));
+        assert_eq!(menu.adds.load(Ordering::SeqCst), 1);
+        let Answer::Reply(Reply { id: 5, outcome }) = core.answer(&Request {
+            id: 5,
+            call: Call::AppMenuStatus {},
+        }) else {
+            panic!("the status is answered at once");
+        };
+        assert_eq!(outcome, menu_state(AppMenuState::Added));
+    }
+
+    /// GIVEN an entry of Persephone's own for another AppImage WHEN the
+    /// user says yes THEN it is replaced; a closed window is a "no".
+    #[test]
+    fn given_an_outdated_entry_when_answered_then_a_closed_window_keeps_it() {
+        let menu = FakeMenu::new(AppMenuState::Outdated);
+        let closed = MenuAnswer::new(Err(credentials::PromptError::Cancelled));
+        assert_eq!(
+            set_app_menu(&menu_core(&menu, &closed), true),
+            menu_state(AppMenuState::Outdated)
+        );
+        assert_eq!(menu.adds.load(Ordering::SeqCst), 0);
+        let yes = MenuAnswer::new(Ok(true));
+        assert_eq!(
+            set_app_menu(&menu_core(&menu, &yes), true),
+            menu_state(AppMenuState::Added)
+        );
+    }
+
+    /// GIVEN an entry that is already added, or another program's entry
+    /// WHEN the page asks to add THEN no question is shown, nothing is
+    /// written, and the state is the reply. GIVEN no AppImage THEN the
+    /// reply is `unavailable`.
+    #[test]
+    fn given_nothing_to_add_when_asked_then_no_question_is_shown() {
+        for state in [AppMenuState::Added, AppMenuState::Provided] {
+            let menu = FakeMenu::new(state);
+            let answer = MenuAnswer::new(Ok(true));
+            assert_eq!(
+                set_app_menu(&menu_core(&menu, &answer), true),
+                menu_state(state)
+            );
+            assert_eq!(answer.asked.load(Ordering::SeqCst), 0, "{state:?}");
+            assert_eq!(menu.adds.load(Ordering::SeqCst), 0, "{state:?}");
+        }
+        let menu = FakeMenu::new(AppMenuState::Unavailable);
+        let answer = MenuAnswer::new(Ok(true));
+        let core = menu_core(&menu, &answer);
+        assert_eq!(
+            set_app_menu(&core, true),
+            Outcome::Error(ErrorCode::Unavailable)
+        );
+        assert_eq!(
+            set_app_menu(&core, false),
+            Outcome::Error(ErrorCode::Unavailable)
+        );
+        assert_eq!(answer.asked.load(Ordering::SeqCst), 0);
+        let none = Core::default().with_app_menu(Arc::new(app_menu::Unavailable));
+        let Answer::Reply(Reply { outcome, .. }) = none.answer(&Request {
+            id: 6,
+            call: Call::AppMenuStatus {},
+        }) else {
+            panic!("the status is answered at once");
+        };
+        assert_eq!(outcome, menu_state(AppMenuState::Unavailable));
+    }
+
+    /// GIVEN Persephone's entry WHEN the page asks to remove it THEN it is
+    /// removed with no question.
+    #[test]
+    fn given_an_added_entry_when_removed_then_no_question_is_shown() {
+        let menu = FakeMenu::new(AppMenuState::Added);
+        let answer = MenuAnswer::new(Ok(false));
+        assert_eq!(
+            set_app_menu(&menu_core(&menu, &answer), false),
+            menu_state(AppMenuState::Absent)
+        );
+        assert_eq!(menu.removes.load(Ordering::SeqCst), 1);
+        assert_eq!(answer.asked.load(Ordering::SeqCst), 0);
+    }
+
+    /// GIVEN a question that is open WHEN another change arrives THEN it
+    /// is refused, so a page cannot open a second window or remove while
+    /// the user decides. A failed question, a failed write and a source
+    /// without windows give fixed codes only.
+    #[test]
+    fn given_an_open_question_or_a_failure_then_the_reply_is_a_fixed_code() {
+        let menu = FakeMenu::new(AppMenuState::Absent);
+        let answer = MenuAnswer::new(Ok(true));
+        let core = menu_core(&menu, &answer);
+        let open = core.app_menu_change(true).unwrap();
+        for on in [true, false] {
+            let Answer::Reply(Reply { outcome, .. }) = core.answer(&Request {
+                id: 7,
+                call: Call::SetAppMenu { on },
+            }) else {
+                panic!("a second change is refused at once");
+            };
+            assert_eq!(outcome, Outcome::Error(ErrorCode::LimitExceeded));
+        }
+        assert_eq!(open(), menu_state(AppMenuState::Added));
+        assert_eq!(set_app_menu(&core, false), menu_state(AppMenuState::Absent));
+
+        let failed = MenuAnswer::new(Err(credentials::PromptError::Failed));
+        assert_eq!(
+            set_app_menu(&menu_core(&menu, &failed), true),
+            Outcome::Error(ErrorCode::Internal)
+        );
+        let windowless = MenuAnswer::new(Err(credentials::PromptError::Unsupported));
+        assert_eq!(
+            set_app_menu(&menu_core(&menu, &windowless), true),
+            Outcome::Error(ErrorCode::Unavailable)
+        );
+        let broken = FakeMenu::failing(AppMenuState::Absent, Err(app_menu::AppMenuError::Failed));
+        assert_eq!(
+            set_app_menu(&menu_core(&broken, &answer), true),
+            Outcome::Error(ErrorCode::Internal)
+        );
+        assert_eq!(broken.adds.load(Ordering::SeqCst), 1);
     }
 
     /// Answers the diagnostic log's question with a fixed answer.

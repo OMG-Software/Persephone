@@ -36,6 +36,8 @@
     "allow-diagnostics-status",
     "allow-set-diagnostics",
     "allow-diagnostic-records",
+    "allow-app-menu-status",
+    "allow-set-app-menu",
     "allow-call-devices",
     "allow-set-call-devices",
     "allow-call-device-test",

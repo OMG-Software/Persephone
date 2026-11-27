@@ -6,6 +6,8 @@ import { Channel, invoke as hostInvoke } from '@tauri-apps/api/core';
 import type { InvokeArgs, InvokeOptions } from '@tauri-apps/api/core';
 import { installPageDiagnostics, noteCall, outcomeCode, setPageDiagnostics } from './diagnostics.ts';
 import type {
+  AppMenuState,
+  AppMenuStatus,
   DiagnosticsStatus,
   AccountChange,
   AccountSettings,
@@ -128,6 +130,8 @@ export type {
   AccountChange,
   AccountSettings,
   AccountStatus,
+  AppMenuState,
+  AppMenuStatus,
   AppStatus,
   CallCamera,
   CallEnd,
@@ -1259,6 +1263,25 @@ export function setDiagnostics(on: boolean): Promise<boolean> {
 }
 
 export { diagnosticsOn, onDiagnosticsChange } from './diagnostics.ts';
+
+/**
+ * Whether this run can add Persephone to the desktop's app menu, and what is
+ * there now (ADR-0072). Only a Linux AppImage can; elsewhere the state is
+ * `unavailable`.
+ */
+export function appMenuStatus(): Promise<AppMenuStatus> {
+  return invoke<AppMenuStatus>('app_menu_status');
+}
+
+/**
+ * Adds Persephone's app menu entry for the running AppImage, or removes it;
+ * resolves to the new state. Adding shows the core's own question first, and
+ * the user can refuse there (the state stays). Rejects with `limit_exceeded`
+ * while a change is already under way.
+ */
+export function setAppMenu(on: boolean): Promise<AppMenuStatus> {
+  return invoke<AppMenuStatus>('set_app_menu', { on });
+}
 
 /**
  * Finds the homeserver of a server name such as `example.org`, through its

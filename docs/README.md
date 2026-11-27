@@ -91,6 +91,7 @@ Run records and supporting artifacts are grouped under [evidence](evidence). The
 - [Contained media worker](evidence/media-worker.md): self-checking worker under AppContainer, Job and mitigations; memory and deadline results.
 - [WebAssembly decoder sandbox](evidence/wasm-decoder.md): import allowlist, memory/fuel limits, hostile-module tests and 16-megapixel benchmark.
 - [SDK task ownership and cooperative stop](evidence/sdk-lifecycle.md): retained Rust task ownership, controlled SDK barriers and the unresolved full SDK shutdown contract.
+- [AppImage icon and compression](evidence/appimage-icon.md): gzip against zstd for the 0.3.0 AppImage (12.8 MB more, twice the unpack time), and Ubuntu's libappimage reading the zstd image's icon; no KDE desktop run.
 - [Rust dependencies and advisories](evidence/dependencies.md): OSV audits of the root lockfile (latest entry 23 October 2026), the maintenance disposition, compiled-graph reviews, and a historical per-package inventory.
 
 Earlier P0 probes (19 and 20 October 2026; historical run records with pre-restructure paths):

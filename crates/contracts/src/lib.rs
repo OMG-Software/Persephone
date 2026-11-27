@@ -1323,6 +1323,31 @@ pub struct DiagnosticsStatus {
     pub path: Option<String>,
 }
 
+/// What Persephone's app menu entry is in this run (ADR-0072).
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AppMenuState {
+    /// Not started from a checked Linux AppImage, or its path cannot be
+    /// written into a desktop entry: the page shows nothing.
+    Unavailable,
+    /// A `Persephone.desktop` that Persephone did not write is there (a
+    /// package, or another program's file): nothing to add.
+    Provided,
+    /// No entry: Persephone can add one, after the core's question.
+    Absent,
+    /// Persephone's own entry for this AppImage.
+    Added,
+    /// Persephone's own entry, for another AppImage path or another version.
+    Outdated,
+}
+
+/// Reply of `app_menu_status` and `set_app_menu` (ADR-0072).
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct AppMenuStatus {
+    pub state: AppMenuState,
+}
+
 /// Reply of `discover_homeserver`: the homeserver found for a server name,
 /// confirmed to speak Matrix, and whether a `.well-known` file named it
 /// (ADR-0027). The page shows it before signing in to it.
@@ -3322,6 +3347,8 @@ pub fn generated_typescript() -> String {
         format!("export {}", DeviceList::decl(&config)),
         format!("export {}", ProxySetting::decl(&config)),
         format!("export {}", DiagnosticsStatus::decl(&config)),
+        format!("export {}", AppMenuState::decl(&config)),
+        format!("export {}", AppMenuStatus::decl(&config)),
         format!("export {}", HomeserverFound::decl(&config)),
         format!("export {}", NewSession::decl(&config)),
         format!("export {}", NewSessions::decl(&config)),
@@ -3514,6 +3541,18 @@ mod personal_contract_tests {
             )
             .is_err(),
             "`failed` is required"
+        );
+        fixture::<AppMenuStatus>(include_str!("../fixtures/app-menu-status.json"));
+        for state in ["unavailable", "provided", "absent", "added", "outdated"] {
+            fixture::<AppMenuStatus>(&format!(r#"{{"state":"{state}"}}"#));
+        }
+        assert!(
+            serde_json::from_str::<AppMenuStatus>(r#"{"state":"installed"}"#).is_err(),
+            "only the defined states"
+        );
+        assert!(
+            serde_json::from_str::<AppMenuStatus>(r#"{"state":"added","path":"/x"}"#).is_err(),
+            "the state names no path"
         );
         fixture::<CallReadiness>(include_str!("../fixtures/call-readiness.json"));
         fixture::<CallStatus>(include_str!("../fixtures/call-status.json"));

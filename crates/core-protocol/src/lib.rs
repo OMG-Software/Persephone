@@ -302,6 +302,17 @@ pub enum Call {
         source: RecordSource,
         records: Vec<DiagnosticRecord>,
     },
+    /// Whether this run can add Persephone to the desktop's app menu, and
+    /// what is there now (ADR-0072). Only a checked Linux AppImage can.
+    AppMenuStatus {},
+    /// Add Persephone's app menu entry and icons for the running AppImage
+    /// (`on`), or remove them; the reply is the new state (ADR-0072). On
+    /// asks the user first in the core's own window, so it can take until
+    /// they answer; a "no" replies the unchanged state. Off needs no
+    /// question and removes only Persephone's own files.
+    SetAppMenu {
+        on: bool,
+    },
     /// The call microphones and speakers, and the saved choice (ADR-0043).
     /// Lists the devices through a contained call worker, so it can take
     /// seconds. Available whenever the profile is unlocked.
@@ -2547,6 +2558,14 @@ mod tests {
                 r#"{"id":1,"call":{"command":"diagnostic_records","source":"page","records":[{"level":"warn","target":"bridge","message":"room_list error locked"}]}}"#,
             ),
             (
+                Call::AppMenuStatus {},
+                r#"{"id":1,"call":{"command":"app_menu_status"}}"#,
+            ),
+            (
+                Call::SetAppMenu { on: false },
+                r#"{"id":1,"call":{"command":"set_app_menu","on":false}}"#,
+            ),
+            (
                 Call::CallDevices {},
                 r#"{"id":1,"call":{"command":"call_devices"}}"#,
             ),
@@ -3275,6 +3294,10 @@ mod tests {
             br#"{"id":1,"call":{"command":"set_diagnostics"}}"#,
             br#"{"id":1,"call":{"command":"set_diagnostics","on":"yes"}}"#,
             br#"{"id":1,"call":{"command":"diagnostics_status","on":true}}"#,
+            br#"{"id":1,"call":{"command":"app_menu_status","on":true}}"#,
+            br#"{"id":1,"call":{"command":"set_app_menu"}}"#,
+            br#"{"id":1,"call":{"command":"set_app_menu","on":1}}"#,
+            br#"{"id":1,"call":{"command":"set_app_menu","on":true,"path":"/tmp/x.AppImage"}}"#,
             br#"{"id":1,"call":{"command":"diagnostic_records","source":"core","records":[]}}"#,
             br#"{"id":1,"call":{"command":"diagnostic_records","source":"page","records":[{"level":"trace","target":"t","message":"m"}]}}"#,
             br#"{"id":1,"call":{"command":"diagnostic_records","source":"page","records":[{"level":"info","target":"t","message":"m","fields":{}}]}}"#,

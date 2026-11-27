@@ -545,6 +545,10 @@ impl CoreTransport for FakeCore {
                 "on": false, "full": false, "failed": false, "available": true, "path": null
             })),
             Call::SetDiagnostics { on } => Ok(serde_json::Value::Bool(on)),
+            Call::AppMenuStatus {} => Ok(serde_json::json!({"state": "absent"})),
+            Call::SetAppMenu { on } => Ok(serde_json::json!({
+                "state": if on { "added" } else { "absent" }
+            })),
             // A page's records always arrive as the page's.
             Call::DiagnosticRecords { source, .. } => match source {
                 persephone_core_protocol::RecordSource::Page => Ok(serde_json::Value::Null),
@@ -1043,6 +1047,8 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-diagnostics-status",
             "allow-set-diagnostics",
             "allow-diagnostic-records",
+            "allow-app-menu-status",
+            "allow-set-app-menu",
             "allow-call-devices",
             "allow-set-call-devices",
             "allow-call-device-test",
@@ -3133,6 +3139,27 @@ fn given_account_change_commands_then_only_non_secret_arguments_cross() {
         .unwrap_err(),
         "invalid_argument"
     );
+    assert_eq!(core.calls.load(Ordering::SeqCst), calls);
+    // The app menu entry (ADR-0072): the status and the switch relay; the
+    // page cannot name a path.
+    assert_eq!(
+        invoke("app_menu_status", serde_json::json!({})),
+        Ok(serde_json::json!({"state": "absent"}))
+    );
+    for (on, state) in [(true, "added"), (false, "absent")] {
+        assert_eq!(
+            invoke("set_app_menu", serde_json::json!({ "on": on })),
+            Ok(serde_json::json!({ "state": state }))
+        );
+    }
+    let calls = core.calls.load(Ordering::SeqCst);
+    for arguments in [
+        serde_json::json!({}),
+        serde_json::json!({"on": "yes"}),
+        serde_json::json!({"on": 1}),
+    ] {
+        assert!(invoke("set_app_menu", arguments).is_err());
+    }
     assert_eq!(core.calls.load(Ordering::SeqCst), calls);
     // The diagnostic log (ADR-0058): the switch and status relay; the page's
     // records go as the page's, and too many or too long never reach the
