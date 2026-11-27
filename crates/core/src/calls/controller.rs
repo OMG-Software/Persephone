@@ -3847,10 +3847,7 @@ impl Call {
         let off_place = if on {
             None
         } else {
-            match self.link.hold_place() {
-                Ok(Some(place)) => Some(place),
-                Ok(None) | Err(_) => return Err(EndReason::WorkerStopped),
-            }
+            Some(self.hold_camera_place()?)
         };
         if off_place.is_some() {
             // A new camera choice goes before the off, so a restart of the
@@ -3873,21 +3870,25 @@ impl Call {
             // needs no second on. On the portal path every camera-on goes
             // with its own remote (`SetCamera { remote: true }`).
         } else {
-            if on {
-                self.settings_before_camera(inner)?;
-            } else {
-                // The worker stops the capture and closes its remote.
-                self.portal_capture = false;
-                self.portal_sent = false;
-            }
-            let command = ToWorker::SetCamera { on, remote: false };
-            match off_place {
-                // The held place keeps the order: the choice went first.
+            let place = match off_place {
                 Some(place) => {
-                    place.send(command);
+                    // The worker stops the capture and closes its remote.
+                    self.portal_capture = false;
+                    self.portal_sent = false;
+                    place
                 }
-                None => self.send_worker(command)?,
-            }
+                None => {
+                    // The on's own place is held before the settings that go
+                    // first, so a choice of the microphone or speaker only,
+                    // which may wait for room, never takes it
+                    // (`settings_before_camera`).
+                    let place = self.hold_camera_place()?;
+                    self.settings_before_camera(inner)?;
+                    place
+                }
+            };
+            // The held place keeps the order: the settings went first.
+            place.send(ToWorker::SetCamera { on, remote: false });
         }
         let changed = self.view.request_camera(on) == Applied::Changed;
         // A camera-on may have lifted the own-tile block above while the
@@ -4431,18 +4432,23 @@ impl Call {
         if !has_portal_remote(&remote) {
             return self.portal_refused(inner);
         }
+        // The on's own place is held before the settings, as for a direct
+        // camera-on (`camera_command`).
+        let place = self.hold_camera_place()?;
         self.settings_before_camera(inner)?;
         if !self.send_portal_remote(remote) {
+            drop(place);
             return self.portal_refused(inner);
         }
         self.portal_capture = true;
         self.portal_sent = true;
         // The command says that its remote went first, so the worker takes
         // that remote with it and with no other command.
-        self.send_worker(ToWorker::SetCamera {
+        place.send(ToWorker::SetCamera {
             on: true,
             remote: true,
-        })
+        });
+        Ok(())
     }
 
     /// A portal request that gives the worker no remote: the camera is
@@ -4556,6 +4562,11 @@ impl Call {
             }
             Applied::End(reason) => return Err(reason),
         };
+        // Every path that applies worker events (the loop and
+        // `alone_still_due`) shares a changed deafen state (ADR-0071).
+        if matches!(event, FromWorker::Deafened { .. }) {
+            self.share_deafen();
+        }
         if changed && matches!(event, FromWorker::Connected) {
             // A resolution chosen while the controller still saw the call
             // join, and not yet read here, reaches the Join's camera now,
@@ -4755,6 +4766,17 @@ impl Call {
         self.link
             .send(message)
             .map_err(|_| EndReason::WorkerStopped)
+    }
+
+    /// Holds one worker queue place for a camera command, so neither a
+    /// command that goes before it and may wait for room nor a share's stop
+    /// that another thread queues (`WorkerStop`) takes it. A full queue ends
+    /// the call, as the command itself would.
+    fn hold_camera_place(&self) -> Result<mpsc::OwnedPermit<ToWorker>, EndReason> {
+        match self.link.hold_place() {
+            Ok(Some(place)) => Ok(place),
+            Ok(None) | Err(_) => Err(EndReason::WorkerStopped),
+        }
     }
 
     /// Notes keys of `device` (a backend identity and a key index each) that
@@ -5040,14 +5062,31 @@ impl Call {
             remote: false,
         })?;
         self.settings_before_camera(inner)?;
-        self.send_worker(ToWorker::SetCamera {
-            on: true,
-            remote: false,
-        })?;
+        self.restart_on(inner)?;
         self.link.release_places();
         self.join_quality = self.worker_quality;
         self.join_device = self.worker_camera.clone();
         Ok(())
+    }
+
+    /// The on of a restart of the Join's camera. The user's newest camera
+    /// request is read again under the slot lock, where `accept_camera`
+    /// stores it and queues its command, and the on goes before the lock is
+    /// given back: an off accepted while the restart ran keeps the camera
+    /// off (no on goes, and the off follows as the user's command), and an
+    /// off accepted after the on follows it as a later command. No holder of
+    /// the slot lock waits for the call task, and the send never waits.
+    /// Returns whether the on went.
+    fn restart_on(&self, inner: &Inner) -> Result<bool, EndReason> {
+        let _slot = inner.slot();
+        if !self.camera_wanted.load(Ordering::SeqCst) {
+            return Ok(false);
+        }
+        self.send_worker(ToWorker::SetCamera {
+            on: true,
+            remote: false,
+        })?;
+        Ok(true)
     }
 
     /// Whether the newest send resolution or camera choice differs from the
@@ -5121,12 +5160,20 @@ impl Call {
     /// before a camera-on (ADR-0059, ADR-0068, ADR-0070): the ones that the
     /// task has not read yet, and the ones that wait for room. So a camera
     /// never starts at an older device, effect or resolution, also when the
-    /// camera command is read before the change. When a queue is still full,
-    /// the call ends, as it does when the camera command itself finds the
-    /// queue full.
+    /// camera command is read before the change. A choice that changes only
+    /// the microphone or speaker may wait for room (its retry sends it): the
+    /// camera starts on the device that the worker has. When a new camera,
+    /// resolution or effect still finds the queue full, the call ends, as it
+    /// does when the camera command itself finds the queue full. The camera
+    /// command holds its own place first (`hold_camera_place`), so these
+    /// never take it.
     fn settings_before_camera(&mut self, inner: &Inner) -> Result<(), EndReason> {
         self.send_devices()?;
-        if self.unsent_devices.is_some() {
+        if self
+            .unsent_devices
+            .as_ref()
+            .is_some_and(|(_, choice)| choice.camera != self.worker_camera)
+        {
             return Err(EndReason::WorkerStopped);
         }
         self.take_unread_quality()?;
@@ -5504,7 +5551,6 @@ impl Call {
                         return Err(EndReason::WorkerStopped);
                     };
                     self.worker_event(inner, &event)?;
-                    self.share_deafen();
                 }
                 (host, connect) = consent_done(&mut self.consent) => {
                     self.consent_answered(inner, &host, connect)?;
@@ -5727,6 +5773,9 @@ impl Call {
             mut deafen_sender,
             ..
         } = self;
+        // No deafen hint starts after the user left (ADR-0071); one that
+        // runs ends within its own timeout.
+        deafen_sender.signal_stop();
         // A portal request still waiting for the user is cancelled first, so
         // its dialog does not stay open while the call is torn down. The
         // screen pick and the share's portal session end with the call.
@@ -5751,18 +5800,19 @@ impl Call {
         } else {
             finish_worker(link).await;
         }
-        // The deafen sender holds an SDK lease while it sends. It ends
-        // before the membership end or the return, so the call gives the
-        // SDK back only when no send of its own is left. A send that runs
-        // ends within its own timeout.
-        deafen_sender.stop_and_join().await;
         // The screen pick and the capture helpers end before the call is
-        // gone: no helper outlives the call or the session. The membership
-        // ends meanwhile, so a slow helper does not hold it either.
+        // gone: no helper outlives the call or the session. They end while
+        // the deafen sender's last send ends, and the membership ends
+        // meanwhile too, so a slow helper does not hold it.
         if session_ended {
             // A call that the end of the session stops always waits for
             // the helper count.
-            end_screen_helpers(screen_pick, screen_helper, true).await;
+            end_after_sender(
+                &mut deafen_sender,
+                end_screen_helpers(screen_pick, screen_helper, true),
+                std::future::ready(()),
+            )
+            .await;
             return;
         }
         let room_id = view.room_id;
@@ -5772,11 +5822,31 @@ impl Call {
                 client.remove_event_handler(handle);
             }
         });
-        let ((), _) = tokio::join!(
+        end_after_sender(
+            &mut deafen_sender,
             end_screen_helpers(screen_pick, screen_helper, screen_capture_used),
-            membership
-        );
+            membership,
+        )
+        .await;
     }
+}
+
+/// The end of a call after its worker ended. `helpers` (the capture
+/// helpers' end) runs while the deafen sender's last send ends; `after` (the
+/// membership end) starts only once the sender has ended. The sender holds
+/// an SDK lease while it sends, so the call gives the SDK back only when no
+/// send of its own is left (ADR-0071), and a send that runs (at most
+/// [`SEND_TIMEOUT`]) never delays the helpers' bounded stop.
+async fn end_after_sender<A: Future>(
+    sender: &mut DeafenSender,
+    helpers: impl Future<Output = ()>,
+    after: A,
+) {
+    let after = async {
+        sender.stop_and_join().await;
+        after.await;
+    };
+    tokio::join!(helpers, after);
 }
 
 /// What a deafen hint send does for one batch: sends `content` to the
@@ -5910,14 +5980,29 @@ impl DeafenSender {
         plain(&self.shared.job).retain(keep);
     }
 
+    /// Tells the task to stop: it starts no new send, and one that runs
+    /// ends within its own timeout. A hint that has not started is dropped.
+    fn signal_stop(&self) {
+        self.shared.stop.store(true, Ordering::SeqCst);
+        self.shared.wake.notify_one();
+    }
+
     /// Stops the task and waits until it has ended. A hint that has not
     /// started is dropped; one that runs ends within its own timeout.
     async fn stop_and_join(&mut self) {
-        self.shared.stop.store(true, Ordering::SeqCst);
-        self.shared.wake.notify_one();
+        self.signal_stop();
         if let Some(task) = self.task.take() {
             let _ = task.await;
         }
+    }
+}
+
+impl Drop for DeafenSender {
+    /// A sender dropped without `stop_and_join` (a call task that unwinds)
+    /// still tells its task to stop, so the task never waits for a wake
+    /// that no owner can give. A send that runs ends within its own timeout.
+    fn drop(&mut self) {
+        self.signal_stop();
     }
 }
 
@@ -8782,12 +8867,11 @@ mod tests {
                     .any(|message| matches!(message, ToWorker::SetCamera { .. })),
                 "no camera-on goes before the quality (room {room})"
             );
-            assert_eq!(
-                sent.contains(&ToWorker::SetVideoQuality {
+            assert!(
+                !sent.contains(&ToWorker::SetVideoQuality {
                     quality: VideoQuality::P720
                 }),
-                room == 1,
-                "the value goes when it fits (room {room})"
+                "the camera-on's place is held first, so the value does not fit beside it (room {room})"
             );
         }
     }
@@ -9432,6 +9516,93 @@ mod tests {
         assert!(other.try_send(ToWorker::SetMuted { muted: false }).is_ok());
     }
 
+    /// GIVEN a worker queue with one free place and a choice of the
+    /// microphone only that waits WHEN the camera is turned on THEN the on
+    /// gets the place, the call goes on and the choice still waits for its
+    /// retry. GIVEN a new camera that waits THEN the call ends and no
+    /// camera-on goes, so the camera never starts on the old device.
+    #[tokio::test]
+    async fn given_one_free_place_when_the_camera_turns_on_then_a_sound_choice_waits() {
+        let fixture = test_call(
+            no_admission(),
+            Arc::new(Flags::default()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let inner = controller(FakeHost::new(true, None)).inner.clone();
+        let (mut call, mut to_worker) = (fixture.call, fixture.to_worker);
+        let waiting = |camera: Option<&str>| {
+            Some((
+                Instant::now() + UNSENT_RETRY,
+                DeviceChoice {
+                    recording: Some("mic-2".to_owned()),
+                    playout: None,
+                    camera: camera.map(str::to_owned),
+                },
+            ))
+        };
+        call.worker_camera = Some("cam-1".to_owned());
+
+        call.unsent_devices = waiting(Some("cam-1"));
+        fill_queue(&call, &mut to_worker, 1);
+        assert_eq!(call.camera_command(&inner, true, 1), Ok(()));
+        let sent: Vec<ToWorker> = std::iter::from_fn(|| to_worker.try_recv().ok()).collect();
+        assert!(sent.contains(&ToWorker::SetCamera {
+            on: true,
+            remote: false
+        }));
+        assert!(
+            !sent
+                .iter()
+                .any(|message| matches!(message, ToWorker::SetDevices { .. }))
+        );
+        assert!(
+            call.unsent_devices.is_some(),
+            "the sound choice still waits"
+        );
+
+        call.unsent_devices = waiting(Some("cam-2"));
+        fill_queue(&call, &mut to_worker, 1);
+        assert!(matches!(
+            call.camera_command(&inner, true, 2),
+            Err(EndReason::WorkerStopped)
+        ));
+        let sent: Vec<ToWorker> = std::iter::from_fn(|| to_worker.try_recv().ok()).collect();
+        assert!(
+            !sent
+                .iter()
+                .any(|message| matches!(message, ToWorker::SetCamera { .. })),
+            "no camera-on goes before the new camera: {sent:?}"
+        );
+    }
+
+    /// GIVEN a restart of the Join's camera WHEN an off was accepted while
+    /// it ran THEN its on does not go; WHEN the camera is still wanted THEN
+    /// the on goes.
+    #[tokio::test]
+    async fn given_an_off_accepted_during_the_join_restart_then_its_on_does_not_go() {
+        let fixture = test_call(
+            no_admission(),
+            Arc::new(Flags::default()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let inner = controller(FakeHost::new(true, None)).inner.clone();
+        let (call, mut to_worker) = (fixture.call, fixture.to_worker);
+
+        call.camera_wanted.store(false, Ordering::SeqCst);
+        assert_eq!(call.restart_on(&inner), Ok(false));
+        assert!(to_worker.try_recv().is_err());
+
+        call.camera_wanted.store(true, Ordering::SeqCst);
+        assert_eq!(call.restart_on(&inner), Ok(true));
+        assert_eq!(
+            to_worker.try_recv(),
+            Ok(ToWorker::SetCamera {
+                on: true,
+                remote: false
+            })
+        );
+    }
+
     /// GIVEN a worker queue with one free place and a device choice that
     /// waits WHEN the camera is turned off THEN the off is queued, the call
     /// goes on and the choice still waits.
@@ -9626,6 +9797,59 @@ mod tests {
             .expect("the task ends");
     }
 
+    /// GIVEN a sender whose task waits for the next hint WHEN the sender is
+    /// dropped without `stop_and_join` (a call task that unwinds) THEN its
+    /// task ends.
+    #[tokio::test]
+    async fn given_a_dropped_deafen_sender_then_its_task_ends() {
+        let (fake, send) = fake_deafen();
+        let mut sender = DeafenSender::new(send);
+        sender.queue(vec![deafen_pair(1)], serde_json::json!({ "seq": 1 }));
+        wait_for_sends(&fake.started, 1).await;
+        fake.gate.add_permits(1);
+        let task = sender.task.take().expect("the first hint starts the task");
+        drop(sender);
+        time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("the task ends")
+            .expect("the task does not fail");
+    }
+
+    /// GIVEN a deafen send that is blocked WHEN the call ends after its
+    /// worker THEN the capture helpers end meanwhile, and the membership end
+    /// starts only after the send ended.
+    #[tokio::test]
+    async fn given_a_blocked_deafen_send_when_the_call_ends_then_only_the_membership_waits() {
+        let (fake, send) = fake_deafen();
+        let mut sender = DeafenSender::new(send);
+        sender.queue(vec![deafen_pair(1)], serde_json::json!({ "seq": 1 }));
+        wait_for_sends(&fake.started, 1).await;
+        sender.signal_stop();
+
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let helpers = {
+            let order = order.clone();
+            async move { plain(&order).push("helpers") }
+        };
+        let membership = {
+            let order = order.clone();
+            async move { plain(&order).push("membership") }
+        };
+        let mut end = Box::pin(end_after_sender(&mut sender, helpers, membership));
+        assert!(
+            time::timeout(Duration::from_millis(100), &mut end)
+                .await
+                .is_err(),
+            "the membership end waits for the running send"
+        );
+        assert_eq!(*plain(&order), vec!["helpers"]);
+        fake.gate.add_permits(1);
+        time::timeout(Duration::from_secs(5), end)
+            .await
+            .expect("the end finishes");
+        assert_eq!(*plain(&order), vec!["helpers", "membership"]);
+    }
+
     /// GIVEN a pending hint WHEN the call stops THEN the task ends and the
     /// hint is not sent.
     #[tokio::test]
@@ -9699,10 +9923,9 @@ mod tests {
                     .any(|message| matches!(message, ToWorker::SetCamera { .. })),
                 "no camera-on goes before the effect (room {room})"
             );
-            assert_eq!(
-                sent.contains(&ToWorker::SetVideoEffect { effect: warm }),
-                room == 1,
-                "the effect goes when it fits (room {room})"
+            assert!(
+                !sent.contains(&ToWorker::SetVideoEffect { effect: warm }),
+                "the camera-on's place is held first, so the effect does not fit beside it (room {room})"
             );
         }
     }
@@ -10466,8 +10689,17 @@ mod tests {
             .unwrap();
         time::advance(super::super::alone::ALONE_LIMIT).await;
         fixture._events.try_send(bob(true)).unwrap();
+        fixture
+            ._events
+            .try_send(FromWorker::Deafened { deafened: true })
+            .unwrap();
+        let seq = fixture.call.deafen_seq;
         assert_eq!(fixture.call.alone_still_due(&inner), Ok(false));
         assert_eq!(fixture.call.alone.deadline(), None);
+        assert!(
+            fixture.call.deafen_shared && fixture.call.deafen_seq > seq,
+            "a deafen answer read here is shared too"
+        );
 
         fixture.call.worker_event(&inner, &bob(false)).unwrap();
         time::advance(super::super::alone::ALONE_LIMIT).await;

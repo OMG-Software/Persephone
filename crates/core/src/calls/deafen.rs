@@ -33,6 +33,17 @@ pub fn outgoing_content(
     deafened: bool,
     seq: u64,
 ) -> Option<Value> {
+    // The JSON text holds each of these at least once as it is (the
+    // identity twice), so content whose parts are already too long is
+    // refused before anything is copied; escapes only add to the text.
+    let parts = room_id
+        .as_str()
+        .len()
+        .saturating_add(own_identity.len().saturating_mul(2))
+        .saturating_add(own_device_id.as_str().len());
+    if parts > MAX_CONTENT_BYTES {
+        return None;
+    }
     let content = json!({
         "room_id": room_id.as_str(),
         "member_id": own_identity,
@@ -308,6 +319,9 @@ mod tests {
             Ok(u64::MAX)
         );
         let device = OwnedDeviceId::from("D".repeat(1200));
+        let identity = participant_identity(&user, &device);
+        assert_eq!(outgoing_content(&room, &identity, &device, true, 1), None);
+        let device = OwnedDeviceId::from("D".repeat(1 << 20));
         let identity = participant_identity(&user, &device);
         assert_eq!(outgoing_content(&room, &identity, &device, true, 1), None);
     }

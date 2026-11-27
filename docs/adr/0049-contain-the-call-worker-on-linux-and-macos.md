@@ -268,9 +268,10 @@ Decision:
   change asked while a job runs waits (the newest only) and is answered after
   that job. A job is over only when its blocking thread has ended, also when
   its answer went out at the deadline, so two never run at once.
-* It moves only this process's own streams: those whose
-  `application.process.id` equals the worker's process ID. No other
-  program's stream is read for any other purpose or moved. Both choices are
+* It moves only streams that name this process: those whose
+  `application.process.id` equals the worker's process ID. That match is
+  best effort, not proof of ownership (see Containment). No stream that names
+  another process is read for any other purpose or moved. Both choices are
   checked before either stream moves. A non-`pulse:` ID or a name the server
   lacks is `DeviceNotFound`. A "System default" whose call-start device the
   server lacks now is `Unsupported`; a start default may be a monitor. A kind that must move but has no own stream
@@ -312,7 +313,12 @@ Another client of the same user can name the worker's process ID, and its
 stream then moves with the worker's, to the device the user chose. That gives
 it nothing it lacks, because it can already move any stream itself. PulseAudio
 gives no server-checked owner for a stream, and a PipeWire-only check was not
-reviewed, so this is a known limit. A listing keeps only streams that name the
+reviewed, so this is a known limit. This amendment proposes to accept that
+best-effort match: failing closed without a checked owner would remove device
+changes during a call on Linux. It needs the owner's approval, as the rest of
+the amendment does. A stronger check is open: PipeWire's server sets
+`pipewire.sec.pid` on a client from its socket's credentials, and matching a
+stream's client by it was not reviewed or measured. A listing keeps only streams that name the
 worker's process ID, before its limit, so other programs' streams never push
 the worker's own out of it.
 
