@@ -292,6 +292,8 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
         video_quality,
         send_tier: Arc::new(SharedTier::new(SendTier::P360)),
         auto_quality: None,
+        #[cfg(target_os = "linux")]
+        accepted_sound: Some(joined_sound.clone()),
         joined_sound,
         #[cfg(target_os = "linux")]
         pulse,
@@ -656,22 +658,42 @@ enum SoundRoute {
     Switch,
 }
 
-/// Decides the route of a sound change. When the server's defaults are
-/// unknown (the query failed at the join) and the choices equal the join's,
-/// the change is a camera-only change and gives no sound error. Any other
-/// change goes to the session, which answers `Unsupported` while the
-/// defaults are unknown (`Session::switch`).
+/// Decides the route of a sound change. A choice equal to the accepted one
+/// (a camera-only change) is no sound change and gives no sound error: the
+/// streams follow it already, and a target that waits keeps waiting. The
+/// join's choice is not skipped once another one was accepted, so the user
+/// can go back to it. Any other choice goes to the session, which answers
+/// `Unsupported` while the server's defaults are unknown (`Session::switch`):
+/// with unknown defaults the accepted choice stays the join's.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn sound_route(
-    defaults_unresolved: bool,
-    joined: &(Option<String>, Option<String>),
+    accepted: Option<&(Option<String>, Option<String>)>,
     recording: &Option<String>,
     playout: &Option<String>,
 ) -> SoundRoute {
-    if defaults_unresolved && joined.0 == *recording && joined.1 == *playout {
+    if accepted.is_some_and(|(mic, speaker)| mic == recording && speaker == playout) {
         SoundRoute::Skip
     } else {
         SoundRoute::Switch
+    }
+}
+
+/// The accepted sound choice after the answer to a change: the new choice
+/// when it worked; the old one when nothing moved, or every move was undone
+/// and the routes were read again (`DeviceKept`); none when the routes are
+/// not known (`AudioDevice`, or no answer in time).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn accepted_after(
+    previous: Option<(Option<String>, Option<String>)>,
+    choice: (Option<String>, Option<String>),
+    answer: Option<FailureCode>,
+) -> Option<(Option<String>, Option<String>)> {
+    match answer {
+        None => Some(choice),
+        Some(FailureCode::DeviceNotFound | FailureCode::Unsupported | FailureCode::DeviceKept) => {
+            previous
+        }
+        Some(_) => None,
     }
 }
 
@@ -1200,6 +1222,14 @@ struct Call<'a> {
     /// changes during a call, so a `SetDevices` with this choice (a change of
     /// the camera only) is no sound change there.
     joined_sound: (Option<String>, Option<String>),
+    /// Linux with a sound server connection: the sound choice that the
+    /// call's streams follow, the join's at first and then each change that
+    /// `Session::switch` accepted. A `SetDevices` with this choice (a change
+    /// of the camera only) is no sound change (`sound_route`). `None` when
+    /// the routes are not known to follow it: a change failed with
+    /// `AudioDevice` or timed out, or the last try dropped a waiting target.
+    #[cfg(target_os = "linux")]
+    accepted_sound: Option<(Option<String>, Option<String>)>,
     /// Linux: the call's sound server connection, which moves the call's own
     /// streams on a change (ADR-0049). `None` when it could not open.
     #[cfg(target_os = "linux")]
@@ -2050,13 +2080,18 @@ impl Call<'_> {
                 return Vec::new();
             };
             let last = self.sound_retries.is_empty();
+            // The try is for the change accepted now: one that runs late
+            // after a newer change touches nothing.
+            let generation = pulse.generation();
             let started = std::time::Instant::now();
-            let apply = tokio::task::spawn_blocking(move || pulse.apply_pending(started, last));
+            let apply =
+                tokio::task::spawn_blocking(move || pulse.apply_pending(started, last, generation));
             let wait = crate::pulse::CHANGE_TIMEOUT + crate::pulse::REPORT_GRACE;
             let run = match tokio::time::timeout(wait, apply).await {
                 Ok(Ok(run)) => run,
                 _ if last => {
                     self.sound_retries.clear();
+                    self.accepted_sound = None;
                     return vec![FromWorker::DevicesSet {
                         failure: Some(FailureCode::AudioDevice),
                     }];
@@ -2080,13 +2115,18 @@ impl Call<'_> {
                 .iter()
                 .any(|(_, code)| *code == FailureCode::AudioDevice);
             match run.moves_failed.first() {
-                Some(_) if last => vec![FromWorker::DevicesSet {
-                    failure: Some(if lost {
-                        FailureCode::AudioDevice
-                    } else {
-                        FailureCode::DeviceKept
-                    }),
-                }],
+                Some(_) if last => {
+                    // The waiting target was dropped: the streams do not
+                    // follow the accepted choice.
+                    self.accepted_sound = None;
+                    vec![FromWorker::DevicesSet {
+                        failure: Some(if lost {
+                            FailureCode::AudioDevice
+                        } else {
+                            FailureCode::DeviceKept
+                        }),
+                    }]
+                }
                 _ => Vec::new(),
             }
         }
@@ -2106,19 +2146,13 @@ impl Call<'_> {
     ) -> Option<FailureCode> {
         #[cfg(target_os = "linux")]
         if let Some(pulse) = self.pulse.clone() {
-            // The defaults query failed at the join: a choice equal to the
-            // join's is no sound change (a camera-only change), as without a
-            // session. A real change is not resolved without the defaults:
-            // `Session::switch` answers `Unsupported`.
-            if sound_route(
-                pulse.defaults_unresolved(),
-                &self.joined_sound,
-                &recording,
-                &playout,
-            ) == SoundRoute::Skip
-            {
+            // The accepted choice again (a camera-only change) is no sound
+            // change. A real change is not resolved without the server's
+            // defaults: `Session::switch` then answers `Unsupported`.
+            if sound_route(self.accepted_sound.as_ref(), &recording, &playout) == SoundRoute::Skip {
                 return None;
             }
+            let choice = (recording.clone(), playout.clone());
             // The change's deadlines start here, so a task that starts late
             // sends nothing. The loop waits for them to end, plus a grace.
             let started = std::time::Instant::now();
@@ -2126,16 +2160,18 @@ impl Call<'_> {
                 pulse.switch(started, recording.as_deref(), playout.as_deref())
             });
             let wait = crate::pulse::CHANGE_TIMEOUT + crate::pulse::REPORT_GRACE;
-            return match tokio::time::timeout(wait, change).await {
-                Ok(Ok(Ok(()))) => {
-                    // A target that waits for a stream is tried soon, also
-                    // when no sound event follows.
-                    self.sound_trigger();
-                    None
-                }
+            let answer = match tokio::time::timeout(wait, change).await {
+                Ok(Ok(Ok(()))) => None,
                 Ok(Ok(Err(code))) => Some(code),
                 _ => Some(FailureCode::AudioDevice),
             };
+            self.accepted_sound = accepted_after(self.accepted_sound.take(), choice, answer);
+            if answer.is_none() {
+                // A target that waits for a stream is tried soon, also when
+                // no sound event follows.
+                self.sound_trigger();
+            }
+            return answer;
         }
         if sound_unchanged_here(&self.joined_sound, &recording, &playout) {
             return None;
@@ -4732,29 +4768,60 @@ mod tests {
         ));
     }
 
-    /// GIVEN the server's defaults are unknown and the join's sound choice
-    /// WHEN `SetDevices` carries it again (a camera-only change) THEN the
-    /// change is skipped and gives no sound error; WHEN another choice
-    /// arrives THEN it goes to the session, whose `Session::switch` answers
-    /// `Unsupported` (that answer is in `pulse.rs`, which needs a real sound
-    /// server, so it is not built here); WHEN the defaults are known THEN
-    /// even the same choice goes to the session, which finds what changes.
+    /// GIVEN the accepted sound choice WHEN `SetDevices` carries it again (a
+    /// camera-only change) THEN the change is skipped and gives no sound
+    /// error, whether the server's defaults are known or not; WHEN another
+    /// choice arrives THEN it goes to the session (whose `Session::switch`
+    /// answers `Unsupported` while the defaults are unknown; that is in
+    /// `pulse.rs`); GIVEN no accepted choice THEN even the same one goes.
     #[test]
-    fn given_unknown_defaults_then_only_the_joined_choice_is_skipped() {
+    fn given_the_accepted_choice_then_only_another_one_goes_to_the_session() {
         let joined = (Some("pulse:mic-1".to_owned()), None);
-        let same = (&joined.0, &joined.1);
-        assert_eq!(sound_route(true, &joined, same.0, same.1), SoundRoute::Skip);
+        let accepted = Some(&joined);
         assert_eq!(
-            sound_route(true, &joined, &Some("pulse:mic-2".to_owned()), &None),
+            sound_route(accepted, &joined.0, &joined.1),
+            SoundRoute::Skip
+        );
+        assert_eq!(
+            sound_route(accepted, &Some("pulse:mic-2".to_owned()), &None),
             SoundRoute::Switch
         );
         assert_eq!(
-            sound_route(true, &joined, &joined.0, &Some("pulse:spk".to_owned())),
+            sound_route(accepted, &joined.0, &Some("pulse:spk".to_owned())),
+            SoundRoute::Switch
+        );
+        assert_eq!(sound_route(None, &joined.0, &joined.1), SoundRoute::Switch);
+    }
+
+    /// GIVEN a change during the call WHEN it is answered THEN the accepted
+    /// choice is the new one after a success, stays after an answer that
+    /// moved nothing or was undone and verified, and is unknown after a lost
+    /// route; so the join's choice goes to the session again once another
+    /// one was accepted (the user can go back), and a camera-only change
+    /// after a success gives no sound error.
+    #[test]
+    fn given_a_change_answer_then_the_accepted_choice_follows_the_routes() {
+        let joined = (Some("pulse:mic-1".to_owned()), None);
+        let other = (Some("pulse:mic-2".to_owned()), None);
+        let after = |answer| accepted_after(Some(joined.clone()), other.clone(), answer);
+        assert_eq!(after(None), Some(other.clone()));
+        for kept in [
+            FailureCode::DeviceNotFound,
+            FailureCode::Unsupported,
+            FailureCode::DeviceKept,
+        ] {
+            assert_eq!(after(Some(kept)), Some(joined.clone()), "{kept:?}");
+        }
+        assert_eq!(after(Some(FailureCode::AudioDevice)), None);
+
+        let accepted = after(None);
+        assert_eq!(
+            sound_route(accepted.as_ref(), &joined.0, &joined.1),
             SoundRoute::Switch
         );
         assert_eq!(
-            sound_route(false, &joined, same.0, same.1),
-            SoundRoute::Switch
+            sound_route(accepted.as_ref(), &other.0, &other.1),
+            SoundRoute::Skip
         );
     }
 

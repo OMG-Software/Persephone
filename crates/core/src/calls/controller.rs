@@ -113,6 +113,10 @@ const PARK_TIME: Duration = Duration::from_secs(30);
 /// Wait before a key that did not fit in the worker queue goes again.
 const UNSENT_RETRY: Duration = Duration::from_millis(200);
 
+/// Free worker queue places that a restart of the Join's camera needs: the
+/// off, the devices, the resolution, the video effect and the on.
+const JOIN_RESTART_ROOM: usize = 5;
+
 /// Most remote keys of one member waiting for room in the worker queue: every
 /// stored key under each of at most two backend identities.
 const MAX_UNSENT_PER_MEMBER: usize = 2 * crate::calls::keys::MAX_KEYS_PER_MEMBER;
@@ -3114,10 +3118,13 @@ struct Call {
     /// change that the task has not read yet, so a camera never starts at an
     /// older resolution.
     quality_seen: watch::Receiver<Option<VideoQuality>>,
-    /// The send resolution that the Join carried, and whether the Join
-    /// started the camera. A resolution chosen while the call joined does
-    /// not reach a camera that the Join opened, so the task restarts that
-    /// camera once at the start (`restart_join_camera`).
+    /// The send resolution of the camera that the Join opened, and whether
+    /// that camera still runs (no camera command came since). Until the call
+    /// connects, the controller restarts no camera (`restart_camera` needs
+    /// `Active`), so a resolution chosen while the call joins does not reach
+    /// that camera. The task restarts it at the start, on each change before
+    /// the connect, and at the connect (`restart_join_camera`); a restart
+    /// records the new resolution here.
     join_quality: VideoQuality,
     join_camera: bool,
     /// The newest send resolution while the worker's queue is full, and when
@@ -3813,6 +3820,9 @@ impl Call {
     /// turns the camera on. The request runs off the call loop, which goes on
     /// with mute, keys and events while the desktop asks the user.
     fn camera_command(&mut self, inner: &Inner, on: bool, request: u64) -> Result<(), EndReason> {
+        // The camera that the Join opened stops or is replaced here; a new
+        // camera-on starts with the newest settings.
+        self.join_camera = false;
         if !on {
             // A new camera choice goes before the off, so a restart of the
             // camera (ADR-0070) shows the worker the order devices, off, on.
@@ -4513,6 +4523,14 @@ impl Call {
             }
             Applied::End(reason) => return Err(reason),
         };
+        if changed && matches!(event, FromWorker::Connected) {
+            // A resolution chosen while the controller still saw the call
+            // join, and not yet read here, reaches the Join's camera now,
+            // before the page sees the call active. In a narrow race the
+            // controller restarts the camera too; that only repeats the off
+            // and the on.
+            self.restart_join_camera(inner)?;
+        }
         let stream = match event {
             FromWorker::VideoStarted { tile, .. } | FromWorker::VideoStopped { tile } => {
                 let stream = self.link.video().stream_applied(*tile);
@@ -4942,16 +4960,23 @@ impl Call {
         Ok(())
     }
 
-    /// A send resolution chosen while the call joined applies only at the
+    /// A send resolution chosen while the call joins applies only at the
     /// next camera start, but the Join already started the camera at its
-    /// own resolution. When the newest choice differs, the camera restarts
-    /// once from here: off, then the settings, then on. The view and the
-    /// request numbers stay as they are; the worker's answers update the
-    /// view. A choice that equals the Join's changes nothing.
+    /// own resolution. When the newest choice differs, that camera restarts
+    /// from here: off, then the settings, then on, and its resolution is
+    /// recorded. The view and the request numbers stay as they are; the
+    /// worker's answers update the view. A choice that equals the camera's
+    /// changes nothing. A restart needs room for all its commands
+    /// ([`JOIN_RESTART_ROOM`]), as a full queue would end the call; without
+    /// it, the restart waits for the next change or the connect.
     fn restart_join_camera(&mut self, inner: &Inner) -> Result<(), EndReason> {
-        let newest = *self.quality_seen.borrow();
-        let changed = newest.is_some_and(|quality| quality != self.join_quality);
-        if !(self.join_camera && changed && self.camera_wanted.load(Ordering::SeqCst)) {
+        let Some(newest) = *self.quality_seen.borrow() else {
+            return Ok(());
+        };
+        let wanted = self.camera_wanted.load(Ordering::SeqCst);
+        if !(self.join_camera && newest != self.join_quality && wanted)
+            || self.link.room() < JOIN_RESTART_ROOM
+        {
             return Ok(());
         }
         self.send_worker(ToWorker::SetCamera {
@@ -4962,7 +4987,26 @@ impl Call {
         self.send_worker(ToWorker::SetCamera {
             on: true,
             remote: false,
-        })
+        })?;
+        self.join_quality = newest;
+        Ok(())
+    }
+
+    /// A send resolution that the task read. Before the connect, the camera
+    /// that the Join opened restarts from here; after it, the controller
+    /// restarts a camera (`restart_camera`).
+    fn quality_read(
+        &mut self,
+        inner: &Inner,
+        quality: Option<VideoQuality>,
+    ) -> Result<(), EndReason> {
+        if let Some(quality) = quality {
+            self.quality_changed(quality)?;
+        }
+        if self.view.connected {
+            return Ok(());
+        }
+        self.restart_join_camera(inner)
     }
 
     /// Applies a send resolution that the task has not read yet.
@@ -5293,9 +5337,7 @@ impl Call {
                 }
                 Ok(()) = self.quality_seen.changed() => {
                     let quality = *self.quality_seen.borrow_and_update();
-                    if let Some(quality) = quality {
-                        self.quality_changed(quality)?;
-                    }
+                    self.quality_read(inner, quality)?;
                 }
                 () = async {
                     match quality_due {
@@ -8995,6 +9037,84 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// GIVEN a joining call whose Join started the camera at 480p WHEN the
+    /// task reads 1440p THEN that camera restarts once and its resolution is
+    /// recorded, so the same value again restarts nothing. GIVEN a camera
+    /// command since the Join THEN a new value restarts nothing from here.
+    #[tokio::test]
+    async fn given_a_quality_read_before_the_connect_then_the_join_camera_restarts() {
+        let fixture = test_call(
+            no_admission(),
+            Arc::new(Flags::default()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let inner = controller(FakeHost::new(true, None)).inner.clone();
+        let (mut call, mut to_worker) = (fixture.call, fixture.to_worker);
+        call.join_camera = true;
+        call.join_quality = VideoQuality::P480;
+        call.camera_wanted.store(true, Ordering::SeqCst);
+        let cameras = |to_worker: &mut mpsc::Receiver<ToWorker>| {
+            std::iter::from_fn(|| to_worker.try_recv().ok())
+                .filter_map(|message| match message {
+                    ToWorker::SetCamera { on, .. } => Some(on),
+                    _ => None,
+                })
+                .collect::<Vec<bool>>()
+        };
+
+        call.video_quality.send_replace(Some(VideoQuality::P1440));
+        let quality = *call.quality_seen.borrow_and_update();
+        assert_eq!(call.quality_read(&inner, quality), Ok(()));
+        assert_eq!(cameras(&mut to_worker), vec![false, true]);
+        assert_eq!(call.join_quality, VideoQuality::P1440);
+
+        assert_eq!(call.quality_read(&inner, quality), Ok(()));
+        assert_eq!(cameras(&mut to_worker), Vec::<bool>::new());
+
+        call.join_camera = false;
+        call.video_quality.send_replace(Some(VideoQuality::P720));
+        let quality = *call.quality_seen.borrow_and_update();
+        assert_eq!(call.quality_read(&inner, quality), Ok(()));
+        assert_eq!(cameras(&mut to_worker), Vec::<bool>::new());
+    }
+
+    /// GIVEN a joining call whose Join started the camera at 480p and a
+    /// newest choice of 1440p that the task has not read WHEN the worker
+    /// reports the connect THEN the camera restarts before the call shows as
+    /// active. GIVEN a connected call WHEN the task reads a new value THEN
+    /// the task restarts nothing: the controller does it.
+    #[tokio::test]
+    async fn given_a_quality_unread_at_the_connect_then_the_join_camera_restarts() {
+        let fixture = test_call(
+            no_admission(),
+            Arc::new(Flags::default()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let inner = controller(FakeHost::new(true, None)).inner.clone();
+        let (mut call, mut to_worker) = (fixture.call, fixture.to_worker);
+        call.join_camera = true;
+        call.join_quality = VideoQuality::P480;
+        call.camera_wanted.store(true, Ordering::SeqCst);
+        call.video_quality.send_replace(Some(VideoQuality::P1440));
+        let cameras = |to_worker: &mut mpsc::Receiver<ToWorker>| {
+            std::iter::from_fn(|| to_worker.try_recv().ok())
+                .filter_map(|message| match message {
+                    ToWorker::SetCamera { on, .. } => Some(on),
+                    _ => None,
+                })
+                .collect::<Vec<bool>>()
+        };
+
+        assert_eq!(call.worker_event(&inner, &FromWorker::Connected), Ok(()));
+        assert_eq!(cameras(&mut to_worker), vec![false, true]);
+        assert_eq!(call.join_quality, VideoQuality::P1440);
+
+        call.video_quality.send_replace(Some(VideoQuality::P720));
+        let quality = *call.quality_seen.borrow_and_update();
+        assert_eq!(call.quality_read(&inner, quality), Ok(()));
+        assert_eq!(cameras(&mut to_worker), Vec::<bool>::new());
     }
 
     /// GIVEN a worker queue with one free place and a device choice that

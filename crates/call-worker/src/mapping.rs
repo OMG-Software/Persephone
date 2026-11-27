@@ -223,6 +223,9 @@ pub struct SoundNow<'a> {
     /// The names of the microphones and speakers (monitors left out).
     pub sources: &'a [&'a str],
     pub sinks: &'a [&'a str],
+    /// The names of the monitor sources. Only a call-start default is
+    /// looked up here: a monitor is never a choice.
+    pub monitors: &'a [&'a str],
     /// The own record and playback streams of the call, with their routes.
     pub own_recording: &'a [OwnStream],
     pub own_playout: &'a [OwnStream],
@@ -274,27 +277,33 @@ fn sound_target(name: &str, streams: &[OwnStream]) -> SoundTarget {
 }
 
 /// The sound server name for one choice: the name of a `pulse:` ID that the
-/// server has now, else `DeviceNotFound`; for no choice the default when the
-/// call started (`Unsupported` if it is not known). A default is not looked
-/// up: it may be a monitor, which the lists leave out.
+/// server has now, else `DeviceNotFound`. For no choice ("System default"),
+/// the default when the call started, while the server has it now: in
+/// `present`, or in `monitors`, as a start default may be a monitor.
+/// `Unsupported` when it is not known or is gone, as for a "System default"
+/// that names no listed device on the other systems (ADR-0059).
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn pulse_target<'a>(
     choice: Option<&'a str>,
     start_default: Option<&'a str>,
     present: &[&str],
+    monitors: &[&str],
 ) -> Result<&'a str, FailureCode> {
     match choice {
         Some(id) => pulse_name(id)
             .filter(|name| present.contains(name))
             .ok_or(FailureCode::DeviceNotFound),
-        None => start_default.ok_or(FailureCode::Unsupported),
+        None => start_default
+            .filter(|name| present.contains(name) || monitors.contains(name))
+            .ok_or(FailureCode::Unsupported),
     }
 }
 
 /// Plans a microphone and speaker change during a call on Linux (ADR-0049,
 /// ADR-0059). Both choices are checked before either stream moves: an ID
 /// that is not a `pulse:` ID, or a name the server lacks, is
-/// `DeviceNotFound`. A kind whose own streams all are on the target (by the
+/// `DeviceNotFound`; a "System default" whose call-start device the server
+/// lacks now is `Unsupported`. A kind whose own streams all are on the target (by the
 /// server's route, not by what the call last asked for) is left alone. A
 /// kind with no own stream yet is not a failure: its target waits
 /// (`SoundTarget::Wait`) until a stream exists, whatever the choice is.
@@ -305,8 +314,8 @@ pub fn plan_sound_move(
     known: &SoundKnown<'_>,
     now: &SoundNow<'_>,
 ) -> Result<SoundMove, FailureCode> {
-    let source = pulse_target(recording, known.default_source, now.sources)?;
-    let sink = pulse_target(playout, known.default_sink, now.sinks)?;
+    let source = pulse_target(recording, known.default_source, now.sources, now.monitors)?;
+    let sink = pulse_target(playout, known.default_sink, now.sinks, &[])?;
     Ok(SoundMove {
         source: sound_target(source, now.own_recording),
         sink: sound_target(sink, now.own_playout),
@@ -1188,6 +1197,7 @@ mod tests {
         SoundNow {
             sources: &["mic-a", "mic-b"],
             sinks: &["spk-a", "spk-b"],
+            monitors: &["mic-a.monitor"],
             own_recording: recording,
             own_playout: playout,
         }
@@ -1237,6 +1247,44 @@ mod tests {
         known.default_sink = None;
         assert_eq!(
             plan_sound_move(None, None, &known, &now(&rec, &play)),
+            Err(FailureCode::Unsupported)
+        );
+    }
+
+    #[test]
+    fn given_a_start_default_that_is_gone_then_no_kind_is_planned() {
+        // GIVEN a call-start speaker that the server no longer has, no
+        // playback stream yet, and a new microphone, WHEN "System default"
+        // is chosen for the speaker, THEN the whole change is `Unsupported`:
+        // neither the microphone move nor a wait for the gone speaker.
+        let rec = on("mic-a");
+        let gone = SoundKnown {
+            default_sink: Some("spk-gone"),
+            ..known()
+        };
+        assert_eq!(
+            plan_sound_move(Some("pulse:mic-b"), None, &gone, &now(&rec, &[])),
+            Err(FailureCode::Unsupported)
+        );
+        // GIVEN a start default that is a monitor, WHEN the server still has
+        // it, THEN it is planned, but a monitor is never an explicit choice.
+        assert_eq!(
+            plan_sound_move(None, None, &known(), &now(&rec, &[])),
+            Ok(SoundMove {
+                source: SoundTarget::Move("mic-a.monitor".to_owned()),
+                sink: SoundTarget::Wait("spk-a".to_owned()),
+            })
+        );
+        assert_eq!(
+            plan_sound_move(Some("pulse:mic-a.monitor"), None, &known(), &now(&rec, &[])),
+            Err(FailureCode::DeviceNotFound)
+        );
+        let no_monitor = SoundNow {
+            monitors: &[],
+            ..now(&rec, &[])
+        };
+        assert_eq!(
+            plan_sound_move(None, None, &known(), &no_monitor),
             Err(FailureCode::Unsupported)
         );
     }

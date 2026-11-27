@@ -266,7 +266,8 @@ Decision:
   `application.process.id` equals the worker's process ID. No other
   program's stream is read for any other purpose or moved. Both choices are
   checked before either stream moves. A non-`pulse:` ID or a name the server
-  lacks is `DeviceNotFound`. A kind that must move but has no own stream
+  lacks is `DeviceNotFound`. A "System default" whose call-start device the
+  server lacks now is `Unsupported`; a start default may be a monitor. A kind that must move but has no own stream
   yet (for example no playback stream while nobody else is in the call) is
   not a failure: the target waits, the change counts as done, and the move
   runs when a stream exists (after remote audio is subscribed or the own
@@ -282,9 +283,13 @@ Decision:
   are read again: `DeviceKept` only when every own stream is on its old
   device, else `AudioDevice`. The new waiting targets are stored only when
   every immediate move worked. A waiting target whose move is refused at the
-  last try is dropped and reported with an unasked `DevicesSet`; a stream that
-  is not open yet only waits. If the defaults query failed at the join, a
-  choice equal to the join's is no change; any other change is `Unsupported`.
+  last try is dropped and reported with an unasked `DevicesSet`
+  (`AudioDevice` also when a try moved the other kind's stream); a stream
+  that is not open yet only waits. A try that runs late, after a newer
+  change was accepted, does nothing. A choice equal to the last accepted
+  one (a camera-only change) is no change; after a lost route it goes to the
+  session again. If the defaults query failed at the join, every other
+  change is `Unsupported`.
 * libwebrtc's own device selection is not touched.
 
 Containment: this adds no capability after stage 2. It creates no socket and

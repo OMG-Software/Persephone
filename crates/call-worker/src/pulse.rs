@@ -17,7 +17,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::ffi::{CStr, c_char, c_int, c_void};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -832,6 +832,8 @@ enum MoveOutcome {
 struct Snapshot {
     sources: Vec<String>,
     sinks: Vec<String>,
+    /// The monitor sources, only to find a call-start default.
+    monitors: Vec<String>,
     recording: Vec<OwnStream>,
     playout: Vec<OwnStream>,
 }
@@ -965,9 +967,11 @@ impl Server for Inner {
         // Monitors are known for routes, but never listed as choices.
         let recording = route_streams(recording, own, &lists.recording_devices());
         let playout = route_streams(playout, own, &lists.playout_devices());
+        let monitors = lists.monitors.into_iter().map(|(name, _)| name).collect();
         Some(Snapshot {
             recording,
             playout,
+            monitors,
             sources: lists.sources.into_iter().map(|(name, _)| name).collect(),
             sinks: lists.sinks.into_iter().map(|(name, _)| name).collect(),
         })
@@ -1029,6 +1033,16 @@ struct Devices {
     /// undone). The last try then reports `AudioDevice`, never `DeviceKept`,
     /// even when the routes it reads are unchanged since the earlier try.
     lost: [bool; 2],
+    /// Per kind: a try moved a stream of this kind to its waiting target
+    /// since the last accepted change. A failure of the other kind at the
+    /// last try is then `AudioDevice`, not `DeviceKept`: one route of the
+    /// change moved, and `DeviceKept` says that the call runs on the
+    /// devices it had.
+    applied: [bool; 2],
+    /// Counts the accepted changes. A try runs only for the change that was
+    /// current when it was scheduled, so a try that runs late never touches
+    /// the targets of a newer change.
+    generation: u64,
 }
 
 /// The two deadlines of one change. Forward moves must end by `forward`, so
@@ -1059,18 +1073,20 @@ pub struct Session {
     /// Whether the defaults query worked. `false` is unknown, not "none".
     defaults_known: bool,
     devices: Mutex<Devices>,
-    /// Whether a target waits. Read without the lock, so the event loop
-    /// never waits for a running change to ask.
+    /// Whether a target waits, and the generation of the accepted change.
+    /// Read without the lock, so the event loop never waits for a running
+    /// change to ask.
     waiting: AtomicBool,
+    generation: AtomicU64,
 }
 
 impl Session {
     /// Opens the connection and reads the defaults. `None` when the library
     /// or a function is missing, the server does not answer, or the time runs
     /// out. A defaults query that fails does not end the session: the
-    /// defaults are then unknown (see [`Session::defaults_unresolved`]). It
-    /// blocks for at most about [`OPERATION_TIMEOUT`]. Call it before
-    /// containment stage 2: it opens a new sound server socket.
+    /// defaults are then unknown, and [`Session::switch`] refuses every
+    /// change. It blocks for at most about [`OPERATION_TIMEOUT`]. Call it
+    /// before containment stage 2: it opens a new sound server socket.
     pub fn open() -> Option<Self> {
         let (api, ext) = (api()?, session_api()?);
         let deadline = Instant::now() + OPERATION_TIMEOUT;
@@ -1107,6 +1123,7 @@ impl Session {
             defaults_known,
             devices: Mutex::new(Devices::default()),
             waiting: AtomicBool::new(false),
+            generation: AtomicU64::new(0),
         })
     }
 
@@ -1115,13 +1132,10 @@ impl Session {
         self.waiting.load(Ordering::Relaxed)
     }
 
-    /// Whether the server's defaults are unknown (the query failed at the
-    /// join). A choice equal to the join's is then no change, so a
-    /// camera-only change gives no sound error. A real change cannot be
-    /// resolved without the defaults: [`Session::switch`] answers
-    /// `Unsupported`, and the call keeps the join's devices.
-    pub fn defaults_unresolved(&self) -> bool {
-        !self.defaults_known
+    /// The generation of the accepted change. The caller reads it when it
+    /// schedules a try and gives it to [`Session::apply_pending`].
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Relaxed)
     }
 
     /// Moves the call's own streams to the chosen microphone and speaker
@@ -1163,14 +1177,15 @@ impl Session {
     /// failed. A kind without a stream is not a failure. A failed target
     /// stays for the next try, except when `last` is set (the last try of a
     /// series): then it is dropped, and the caller reports the failure. The
-    /// last try also reports a kind whose routes it could not read. Same
+    /// last try also reports a kind whose routes it could not read. A try
+    /// for an older `generation` than the accepted change does nothing. Same
     /// start, bound and thread rule as [`Session::switch`].
-    pub fn apply_pending(&self, started: Instant, last: bool) -> PendingRun {
+    pub fn apply_pending(&self, started: Instant, last: bool, generation: u64) -> PendingRun {
         let deadlines = Deadlines::starting_at(started);
         let (Ok(inner), Ok(mut devices)) = (self.inner.lock(), self.devices.lock()) else {
             return PendingRun::default();
         };
-        let run = run_pending(&*inner, &mut devices, last, deadlines);
+        let run = run_pending(&*inner, &mut devices, (last, generation), deadlines);
         self.publish(&devices);
         run
     }
@@ -1181,6 +1196,7 @@ impl Session {
             devices.pending.iter().any(Option::is_some),
             Ordering::Relaxed,
         );
+        self.generation.store(devices.generation, Ordering::Relaxed);
     }
 }
 
@@ -1265,6 +1281,7 @@ fn run_change(
         .ok_or(FailureCode::AudioDevice)?;
     let source_names: Vec<&str> = snapshot.sources.iter().map(String::as_str).collect();
     let sink_names: Vec<&str> = snapshot.sinks.iter().map(String::as_str).collect();
+    let monitor_names: Vec<&str> = snapshot.monitors.iter().map(String::as_str).collect();
     let plan = plan_sound_move(
         choice.0,
         choice.1,
@@ -1275,6 +1292,7 @@ fn run_change(
         &SoundNow {
             sources: &source_names,
             sinks: &sink_names,
+            monitors: &monitor_names,
             own_recording: &snapshot.recording,
             own_playout: &snapshot.playout,
         },
@@ -1296,7 +1314,8 @@ fn run_change(
         }
     }
     if moved {
-        // Commit: every immediate move worked.
+        // Commit: every immediate move worked. The answer reports them, so
+        // a later try reports only what it moves itself.
         for (kind, target) in targets {
             let slot = kind.slot();
             devices.pending[slot] = match target {
@@ -1304,7 +1323,9 @@ fn run_change(
                 SoundTarget::Move(_) | SoundTarget::Keep => None,
             };
             devices.lost[slot] = false;
+            devices.applied[slot] = false;
         }
+        devices.generation = devices.generation.wrapping_add(1);
         return Ok(());
     }
     // Roll back every kind that moved or may have moved, then read the
@@ -1322,14 +1343,21 @@ fn run_change(
 }
 
 /// One try of the waiting targets. Same commit rule as [`run_change`].
+/// `try_of` is whether this is the last try, and the generation of the
+/// change that it was scheduled for: a try of an older change returns at
+/// once and changes nothing, so it never drops a newer target.
 fn run_pending(
     server: &impl Server,
     devices: &mut Devices,
-    last: bool,
+    try_of: (bool, u64),
     deadlines: Deadlines,
 ) -> PendingRun {
-    let mut run = PendingRun::default();
-    if devices.pending.iter().all(Option::is_none) {
+    let (last, generation) = try_of;
+    let mut run = PendingRun {
+        waiting: devices.pending.iter().any(Option::is_some),
+        moves_failed: Vec::new(),
+    };
+    if !run.waiting || devices.generation != generation {
         return run;
     }
     let Some(snapshot) = server.snapshot(deadlines.forward) else {
@@ -1365,6 +1393,9 @@ fn run_pending(
         };
         let mut touched = Vec::new();
         let moved = move_to(server, deadlines.forward, kind, name, streams, &mut touched);
+        // A stream that moved to its target changes the call's routes,
+        // also when the other kind fails in this try.
+        devices.applied[slot] |= moved && !touched.is_empty();
         tries[slot] = Some((touched, moved));
     }
     // Then the commit and the rollback of each kind, under the full
@@ -1387,8 +1418,10 @@ fn run_pending(
                 .is_some_and(|now| routes_kept(streams, now.streams(kind)));
         if last {
             // The routes that were read may already be split by an earlier
-            // try: the kind is then lost, whatever they show now.
-            let code = failure(kept && !devices.lost[slot]);
+            // try: the kind is then lost, whatever they show now. A route of
+            // the other kind that a try moved is not the call's old device.
+            let other = 1 - slot;
+            let code = failure(kept && !devices.lost[slot] && !devices.applied[other]);
             devices.pending[slot] = None;
             devices.lost[slot] = false;
             run.moves_failed.push((kind.label(), code));
@@ -1616,6 +1649,7 @@ mod tests {
             Some(Snapshot {
                 sources: vec!["mic-a".to_owned(), "mic-b".to_owned()],
                 sinks: vec!["spk-a".to_owned(), "spk-b".to_owned()],
+                monitors: vec!["spk-a.monitor".to_owned()],
                 recording: self.recording.borrow().clone(),
                 playout: self.playout.borrow().clone(),
             })
@@ -1829,7 +1863,7 @@ mod tests {
         server.refuse = vec![(2, "spk-b")];
         let mut devices = Devices::default();
         devices.pending[1] = Some("spk-b".to_owned());
-        let early = run_pending(&server, &mut devices, false, deadlines());
+        let early = run_pending(&server, &mut devices, (false, 0), deadlines());
         assert_eq!(
             early,
             PendingRun {
@@ -1837,7 +1871,7 @@ mod tests {
                 moves_failed: vec![("speaker", FailureCode::DeviceKept)],
             }
         );
-        let last = run_pending(&server, &mut devices, true, deadlines());
+        let last = run_pending(&server, &mut devices, (true, 0), deadlines());
         assert_eq!(
             last,
             PendingRun {
@@ -1855,7 +1889,7 @@ mod tests {
         let server = Fake::with(vec![at(1, "mic-a")], vec![]);
         let mut devices = Devices::default();
         devices.pending[1] = Some("spk-b".to_owned());
-        let run = run_pending(&server, &mut devices, true, deadlines());
+        let run = run_pending(&server, &mut devices, (true, 0), deadlines());
         assert_eq!(
             run,
             PendingRun {
@@ -1872,7 +1906,7 @@ mod tests {
         let server = Fake::with(vec![], vec![at(2, "spk-a")]);
         let mut devices = Devices::default();
         devices.pending[1] = Some("spk-b".to_owned());
-        let run = run_pending(&server, &mut devices, false, deadlines());
+        let run = run_pending(&server, &mut devices, (false, 0), deadlines());
         assert_eq!(run, PendingRun::default());
         assert_eq!(server.route(Kind::Playout, 2).as_deref(), Some("spk-b"));
         assert_eq!(devices.pending, [None, None]);
@@ -1887,7 +1921,7 @@ mod tests {
         let server = Fake::with(vec![], vec![at(2, "spk-b")]);
         let mut devices = Devices::default();
         devices.pending[1] = Some("spk-b".to_owned());
-        let run = run_pending(&server, &mut devices, false, deadlines());
+        let run = run_pending(&server, &mut devices, (false, 0), deadlines());
         assert_eq!(run, PendingRun::default());
         assert!(server.sent.borrow().is_empty());
         assert_eq!(devices.pending, [None, None]);
@@ -1906,14 +1940,14 @@ mod tests {
             ..Devices::default()
         };
         assert_eq!(
-            run_pending(&server, &mut devices, false, deadlines()),
+            run_pending(&server, &mut devices, (false, 0), deadlines()),
             PendingRun {
                 waiting: true,
                 moves_failed: Vec::new(),
             }
         );
         assert_eq!(
-            run_pending(&server, &mut devices, true, deadlines()),
+            run_pending(&server, &mut devices, (true, 0), deadlines()),
             PendingRun {
                 waiting: false,
                 moves_failed: vec![
@@ -1936,10 +1970,10 @@ mod tests {
         server.refuse = vec![(3, "spk-b"), (2, "spk-a")];
         let mut devices = Devices::default();
         devices.pending[1] = Some("spk-b".to_owned());
-        run_pending(&server, &mut devices, false, deadlines());
+        run_pending(&server, &mut devices, (false, 0), deadlines());
         assert_eq!(server.route(Kind::Playout, 2).as_deref(), Some("spk-b"));
         assert!(devices.lost[1]);
-        let last = run_pending(&server, &mut devices, true, deadlines());
+        let last = run_pending(&server, &mut devices, (true, 0), deadlines());
         assert_eq!(
             last,
             PendingRun {
@@ -1962,7 +1996,7 @@ mod tests {
             pending: [Some("mic-b".to_owned()), Some("spk-b".to_owned())],
             ..Devices::default()
         };
-        let run = run_pending(&server, &mut devices, false, deadlines());
+        let run = run_pending(&server, &mut devices, (false, 0), deadlines());
         assert_eq!(
             *server.sent.borrow(),
             vec![
@@ -1981,6 +2015,135 @@ mod tests {
         );
         assert_eq!(devices.pending[1], None);
         assert_eq!(devices.pending[0].as_deref(), Some("mic-b"));
+    }
+
+    #[test]
+    fn given_a_try_of_an_older_change_then_it_leaves_the_newer_target_alone() {
+        // GIVEN a speaker target of a newer change (generation 1) and a
+        // server whose routes cannot be read, WHEN a last try that was
+        // scheduled for the older change (generation 0) runs late, THEN it
+        // reads nothing, reports nothing and the newer target still waits;
+        // WHEN a last try of the newer change runs, THEN it reports the
+        // unreadable routes and drops the target.
+        let server = Fake::with(vec![], vec![]);
+        server.unreadable.set(true);
+        let mut devices = Devices {
+            pending: [None, Some("spk-c".to_owned())],
+            generation: 1,
+            ..Devices::default()
+        };
+        assert_eq!(
+            run_pending(&server, &mut devices, (true, 0), deadlines()),
+            PendingRun {
+                waiting: true,
+                moves_failed: Vec::new(),
+            }
+        );
+        assert_eq!(server.reads.get(), 0);
+        assert_eq!(devices.pending[1].as_deref(), Some("spk-c"));
+        assert_eq!(
+            run_pending(&server, &mut devices, (true, 1), deadlines()),
+            PendingRun {
+                waiting: false,
+                moves_failed: vec![("speaker", FailureCode::AudioDevice)],
+            }
+        );
+    }
+
+    #[test]
+    fn given_one_kind_moved_by_a_try_when_the_other_fails_last_then_it_is_audio_device() {
+        // GIVEN waiting targets of both kinds and a speaker move that the
+        // server refuses, WHEN the last try moves the microphone and the
+        // speaker stays, THEN the speaker is AudioDevice: one route of the
+        // change moved, so the call does not run on the devices it had.
+        // GIVEN a microphone stream that opened on its target by itself
+        // THEN no route moved, and the speaker is DeviceKept.
+        for (mic, code) in [
+            ("mic-a", FailureCode::AudioDevice),
+            ("mic-b", FailureCode::DeviceKept),
+        ] {
+            let mut server = Fake::with(vec![at(1, mic)], vec![at(2, "spk-a")]);
+            server.refuse = vec![(2, "spk-b")];
+            let mut devices = Devices {
+                pending: [Some("mic-b".to_owned()), Some("spk-b".to_owned())],
+                ..Devices::default()
+            };
+            let run = run_pending(&server, &mut devices, (true, 0), deadlines());
+            assert_eq!(
+                run,
+                PendingRun {
+                    waiting: false,
+                    moves_failed: vec![("speaker", code)],
+                },
+                "{mic}"
+            );
+            assert_eq!(server.route(Kind::Recording, 1).as_deref(), Some("mic-b"));
+        }
+    }
+
+    #[test]
+    fn given_an_accepted_change_then_a_new_generation_starts_with_no_moved_kind() {
+        // GIVEN a kind that an earlier try moved, WHEN a change is accepted,
+        // THEN the generation counts it and no kind is marked as moved;
+        // WHEN a change is refused, THEN the generation stays.
+        let server = Fake::with(vec![], vec![]);
+        let mut devices = Devices {
+            applied: [true, true],
+            ..Devices::default()
+        };
+        let accepted = run_change(
+            &server,
+            DEFAULTS,
+            &mut devices,
+            (Some("pulse:mic-b"), Some("pulse:spk-b")),
+            deadlines(),
+        );
+        assert_eq!(accepted, Ok(()));
+        assert_eq!(devices.generation, 1);
+        assert_eq!(devices.applied, [false, false]);
+        let refused = run_change(
+            &server,
+            DEFAULTS,
+            &mut devices,
+            (Some("pulse:mic-gone"), None),
+            deadlines(),
+        );
+        assert_eq!(refused, Err(FailureCode::DeviceNotFound));
+        assert_eq!(devices.generation, 1);
+    }
+
+    #[test]
+    fn given_a_start_default_that_is_gone_when_changed_then_nothing_moves() {
+        // GIVEN a call-start speaker that the server no longer has and no
+        // playback stream, WHEN a new microphone and "System default" for
+        // the speaker are chosen, THEN the change is Unsupported and no
+        // stream moves. GIVEN a start microphone that is a monitor the
+        // server still has, WHEN "System default" is chosen, THEN the
+        // stream moves there.
+        let server = Fake::with(vec![at(1, "mic-a")], vec![]);
+        let mut devices = Devices::default();
+        let gone = run_change(
+            &server,
+            (Some("mic-a"), Some("spk-gone")),
+            &mut devices,
+            (Some("pulse:mic-b"), None),
+            deadlines(),
+        );
+        assert_eq!(gone, Err(FailureCode::Unsupported));
+        assert!(server.sent.borrow().is_empty());
+        assert_eq!(devices.pending, [None, None]);
+        let monitor = run_change(
+            &server,
+            (Some("spk-a.monitor"), Some("spk-a")),
+            &mut devices,
+            (None, None),
+            deadlines(),
+        );
+        assert_eq!(monitor, Ok(()));
+        assert_eq!(
+            server.route(Kind::Recording, 1).as_deref(),
+            Some("spk-a.monitor")
+        );
     }
 
     #[test]

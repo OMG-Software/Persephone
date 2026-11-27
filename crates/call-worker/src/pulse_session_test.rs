@@ -22,7 +22,10 @@
 //! Run the setup in a subshell, so the parent shell keeps its environment.
 //! `PULSE_RUNTIME_PATH` points the daemon, `pactl` and `pulseaudio --kill`
 //! at the private `pulse` directory of the temporary runtime directory, so
-//! they never reach the desktop's server.
+//! they never reach the desktop's server. `PULSE_SINK` and `PULSE_SOURCE`
+//! are unset, as a desktop device name there would stop the test's streams
+//! from opening on the private server; the test also removes them from
+//! every program it starts.
 //!
 //! ```text
 //! (
@@ -30,6 +33,7 @@
 //!   export PULSE_RUNTIME_PATH="$XDG_RUNTIME_DIR/pulse"
 //!   pulseaudio -n --daemonize=yes --exit-idle-time=-1 -L module-native-protocol-unix
 //!   export PULSE_SERVER="unix:$PULSE_RUNTIME_PATH/native"
+//!   unset PULSE_SINK PULSE_SOURCE
 //!   ORIG_SINK="$(pactl get-default-sink)"; ORIG_SOURCE="$(pactl get-default-source)"
 //!   MODULES=""
 //!   cleanup() {
@@ -156,7 +160,8 @@ fn the_call_worker_side() {
                 continue;
             }
             Some("APPLY") => {
-                let run = session.apply_pending(std::time::Instant::now(), false);
+                let run =
+                    session.apply_pending(std::time::Instant::now(), false, session.generation());
                 writeln!(
                     out,
                     "OK waiting={} failed={:?}",
@@ -197,7 +202,7 @@ impl Drop for Reaper {
 /// Starts the child in `mode` (`"1"` or `"late"`) and waits until it is
 /// ready.
 fn start_child(mode: &str) -> (Child, BufReader<std::process::ChildStdout>) {
-    let mut child = Command::new(std::env::current_exe().unwrap())
+    let mut child = command(std::env::current_exe().unwrap())
         .args([
             "--ignored",
             "--exact",
@@ -253,8 +258,16 @@ fn streams(kind: &str) -> Vec<(u32, String)> {
     found
 }
 
+/// A command for `program` with no inherited device override, so its
+/// streams open on the private server's defaults.
+fn command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut command = Command::new(program);
+    command.env_remove("PULSE_SINK").env_remove("PULSE_SOURCE");
+    command
+}
+
 fn pactl(args: &[&str]) -> String {
-    let output = Command::new("pactl").args(args).output().expect("pactl");
+    let output = command("pactl").args(args).output().expect("pactl");
     assert!(output.status.success(), "pactl {args:?}");
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
@@ -302,14 +315,14 @@ fn given_a_call_session() {
     // Each program goes under its guard at once, so a panic or a failed
     // start of the next one still stops it.
     let playing = Reaper(
-        Command::new("pacat")
+        command("pacat")
             .args(["--playback", "--raw"])
             .stdin(Stdio::from(std::fs::File::open("/dev/zero").unwrap()))
             .spawn()
             .expect("pacat"),
     );
     let recording = Reaper(
-        Command::new("parec")
+        command("parec")
             .arg("--raw")
             .stdout(Stdio::null())
             .spawn()
