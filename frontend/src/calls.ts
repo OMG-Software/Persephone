@@ -3,13 +3,19 @@
 // full `Record`, so a new code in the contract fails type checking until it
 // has a text.
 import type {
+  CallBackground,
   CallCamera,
+  CallColourFilter,
   CallDevice,
   CallDeviceChange,
   CallDevices,
   CallDeviceTestKind,
   CallDeviceTestState,
   CallDeviceTestStatus,
+  CALL_BLUR_DEFAULT,
+  CALL_BLUR_MAX,
+  CALL_BLUR_MIN,
+  CALL_BLUR_STEP,
   CALL_DEVICE_ID_BYTES_MAX,
   CALL_PARTICIPANTS_MAX,
   CALL_SOUND_LEVEL_MAX,
@@ -23,7 +29,8 @@ import type {
   CallRing,
   CallRings,
   CallStatus,
-  CallUnavailable
+  CallUnavailable,
+  CallVideoEffect
 } from '../../crates/contracts/generated/contracts';
 import type { DesktopPlatform } from './modules';
 
@@ -118,7 +125,9 @@ export const IDLE_CALL: CallStatus = {
   screen: 'off',
   video: [],
   ringDeclined: false,
-  deviceChange: null
+  deviceChange: null,
+  effectRefused: false,
+  mirror: true
 };
 
 /** This account is in a call, or joining one. */
@@ -210,6 +219,13 @@ export const CAMERA_OFF_LABEL = 'Turn camera off';
 export const CAMERA_STARTING_TEXT = 'Starting the camera…';
 export const CAMERA_NOT_FOUND_TEXT = 'The chosen camera is not connected';
 export const CAMERA_UNAVAILABLE_TEXT = 'The camera could not start';
+/**
+ * The camera stays off because its background effect cannot run here
+ * (ADR-0068): the camera never sends the background that the user chose to
+ * hide.
+ */
+export const CAMERA_EFFECT_UNAVAILABLE_TEXT =
+  'The camera stays off: the chosen background cannot run here. Choose another background in the call settings';
 
 /** The note beside the camera toggle; empty when the camera needs none. */
 export const CAMERA_TEXT: Record<CallCamera, string> = {
@@ -217,7 +233,8 @@ export const CAMERA_TEXT: Record<CallCamera, string> = {
   starting: CAMERA_STARTING_TEXT,
   on: '',
   not_found: CAMERA_NOT_FOUND_TEXT,
-  unavailable: CAMERA_UNAVAILABLE_TEXT
+  unavailable: CAMERA_UNAVAILABLE_TEXT,
+  effect_unavailable: CAMERA_EFFECT_UNAVAILABLE_TEXT
 };
 
 export type CameraButtonView = {
@@ -228,7 +245,8 @@ export type CameraButtonView = {
 
 /**
  * The camera toggle in the call bar. A camera that failed (`not_found`,
- * `unavailable`) is off, so the toggle offers to turn it on again.
+ * `unavailable`, `effect_unavailable`) is off, so the toggle offers to turn
+ * it on again.
  */
 export function cameraButton(camera: CallCamera): CameraButtonView {
   const pressed = camera === 'on' || camera === 'starting';
@@ -500,6 +518,132 @@ export function micGainValue(value: number): number {
 /** The text a microphone gain is read and shown as. */
 export function micGainText(percent: number): string {
   return `${micGainValue(percent)}%`;
+}
+
+// The blur bounds (ADR-0068) are typed as the contract's literals, so a
+// change of the contract's `CALL_BLUR_*` fails the type check here instead
+// of offering a strength that the host refuses.
+/** The weakest background blur, in percent (ADR-0068). */
+export const BLUR_MIN: typeof CALL_BLUR_MIN = 10;
+/** The strongest background blur. */
+export const BLUR_MAX: typeof CALL_BLUR_MAX = 100;
+/** The blur moves in steps of this many percent. */
+export const BLUR_STEP: typeof CALL_BLUR_STEP = 10;
+/** The blur when none is saved. */
+export const BLUR_DEFAULT: typeof CALL_BLUR_DEFAULT = 50;
+/** No video effect: what a profile without a saved one has. */
+export const NO_VIDEO_EFFECT: CallVideoEffect = { background: 'none', blur: BLUR_DEFAULT, filter: 'none' };
+export const VIDEO_EFFECTS_TITLE = 'Video effects';
+export const VIDEO_EFFECTS_HELP =
+  'The others in the call see the background and the colour filter. They apply at once, also in a call that runs and in the camera test.';
+export const BACKGROUND_LABEL = 'Background';
+export const BLUR_LABEL = 'Blur strength';
+export const FILTER_LABEL = 'Colour filter';
+export const MIRROR_LABEL = 'Mirror my picture';
+export const MIRROR_HELP = 'Only you see your picture mirrored. The others see it the right way round.';
+/** This build has no person mask, so blur and pictures cannot run (ADR-0068). */
+export const BACKGROUND_EFFECTS_UNAVAILABLE_TEXT =
+  'Background blur and background pictures are not available in this version. They need a person mask, which a later version adds.';
+export const EFFECT_REFUSED_TEXT = 'This effect cannot run here. Your camera keeps the effect it had.';
+export const EFFECT_SAVE_TEXT = 'The video effect could not be saved.';
+
+/** The background menu's texts, in menu order. */
+export const BACKGROUND_TEXT: Record<CallBackground, string> = {
+  none: 'None',
+  blur: 'Blur',
+  dusk: 'Dusk',
+  sea: 'Sea',
+  forest: 'Forest',
+  studio: 'Studio'
+};
+
+/** The colour filter menu's texts, in menu order. */
+export const FILTER_TEXT: Record<CallColourFilter, string> = {
+  none: 'None',
+  greyscale: 'Greyscale',
+  warm: 'Warm',
+  cool: 'Cool',
+  brighten: 'Brighten'
+};
+
+/** One entry of an effect menu. */
+export type EffectOption<T extends string> = { value: T; label: string; disabled: boolean };
+
+/**
+ * The background menu (ADR-0068). Every background but `none` needs the
+ * person mask; without it (`available` false) those cannot be chosen. The
+ * one in use stays chosen, so the menu never shows another than the saved.
+ */
+export function backgroundOptions(available: boolean, current: CallBackground): EffectOption<CallBackground>[] {
+  return (Object.keys(BACKGROUND_TEXT) as CallBackground[]).map((value) => ({
+    value,
+    label: BACKGROUND_TEXT[value],
+    disabled: !available && value !== 'none' && value !== current
+  }));
+}
+
+/** The colour filter menu: each filter works without the person mask. */
+export function filterOptions(): EffectOption<CallColourFilter>[] {
+  return (Object.keys(FILTER_TEXT) as CallColourFilter[]).map((value) => ({
+    value,
+    label: FILTER_TEXT[value],
+    disabled: false
+  }));
+}
+
+/** A menu value as a background; anything else keeps `current`. */
+export function backgroundValue(value: string, current: CallBackground): CallBackground {
+  return Object.hasOwn(BACKGROUND_TEXT, value) ? (value as CallBackground) : current;
+}
+
+/** A menu value as a colour filter; anything else keeps `current`. */
+export function filterValue(value: string, current: CallColourFilter): CallColourFilter {
+  return Object.hasOwn(FILTER_TEXT, value) ? (value as CallColourFilter) : current;
+}
+
+/**
+ * A slider value as a blur strength: a whole percent from 10 to 100 in steps
+ * of 10. Anything that is not a finite number is the default, so the host
+ * never gets a strength that it refuses.
+ */
+export function blurValue(value: number): number {
+  if (!Number.isFinite(value)) return BLUR_DEFAULT;
+  const clamped = Math.min(BLUR_MAX, Math.max(BLUR_MIN, value));
+  return Math.round(clamped / BLUR_STEP) * BLUR_STEP;
+}
+
+/** The text a blur strength is read and shown as. */
+export function blurText(percent: number): string {
+  return `${blurValue(percent)}%`;
+}
+
+/** The effect with only its three fields, as the host takes it. */
+export function plainEffect(effect: CallVideoEffect): CallVideoEffect {
+  return { background: effect.background, blur: blurValue(effect.blur), filter: effect.filter };
+}
+
+/** The part of the video effect controls that a change touched (ADR-0068). */
+export type VideoEffectPart = 'effect' | 'mirror';
+
+/**
+ * One change of the own video effect or the preview's mirror (ADR-0068).
+ * The core saves only the parts that are sent and keeps the other as saved,
+ * so a window whose copy of it is old does not undo a change that the other
+ * window made.
+ */
+export interface VideoEffectChange {
+  effect?: CallVideoEffect;
+  mirror?: boolean;
+}
+
+/** The command for a change of `part`: only that part, the effect made plain. */
+export function videoEffectChange(part: VideoEffectPart, effect: CallVideoEffect, mirror: boolean): VideoEffectChange {
+  return part === 'effect' ? { effect: plainEffect(effect) } : { mirror };
+}
+
+/** The device record after a saved change: the parts it sent, the rest as before. */
+export function withVideoEffectChange(devices: CallDevices, change: VideoEffectChange): CallDevices {
+  return { ...devices, effect: change.effect ?? devices.effect, mirror: change.mirror ?? devices.mirror };
 }
 
 /**
@@ -871,4 +1015,10 @@ export function deviceTestActive(status: CallDeviceTestStatus, kind: CallDeviceT
 }
 
 /** No device test yet. */
-export const IDLE_DEVICE_TEST: CallDeviceTestStatus = { id: 0, test: null, state: 'idle', stream: 0 };
+export const IDLE_DEVICE_TEST: CallDeviceTestStatus = {
+  id: 0,
+  test: null,
+  state: 'idle',
+  stream: 0,
+  effectRefused: false
+};

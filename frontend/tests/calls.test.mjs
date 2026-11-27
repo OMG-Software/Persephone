@@ -289,9 +289,10 @@ test('GIVEN device replies WHEN the note is chosen THEN unsupported, unreadable 
 });
 
 test('GIVEN each camera state WHEN its text is read THEN failures say what happened and working states say nothing', () => {
-  assert.deepEqual(Object.keys(CAMERA_TEXT).sort(), ['not_found', 'off', 'on', 'starting', 'unavailable']);
+  assert.deepEqual(Object.keys(CAMERA_TEXT).sort(), ['effect_unavailable', 'not_found', 'off', 'on', 'starting', 'unavailable']);
   assert.equal(CAMERA_TEXT.not_found, 'The chosen camera is not connected');
   assert.equal(CAMERA_TEXT.unavailable, 'The camera could not start');
+  assert.match(CAMERA_TEXT.effect_unavailable, /chosen background cannot run here/);
   assert.equal(CAMERA_TEXT.starting, 'Starting the camera…');
   assert.equal(CAMERA_TEXT.off, '');
   assert.equal(CAMERA_TEXT.on, '');
@@ -301,7 +302,7 @@ test('GIVEN each camera state WHEN the toggle is built THEN it offers to turn of
   assert.deepEqual(cameraButton('off'), { label: 'Turn camera on', pressed: false });
   assert.deepEqual(cameraButton('on'), { label: 'Turn camera off', pressed: true });
   assert.deepEqual(cameraButton('starting'), { label: 'Turn camera off', pressed: true });
-  for (const failed of ['not_found', 'unavailable']) {
+  for (const failed of ['not_found', 'unavailable', 'effect_unavailable']) {
     assert.deepEqual(cameraButton(failed), { label: 'Turn camera on', pressed: false });
   }
 });

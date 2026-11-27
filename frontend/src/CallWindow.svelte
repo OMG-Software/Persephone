@@ -318,7 +318,7 @@
 
 {#snippet feed(cell: CallCell, isLarge: boolean)}
   {@const shape = cell.tile === null ? undefined : shapes[cell.tile]}
-  {@const layout = shape && cell.tile !== null ? tileLayout(shape.width, shape.height, shape.rotation, cell.own) : null}
+  {@const layout = shape && cell.tile !== null ? tileLayout(shape.width, shape.height, shape.rotation, cell.own && status.mirror) : null}
   <div class="video-tile call-cell" class:screen={cell.screen} class:speaking={cell.speaking} class:large={isLarge} style:--ratio={layout ? String(layout.ratio) : '1.7778'}>
     <button
       type="button"
@@ -457,7 +457,7 @@
 
   {#if joined}
     {#if devicesOpen}
-      <CallWindowDevices change={status.deviceChange} />
+      <CallWindowDevices change={status.deviceChange} effectRefused={status.effectRefused} />
     {/if}
     <footer class="call-window-controls">
       <button type="button" class="secondary" aria-pressed={status.muted} disabled={busy} onclick={() => command(() => callMute(!status.muted), 'The microphone did not change. Try again.')}>

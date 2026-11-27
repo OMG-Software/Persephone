@@ -668,6 +668,148 @@ fn given_a_profile_when_the_call_volume_is_set_then_it_is_saved_with_the_devices
     );
 }
 
+/// GIVEN an open profile WHEN the page sets the video effect and the mirror
+/// THEN both are saved in the call device record, kept when the devices are
+/// saved again, and the effect keeps the devices; WHEN it sends only one of
+/// them THEN the other keeps its saved value; no call is not an error, and
+/// a blur off the 10 percent steps or a command with neither is refused
+/// before anything is saved (ADR-0068).
+#[test]
+fn given_a_profile_when_the_video_effect_is_set_then_it_is_saved_with_the_devices() {
+    use persephone_contracts::{CallBackground, CallColourFilter, CallStatus, CallVideoEffect};
+    use persephone_core::calls::devices::{Selection, load};
+    let dir = tempfile::TempDir::new().unwrap();
+    let core = Core::default().with_session(common::open_session(dir.path()));
+    let saved = |core: &Core| -> Selection {
+        let lease = core.session().admit().unwrap();
+        lease.stores().block_on(load(lease.stores())).unwrap()
+    };
+    assert_eq!(
+        (saved(&core).effect(), saved(&core).mirror()),
+        (CallVideoEffect::default(), true),
+        "no record is no effect and a mirrored preview"
+    );
+    let sea = CallVideoEffect {
+        background: CallBackground::Sea,
+        blur: 30,
+        filter: CallColourFilter::Cool,
+    };
+    assert_eq!(
+        answer::<CallStatus>(
+            &core,
+            Call::CallVideoEffect {
+                effect: Some(sea),
+                mirror: Some(true),
+            },
+        ),
+        Ok(CallStatus::idle())
+    );
+    assert_eq!(
+        (saved(&core).effect, saved(&core).mirror),
+        (Some(sea), Some(true))
+    );
+    assert_eq!(
+        answer::<serde_json::Value>(
+            &core,
+            Call::SetCallDevices {
+                recording: Some("mic".into()),
+                playout: None,
+                camera: None,
+            },
+        ),
+        Ok(serde_json::Value::Null)
+    );
+    let record = saved(&core);
+    assert_eq!(
+        (record.effect, record.mirror),
+        (Some(sea), Some(true)),
+        "saving the devices keeps the effect"
+    );
+    let plain = CallVideoEffect::default();
+    assert_eq!(
+        answer::<CallStatus>(
+            &core,
+            Call::CallVideoEffect {
+                effect: Some(plain),
+                mirror: Some(false),
+            },
+        ),
+        Ok(CallStatus::idle())
+    );
+    let record = saved(&core);
+    assert_eq!((record.effect, record.mirror), (Some(plain), Some(false)));
+    assert_eq!(
+        record.recording.as_deref(),
+        Some("mic"),
+        "the effect keeps the devices"
+    );
+    // One window changes the effect, the other then only the mirror: the
+    // mirror change does not bring back that window's old effect.
+    assert_eq!(
+        answer::<CallStatus>(
+            &core,
+            Call::CallVideoEffect {
+                effect: Some(sea),
+                mirror: None,
+            },
+        ),
+        Ok(CallStatus::idle())
+    );
+    assert_eq!(
+        (saved(&core).effect, saved(&core).mirror),
+        (Some(sea), Some(false)),
+        "an effect alone keeps the mirror"
+    );
+    assert_eq!(
+        answer::<CallStatus>(
+            &core,
+            Call::CallVideoEffect {
+                effect: None,
+                mirror: Some(true),
+            },
+        ),
+        Ok(CallStatus::idle())
+    );
+    assert_eq!(
+        (saved(&core).effect, saved(&core).mirror),
+        (Some(sea), Some(true)),
+        "a mirror alone keeps the effect"
+    );
+    assert_eq!(
+        answer::<CallStatus>(
+            &core,
+            Call::CallVideoEffect {
+                effect: None,
+                mirror: None,
+            },
+        ),
+        Err(ErrorCode::InvalidArgument),
+        "a command that changes nothing is refused"
+    );
+    for blur in [0, 55, 110] {
+        assert_eq!(
+            answer::<CallStatus>(
+                &core,
+                Call::CallVideoEffect {
+                    effect: Some(CallVideoEffect {
+                        background: CallBackground::Blur,
+                        blur,
+                        filter: CallColourFilter::None,
+                    }),
+                    mirror: Some(false),
+                },
+            ),
+            Err(ErrorCode::InvalidArgument),
+            "{blur}"
+        );
+    }
+    assert_eq!(
+        (saved(&core).effect, saved(&core).mirror),
+        (Some(sea), Some(true)),
+        "a refused effect saves nothing"
+    );
+}
+
 /// GIVEN a malformed room ID WHEN the page asks for readiness or a join THEN
 /// the core refuses it before any other work; a valid ID without a homeserver
 /// is not found.
@@ -769,6 +911,10 @@ fn given_a_profile_then_call_commands_follow_the_session() {
         Call::CallMute { muted: true },
         Call::CallDeafen { deafened: true },
         Call::CallVolume { percent: 50 },
+        Call::CallVideoEffect {
+            effect: Some(persephone_contracts::CallVideoEffect::default()),
+            mirror: Some(false),
+        },
         Call::CallReadiness {
             room_id: room.into(),
         },

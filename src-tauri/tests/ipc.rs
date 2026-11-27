@@ -221,6 +221,9 @@ impl CoreTransport for FakeCore {
             Call::CallMicrophone { .. } => Ok(
                 serde_json::json!({"phase": "active", "roomId": "!r:example.invalid", "muted": false, "deafened": false, "volume": 100, "participants": [], "ended": null, "joinError": null, "camera": "off", "screen": "off", "video": []}),
             ),
+            Call::CallVideoEffect { effect, .. } => Ok(
+                serde_json::json!({"phase": "active", "roomId": "!r:example.invalid", "muted": false, "deafened": false, "volume": 100, "participants": [], "ended": null, "joinError": null, "camera": "off", "screen": "off", "video": [], "effectRefused": effect.is_some_and(|effect| effect.background == persephone_contracts::CallBackground::Blur)}),
+            ),
             Call::VerifyThisDevice {} => Ok(serde_json::json!({
                 "identity": "unverified", "recovery": "enabled", "operation": "idle", "error": null, "verification": null, "canSetUpRecovery": false, "canStartNewBackup": false, "profilePassphrase": false,
                 "verification": {"flowId": "f1", "phase": "waiting", "emoji": [], "otherDevice": null}
@@ -564,7 +567,10 @@ impl CoreTransport for FakeCore {
                 "unreadable": false,
                 "volume": 100,
                 "autoLevel": true,
-                "micGain": 100
+                "micGain": 100,
+                "effect": {"background": "none", "blur": 50, "filter": "none"},
+                "mirror": false,
+                "backgroundEffects": false
             })),
             Call::SetCallDevices {
                 recording,
@@ -1052,6 +1058,7 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-call-deafen",
             "allow-call-volume",
             "allow-call-microphone",
+            "allow-call-video-effect",
             "allow-call-camera",
             "allow-call-screen",
             "allow-call-video-frame",
@@ -1158,6 +1165,7 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-call-screen",
             "allow-call-devices",
             "allow-set-call-devices",
+            "allow-call-video-effect",
             "allow-call-stats",
             "allow-call-stats-read",
             "allow-close-call-window",
@@ -1263,6 +1271,17 @@ fn given_the_call_window_then_it_lists_and_changes_call_devices() {
     for cmd in ["call_device_test_stop", "call_device_test_status"] {
         assert!(invoke(cmd, serde_json::json!({})).is_err(), "{cmd} refused");
     }
+    // The call window may change the own video effect (ADR-0068).
+    let relayed = core.calls.load(Ordering::SeqCst);
+    assert_eq!(
+        invoke(
+            "call_video_effect",
+            serde_json::json!({"effect": {"background": "none", "blur": 50, "filter": "warm"}, "mirror": true})
+        )
+        .unwrap()["phase"],
+        "active"
+    );
+    assert_eq!(core.calls.load(Ordering::SeqCst), relayed + 1);
 }
 
 /// GIVEN the call statistics command WHEN the main window calls it THEN it is
@@ -1608,7 +1627,8 @@ fn given_a_ready_call_page_then_the_open_returns() {
 }
 
 /// GIVEN device test commands THEN bounded IDs cross, a bad one never
-/// reaches the core, and a reply outside the contract is refused.
+/// reaches the core, and a reply outside the contract is refused. A reply
+/// without the effect refusal (ADR-0068) reaches the page as no refusal.
 #[test]
 fn given_device_test_commands_then_bounded_arguments_cross() {
     let core = FakeCore::new(true);
@@ -1620,7 +1640,9 @@ fn given_device_test_commands_then_bounded_arguments_cross() {
             "call_device_test",
             serde_json::json!({"test": "speaker", "device": "{0.0.0.00000000}.{a}"})
         ),
-        Ok(serde_json::json!({"id": 3, "test": "speaker", "state": "starting", "stream": 0}))
+        Ok(serde_json::json!({
+            "id": 3, "test": "speaker", "state": "starting", "stream": 0, "effectRefused": false
+        }))
     );
     assert_eq!(
         invoke("call_device_test_stop", serde_json::json!({})),
@@ -2313,9 +2335,84 @@ fn given_call_commands_then_bounded_arguments_cross_and_replies_are_checked() {
         before_microphone + 5,
         "a refused change never reached the core"
     );
-    // The five valid microphone changes above are the only calls since the
-    // start of this check.
-    assert_eq!(core.calls.load(Ordering::SeqCst), before + 5);
+    // The video effect (ADR-0068): a closed set of names and a blur of 10
+    // to 100 percent in steps of 10. A wrong type or an unknown name never
+    // reaches the core; a blur off the range or the step is refused by the
+    // host before the core.
+    let before_effect = core.calls.load(Ordering::SeqCst);
+    let effect = |background: &str, blur: serde_json::Value, filter: &str| serde_json::json!({"background": background, "blur": blur, "filter": filter});
+    for (background, filter) in [
+        ("none", "none"),
+        ("dusk", "greyscale"),
+        ("sea", "warm"),
+        ("forest", "cool"),
+        ("studio", "brighten"),
+    ] {
+        assert_eq!(
+            invoke(
+                "call_video_effect",
+                serde_json::json!({"effect": effect(background, 50.into(), filter), "mirror": true})
+            )
+            .unwrap()["phase"],
+            "active",
+            "{background} {filter}"
+        );
+    }
+    let refused = invoke(
+        "call_video_effect",
+        serde_json::json!({"effect": effect("blur", 10.into(), "none"), "mirror": false}),
+    )
+    .unwrap();
+    assert_eq!(
+        refused["effectRefused"], true,
+        "the worker's refusal reaches the page"
+    );
+    // A window that changes one of them sends only that one; the core keeps
+    // the other.
+    for args in [
+        serde_json::json!({"effect": effect("none", 50.into(), "none")}),
+        serde_json::json!({"mirror": true}),
+    ] {
+        assert!(invoke("call_video_effect", args.clone()).is_ok(), "{args}");
+    }
+    assert_eq!(
+        core.calls.load(Ordering::SeqCst),
+        before_effect + 8,
+        "each valid effect reached the core"
+    );
+    for args in [
+        serde_json::json!({"effect": effect("moon", 50.into(), "none"), "mirror": false}),
+        serde_json::json!({"effect": effect("none", 50.into(), "sepia"), "mirror": false}),
+        serde_json::json!({"effect": effect("Blur", 50.into(), "none"), "mirror": false}),
+        serde_json::json!({"effect": effect("blur", "50".into(), "none"), "mirror": false}),
+        serde_json::json!({"effect": effect("blur", (-10).into(), "none"), "mirror": false}),
+        serde_json::json!({"effect": effect("blur", 256.into(), "none"), "mirror": false}),
+        serde_json::json!({"effect": {"background": "none", "blur": 50}, "mirror": false}),
+        serde_json::json!({"effect": {"background": "none", "blur": 50, "filter": "none", "url": "x"}, "mirror": false}),
+        serde_json::json!({"effect": effect("none", 50.into(), "none"), "mirror": "yes"}),
+        serde_json::json!({}),
+        serde_json::json!({"effect": null, "mirror": null}),
+    ] {
+        assert!(invoke("call_video_effect", args.clone()).is_err(), "{args}");
+    }
+    for blur in [0, 5, 55, 101, 110, 255] {
+        assert!(
+            invoke(
+                "call_video_effect",
+                serde_json::json!({"effect": effect("blur", blur.into(), "none"), "mirror": false})
+            )
+            .is_err(),
+            "{blur}"
+        );
+    }
+    assert_eq!(
+        core.calls.load(Ordering::SeqCst),
+        before_effect + 8,
+        "a refused effect never reached the core"
+    );
+    // The five valid microphone changes and the eight valid effects above
+    // are the only calls since the start of this check.
+    assert_eq!(core.calls.load(Ordering::SeqCst), before + 13);
 }
 
 /// Sending relays the room and body only; oversized input never reaches the

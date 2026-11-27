@@ -194,13 +194,20 @@ export type CallDeviceTestStatus = {
  * Numbers the tests, so the page can stop the one it started
  * (`call_device_test_stop`). 0 for no test and for a refusal.
  */
-id: number, test: CallDeviceTestKind | null, state: CallDeviceTestState, stream: number, };
+id: number, test: CallDeviceTestKind | null, state: CallDeviceTestState, stream: number, 
+/**
+ * The worker refused the camera test's video effect (ADR-0068), so the
+ * test shows the camera without it. The worker answers after the
+ * command that set the effect, so this comes later than its reply.
+ * False for other tests and once the test has ended.
+ */
+effectRefused: boolean, };
 
 export type CallEnd = "left" | "connection_failed" | "audio_device" | "containment" | "worker_stopped" | "worker_crashed" | "membership_lost" | "keys_unavailable" | "session_ended" | "internal" | "device_not_found" | "alone";
 
 export type CallJoinError = "already_in_call" | "not_joined" | "not_encrypted" | "no_call_server" | "call_server_unsupported" | "declined" | "unsupported_platform" | "containment" | "no_worker" | "no_delayed_events" | "membership" | "not_permitted" | "call_server" | "keys" | "proxy_unreadable" | "device_setting_unreadable";
 
-export type CallCamera = "off" | "starting" | "on" | "not_found" | "unavailable";
+export type CallCamera = "off" | "starting" | "on" | "not_found" | "unavailable" | "effect_unavailable";
 
 export type CallScreen = "off" | "starting" | "on" | "not_found" | "unavailable" | "refused";
 
@@ -266,7 +273,19 @@ ringDeclined: boolean,
  * the sound may have stopped. Null after a change that worked, and
  * before any.
  */
-deviceChange: CallDeviceChange | null, };
+deviceChange: CallDeviceChange | null, 
+/**
+ * The last video effect change during this call could not run here
+ * (ADR-0068); the call keeps the effect it had. False after a change
+ * that applied, and before any.
+ */
+effectRefused: boolean, 
+/**
+ * The page mirrors the own preview (ADR-0068): the saved choice of the
+ * call device record. True when idle, and in a status from before the
+ * choice existed.
+ */
+mirror: boolean, };
 
 export type CallIntent = "audio" | "video";
 
@@ -281,7 +300,30 @@ export type CallRings = { rings: Array<CallRing>, };
 
 export type CallDevice = { id: string, name: string, };
 
-export type CallDevices = { supported: boolean, recording: Array<CallDevice>, playout: Array<CallDevice>, cameras: Array<CallDevice>, selectedRecording: string | null, selectedPlayout: string | null, selectedCamera: string | null, volume: number, autoLevel: boolean, micGain: number, unreadable: boolean, };
+export type CallBackground = "none" | "blur" | "dusk" | "sea" | "forest" | "studio";
+
+export type CallColourFilter = "none" | "greyscale" | "warm" | "cool" | "brighten";
+
+export type CallVideoEffect = { background: CallBackground, blur: number, filter: CallColourFilter, };
+
+export type CallDevices = { supported: boolean, recording: Array<CallDevice>, playout: Array<CallDevice>, cameras: Array<CallDevice>, selectedRecording: string | null, selectedPlayout: string | null, selectedCamera: string | null, volume: number, autoLevel: boolean, micGain: number, 
+/**
+ * The saved video effect of the own camera (ADR-0068). No effect when
+ * nothing is saved.
+ */
+effect: CallVideoEffect, 
+/**
+ * The own camera's preview is shown mirrored (ADR-0068). On when
+ * nothing is saved, as before the choice existed. Others always see
+ * the picture as it is.
+ */
+mirror: boolean, 
+/**
+ * Whether this build can run the background effects that need the
+ * person mask: blur and pictures (ADR-0068). The page offers them only
+ * when it is true.
+ */
+backgroundEffects: boolean, unreadable: boolean, };
 
 export type ContactTrust = "unknown" | "no_identity" | "unverified" | "verified" | "changed" | "verified_changed";
 
@@ -1029,3 +1071,15 @@ export const CALL_STATS_SIDE_MAX = 16384;
 
 /** The most connections in one call statistics reading. */
 export const CALL_STATS_CONNECTIONS_MAX = 4;
+
+/** The weakest background blur of the call video, in percent. */
+export const CALL_BLUR_MIN = 10;
+
+/** The strongest background blur of the call video, in percent. */
+export const CALL_BLUR_MAX = 100;
+
+/** The blur strength moves in steps of this many percent. */
+export const CALL_BLUR_STEP = 10;
+
+/** The blur strength the page offers first. */
+export const CALL_BLUR_DEFAULT = 50;

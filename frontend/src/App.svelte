@@ -2923,7 +2923,12 @@
             </p>
             <div class="panel">
               <h3>Devices</h3>
-              <CallDevices soundLevel={callSoundLevel} testTicks={deviceTestTicks} videoTicks={callVideoTicks} />
+              <CallDevices
+                soundLevel={callSoundLevel}
+                testTicks={deviceTestTicks}
+                videoTicks={callVideoTicks}
+                callEffectRefused={callState.effectRefused}
+              />
             </div>
           {:else}
             <p class="lede">No account is signed in. Call devices belong to an account, so there are none to choose.</p>
@@ -3250,7 +3255,7 @@
           </p>
         {/if}
         {#if callWindowFailed && hasVideo(callState)}
-          <CallVideo tiles={callState.video} names={callNames} ticks={callVideoTicks} />
+          <CallVideo tiles={callState.video} names={callNames} ticks={callVideoTicks} mirror={callState.mirror} />
         {/if}
         {#if selectedRoom}
           <div class="room-view" style:--members-width="{shownMembers}px">

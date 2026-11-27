@@ -10,6 +10,7 @@ This crate defines small Rust view types and exports their TypeScript representa
 - Sonar's rule `rust:S9334` is off for `src/lib.rs` (`sonar-project.properties`), so review does its check: an `Option` field with its own `deserialize_with` is required-nullable (`Option::deserialize`), or it has `#[serde(default)]` so that a missing key reads as `None`.
 
 - Call statistics (ADR-0066): `CallStats` and its parts hold integers with bounds (`CALL_STATS_*`). `CallStats::within_limits` is the check that the core, the UI host and the page's `parseCallStats` all repeat; change them together. The `CALL_STATS_*` bounds repeat `MAX_STATS_*` in `crates/call-protocol/src/stats.rs`, and `crates/core/src/calls/stats.rs` checks at compile time that they match. Each `Option` field is required-nullable (`Option::deserialize`): the key must be there, and only its value may be null.
+- Video effects (ADR-0068): `CallVideoEffect.blur` takes `CALL_BLUR_MIN` to `CALL_BLUR_MAX` in steps of `CALL_BLUR_STEP` (`call_blur_valid`), and `CALL_BLUR_DEFAULT` is the first value. These four repeat the call protocol's `MIN_BLUR_PERCENT`, `MAX_BLUR_PERCENT`, `BLUR_STEP_PERCENT` and `DEFAULT_BLUR_PERCENT` (`crates/core/src/calls/devices.rs` asserts the match when it compiles), and the exporter writes them, so the page's `BLUR_*` in `frontend/src/calls.ts` are typed as their literals. Change the three places together.
 
 ## Checks
 

@@ -26,6 +26,7 @@ import type {
   CallStats,
   CallStatus,
   CallUnavailable,
+  CallVideoEffect,
   CallVideoTile,
   ContactStatus,
   ConversationStart,
@@ -99,7 +100,7 @@ import type {
   PublicRoomPage,
   JoinedRoom
 } from '../../../crates/contracts/generated/contracts';
-import { parseLevels, parseSoundLevel } from '../calls.ts';
+import { parseLevels, parseSoundLevel, type VideoEffectChange } from '../calls.ts';
 import { parseCallStats } from '../callStats.ts';
 import { MAX_PASTED_IMAGE_BYTES, parseBand, type Band } from '../image.ts';
 import { parseVideoPicture, type VideoPicture } from '../video.ts';
@@ -711,6 +712,24 @@ export function callVolume(percent: number): Promise<CallStatus> {
  */
 export function callMicrophone(autoLevel: boolean, gain: number): Promise<CallStatus> {
   return invoke<CallStatus>('call_microphone', { autoLevel, gain });
+}
+
+/**
+ * Sets the own camera's video effect, whether the own preview is mirrored,
+ * or both (ADR-0068). Only the parts in `change` cross, and only the
+ * effect's three fields: the core keeps a part that is not sent as saved.
+ * The effect applies at once to a camera test and a running call; both are
+ * saved for later calls. The status says when the worker refused the effect
+ * (`effectRefused`): the camera then keeps the effect it had.
+ */
+export function callVideoEffect(change: VideoEffectChange): Promise<CallStatus> {
+  const args: { effect?: CallVideoEffect; mirror?: boolean } = {};
+  if (change.effect) {
+    const { background, blur, filter } = change.effect;
+    args.effect = { background, blur, filter };
+  }
+  if (typeof change.mirror === 'boolean') args.mirror = change.mirror;
+  return invoke<CallStatus>('call_video_effect', args);
 }
 
 /**

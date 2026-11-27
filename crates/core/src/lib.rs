@@ -1557,6 +1557,12 @@ impl Core {
                 }
                 self.call_microphone(*auto_level, *gain)
             }
+            Call::CallVideoEffect { effect, mirror } => {
+                if !call_video_within_limits(call) {
+                    return Outcome::Error(ErrorCode::InvalidArgument);
+                }
+                self.call_video_effect(*effect, *mirror)
+            }
             Call::CallStats { on } => self.call_stats(*on),
             Call::CallCamera { on } => self.call_camera(*on),
             Call::CallScreen { on } => self.call_screen(*on),
@@ -1575,7 +1581,19 @@ impl Core {
                     return Outcome::Error(ErrorCode::InvalidArgument);
                 }
                 match self.calls_open() {
-                    Ok(()) => ok(&self.calls.start_device_test(*test, device.clone())),
+                    Ok(()) => {
+                        // A camera test asks for the saved video effect
+                        // (ADR-0068). Its pictures stay on this device, so
+                        // a record that cannot be read asks for none.
+                        if *test == persephone_contracts::CallDeviceTestKind::Camera {
+                            let effect = self.saved_call_devices().map_or(
+                                persephone_call_protocol::VideoEffect::NONE,
+                                |(selection, _)| selection.video_effect(),
+                            );
+                            self.calls.set_test_effect(effect);
+                        }
+                        ok(&self.calls.start_device_test(*test, device.clone()))
+                    }
                     Err(code) => Outcome::Error(code),
                 }
             }
@@ -2772,6 +2790,79 @@ impl Core {
         ok(&calls::status::status(&self.calls.state()))
     }
 
+    /// Sets the own camera's video effect and whether the own preview is
+    /// mirrored (ADR-0068): both saved in the profile's call device record
+    /// for later calls, then the effect for a camera test and both for a
+    /// running or joining call. The save comes first, so a join that read the
+    /// record before it gets the effect from the controller
+    /// (`CallController::video_asked`). The worker refuses an effect that it
+    /// cannot run and keeps the old one; the call status and the device test
+    /// status then say so, later than this reply. A record that cannot be
+    /// read is not replaced; the reply is then `unavailable`, and nothing
+    /// changes.
+    fn call_video_effect(
+        &self,
+        effect: Option<persephone_contracts::CallVideoEffect>,
+        mirror: Option<bool>,
+    ) -> Outcome {
+        if let Err(code) = self.calls_open() {
+            return Outcome::Error(code);
+        }
+        // The dispatch checked the blur, so a sent effect has a worker form.
+        if effect.is_some_and(|effect| calls::devices::worker_effect(effect).is_none()) {
+            return Outcome::Error(ErrorCode::InvalidArgument);
+        }
+        // A field that was not sent keeps its saved value, so a window with
+        // an old copy of it does not undo a change made in the other window.
+        // Both then apply, from the record as saved.
+        let (worker_effect, mirror) = if self.session.is_configured() {
+            let lease = match self.session.admit() {
+                Ok(lease) => lease,
+                Err(session::AdmissionError::Locked) => return Outcome::Error(ErrorCode::Locked),
+                Err(session::AdmissionError::Saturated) => {
+                    return Outcome::Error(ErrorCode::LimitExceeded);
+                }
+            };
+            let stores = lease.stores();
+            let saved = stores.block_on(async {
+                let Ok(mut selection) = calls::devices::load(stores).await else {
+                    return Err(ErrorCode::Unavailable);
+                };
+                if effect.is_some() {
+                    selection.effect = effect;
+                }
+                if mirror.is_some() {
+                    selection.mirror = mirror;
+                }
+                if calls::devices::save(stores, &selection).await {
+                    Ok((selection.video_effect(), selection.mirror()))
+                } else {
+                    Err(ErrorCode::Internal)
+                }
+            });
+            match saved {
+                Ok(both) => both,
+                Err(code) => return Outcome::Error(code),
+            }
+        } else {
+            // Without a profile nothing is saved: a field that was not sent
+            // keeps the value asked last, else none and a mirrored preview.
+            let (last_effect, last_mirror) = self
+                .calls
+                .asked_video()
+                .unwrap_or((persephone_call_protocol::VideoEffect::NONE, true));
+            (
+                effect
+                    .and_then(calls::devices::worker_effect)
+                    .unwrap_or(last_effect),
+                mirror.unwrap_or(last_mirror),
+            )
+        };
+        // `NotInCall` is no failure: the saved effect is for the next call.
+        let _ = self.calls.set_video_effect(worker_effect, mirror);
+        ok(&calls::status::status(&self.calls.state()))
+    }
+
     /// Turns the call's technical details on or off (ADR-0066). They are
     /// read and sent only while on, which needs a call; turning them off
     /// also drops a reading that waits.
@@ -2901,6 +2992,7 @@ impl Core {
             };
         let volume = selection.volume();
         let (auto_level, mic_gain) = (selection.auto_level(), selection.mic_gain());
+        let (effect, mirror) = (selection.effect(), selection.mirror());
         let devices = persephone_contracts::CallDevices {
             supported: listing.supported,
             recording: listing.recording.into_iter().map(device).collect(),
@@ -2912,6 +3004,9 @@ impl Core {
             volume,
             auto_level,
             mic_gain,
+            effect,
+            mirror,
+            background_effects: listing.background_effects,
             unreadable,
         };
         within_device_reply(&devices)?;
@@ -2957,6 +3052,8 @@ impl Core {
             volume: None,
             auto_level: None,
             mic_gain: None,
+            effect: None,
+            mirror: None,
         };
         if !selection.is_valid() {
             return Outcome::Error(ErrorCode::InvalidArgument);
@@ -2973,11 +3070,14 @@ impl Core {
         };
         let stores = lease.stores();
         if stores.block_on(async {
-            // The volume and the microphone settings are kept.
+            // The volume, the microphone settings and the video effect are
+            // kept.
             if let Ok(saved) = calls::devices::load(stores).await {
                 selection.volume = saved.volume;
                 selection.auto_level = saved.auto_level;
                 selection.mic_gain = saved.mic_gain;
+                selection.effect = saved.effect;
+                selection.mirror = saved.mirror;
             }
             calls::devices::save(stores, &selection).await
         }) {
@@ -3042,6 +3142,9 @@ impl Core {
         let proxy = lease
             .stores()
             .block_on(calls::controller::proxy_configured(lease.stores()));
+        // Before the record: a video effect asked after this read replaces
+        // the saved one (ADR-0068).
+        let video_asked = self.calls.video_asked();
         let devices = lease
             .stores()
             .block_on(calls::controller::device_selection(lease.stores()));
@@ -3073,6 +3176,7 @@ impl Core {
             generation,
             runtime: lease.stores().runtime().handle().clone(),
             devices,
+            video_asked,
             video,
         };
         let joined = lease
@@ -4330,6 +4434,9 @@ mod tests {
             volume: 100,
             auto_level: true,
             mic_gain: 100,
+            effect: persephone_contracts::CallVideoEffect::default(),
+            mirror: false,
+            background_effects: false,
             unreadable: false,
         };
         let ordinary = devices(

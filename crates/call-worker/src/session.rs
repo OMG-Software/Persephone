@@ -41,7 +41,7 @@ use livekit_signaling::SignalError;
 use persephone_call_protocol::{
     CameraState, DeviceTest, FailureCode, FrameKeyMsg, FromWorker, MAX_OTHER_CONNECTIONS,
     MAX_PARTICIPANTS, MAX_SCREEN_FPS, MAX_VIDEO_FPS, MAX_VIDEO_PIXELS, MAX_VIDEO_SIDE, SCREEN_TILE,
-    ScreenState, ScreenTarget, ToWorker, VIDEO_TILES,
+    ScreenState, ScreenTarget, ToWorker, VIDEO_TILES, VideoEffect,
 };
 use tokio::sync::mpsc::{self, Receiver, UnboundedReceiver};
 use tokio::task::JoinHandle;
@@ -53,6 +53,7 @@ mod stats_probe;
 
 use crate::camera::{self, CapturedFrame, Format};
 use crate::containment;
+use crate::effects::{self, CameraEffects, Planes, SharedEffect};
 use crate::mapping::{
     AudioRoster, ConnectFault, LevelMeters, Levels, Microphone, Playout, RoomChange, Slot, Slots,
     SoundPath, SpeakingTracker, apply, bounded_device_list, choose_device, failure_for_connect,
@@ -62,6 +63,7 @@ use crate::mapping::{
 use crate::mapping::{pulse_device_list, sound_path};
 use crate::output::{Closed, Output, PictureSink};
 use crate::screen;
+use crate::segmenter;
 use crate::sound_defaults;
 use crate::sound_test;
 use crate::video::{
@@ -114,6 +116,7 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
         volume,
         auto_level,
         mic_gain,
+        video_effect,
     } = first
     else {
         return fail(output, FailureCode::Protocol).await;
@@ -276,6 +279,8 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
         own_sids,
         publication: &publication,
         camera_device,
+        video_effect,
+        shared_effect: SharedEffect::new(video_effect),
         joined_sound,
         camera: None,
         stalled: None,
@@ -383,7 +388,12 @@ pub async fn list_devices(output: &Output) -> u8 {
         .await
         .unwrap_or_default();
     if output
-        .send(FromWorker::devices(recording, playout, cameras))
+        .send(FromWorker::devices(
+            recording,
+            playout,
+            cameras,
+            segmenter::available(),
+        ))
         .await
         .is_err()
     {
@@ -760,7 +770,12 @@ enum TestNote {
 /// test early; any other message but the diagnostic switch is a protocol
 /// failure.
 pub async fn test_device(first: ToWorker, input: &mut Receiver<Input>, output: &Output) -> u8 {
-    let ToWorker::TestDevice { test, device } = first else {
+    let ToWorker::TestDevice {
+        test,
+        device,
+        video_effect,
+    } = first
+    else {
         return fail(output, FailureCode::Protocol).await;
     };
     // Only a sound test reaches the microphone or the tone.
@@ -784,7 +799,38 @@ pub async fn test_device(first: ToWorker, input: &mut Receiver<Input>, output: &
     }
     match opened {
         Some(opened) => test_sound(opened, input, output).await,
-        None => test_camera(device, input, output).await,
+        None => test_camera(device, video_effect, input, output).await,
+    }
+}
+
+/// The camera test's video effect (ADR-0068): the one in use, shared with
+/// the capture thread.
+struct TestEffect {
+    effect: VideoEffect,
+    shared: Arc<SharedEffect>,
+}
+
+impl TestEffect {
+    /// The test's effect from the start, and the answer to give. An effect
+    /// that cannot run here is refused, as `set` refuses it, and the test
+    /// starts without one.
+    fn starting(requested: VideoEffect) -> (Self, FromWorker) {
+        let mut effect = Self {
+            effect: VideoEffect::NONE,
+            shared: SharedEffect::new(VideoEffect::NONE),
+        };
+        let answer = effect.set(requested);
+        (effect, answer)
+    }
+
+    /// Applies `requested` unless it cannot run here, as a call does, and
+    /// gives the answer.
+    fn set(&mut self, requested: VideoEffect) -> FromWorker {
+        let (effect, refused) =
+            effects::accept_effect(self.effect, requested, segmenter::available());
+        self.effect = effect;
+        self.shared.store(effect);
+        FromWorker::VideoEffect { effect, refused }
     }
 }
 
@@ -813,6 +859,9 @@ enum TestInput {
     Continue,
     /// End the test.
     Stop,
+    /// Change the camera test's video effect (ADR-0068). A sound test
+    /// takes it as `Bad`.
+    Effect(VideoEffect),
     Bad,
 }
 
@@ -822,6 +871,7 @@ fn test_input(message: Option<Input>) -> TestInput {
             crate::diagnostics::global().set_on(on);
             TestInput::Continue
         }
+        Some(Input::Message(ToWorker::SetVideoEffect { effect })) => TestInput::Effect(effect),
         Some(Input::Message(ToWorker::Leave)) | Some(Input::Eof) | None => TestInput::Stop,
         Some(Input::Message(_)) | Some(Input::Bad) => TestInput::Bad,
     }
@@ -887,7 +937,7 @@ async fn test_sound(
                 match test_input(message) {
                     TestInput::Continue => {}
                     TestInput::Stop => stop.store(true, std::sync::atomic::Ordering::Release),
-                    TestInput::Bad => {
+                    TestInput::Bad | TestInput::Effect(_) => {
                         bad = true;
                         stop.store(true, std::sync::atomic::Ordering::Release);
                     }
@@ -897,9 +947,26 @@ async fn test_sound(
     }
 }
 
-async fn test_camera(device: Option<String>, input: &mut Receiver<Input>, output: &Output) -> u8 {
+async fn test_camera(
+    device: Option<String>,
+    video_effect: VideoEffect,
+    input: &mut Receiver<Input>,
+    output: &Output,
+) -> u8 {
     let pictures = output.pictures();
     let mut limiter = RateLimiter::default();
+    // The test shows the effect as a call would (ADR-0068). It starts with
+    // the one in `TestDevice`, set before the camera opens, so when that
+    // effect can run here, no picture is shown without it; `SetVideoEffect`
+    // changes it later. An effect that cannot run here is refused and the
+    // answer says so: the test then shows the camera without an effect.
+    // Unlike a call, the test publishes no track: its pictures go only to
+    // the local preview, and it is there to check the camera.
+    let (mut effect, started) = TestEffect::starting(video_effect);
+    if output.send(started).await.is_err() {
+        return fail(output, FailureCode::Internal).await;
+    }
+    let mut feed_effects = CameraEffects::new(effect.shared.clone(), segmenter::open());
     let (ended_tx, mut ended) = mpsc::channel::<()>(1);
     let (open_tx, mut opened) = mpsc::channel::<Opened<camera::Capture, CameraState>>(1);
     // On the portal path (Linux) the core sends one remote before
@@ -914,7 +981,8 @@ async fn test_camera(device: Option<String>, input: &mut Receiver<Input>, output
                 if !limiter.admit(std::time::Instant::now()) {
                     return;
                 }
-                if let Some(picture) = fitted_i420(&frame)
+                if let Some(mut picture) = fitted_i420(&frame)
+                    && apply_effects(&mut feed_effects, &mut picture)
                     && let Some((width, height, rgba)) = to_rgba(OWN_TILE, &picture)
                 {
                     pictures.put(OWN_TILE, 0, width, height, rgba);
@@ -948,6 +1016,11 @@ async fn test_camera(device: Option<String>, input: &mut Receiver<Input>, output
                     let _ = output.send(FromWorker::Left).await;
                     return EXIT_DONE;
                 }
+                TestInput::Effect(requested) => {
+                    if output.send(effect.set(requested)).await.is_err() {
+                        return fail(output, FailureCode::Internal).await;
+                    }
+                }
                 TestInput::Bad => return fail(output, FailureCode::Protocol).await,
             },
         }
@@ -972,6 +1045,11 @@ async fn test_camera(device: Option<String>, input: &mut Receiver<Input>, output
             message = input.recv() => match test_input(message) {
                 TestInput::Continue => {}
                 TestInput::Stop => break,
+                TestInput::Effect(requested) => {
+                    if output.send(effect.set(requested)).await.is_err() {
+                        code = Some(FailureCode::Internal);
+                    }
+                }
                 TestInput::Bad => code = Some(FailureCode::Protocol),
             },
         }
@@ -1021,6 +1099,12 @@ struct Call<'a> {
     /// The camera the next camera start opens: the join's choice, then the
     /// newest `SetDevices` choice (ADR-0059).
     camera_device: Option<String>,
+    /// The own camera's video effect (ADR-0068): the join's, then the newest
+    /// accepted `SetVideoEffect`. It may need a segmenter that this build
+    /// lacks only when the join asked for it; the camera then stays off.
+    video_effect: VideoEffect,
+    /// The same effect, for the camera's capture thread.
+    shared_effect: Arc<SharedEffect>,
     /// The microphone and speaker choice of the join. On Linux no device
     /// changes during a call, so a `SetDevices` with this choice (a change of
     /// the camera only) is no sound change there.
@@ -1755,6 +1839,8 @@ struct CameraFeed {
     live: Arc<FrameAdmission>,
     pictures: PictureSink,
     limiter: RateLimiter,
+    /// The video effect (ADR-0068).
+    effects: CameraEffects,
 }
 
 impl CameraFeed {
@@ -1766,9 +1852,14 @@ impl CameraFeed {
         if !self.limiter.admit(std::time::Instant::now()) {
             return;
         }
-        let Some(picture) = fitted_i420(&frame) else {
+        let Some(mut picture) = fitted_i420(&frame) else {
             return;
         };
+        // The effect applies before the preview and the SFU get the
+        // picture; a picture that it refuses goes to neither (ADR-0068).
+        if !apply_effects(&mut self.effects, &mut picture) {
+            return;
+        }
         if let Some((width, height, rgba)) = to_rgba(OWN_TILE, &picture) {
             self.pictures.put(OWN_TILE, 0, width, height, rgba);
         }
@@ -1803,6 +1894,17 @@ impl ScreenFeed {
 }
 
 impl Call<'_> {
+    /// Applies a new video effect, at once for a running camera and for
+    /// later camera starts, unless it cannot run here: the old one then
+    /// stays (ADR-0068). The answer names the effect in use.
+    fn set_video_effect(&mut self, requested: VideoEffect) -> FromWorker {
+        let (effect, refused) =
+            effects::accept_effect(self.video_effect, requested, segmenter::available());
+        self.video_effect = effect;
+        self.shared_effect.store(effect);
+        FromWorker::VideoEffect { effect, refused }
+    }
+
     /// Starts turning the camera on. The open runs on its own thread; the
     /// result arrives in the event loop (`camera_opened`). Returns a state to
     /// report now: `On` when the camera already runs, `Unavailable` when the
@@ -1811,6 +1913,11 @@ impl Call<'_> {
     /// `grant` is what the camera-on brought. An open takes it; a camera-on
     /// that opens nothing drops it, which closes its portal remote.
     fn begin_camera(&mut self, grant: camera::Grant) -> Option<CameraState> {
+        // An effect that cannot run keeps the camera off: the camera never
+        // sends the background that the user chose to hide (ADR-0068).
+        if !effects::can_apply(self.video_effect, segmenter::available()) {
+            return Some(CameraState::EffectUnavailable);
+        }
         // A capture that did not stop still holds the camera: open no second
         // one. With no open in flight, any capture thread that still runs (a
         // stalled stop, or an open that timed out) holds a camera too.
@@ -1837,6 +1944,7 @@ impl Call<'_> {
             live: live.clone(),
             pictures: self.output.pictures(),
             limiter: RateLimiter::default(),
+            effects: CameraEffects::new(self.shared_effect.clone(), segmenter::open()),
         };
         let failed = self.camera_failed.clone();
         let choice = self.camera_device.clone();
@@ -3066,6 +3174,7 @@ impl Call<'_> {
                 self.apply_microphone();
                 Ok(vec![FromWorker::DevicesSet { failure }])
             }
+            ToWorker::SetVideoEffect { effect } => Ok(vec![self.set_video_effect(effect)]),
             ToWorker::Join { .. }
             | ToWorker::ListDevices
             | ToWorker::TestDevice { .. }
@@ -3417,6 +3526,21 @@ fn use_own_key_index(manager: &E2eeManager, own_sids: &[TrackSid], index: i32) {
             cryptor.set_key_index(index);
         }
     }
+}
+
+/// Applies the camera's video effect to `picture` in place (ADR-0068).
+/// `false` when the picture must not go out. With no effect the picture goes
+/// as it is, as before effects, also one that `Planes` does not take (a side
+/// of 1 pixel after scaling).
+fn apply_effects(effects: &mut CameraEffects, picture: &mut I420Buffer) -> bool {
+    if effects.leaves_plain() {
+        return true;
+    }
+    let (width, height) = (picture.width(), picture.height());
+    let (y_stride, u_stride, v_stride) = picture.strides();
+    let (y, u, v) = picture.data_mut();
+    Planes::new(width, height, y, y_stride, u, u_stride, v, v_stride)
+        .is_some_and(|mut planes| effects.process(&mut planes))
 }
 
 /// A camera picture as I420, scaled to fit 640x360 (no enlarging).
@@ -4058,6 +4182,44 @@ mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
 
+    /// GIVEN the effect that a camera test starts with WHEN it can run here
+    /// THEN the capture thread has it before the camera opens; WHEN it needs
+    /// the person mask, which this build lacks, THEN it is refused and the
+    /// test starts without one (ADR-0068).
+    #[test]
+    fn given_a_camera_test_effect_then_it_is_set_before_the_camera_opens_or_refused() {
+        let warm = VideoEffect {
+            background: persephone_call_protocol::Background::None,
+            filter: persephone_call_protocol::ColourFilter::Warm,
+        };
+        let (effect, answer) = TestEffect::starting(warm);
+        assert_eq!(effect.shared.load(), Some(warm));
+        assert_eq!(
+            answer,
+            FromWorker::VideoEffect {
+                effect: warm,
+                refused: false
+            }
+        );
+
+        assert!(!segmenter::available(), "this build has no person mask");
+        let blur = VideoEffect {
+            background: persephone_call_protocol::Background::Blur(
+                persephone_call_protocol::BlurStrength::new(50).unwrap(),
+            ),
+            ..warm
+        };
+        let (effect, answer) = TestEffect::starting(blur);
+        assert_eq!(effect.shared.load(), Some(VideoEffect::NONE));
+        assert_eq!(
+            answer,
+            FromWorker::VideoEffect {
+                effect: VideoEffect::NONE,
+                refused: true
+            }
+        );
+    }
+
     /// GIVEN notes that come while one is written THEN one writer starts,
     /// only the newest note waits, and after the writer ends the next note
     /// starts a writer again.
@@ -4568,6 +4730,35 @@ mod tests {
         };
         assert!(!is_noted(&event), "it must take no budget");
         assert_eq!(describe_room_event(0, &event), None);
+    }
+
+    /// GIVEN a camera picture of 640x1, which a 1920x2 camera scales to
+    /// WHEN no effect is in use THEN it goes out unchanged, as before
+    /// effects; WHEN a filter is in use THEN it is dropped, because the
+    /// filter cannot run on it; a normal picture with the filter goes out
+    /// changed (ADR-0068).
+    #[test]
+    fn given_a_picture_of_one_row_then_only_an_effect_drops_it() {
+        let shared = SharedEffect::new(VideoEffect::NONE);
+        let mut effects = CameraEffects::new(shared.clone(), None);
+        let mut thin = solid_i420(640, 1, 100, 128, 128);
+        assert!(apply_effects(&mut effects, &mut thin), "no effect: it goes");
+        assert!(thin.data().0.iter().all(|&value| value == 100));
+
+        shared.store(VideoEffect {
+            background: persephone_call_protocol::Background::None,
+            filter: persephone_call_protocol::ColourFilter::Greyscale,
+        });
+        assert!(
+            !apply_effects(&mut effects, &mut thin),
+            "the filter cannot run"
+        );
+        let mut normal = solid_i420(16, 8, 100, 40, 200);
+        assert!(apply_effects(&mut effects, &mut normal));
+        assert!(
+            normal.data().1.iter().all(|&value| value == 128),
+            "greyscale clears the colour"
+        );
     }
 
     fn solid_i420(width: u32, height: u32, y: u8, u: u8, v: u8) -> I420Buffer {

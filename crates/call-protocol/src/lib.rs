@@ -22,7 +22,7 @@ pub use stats::{
     VideoReceiveStats, VideoSendStats,
 };
 
-pub const VERSION: u8 = 14;
+pub const VERSION: u8 = 15;
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 /// Longest diagnostic record target (ADR-0058).
 pub const MAX_DIAGNOSTIC_TARGET_BYTES: usize = 64;
@@ -164,6 +164,167 @@ pub const DEFAULT_MIC_GAIN_PERCENT: u16 = 100;
 /// whole steps of [`MIC_GAIN_STEP_PERCENT`] (ADR-0062).
 pub const fn valid_mic_gain(percent: u16) -> bool {
     percent <= MAX_MIC_GAIN_PERCENT && percent.is_multiple_of(MIC_GAIN_STEP_PERCENT)
+}
+
+/// The weakest background blur, in percent (ADR-0068).
+pub const MIN_BLUR_PERCENT: u8 = 10;
+/// The strongest background blur, in percent (ADR-0068).
+pub const MAX_BLUR_PERCENT: u8 = 100;
+/// The blur strength moves in steps of this many percent (ADR-0068).
+pub const BLUR_STEP_PERCENT: u8 = 10;
+/// The blur strength that the page offers first (ADR-0068).
+pub const DEFAULT_BLUR_PERCENT: u8 = 50;
+
+/// A background blur strength: [`MIN_BLUR_PERCENT`] to [`MAX_BLUR_PERCENT`]
+/// in whole steps of [`BLUR_STEP_PERCENT`] (ADR-0068). No other value can be
+/// made.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct BlurStrength(u8);
+
+impl BlurStrength {
+    /// The strength of `percent`, or `None` when it is out of range or off
+    /// the step.
+    pub const fn new(percent: u8) -> Option<Self> {
+        if percent >= MIN_BLUR_PERCENT
+            && percent <= MAX_BLUR_PERCENT
+            && percent.is_multiple_of(BLUR_STEP_PERCENT)
+        {
+            Some(Self(percent))
+        } else {
+            None
+        }
+    }
+
+    pub const fn percent(self) -> u8 {
+        self.0
+    }
+}
+
+/// A background picture that the worker draws from code (ADR-0068). A
+/// closed set; no image file is read.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[repr(u8)]
+pub enum BackgroundPicture {
+    Dusk = 1,
+    Sea = 2,
+    Forest = 3,
+    Studio = 4,
+}
+
+impl BackgroundPicture {
+    pub const ALL: [Self; 4] = [Self::Dusk, Self::Sea, Self::Forest, Self::Studio];
+}
+
+impl TryFrom<u8> for BackgroundPicture {
+    type Error = DecodeError;
+
+    fn try_from(value: u8) -> Result<Self, DecodeError> {
+        Ok(match value {
+            1 => Self::Dusk,
+            2 => Self::Sea,
+            3 => Self::Forest,
+            4 => Self::Studio,
+            _ => return Err(DecodeError::InvalidValue),
+        })
+    }
+}
+
+/// What the own camera shows behind the person (ADR-0068).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
+pub enum Background {
+    /// The camera's own background.
+    #[default]
+    None,
+    /// The background blurred, the person sharp.
+    Blur(BlurStrength),
+    /// The background replaced with a picture, the person kept.
+    Picture(BackgroundPicture),
+}
+
+/// A colour filter on the whole own camera picture (ADR-0068). A closed set.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
+#[repr(u8)]
+pub enum ColourFilter {
+    #[default]
+    None = 0,
+    Greyscale = 1,
+    Warm = 2,
+    Cool = 3,
+    /// Lifts the dark parts of the picture.
+    Brighten = 4,
+}
+
+impl ColourFilter {
+    pub const ALL: [Self; 5] = [
+        Self::None,
+        Self::Greyscale,
+        Self::Warm,
+        Self::Cool,
+        Self::Brighten,
+    ];
+}
+
+impl TryFrom<u8> for ColourFilter {
+    type Error = DecodeError;
+
+    fn try_from(value: u8) -> Result<Self, DecodeError> {
+        Ok(match value {
+            0 => Self::None,
+            1 => Self::Greyscale,
+            2 => Self::Warm,
+            3 => Self::Cool,
+            4 => Self::Brighten,
+            _ => return Err(DecodeError::InvalidValue),
+        })
+    }
+}
+
+/// The own camera's video effect (ADR-0068): the background first, then the
+/// colour filter. The worker applies it to each camera picture before the
+/// own preview and the SFU get it.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
+pub struct VideoEffect {
+    pub background: Background,
+    pub filter: ColourFilter,
+}
+
+impl VideoEffect {
+    /// No effect: the camera picture as captured.
+    pub const NONE: Self = Self {
+        background: Background::None,
+        filter: ColourFilter::None,
+    };
+
+    /// Whether the effect needs a person mask: blur and pictures do.
+    pub const fn needs_mask(self) -> bool {
+        !matches!(self.background, Background::None)
+    }
+
+    /// The three wire bytes: the background kind (0 none, 1 blur, 2
+    /// picture), its value (0, the blur strength or the picture number) and
+    /// the filter.
+    pub const fn to_bytes(self) -> [u8; 3] {
+        let (kind, value) = match self.background {
+            Background::None => (0, 0),
+            Background::Blur(strength) => (1, strength.percent()),
+            Background::Picture(picture) => (2, picture as u8),
+        };
+        [kind, value, self.filter as u8]
+    }
+
+    /// The effect of three wire bytes. Any byte outside its set is refused.
+    pub fn from_bytes([kind, value, filter]: [u8; 3]) -> Result<Self, DecodeError> {
+        let background = match kind {
+            0 if value == 0 => Background::None,
+            1 => Background::Blur(BlurStrength::new(value).ok_or(DecodeError::InvalidValue)?),
+            2 => Background::Picture(BackgroundPicture::try_from(value)?),
+            _ => return Err(DecodeError::InvalidValue),
+        };
+        Ok(Self {
+            background,
+            filter: ColourFilter::try_from(filter)?,
+        })
+    }
 }
 /// The highest received sound level (ADR-0055): 0 dBFS. 0 is -60 dBFS or
 /// quieter, and each step is 0.6 dB.
@@ -312,6 +473,8 @@ pub enum ToWorker {
         /// processing: 0 to [`MAX_MIC_GAIN_PERCENT`] in steps of
         /// [`MIC_GAIN_STEP_PERCENT`] (ADR-0062).
         mic_gain: u16,
+        /// The own camera's video effect (ADR-0068).
+        video_effect: VideoEffect,
     },
     /// Only as the first message: report the devices, then exit.
     ListDevices,
@@ -400,10 +563,16 @@ pub enum ToWorker {
     /// sends `Connected` once the device runs, then `SoundLevel` for a
     /// microphone, or `Camera` and tile 0 pictures for a camera, and `Left`
     /// when the test ends by itself or after `Leave`; `Failed` when the
-    /// device cannot be used.
+    /// device cannot be used. `video_effect` is the effect that a camera test
+    /// starts with (ADR-0068); the worker answers with
+    /// [`FromWorker::VideoEffect`] before the camera opens. When the worker
+    /// accepts it, the first picture has it; an effect that cannot run there
+    /// is refused, and the test then shows the camera without one. A sound
+    /// test must send [`VideoEffect::NONE`]; another is refused.
     TestDevice {
         test: DeviceTest,
         device: Option<String>,
+        video_effect: VideoEffect,
     },
     /// Move the running call to another microphone and speaker, and choose
     /// the camera for the next camera start (ADR-0059). `None` is the system
@@ -418,6 +587,13 @@ pub enum ToWorker {
     /// (ADR-0066). Off when the worker starts. No answer.
     SetStats {
         on: bool,
+    },
+    /// Change the own camera's video effect in a running call or a camera
+    /// test (ADR-0068). The worker answers with [`FromWorker::VideoEffect`].
+    /// An effect that the worker cannot apply is refused, and the old one
+    /// stays.
+    SetVideoEffect {
+        effect: VideoEffect,
     },
 }
 
@@ -460,6 +636,7 @@ impl std::fmt::Debug for ToWorker {
                 volume,
                 auto_level,
                 mic_gain,
+                video_effect,
             } => f
                 .debug_struct("Join")
                 .field("sfu_url", sfu_url)
@@ -475,6 +652,7 @@ impl std::fmt::Debug for ToWorker {
                 .field("volume", volume)
                 .field("auto_level", auto_level)
                 .field("mic_gain", mic_gain)
+                .field("video_effect", video_effect)
                 .finish(),
             Self::ListDevices => f.write_str("ListDevices"),
             Self::SetKey { identity, key } => f
@@ -529,10 +707,15 @@ impl std::fmt::Debug for ToWorker {
             Self::SetDiagnostics { on } => {
                 f.debug_struct("SetDiagnostics").field("on", on).finish()
             }
-            Self::TestDevice { test, device } => f
+            Self::TestDevice {
+                test,
+                device,
+                video_effect,
+            } => f
                 .debug_struct("TestDevice")
                 .field("test", test)
                 .field("device", device)
+                .field("video_effect", video_effect)
                 .finish(),
             Self::SetDevices {
                 recording,
@@ -545,6 +728,10 @@ impl std::fmt::Debug for ToWorker {
                 .field("playout", playout)
                 .finish(),
             Self::SetStats { on } => f.debug_struct("SetStats").field("on", on).finish(),
+            Self::SetVideoEffect { effect } => f
+                .debug_struct("SetVideoEffect")
+                .field("effect", effect)
+                .finish(),
         }
     }
 }
@@ -765,6 +952,9 @@ pub enum CameraState {
     NotFound = 2,
     /// No camera, the OS denied it, it is in use, or capture failed.
     Unavailable = 3,
+    /// The chosen video effect cannot run, so the camera stays off
+    /// (ADR-0068).
+    EffectUnavailable = 4,
 }
 
 impl TryFrom<u8> for CameraState {
@@ -776,6 +966,7 @@ impl TryFrom<u8> for CameraState {
             1 => Self::On,
             2 => Self::NotFound,
             3 => Self::Unavailable,
+            4 => Self::EffectUnavailable,
             _ => return Err(DecodeError::InvalidValue),
         })
     }
@@ -851,6 +1042,16 @@ pub enum FromWorker {
         recording: Vec<MediaDevice>,
         playout: Vec<MediaDevice>,
         cameras: Vec<MediaDevice>,
+        /// Whether this worker can run the effects that need a person mask:
+        /// background blur and pictures (ADR-0068).
+        background_effects: bool,
+    },
+    /// The video effect in use, after every `SetVideoEffect` (ADR-0068).
+    /// `refused` is set when the worker could not apply the requested
+    /// effect; `effect` is then the one that stayed.
+    VideoEffect {
+        effect: VideoEffect,
+        refused: bool,
     },
     /// The camera state. Sent after every `SetCamera`, after a join with
     /// the camera on, and when capture fails during a call.
@@ -931,6 +1132,7 @@ const TO_SET_DEVICES: u8 = 15;
 const TO_SET_MICROPHONE: u8 = 16;
 const TO_SET_STATS: u8 = 17;
 const TO_SCREEN_FRAMES: u8 = 18;
+const TO_SET_VIDEO_EFFECT: u8 = 19;
 
 // Tags of worker to core messages.
 const FROM_READY: u8 = 1;
@@ -956,6 +1158,7 @@ const FROM_PARTICIPANT_LEVEL: u8 = 20;
 const FROM_PARTICIPANT_MUTED: u8 = 21;
 const FROM_DEVICES_SET: u8 = 22;
 const FROM_STATS: u8 = 23;
+const FROM_VIDEO_EFFECT: u8 = 24;
 
 #[derive(Clone, Copy)]
 enum CharRule {
@@ -991,6 +1194,12 @@ impl<'a> Reader<'a> {
     fn u16(&mut self) -> Result<u16, DecodeError> {
         let bytes = self.take(2)?;
         Ok(u16::from_be_bytes([bytes[0], bytes[1]]))
+    }
+
+    /// A video effect: see [`VideoEffect::from_bytes`].
+    fn video_effect(&mut self) -> Result<VideoEffect, DecodeError> {
+        let bytes = self.take(3)?;
+        VideoEffect::from_bytes([bytes[0], bytes[1], bytes[2]])
     }
 
     /// A microphone gain: see [`valid_mic_gain`].
@@ -1237,6 +1446,7 @@ impl ToWorker {
                 volume,
                 auto_level,
                 mic_gain,
+                video_effect,
             } => {
                 out.push(TO_JOIN);
                 put_str(&mut out, sfu_url);
@@ -1257,6 +1467,7 @@ impl ToWorker {
                 out.push(*volume);
                 out.push(u8::from(*auto_level));
                 out.extend_from_slice(&mic_gain.to_be_bytes());
+                out.extend_from_slice(&video_effect.to_bytes());
             }
             Self::ListDevices => out.push(TO_LIST_DEVICES),
             Self::SetKey { identity, key } => {
@@ -1348,10 +1559,15 @@ impl ToWorker {
                 out.push(TO_SET_DIAGNOSTICS);
                 out.push(u8::from(*on));
             }
-            Self::TestDevice { test, device } => {
+            Self::TestDevice {
+                test,
+                device,
+                video_effect,
+            } => {
                 out.push(TO_TEST_DEVICE);
                 out.push(*test as u8);
                 put_str(&mut out, device.as_deref().unwrap_or(""));
+                out.extend_from_slice(&video_effect.to_bytes());
             }
             Self::SetDevices {
                 recording,
@@ -1366,6 +1582,10 @@ impl ToWorker {
             Self::SetStats { on } => {
                 out.push(TO_SET_STATS);
                 out.push(u8::from(*on));
+            }
+            Self::SetVideoEffect { effect } => {
+                out.push(TO_SET_VIDEO_EFFECT);
+                out.extend_from_slice(&effect.to_bytes());
             }
         }
         out
@@ -1410,6 +1630,7 @@ impl ToWorker {
                     volume: reader.volume()?,
                     auto_level: reader.bool()?,
                     mic_gain: reader.mic_gain()?,
+                    video_effect: reader.video_effect()?,
                 }
             }
             TO_LIST_DEVICES => Self::ListDevices,
@@ -1499,16 +1720,29 @@ impl ToWorker {
                 mic_gain: reader.mic_gain()?,
             },
             TO_SET_DIAGNOSTICS => Self::SetDiagnostics { on: reader.bool()? },
-            TO_TEST_DEVICE => Self::TestDevice {
-                test: DeviceTest::try_from(reader.u8()?)?,
-                device: reader.device_choice()?,
-            },
+            TO_TEST_DEVICE => {
+                let test = DeviceTest::try_from(reader.u8()?)?;
+                let device = reader.device_choice()?;
+                let video_effect = reader.video_effect()?;
+                // Only a camera test shows a picture.
+                if test != DeviceTest::Camera && video_effect != VideoEffect::NONE {
+                    return Err(DecodeError::InvalidValue);
+                }
+                Self::TestDevice {
+                    test,
+                    device,
+                    video_effect,
+                }
+            }
             TO_SET_DEVICES => Self::SetDevices {
                 recording: reader.device_choice()?,
                 playout: reader.device_choice()?,
                 camera: reader.device_choice()?,
             },
             TO_SET_STATS => Self::SetStats { on: reader.bool()? },
+            TO_SET_VIDEO_EFFECT => Self::SetVideoEffect {
+                effect: reader.video_effect()?,
+            },
             _ => return Err(DecodeError::UnknownTag),
         };
         reader.finish()?;
@@ -1526,6 +1760,7 @@ impl FromWorker {
         mut recording: Vec<MediaDevice>,
         mut playout: Vec<MediaDevice>,
         mut cameras: Vec<MediaDevice>,
+        background_effects: bool,
     ) -> Self {
         fn list_len(list: &[MediaDevice]) -> usize {
             // The count, then each ID and name with its two-byte length.
@@ -1535,8 +1770,8 @@ impl FromWorker {
                 .sum::<usize>()
         }
         loop {
-            // The version and the tag, then the three lists.
-            let size = 2 + list_len(&recording) + list_len(&playout) + list_len(&cameras);
+            // The version and the tag, the three lists, then the flag.
+            let size = 3 + list_len(&recording) + list_len(&playout) + list_len(&cameras);
             if size <= MAX_MESSAGE_BYTES {
                 break;
             }
@@ -1550,6 +1785,7 @@ impl FromWorker {
             recording,
             playout,
             cameras,
+            background_effects,
         }
     }
 
@@ -1632,11 +1868,18 @@ impl FromWorker {
                 recording,
                 playout,
                 cameras,
+                background_effects,
             } => {
                 out.push(FROM_DEVICES);
                 put_devices(&mut out, recording);
                 put_devices(&mut out, playout);
                 put_devices(&mut out, cameras);
+                out.push(u8::from(*background_effects));
+            }
+            Self::VideoEffect { effect, refused } => {
+                out.push(FROM_VIDEO_EFFECT);
+                out.extend_from_slice(&effect.to_bytes());
+                out.push(u8::from(*refused));
             }
             Self::Camera { state } => {
                 out.push(FROM_CAMERA);
@@ -1752,6 +1995,11 @@ impl FromWorker {
                 recording: reader.devices()?,
                 playout: reader.devices()?,
                 cameras: reader.devices()?,
+                background_effects: reader.bool()?,
+            },
+            FROM_VIDEO_EFFECT => Self::VideoEffect {
+                effect: reader.video_effect()?,
+                refused: reader.bool()?,
             },
             FROM_CAMERA => Self::Camera {
                 state: CameraState::try_from(reader.u8()?)?,
@@ -2100,6 +2348,10 @@ mod tests {
             volume: 65,
             auto_level: false,
             mic_gain: 250,
+            video_effect: VideoEffect {
+                background: Background::Blur(BlurStrength::new(40).expect("valid")),
+                filter: ColourFilter::Warm,
+            },
         }
     }
 
@@ -2125,6 +2377,7 @@ mod tests {
             volume: MAX_VOLUME_PERCENT,
             auto_level: true,
             mic_gain: DEFAULT_MIC_GAIN_PERCENT,
+            video_effect: VideoEffect::NONE,
         }
         .encode()
         .to_vec()
@@ -2232,17 +2485,43 @@ mod tests {
             ToWorker::SetDiagnostics { on: false },
             ToWorker::SetStats { on: true },
             ToWorker::SetStats { on: false },
+            ToWorker::SetVideoEffect {
+                effect: VideoEffect::NONE,
+            },
+            ToWorker::SetVideoEffect {
+                effect: VideoEffect {
+                    background: Background::Blur(BlurStrength::new(MAX_BLUR_PERCENT).unwrap()),
+                    filter: ColourFilter::Greyscale,
+                },
+            },
+            ToWorker::SetVideoEffect {
+                effect: VideoEffect {
+                    background: Background::Picture(BackgroundPicture::Studio),
+                    filter: ColourFilter::Brighten,
+                },
+            },
             ToWorker::TestDevice {
                 test: DeviceTest::Microphone,
                 device: None,
+                video_effect: VideoEffect::NONE,
             },
             ToWorker::TestDevice {
                 test: DeviceTest::Speaker,
                 device: Some("{0.0.0.00000000}.{6a2c}".to_owned()),
+                video_effect: VideoEffect::NONE,
             },
             ToWorker::TestDevice {
                 test: DeviceTest::Camera,
                 device: Some("usb#cam".to_owned()),
+                video_effect: VideoEffect::NONE,
+            },
+            ToWorker::TestDevice {
+                test: DeviceTest::Camera,
+                device: None,
+                video_effect: VideoEffect {
+                    background: Background::Blur(BlurStrength::new(MIN_BLUR_PERCENT).unwrap()),
+                    filter: ColourFilter::Cool,
+                },
             },
             ToWorker::SetDevices {
                 recording: Some("m".to_owned()),
@@ -2302,11 +2581,13 @@ mod tests {
                 recording: vec![device("{0.0.1.00000000}.{6a2c}", "Microphone (Headset)")],
                 playout: vec![device("p", ""), device("q", "Lautsprecher (Ü)")],
                 cameras: vec![device("usb#cam", "Integrated Camera")],
+                background_effects: true,
             },
             FromWorker::Devices {
                 recording: Vec::new(),
                 playout: Vec::new(),
                 cameras: Vec::new(),
+                background_effects: false,
             },
             FromWorker::Camera {
                 state: CameraState::Off,
@@ -2319,6 +2600,23 @@ mod tests {
             },
             FromWorker::Camera {
                 state: CameraState::Unavailable,
+            },
+            FromWorker::Camera {
+                state: CameraState::EffectUnavailable,
+            },
+            FromWorker::VideoEffect {
+                effect: VideoEffect {
+                    background: Background::None,
+                    filter: ColourFilter::Cool,
+                },
+                refused: true,
+            },
+            FromWorker::VideoEffect {
+                effect: VideoEffect {
+                    background: Background::Picture(BackgroundPicture::Dusk),
+                    filter: ColourFilter::None,
+                },
+                refused: false,
             },
             FromWorker::Screen {
                 state: ScreenState::Off,
@@ -2622,11 +2920,11 @@ mod tests {
             Err(DecodeError::UnknownTag)
         );
         assert_eq!(
-            ToWorker::decode(&[VERSION, 19]),
+            ToWorker::decode(&[VERSION, 20]),
             Err(DecodeError::UnknownTag)
         );
         assert_eq!(
-            FromWorker::decode(&[VERSION, 24]),
+            FromWorker::decode(&[VERSION, 25]),
             Err(DecodeError::UnknownTag)
         );
         assert_eq!(FromWorker::decode(&[]), Err(DecodeError::Truncated));
@@ -2799,6 +3097,7 @@ mod tests {
             volume: MAX_VOLUME_PERCENT,
             auto_level: true,
             mic_gain: DEFAULT_MIC_GAIN_PERCENT,
+            video_effect: VideoEffect::NONE,
         }
     }
 
@@ -2820,9 +3119,10 @@ mod tests {
             recording: full('r'),
             playout: full('p'),
             cameras: full('c'),
+            background_effects: true,
         };
         assert!(unfitted.encode().len() > MAX_MESSAGE_BYTES);
-        let fitted = FromWorker::devices(full('r'), full('p'), full('c'));
+        let fitted = FromWorker::devices(full('r'), full('p'), full('c'), true);
         let encoded = fitted.encode();
         assert!(encoded.len() <= MAX_MESSAGE_BYTES);
         assert!(write_message(&mut Vec::new(), &fitted).is_ok());
@@ -2831,6 +3131,7 @@ mod tests {
             recording,
             playout,
             cameras,
+            background_effects: true,
         } = fitted
         else {
             panic!("not a device list");
@@ -2846,6 +3147,7 @@ mod tests {
             vec![device("r", "R")],
             vec![device("p", "P")],
             vec![device("c", "C")],
+            false,
         );
         assert_eq!(
             small,
@@ -2853,6 +3155,7 @@ mod tests {
                 recording: vec![device("r", "R")],
                 playout: vec![device("p", "P")],
                 cameras: vec![device("c", "C")],
+                background_effects: false,
             }
         );
     }
@@ -2869,6 +3172,7 @@ mod tests {
             recording,
             playout: Vec::new(),
             cameras: Vec::new(),
+            background_effects: false,
         };
         let full_id = "d".repeat(MAX_DEVICE_ID_BYTES);
         let full_name = "n".repeat(MAX_DEVICE_NAME_BYTES);
@@ -2950,6 +3254,7 @@ mod tests {
             recording: vec![cut],
             playout: vec![named],
             cameras: Vec::new(),
+            background_effects: false,
         };
         assert!(FromWorker::decode(&fits.encode()).is_ok());
     }
@@ -3168,7 +3473,7 @@ mod tests {
                 &[VERSION, FROM_VIDEO_STARTED, 1, 0, 0, 0],
                 DecodeError::TooShort,
             ),
-            (&[VERSION, FROM_CAMERA, 4], invalid),
+            (&[VERSION, FROM_CAMERA, 5], invalid),
         ];
         for (body, expected) in cases {
             assert_eq!(FromWorker::decode(body), Err(expected), "{body:?}");
@@ -3244,7 +3549,7 @@ mod tests {
     /// 640x360 at 15 per second.
     #[test]
     fn given_tiles_when_limits_asked_then_screen_differs_from_camera() {
-        assert_eq!((VIDEO_TILES, SCREEN_TILE, VERSION), (6, 5, 14));
+        assert_eq!((VIDEO_TILES, SCREEN_TILE, VERSION), (6, 5, 15));
         assert_eq!(MAX_SCREEN_BYTES, 3_686_400);
         assert_eq!(MAX_SCREEN_PIXELS, 921_600);
         for tile in 0..SCREEN_TILE {
@@ -3585,6 +3890,7 @@ mod tests {
                 volume: 0,
                 auto_level: true,
                 mic_gain: DEFAULT_MIC_GAIN_PERCENT,
+                video_effect: VideoEffect::NONE,
             }
             .encode()
         };
@@ -3601,6 +3907,7 @@ mod tests {
             recording: Vec::new(),
             playout: Vec::new(),
             cameras,
+            background_effects: false,
         };
         let full: Vec<MediaDevice> = (0..MAX_DEVICES).map(|_| device("c", "n")).collect();
         assert!(FromWorker::decode(&cameras(full).encode()).is_ok());
@@ -3747,13 +4054,13 @@ mod tests {
         );
     }
 
-    /// GIVEN a message of the previous wire versions (6 to 13)
+    /// GIVEN a message of the previous wire versions (6 to 14)
     /// WHEN it is decoded in either direction
     /// THEN the version is refused.
     #[test]
     fn given_older_wire_versions_when_decoded_then_they_are_refused() {
-        assert_eq!(VERSION, 14);
-        for old in [6, 7, 8, 9, 10, 11, 12, 13] {
+        assert_eq!(VERSION, 15);
+        for old in [6, 7, 8, 9, 10, 11, 12, 13, 14] {
             assert_eq!(
                 ToWorker::decode(&[old, TO_LEAVE]),
                 Err(DecodeError::UnknownVersion)
@@ -3811,8 +4118,9 @@ mod tests {
             panic!("join decodes");
         };
         assert_eq!(volume, 65);
-        // The volume, the automatic level flag and the two gain bytes end it.
-        let at = body.len() - 4;
+        // The volume, the automatic level flag, the two gain bytes and the
+        // three effect bytes end it.
+        let at = body.len() - 7;
         body[at] = MAX_VOLUME_PERCENT + 1;
         assert_eq!(ToWorker::decode(&body), Err(DecodeError::InvalidValue));
     }
@@ -3859,12 +4167,13 @@ mod tests {
             ToWorker::decode(&[VERSION, TO_SET_MICROPHONE, 1, 0, 100, 0]),
             Err(DecodeError::TrailingBytes)
         );
-        // A Join with a gain over the limit is refused as a whole.
+        // A Join with a gain over the limit is refused as a whole. The gain
+        // comes before the three effect bytes.
         let mut body = join().encode().to_vec();
-        let end = body.len();
-        body[end - 2..].copy_from_slice(&405_u16.to_be_bytes());
+        let end = body.len() - 3;
+        body[end - 2..end].copy_from_slice(&405_u16.to_be_bytes());
         assert_eq!(ToWorker::decode(&body), invalid);
-        body[end - 2..].copy_from_slice(&MAX_MIC_GAIN_PERCENT.to_be_bytes());
+        body[end - 2..end].copy_from_slice(&MAX_MIC_GAIN_PERCENT.to_be_bytes());
         assert!(matches!(
             ToWorker::decode(&body),
             Ok(ToWorker::Join {
@@ -3874,6 +4183,150 @@ mod tests {
         ));
         assert!(valid_mic_gain(0) && valid_mic_gain(400));
         assert!(!valid_mic_gain(2) && !valid_mic_gain(405));
+    }
+
+    /// Every video effect: each background with each filter.
+    fn all_effects() -> Vec<VideoEffect> {
+        let mut backgrounds = vec![Background::None];
+        backgrounds.extend(
+            (MIN_BLUR_PERCENT..=MAX_BLUR_PERCENT)
+                .step_by(usize::from(BLUR_STEP_PERCENT))
+                .map(|percent| Background::Blur(BlurStrength::new(percent).unwrap())),
+        );
+        backgrounds.extend(BackgroundPicture::ALL.map(Background::Picture));
+        backgrounds
+            .into_iter()
+            .flat_map(|background| {
+                ColourFilter::ALL.map(|filter| VideoEffect { background, filter })
+            })
+            .collect()
+    }
+
+    /// GIVEN every blur strength from 0 to 255
+    /// WHEN it is checked
+    /// THEN exactly 10 to 100 in steps of 10 are strengths.
+    #[test]
+    fn given_blur_percent_when_checked_then_only_the_steps_are_strengths() {
+        let accepted: Vec<u8> = (0..=u8::MAX)
+            .filter(|percent| BlurStrength::new(*percent).is_some())
+            .collect();
+        assert_eq!(accepted, [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]);
+        assert_eq!(
+            BlurStrength::new(DEFAULT_BLUR_PERCENT).map(BlurStrength::percent),
+            Some(50)
+        );
+    }
+
+    /// GIVEN every video effect
+    /// WHEN it is sent in a SetVideoEffect, a Join and a VideoEffect answer
+    /// THEN it round-trips as its three documented bytes, and only blur and
+    /// pictures need the person mask.
+    #[test]
+    fn given_every_video_effect_when_round_tripped_then_it_is_unchanged() {
+        let effects = all_effects();
+        assert_eq!(effects.len(), (1 + 10 + 4) * 5);
+        for effect in effects {
+            let set = ToWorker::SetVideoEffect { effect };
+            assert_eq!(ToWorker::decode(&set.encode()), Ok(set));
+            let answer = FromWorker::VideoEffect {
+                effect,
+                refused: false,
+            };
+            assert_eq!(FromWorker::decode(&answer.encode()), Ok(answer));
+            let mut body = join().encode().to_vec();
+            let end = body.len();
+            body[end - 3..].copy_from_slice(&effect.to_bytes());
+            assert!(matches!(
+                ToWorker::decode(&body),
+                Ok(ToWorker::Join { video_effect, .. }) if video_effect == effect
+            ));
+            assert_eq!(
+                effect.needs_mask(),
+                effect.background != Background::None,
+                "{effect:?}"
+            );
+        }
+        let blur = VideoEffect {
+            background: Background::Blur(BlurStrength::new(30).unwrap()),
+            filter: ColourFilter::Warm,
+        };
+        assert_eq!(blur.to_bytes(), [1, 30, 2]);
+        let picture = VideoEffect {
+            background: Background::Picture(BackgroundPicture::Forest),
+            filter: ColourFilter::None,
+        };
+        assert_eq!(picture.to_bytes(), [2, 3, 0]);
+        assert_eq!(VideoEffect::NONE.to_bytes(), [0, 0, 0]);
+        assert_eq!(VideoEffect::default(), VideoEffect::NONE);
+    }
+
+    /// GIVEN video effect bytes outside their sets, or a short or long
+    /// message
+    /// WHEN they are decoded in a SetVideoEffect, a Join or an answer
+    /// THEN each is refused.
+    #[test]
+    fn given_bad_video_effect_bytes_when_decoded_then_they_are_refused() {
+        let invalid = Some(DecodeError::InvalidValue);
+        for bytes in [
+            [0, 1, 0],   // no background with a value
+            [1, 0, 0],   // blur of 0
+            [1, 5, 0],   // blur off the step
+            [1, 110, 0], // blur over the top
+            [2, 0, 0],   // picture 0
+            [2, 5, 0],   // picture past the set
+            [3, 0, 0],   // an unknown kind
+            [0, 0, 5],   // an unknown filter
+            [0, 0, 255],
+        ] {
+            assert_eq!(VideoEffect::from_bytes(bytes).err(), invalid, "{bytes:?}");
+            let set = [VERSION, TO_SET_VIDEO_EFFECT, bytes[0], bytes[1], bytes[2]];
+            assert_eq!(ToWorker::decode(&set).err(), invalid, "{bytes:?}");
+            let answer = [VERSION, FROM_VIDEO_EFFECT, bytes[0], bytes[1], bytes[2], 0];
+            assert_eq!(FromWorker::decode(&answer).err(), invalid, "{bytes:?}");
+            let mut body = join().encode().to_vec();
+            let end = body.len();
+            body[end - 3..].copy_from_slice(&bytes);
+            assert_eq!(ToWorker::decode(&body).err(), invalid, "{bytes:?}");
+        }
+        // A bad refused flag, and a short or long message.
+        assert_eq!(
+            FromWorker::decode(&[VERSION, FROM_VIDEO_EFFECT, 0, 0, 0, 2]).err(),
+            invalid
+        );
+        assert_eq!(
+            ToWorker::decode(&[VERSION, TO_SET_VIDEO_EFFECT, 0, 0]),
+            Err(DecodeError::Truncated)
+        );
+        assert!(ToWorker::decode(&[VERSION, TO_SET_VIDEO_EFFECT, 0, 0, 0, 0]).is_err());
+        let mut short_join = join().encode().to_vec();
+        short_join.pop();
+        assert_eq!(ToWorker::decode(&short_join), Err(DecodeError::Truncated));
+        // The new camera state decodes; the next value does not.
+        assert_eq!(
+            FromWorker::decode(&[VERSION, FROM_CAMERA, 4]),
+            Ok(FromWorker::Camera {
+                state: CameraState::EffectUnavailable
+            })
+        );
+        assert_eq!(
+            FromWorker::decode(&[VERSION, FROM_CAMERA, 5]).err(),
+            invalid
+        );
+    }
+
+    /// GIVEN a device list whose background effects flag is not 0 or 1, or
+    /// is missing
+    /// WHEN it is decoded
+    /// THEN it is refused.
+    #[test]
+    fn given_bad_background_effects_flag_when_decoded_then_it_is_refused() {
+        let empty = FromWorker::devices(Vec::new(), Vec::new(), Vec::new(), true);
+        let mut body = empty.encode();
+        assert_eq!(FromWorker::decode(&body), Ok(empty));
+        *body.last_mut().unwrap() = 2;
+        assert_eq!(FromWorker::decode(&body), Err(DecodeError::InvalidValue));
+        body.pop();
+        assert_eq!(FromWorker::decode(&body), Err(DecodeError::Truncated));
     }
 
     /// GIVEN a sound level over the top, or without its byte
@@ -3901,6 +4354,29 @@ mod tests {
     /// failure code in `DevicesSet`.
     #[test]
     fn given_device_and_level_messages_out_of_range_then_they_are_rejected() {
+        // A sound test shows no picture, so it takes no effect (ADR-0068).
+        let warm = VideoEffect {
+            background: Background::None,
+            filter: ColourFilter::Warm,
+        };
+        for test in [DeviceTest::Microphone, DeviceTest::Speaker] {
+            let message = ToWorker::TestDevice {
+                test,
+                device: None,
+                video_effect: warm,
+            };
+            assert_eq!(
+                ToWorker::decode(&message.encode()),
+                Err(DecodeError::InvalidValue),
+                "{test:?}"
+            );
+        }
+        let camera = ToWorker::TestDevice {
+            test: DeviceTest::Camera,
+            device: None,
+            video_effect: warm,
+        };
+        assert_eq!(ToWorker::decode(&camera.encode()), Ok(camera));
         for test in [0, 4, u8::MAX] {
             assert_eq!(
                 ToWorker::decode(&[VERSION, TO_TEST_DEVICE, test, 0, 0]),
