@@ -2868,7 +2868,8 @@ impl Core {
     /// profile's call device record for later calls, then given to a running
     /// or joining call, which restarts a camera that is on. A choice that
     /// equals the saved one changes nothing, so the camera does not restart
-    /// for it. A record that cannot be read is not replaced; the reply is
+    /// for it, unless an earlier restart is owed (the call's queue was
+    /// full): then the answer was `limit_exceeded` and this one restarts. A record that cannot be read is not replaced; the reply is
     /// then `unavailable`, and nothing changes. The save comes first, so a
     /// join that read the record before it gets the value from the
     /// controller (`CallController::video_asked`).
@@ -2910,9 +2911,15 @@ impl Core {
                 .unwrap_or(persephone_call_protocol::VideoQuality::Auto)
                 != worker
         };
-        if changed {
-            // `NotInCall` is no failure: the saved value is for the next call.
-            let _ = self.calls.set_video_quality(worker);
+        // A restart that found no room for its commands is owed, so the same
+        // value asked again restarts the camera.
+        if changed || self.calls.restart_owed() {
+            // `NotInCall` is no failure: the saved value is for the next
+            // call. `Busy` is: the value is saved, but the camera did not
+            // restart. The next request restarts it.
+            if let Err(calls::controller::CallError::Busy) = self.calls.set_video_quality(worker) {
+                return Outcome::Error(ErrorCode::LimitExceeded);
+            }
         }
         ok(&calls::status::status(&self.calls.state()))
     }
@@ -3153,8 +3160,12 @@ impl Core {
                 selection.playout.as_deref(),
                 selection.camera.as_deref(),
             );
-            if camera_changed {
-                let _ = self.calls.restart_camera();
+            // `Busy` leaves the new camera saved but the old one running; the
+            // restart stays owed for the next request.
+            if (camera_changed || self.calls.restart_owed())
+                && let Err(calls::controller::CallError::Busy) = self.calls.restart_camera()
+            {
+                return Outcome::Error(ErrorCode::LimitExceeded);
             }
             Outcome::Ok(serde_json::Value::Null)
         } else {

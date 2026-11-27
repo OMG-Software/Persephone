@@ -64,6 +64,7 @@ use persephone_contracts::{
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     future::Future,
+    pin::Pin,
     sync::{
         Arc, Mutex, MutexGuard,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -1335,6 +1336,11 @@ struct RunHandle {
     /// The latest microphone and speaker choice made during the call
     /// (ADR-0059). `None` until one is made.
     devices: watch::Sender<Option<DeviceChoice>>,
+    /// A camera restart (ADR-0070) found no room for its two commands and
+    /// is still owed: the next request restarts the camera although its
+    /// value did not change. Cleared by a restart that was queued, and with
+    /// the call.
+    restart_owed: AtomicBool,
     task: Option<JoinHandle<()>>,
 }
 
@@ -1986,6 +1992,7 @@ impl CallController {
                         video_effect,
                         video_quality,
                         devices,
+                        restart_owed: AtomicBool::new(false),
                         task: Some(task),
                     });
                     guard.armed = false;
@@ -2249,6 +2256,7 @@ impl CallController {
             own_device: device_id,
             deafen_seq: deafen::first_seq(now_ms()),
             deafen_shared: false,
+            deafen_sender: DeafenSender::new(deafen_send(access.clone(), room_id.to_owned())),
             own_keys,
             remote: RemoteKeys::new(),
             unsent: BTreeMap::new(),
@@ -2464,8 +2472,10 @@ impl CallController {
     /// call task sends the newest device choice and send resolution before
     /// the camera-on (`settings_before_camera`). A camera that is off,
     /// unavailable or not found stays as it is; so does a call that is not
-    /// running. When the queue has room for the off but not for the on, the
-    /// camera stays off and the page shows it.
+    /// running. The off and the on go together or not at all: the queue
+    /// must have room for both. Without it nothing is queued, the camera
+    /// goes on as it was, the restart stays owed (`restart_owed`) and the
+    /// error is `Busy`.
     pub fn restart_camera(&self) -> Result<(), CallError> {
         let on = matches!(
             &*self.inner.state.borrow(),
@@ -2474,11 +2484,54 @@ impl CallController {
                 ..
             }
         );
+        let slot = self.inner.slot();
+        let Slot::Running(run) = &*slot else {
+            return if on {
+                Err(CallError::NotInCall)
+            } else {
+                Ok(())
+            };
+        };
         if !on {
+            // A camera that is off starts with the newest settings.
+            run.restart_owed.store(false, Ordering::SeqCst);
             return Ok(());
         }
-        self.set_camera(false)?;
-        self.set_camera(true)
+        if !matches!(*self.inner.state.borrow(), CallState::Active { .. }) {
+            return Err(CallError::NotInCall);
+        }
+        let mut permits = match run.commands.try_reserve_many(2) {
+            Ok(permits) => permits,
+            Err(mpsc::error::TrySendError::Full(())) => {
+                run.restart_owed.store(true, Ordering::SeqCst);
+                return Err(CallError::Busy);
+            }
+            Err(mpsc::error::TrySendError::Closed(())) => return Err(CallError::NotInCall),
+        };
+        run.restart_owed.store(false, Ordering::SeqCst);
+        let (Some(off), Some(on_permit)) = (permits.next(), permits.next()) else {
+            return Err(CallError::NotInCall);
+        };
+        let changed_off = self.accept_camera(run, off, false);
+        let changed_on = self.accept_camera(run, on_permit, true);
+        drop(permits);
+        drop(slot);
+        if changed_off || changed_on {
+            let listener = plain(&self.inner.listener).clone();
+            if let Some(listener) = listener {
+                listener();
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether a camera restart is owed to the running call (see
+    /// `restart_camera`): the caller restarts although nothing changed.
+    pub fn restart_owed(&self) -> bool {
+        match &*self.inner.slot() {
+            Slot::Running(run) => run.restart_owed.load(Ordering::SeqCst),
+            _ => false,
+        }
     }
 
     /// The number of the newest video effect asked for (ADR-0068). A join
@@ -2560,13 +2613,28 @@ impl CallController {
         if !matches!(*self.inner.state.borrow(), CallState::Active { .. }) {
             return Err(CallError::NotInCall);
         }
-        // A queue place is taken first, so a full queue changes nothing. The
-        // pending state is published before the command is queued, so the
-        // task's answer (which may be quick) always comes after it.
+        // A queue place is taken first, so a full queue changes nothing.
         let permit = run
             .commands
             .try_reserve()
             .map_err(|_| CallError::NotInCall)?;
+        let changed = self.accept_camera(run, permit, on);
+        drop(slot);
+        if changed {
+            let listener = plain(&self.inner.listener).clone();
+            if let Some(listener) = listener {
+                listener();
+            }
+        }
+        Ok(())
+    }
+
+    /// Accepts a camera command for the running call `run` with the slot
+    /// lock held and a queue place `permit` taken. Returns whether the
+    /// state changed. The pending state is published before the command is
+    /// queued, so the task's answer (which may be quick) always comes after
+    /// it.
+    fn accept_camera(&self, run: &RunHandle, permit: mpsc::Permit<'_, Command>, on: bool) -> bool {
         // Numbered under the store's lock. An off stops the own picture at
         // once, before the task takes the command; only a later camera-on
         // lets a sync allow it again.
@@ -2593,14 +2661,7 @@ impl CallController {
             true
         });
         permit.send(Command::Camera { on, request });
-        drop(slot);
-        if changed {
-            let listener = plain(&self.inner.listener).clone();
-            if let Some(listener) = listener {
-                listener();
-            }
-        }
-        Ok(())
+        changed
     }
 
     /// Starts or stops the screen share (ADR-0053). Refused unless a call is
@@ -2994,6 +3055,9 @@ struct Call {
     deafen_seq: u64,
     /// The deafen state that the other members were last sent.
     deafen_shared: bool,
+    /// Sends the deafen hints off the call loop (ADR-0071). `finish` joins
+    /// its task before the call gives the SDK back.
+    deafen_sender: DeafenSender,
     own_keys: OwnKeys,
     remote: RemoteKeys,
     /// Remote keys the worker queue had no room for, by member device
@@ -4870,6 +4934,17 @@ impl Call {
         }
     }
 
+    /// Takes the choice that `devices_seen.changed()` announced and sends it.
+    /// `changed()` marks the newest value as seen, so `send_devices` would
+    /// find nothing new: the value is read here, with `borrow_and_update`.
+    fn devices_changed(&mut self) -> Result<(), EndReason> {
+        let choice = self.devices_seen.borrow_and_update().clone();
+        if let Some(choice) = choice {
+            self.unsent_devices = Some((Instant::now(), choice));
+        }
+        self.send_devices()
+    }
+
     /// Sends the waiting device choice, after a newer one that the task has
     /// not read yet replaced it (ADR-0059). A full queue keeps the choice
     /// for a retry.
@@ -5008,50 +5083,28 @@ impl Call {
             .map_err(|_| EndReason::SessionEnded)
     }
 
-    /// Sends the own deafen state and counter to `recipients` (ADR-0071), in
-    /// the way and to the devices that frame keys go to. A failure is not
-    /// fatal and is not retried: the next change or a new member sends the
-    /// state again.
-    async fn send_deafen(
-        &self,
-        recipients: Vec<(OwnedUserId, OwnedDeviceId)>,
-    ) -> Result<(), EndReason> {
-        if recipients.is_empty() {
-            return Ok(());
-        }
-        let room_id = self.view.room_id.clone();
+    /// Queues the own deafen state and counter for `recipients` (ADR-0071),
+    /// to go the way and to the devices that frame keys go to. It never
+    /// waits: a stalled homeserver must not stop the call loop. A failure is
+    /// not fatal and is not retried: the next change or a new member sends
+    /// the state again.
+    fn queue_deafen(&mut self, recipients: Vec<(OwnedUserId, OwnedDeviceId)>) {
         let content = deafen::outgoing_content(
-            &room_id,
+            &self.view.room_id,
             &self.own_identity,
             &self.own_device,
             self.deafen_shared,
             self.deafen_seq,
         );
-        self.access
-            .run(|client| async move {
-                if let Some(room) = client.get_room(&room_id) {
-                    let _ = time::timeout(
-                        SEND_TIMEOUT,
-                        encryption_keys::send_event(
-                            &room,
-                            &recipients,
-                            deafen::EVENT_TYPE,
-                            content,
-                        ),
-                    )
-                    .await;
-                }
-            })
-            .await
-            .map_err(|_| EndReason::SessionEnded)
+        self.deafen_sender.queue(recipients, content);
     }
 
     /// Tells every other member when the own deafen state changed since it
     /// was last shared (ADR-0071). The state is the worker's answer
     /// (`View::deafened`), so it follows what the call really does.
-    async fn share_deafen(&mut self) -> Result<(), EndReason> {
+    fn share_deafen(&mut self) {
         if self.view.deafened == self.deafen_shared {
-            return Ok(());
+            return;
         }
         self.deafen_shared = self.view.deafened;
         self.deafen_seq = self.deafen_seq.saturating_add(1);
@@ -5062,7 +5115,7 @@ impl Call {
             .take(MAX_CALL_MEMBERS)
             .map(|m| (m.user_id.clone(), m.device_id.clone()))
             .collect();
-        self.send_deafen(all).await
+        self.queue_deafen(all);
     }
 
     /// Tells the members that just joined, and the members that were there
@@ -5070,9 +5123,9 @@ impl Call {
     /// counter has not changed, but it is above any counter of an earlier
     /// call of this device, so the state replaces a note that a receiver
     /// kept from one (ADR-0071).
-    async fn share_deafen_with_new(&self, joined: &[MemberKey]) -> Result<(), EndReason> {
-        self.send_deafen(deafen_recipients(&self.view.members, joined))
-            .await
+    fn share_deafen_with_new(&mut self, joined: &[MemberKey]) {
+        let recipients = deafen_recipients(&self.view.members, joined);
+        self.queue_deafen(recipients);
     }
 
     /// Reads the members and gives the current key to all of them.
@@ -5091,7 +5144,7 @@ impl Call {
         // The members that are already there learn the state too. The
         // later member changes then see them as known, not as joined.
         let present: Vec<MemberKey> = self.view.members.iter().map(member_key).collect();
-        self.share_deafen_with_new(&present).await?;
+        self.share_deafen_with_new(&present);
         self.plan_others(inner)?;
         self.publish(inner);
         Ok(())
@@ -5211,7 +5264,7 @@ impl Call {
                     self.take_unread_quality()?;
                     self.send_quality()?;
                 }
-                Ok(()) = self.devices_seen.changed() => self.send_devices()?,
+                Ok(()) = self.devices_seen.changed() => self.devices_changed()?,
                 () = async {
                     match devices_due {
                         Some(at) => time::sleep_until(at.into()).await,
@@ -5273,7 +5326,7 @@ impl Call {
                         return Err(EndReason::WorkerStopped);
                     };
                     self.worker_event(inner, &event)?;
-                    self.share_deafen().await?;
+                    self.share_deafen();
                 }
                 (host, connect) = consent_done(&mut self.consent) => {
                     self.consent_answered(inner, &host, connect)?;
@@ -5381,7 +5434,7 @@ impl Call {
             }
         }
         // A new member does not know that this device is deafened.
-        self.share_deafen_with_new(&diff.joined).await?;
+        self.share_deafen_with_new(&diff.joined);
         // Keys that came before their sender's membership may fit now.
         for candidate in std::mem::take(parked) {
             self.key_received(inner, candidate, parked)?;
@@ -5486,6 +5539,7 @@ impl Call {
             screen_closed,
             screen_helper,
             screen_capture_used,
+            mut deafen_sender,
             ..
         } = self;
         // A portal request still waiting for the user is cancelled first, so
@@ -5512,6 +5566,11 @@ impl Call {
         } else {
             finish_worker(link).await;
         }
+        // The deafen sender holds an SDK lease while it sends. It ends
+        // before the membership end or the return, so the call gives the
+        // SDK back only when no send of its own is left. A send that runs
+        // ends within its own timeout.
+        deafen_sender.stop_and_join().await;
         // The screen pick and the capture helpers end before the call is
         // gone: no helper outlives the call or the session. The membership
         // ends meanwhile, so a slow helper does not hold it either.
@@ -5532,6 +5591,151 @@ impl Call {
             end_screen_helpers(screen_pick, screen_helper, screen_capture_used),
             membership
         );
+    }
+}
+
+/// What a deafen hint send does for one batch: sends `content` to the
+/// recipients. Tests give a fake.
+type DeafenSend = Arc<
+    dyn Fn(
+            Vec<(OwnedUserId, OwnedDeviceId)>,
+            serde_json::Value,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// The send of a deafen hint through the SDK (ADR-0071), in the way and to
+/// the devices that frame keys go to. The result is ignored: it is a hint.
+/// One send takes at most [`SEND_TIMEOUT`], and `Access::run` refuses it
+/// once the call has ended.
+fn deafen_send(access: Access, room_id: OwnedRoomId) -> DeafenSend {
+    Arc::new(move |recipients, content| {
+        let access = access.clone();
+        let room_id = room_id.clone();
+        Box::pin(async move {
+            let _ = access
+                .run(|client| async move {
+                    if let Some(room) = client.get_room(&room_id) {
+                        let _ = time::timeout(
+                            SEND_TIMEOUT,
+                            encryption_keys::send_event(
+                                &room,
+                                &recipients,
+                                deafen::EVENT_TYPE,
+                                content,
+                            ),
+                        )
+                        .await;
+                    }
+                })
+                .await;
+        })
+    })
+}
+
+/// The deafen hint that waits for the sender task.
+#[derive(Default)]
+struct DeafenJob {
+    /// The newest content: it carries the newest state and counter.
+    content: Option<serde_json::Value>,
+    /// The devices that still wait for it, at most [`MAX_CALL_MEMBERS`].
+    recipients: BTreeSet<(OwnedUserId, OwnedDeviceId)>,
+}
+
+impl DeafenJob {
+    /// Adds `recipients` and replaces the content with the newer `content`.
+    /// A recipient beyond the cap is dropped: it is a hint. Every send
+    /// carries the newest content and a receiver ignores a counter that is
+    /// not higher, so the order of the sends holds.
+    fn merge(&mut self, recipients: Vec<(OwnedUserId, OwnedDeviceId)>, content: serde_json::Value) {
+        if recipients.is_empty() {
+            return;
+        }
+        for recipient in recipients {
+            if self.recipients.len() >= MAX_CALL_MEMBERS && !self.recipients.contains(&recipient) {
+                continue;
+            }
+            self.recipients.insert(recipient);
+        }
+        self.content = Some(content);
+    }
+
+    /// Takes the batch to send, if there is one. The job is empty after.
+    fn take(&mut self) -> Option<(Vec<(OwnedUserId, OwnedDeviceId)>, serde_json::Value)> {
+        let recipients = std::mem::take(&mut self.recipients);
+        match self.content.take() {
+            Some(content) if !recipients.is_empty() => {
+                Some((recipients.into_iter().collect(), content))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// What the call task and the sender task share.
+#[derive(Default)]
+struct DeafenShared {
+    job: Mutex<DeafenJob>,
+    wake: Notify,
+    stop: AtomicBool,
+}
+
+/// Sends the deafen hints (ADR-0071) from its own task, so the call loop
+/// never waits for the homeserver. The first hint starts the task.
+/// [`DeafenSender::stop_and_join`] ends it and never aborts it: a send holds
+/// an SDK lease, and the call must not give the SDK back before it ends.
+struct DeafenSender {
+    shared: Arc<DeafenShared>,
+    send: DeafenSend,
+    task: Option<JoinHandle<()>>,
+}
+
+impl DeafenSender {
+    fn new(send: DeafenSend) -> Self {
+        Self {
+            shared: Arc::default(),
+            send,
+            task: None,
+        }
+    }
+
+    /// Queues the hint and returns at once. Needs a Tokio runtime.
+    fn queue(&mut self, recipients: Vec<(OwnedUserId, OwnedDeviceId)>, content: serde_json::Value) {
+        if self.shared.stop.load(Ordering::SeqCst) {
+            return;
+        }
+        plain(&self.shared.job).merge(recipients, content);
+        if self.task.is_none() {
+            let shared = self.shared.clone();
+            let send = self.send.clone();
+            self.task = Some(tokio::spawn(deafen_task(shared, send)));
+        }
+        self.shared.wake.notify_one();
+    }
+
+    /// Stops the task and waits until it has ended. A hint that has not
+    /// started is dropped; one that runs ends within its own timeout.
+    async fn stop_and_join(&mut self) {
+        self.shared.stop.store(true, Ordering::SeqCst);
+        self.shared.wake.notify_one();
+        if let Some(task) = self.task.take() {
+            let _ = task.await;
+        }
+    }
+}
+
+/// The sender task: one send at a time, each with the newest content.
+async fn deafen_task(shared: Arc<DeafenShared>, send: DeafenSend) {
+    loop {
+        shared.wake.notified().await;
+        if shared.stop.load(Ordering::SeqCst) {
+            return;
+        }
+        let batch = plain(&shared.job).take();
+        if let Some((recipients, content)) = batch {
+            send(recipients, content).await;
+        }
     }
 }
 
@@ -7483,6 +7687,7 @@ mod tests {
             video_effect: watch::channel(None).0,
             video_quality: watch::channel(None).0,
             devices: watch::channel(None).0,
+            restart_owed: AtomicBool::new(false),
             task: None,
         });
         calls.stop_for_session_end();
@@ -7726,6 +7931,7 @@ mod tests {
             own_device: owned_device_id!("A"),
             deafen_seq: 0,
             deafen_shared: false,
+            deafen_sender: DeafenSender::new(Arc::new(|_, _| Box::pin(async {}))),
             own_keys: OwnKeys::new(Instant::now()).unwrap(),
             remote: RemoteKeys::new(),
             unsent: BTreeMap::new(),
@@ -8445,8 +8651,8 @@ mod tests {
         assert_eq!(calls.restart_camera(), Ok(()));
         assert_eq!(waiting_cameras(&mut commands), Vec::<bool>::new());
 
-        // Room for the off but not for the on: the camera stays off and the
-        // page shows it, and the error says no call took the command.
+        // Room for the off but not for the on: nothing is queued, the camera
+        // stays as it was (see the restart tests below).
         let calls = controller(FakeHost::new(true, None));
         let (_store, mut commands, _) = running_call(&calls, camera_state(CallCamera::On));
         let commands_tx = {
@@ -8456,13 +8662,263 @@ mod tests {
             run.commands.clone()
         };
         let held: Vec<_> = (0..3).map(|_| commands_tx.try_reserve().unwrap()).collect();
-        assert_eq!(calls.restart_camera(), Err(CallError::NotInCall));
+        assert_eq!(calls.restart_camera(), Err(CallError::Busy));
         drop(held);
-        assert_eq!(waiting_cameras(&mut commands), vec![false]);
+        assert_eq!(waiting_cameras(&mut commands), Vec::<bool>::new());
         let CallState::Active { camera, .. } = calls.state() else {
             panic!("active");
         };
-        assert_eq!(camera, CallCamera::Off);
+        assert_eq!(camera, CallCamera::On, "the camera stays as it was");
+    }
+
+    /// The command sender of the running call in `calls`.
+    fn command_sender(calls: &CallController) -> mpsc::Sender<Command> {
+        let Slot::Running(run) = &*calls.inner.slot() else {
+            panic!("running");
+        };
+        run.commands.clone()
+    }
+
+    /// GIVEN a camera that is on and a queue with room for one command only
+    /// WHEN the camera restarts THEN no command is queued, the error is
+    /// `Busy` and the restart is owed; WHEN room is back THEN the next
+    /// restart queues exactly the off and the on, and nothing is owed.
+    #[tokio::test]
+    async fn given_a_full_queue_when_the_camera_restarts_then_nothing_is_queued_and_it_is_owed() {
+        let calls = controller(FakeHost::new(true, None));
+        let (_store, mut commands, _) = running_call(&calls, camera_state(CallCamera::On));
+        let sender = command_sender(&calls);
+        let held: Vec<_> = (0..3).map(|_| sender.try_reserve().unwrap()).collect();
+
+        assert_eq!(calls.restart_camera(), Err(CallError::Busy));
+        assert!(calls.restart_owed(), "the restart is owed");
+        assert_eq!(waiting_cameras(&mut commands), Vec::<bool>::new());
+        let CallState::Active { camera, .. } = calls.state() else {
+            panic!("active");
+        };
+        assert_eq!(camera, CallCamera::On, "the page keeps the camera on");
+
+        drop(held);
+        assert_eq!(calls.restart_camera(), Ok(()));
+        assert!(!calls.restart_owed(), "a queued restart clears the debt");
+        assert_eq!(waiting_cameras(&mut commands), vec![false, true]);
+    }
+
+    /// GIVEN a restart that is owed WHEN the same quality is asked again
+    /// with room in the queue THEN the camera restarts; WHEN the camera is
+    /// off THEN the debt ends without a restart.
+    #[tokio::test]
+    async fn given_an_owed_restart_when_the_next_request_comes_then_the_camera_restarts() {
+        let calls = controller(FakeHost::new(true, None));
+        let (_store, mut commands, _) = running_call(&calls, camera_state(CallCamera::On));
+        let sender = command_sender(&calls);
+        let held: Vec<_> = (0..3).map(|_| sender.try_reserve().unwrap()).collect();
+        assert_eq!(
+            calls.set_video_quality(VideoQuality::P720),
+            Err(CallError::Busy)
+        );
+        assert!(calls.restart_owed());
+        drop(held);
+
+        // The core restarts when the value is the same but a restart is owed.
+        assert!(calls.restart_owed());
+        assert_eq!(calls.set_video_quality(VideoQuality::P720), Ok(()));
+        assert_eq!(waiting_cameras(&mut commands), vec![false, true]);
+        assert!(!calls.restart_owed());
+
+        let calls = controller(FakeHost::new(true, None));
+        let (_store, mut commands, _) = running_call(&calls, camera_state(CallCamera::On));
+        let sender = command_sender(&calls);
+        let held: Vec<_> = (0..3).map(|_| sender.try_reserve().unwrap()).collect();
+        assert_eq!(calls.restart_camera(), Err(CallError::Busy));
+        drop(held);
+        let _ = calls.inner.state.send_if_modified(|state| {
+            if let CallState::Active { camera, .. } = state {
+                *camera = CallCamera::Off;
+            }
+            true
+        });
+        assert_eq!(calls.restart_camera(), Ok(()));
+        assert!(!calls.restart_owed(), "a camera that is off owes nothing");
+        assert_eq!(waiting_cameras(&mut commands), Vec::<bool>::new());
+    }
+
+    /// GIVEN a device change during a running call WHEN the task reads the
+    /// `changed()` notice THEN exactly one `SetDevices` with the new choice
+    /// is in the worker queue. `changed()` marks the value seen, so the
+    /// choice must be read from the receiver and not by `has_changed()`.
+    #[tokio::test]
+    async fn given_a_device_change_when_the_task_reads_the_notice_then_the_worker_gets_it() {
+        let fixture = test_call(
+            no_admission(),
+            Arc::new(Flags::default()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let (mut call, mut to_worker) = (fixture.call, fixture.to_worker);
+        call.devices_seen.mark_changed();
+        call.devices_seen.borrow_and_update();
+        let choice = DeviceChoice {
+            recording: Some("mic-2".to_owned()),
+            playout: Some("spk-2".to_owned()),
+            camera: None,
+        };
+
+        call.devices.send_replace(Some(choice));
+        time::timeout(Duration::from_secs(5), call.devices_seen.changed())
+            .await
+            .expect("the notice comes")
+            .expect("the channel is open");
+        call.devices_changed().unwrap();
+
+        let sent: Vec<ToWorker> = std::iter::from_fn(|| to_worker.try_recv().ok()).collect();
+        assert_eq!(
+            sent,
+            vec![ToWorker::SetDevices {
+                recording: Some("mic-2".to_owned()),
+                playout: Some("spk-2".to_owned()),
+                camera: None,
+            }]
+        );
+        assert!(call.unsent_devices.is_none(), "nothing waits for a retry");
+    }
+
+    fn deafen_pair(user: usize) -> (OwnedUserId, OwnedDeviceId) {
+        (
+            OwnedUserId::try_from(format!("@u{user}:example.org")).unwrap(),
+            owned_device_id!("D"),
+        )
+    }
+
+    /// GIVEN waiting hints WHEN more are queued THEN the recipients are
+    /// joined, capped at `MAX_CALL_MEMBERS`, and the newest content wins.
+    #[test]
+    fn given_deafen_hints_when_queued_then_recipients_join_and_the_newest_content_wins() {
+        let mut job = DeafenJob::default();
+        job.merge(
+            vec![deafen_pair(1), deafen_pair(2)],
+            serde_json::json!({ "seq": 1 }),
+        );
+        job.merge(
+            vec![deafen_pair(2), deafen_pair(3)],
+            serde_json::json!({ "seq": 2 }),
+        );
+        let (recipients, content) = job.take().expect("a batch waits");
+        assert_eq!(recipients.len(), 3);
+        assert_eq!(content, serde_json::json!({ "seq": 2 }));
+        assert!(job.take().is_none(), "the job is empty after a take");
+
+        let many: Vec<_> = (0..MAX_CALL_MEMBERS + 5).map(deafen_pair).collect();
+        job.merge(many.clone(), serde_json::json!({ "seq": 3 }));
+        job.merge(vec![deafen_pair(1000)], serde_json::json!({ "seq": 4 }));
+        let (recipients, content) = job.take().unwrap();
+        assert_eq!(recipients.len(), MAX_CALL_MEMBERS);
+        assert!(!recipients.contains(&deafen_pair(1000)));
+        assert_eq!(content, serde_json::json!({ "seq": 4 }));
+
+        job.merge(Vec::new(), serde_json::json!({ "seq": 5 }));
+        assert!(job.take().is_none(), "no recipients, no send");
+    }
+
+    /// A fake deafen send that records its batches and waits for a permit.
+    struct FakeDeafen {
+        started: Arc<AtomicUsize>,
+        batches: Arc<Mutex<Vec<(usize, serde_json::Value)>>>,
+        gate: Arc<tokio::sync::Semaphore>,
+    }
+
+    fn fake_deafen() -> (FakeDeafen, DeafenSend) {
+        let fake = FakeDeafen {
+            started: Arc::new(AtomicUsize::new(0)),
+            batches: Arc::default(),
+            gate: Arc::new(tokio::sync::Semaphore::new(0)),
+        };
+        let (started, batches, gate) = (
+            fake.started.clone(),
+            fake.batches.clone(),
+            fake.gate.clone(),
+        );
+        let send: DeafenSend = Arc::new(move |recipients, content| {
+            let (started, batches, gate) = (started.clone(), batches.clone(), gate.clone());
+            Box::pin(async move {
+                plain(&batches).push((recipients.len(), content));
+                started.fetch_add(1, Ordering::SeqCst);
+                let _ = gate.acquire().await.map(|permit| permit.forget());
+            })
+        });
+        (fake, send)
+    }
+
+    async fn wait_for_sends(started: &AtomicUsize, count: usize) {
+        time::timeout(Duration::from_secs(5), async {
+            while started.load(Ordering::SeqCst) < count {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the send starts");
+    }
+
+    /// GIVEN a send that is blocked WHEN hints are queued THEN `queue`
+    /// returns at once, and the next send carries all recipients and the
+    /// newest content; WHEN the call stops THEN the stop waits for the send.
+    #[tokio::test]
+    async fn given_a_blocked_deafen_send_when_hints_are_queued_then_the_loop_does_not_wait() {
+        let (fake, send) = fake_deafen();
+        let mut sender = DeafenSender::new(send);
+        sender.queue(vec![deafen_pair(1)], serde_json::json!({ "seq": 1 }));
+        wait_for_sends(&fake.started, 1).await;
+
+        // The first send is blocked; these calls return at once.
+        sender.queue(vec![deafen_pair(2)], serde_json::json!({ "seq": 2 }));
+        sender.queue(vec![deafen_pair(3)], serde_json::json!({ "seq": 3 }));
+        assert_eq!(fake.started.load(Ordering::SeqCst), 1);
+
+        fake.gate.add_permits(1);
+        wait_for_sends(&fake.started, 2).await;
+        assert_eq!(
+            plain(&fake.batches)[1],
+            (2, serde_json::json!({ "seq": 3 })),
+            "one send with both recipients and the newest content"
+        );
+
+        // The stop waits for the send that runs, and never aborts it.
+        let mut stopping = Box::pin(sender.stop_and_join());
+        assert!(
+            time::timeout(Duration::from_millis(100), &mut stopping)
+                .await
+                .is_err(),
+            "the stop waits for the running send"
+        );
+        fake.gate.add_permits(1);
+        time::timeout(Duration::from_secs(5), stopping)
+            .await
+            .expect("the task ends");
+    }
+
+    /// GIVEN a pending hint WHEN the call stops THEN the task ends and the
+    /// hint is not sent.
+    #[tokio::test]
+    async fn given_a_pending_deafen_hint_when_the_call_stops_then_the_task_ends_unsent() {
+        let (fake, send) = fake_deafen();
+        let mut sender = DeafenSender::new(send);
+        sender.queue(vec![deafen_pair(1)], serde_json::json!({ "seq": 1 }));
+        wait_for_sends(&fake.started, 1).await;
+        sender.queue(vec![deafen_pair(2)], serde_json::json!({ "seq": 2 }));
+
+        fake.gate.add_permits(1);
+        time::timeout(Duration::from_secs(5), sender.stop_and_join())
+            .await
+            .expect("the task ends");
+        assert_eq!(
+            fake.started.load(Ordering::SeqCst),
+            1,
+            "the hint is dropped"
+        );
+        assert!(sender.task.is_none());
+
+        // After the stop a new hint starts nothing.
+        sender.queue(vec![deafen_pair(3)], serde_json::json!({ "seq": 3 }));
+        assert!(sender.task.is_none());
     }
 
     /// GIVEN a video effect that waits for room in the worker queue WHEN the
@@ -9013,6 +9469,7 @@ mod tests {
             microphone: watch::channel(None).0,
             video_effect: watch::channel(None).0,
             video_quality: watch::channel(None).0,
+            restart_owed: AtomicBool::new(false),
             task: None,
         });
     }
@@ -9550,6 +10007,7 @@ mod tests {
             video_effect: call.video_effect.clone(),
             video_quality: call.video_quality.clone(),
             devices: call.devices.clone(),
+            restart_owed: AtomicBool::new(false),
             task: None,
         });
         run_call(
@@ -9790,6 +10248,7 @@ mod tests {
             video_effect: watch::channel(None).0,
             video_quality: watch::channel(None).0,
             devices: watch::channel(None).0,
+            restart_owed: AtomicBool::new(false),
             task: None,
         });
         calls.inner.publish(state);
