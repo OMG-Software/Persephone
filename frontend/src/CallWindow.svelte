@@ -1,6 +1,7 @@
 <script module lang="ts">
   import { callVideoFrame } from './bridge';
-  import { reportFullscreen, toggleFullscreen } from './fullscreen';
+  import { FullscreenReporter, toggleFullscreen } from './fullscreen';
+  import { GainSender } from './callGain';
   import { VideoFetcher } from './video';
 
   // One fetcher for the window's tiles, as in CallVideo.svelte.
@@ -163,31 +164,40 @@
 
   // The gain goes with the call's own automatic level flag, read from the
   // newest status when the slider moves, never from an older copy.
-  async function setGain(gain: number) {
-    gainDraft = gain;
-    const mine = ++request;
-    try {
-      const next = await callMicrophone(status.autoLevel, gain);
-      if (gainDraft === gain) gainDraft = null;
-      if (mine === request) take(next);
-    } catch {
-      if (gainDraft === gain) gainDraft = null;
-      failure = MIC_GAIN_CHANGE_TEXT;
+  // One send at a time: the newest chosen gain is the one the call uses and
+  // the profile saves. The draft shows the chosen value while sends wait.
+  let gainRequest = 0;
+  const gainSender = new GainSender(
+    (gain) => callMicrophone(status.autoLevel, gain),
+    (next, newest) => {
+      if (newest && gainRequest === request) take(next);
+    },
+    (failed) => {
+      gainDraft = null;
+      if (failed) failure = MIC_GAIN_CHANGE_TEXT;
     }
+  );
+  function setGain(gain: number) {
+    gainDraft = gain;
+    gainRequest = ++request;
+    gainSender.set(gain);
   }
 
   // The element that fills the screen, if any (full screen of a screen
   // share). The page learns of a change from the browser, also after Escape
   // or when the share ends.
+  // Made on mount: the page has no document while it renders for a test.
+  let fullscreenReporter: FullscreenReporter | null = null;
   let fullscreenKey = $state<string | null>(null);
   function syncFullscreen() {
     const tile = document.fullscreenElement;
     fullscreenKey = tile instanceof HTMLElement ? (tile.dataset.cell ?? null) : null;
     // The host turns the window full screen on Windows; Escape, the exit
     // button and the end of the share all come here and send false.
-    void reportFullscreen(document, setCallFullscreen);
+    fullscreenReporter?.report();
   }
   onMount(() => {
+    fullscreenReporter = new FullscreenReporter(document, setCallFullscreen);
     document.addEventListener('fullscreenchange', syncFullscreen);
     return () => document.removeEventListener('fullscreenchange', syncFullscreen);
   });
@@ -561,7 +571,7 @@
             step={MIC_GAIN_STEP}
             value={gain}
             aria-valuetext={micGainText(gain)}
-            onchange={(event) => void setGain(micGainValue(Number(event.currentTarget.value)))}
+            onchange={(event) => setGain(micGainValue(Number(event.currentTarget.value)))}
           />
           <output class="note">{micGainText(gain)}</output>
         </label>
