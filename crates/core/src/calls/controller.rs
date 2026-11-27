@@ -115,7 +115,9 @@ const UNSENT_RETRY: Duration = Duration::from_millis(200);
 
 /// Worker queue places that a restart of the Join's camera holds before its
 /// first command (`CallWorkerLink::hold_places`): the off, the devices, the
-/// resolution, the video effect and the on.
+/// resolution, the video effect and the on. A camera-on reads the device
+/// choice once (`settings_before_camera`), so it sends one `SetDevices` at
+/// most.
 const JOIN_RESTART_ROOM: usize = 5;
 
 /// Most remote keys of one member waiting for room in the worker queue: every
@@ -5158,8 +5160,14 @@ impl Call {
     /// not read yet replaced it (ADR-0059). A full queue keeps the choice
     /// for a retry.
     fn send_devices(&mut self) -> Result<(), EndReason> {
+        take_newer_choice(&mut self.devices_seen, &mut self.unsent_devices);
+        self.apply_unsent_devices()
+    }
+
+    /// Sends the waiting device choice as it is, without reading a newer
+    /// one. A full queue keeps it for a retry.
+    fn apply_unsent_devices(&mut self) -> Result<(), EndReason> {
         let mut pending = self.unsent_devices.take();
-        take_newer_choice(&mut self.devices_seen, &mut pending);
         let sent = self.apply_devices(&mut pending);
         self.unsent_devices = pending;
         sent
@@ -5173,10 +5181,14 @@ impl Call {
     /// goes first. A choice that changes only the microphone or speaker goes
     /// last and may wait for room (its retry sends it), so it never takes
     /// the room that the resolution and the effect need: the camera starts
-    /// on the device that the worker has. When a new camera, resolution or
-    /// effect still finds the queue full, the call ends, as it does when the
-    /// camera command itself finds the queue full. The camera command holds
-    /// its own place first (`hold_camera_place`), so these never take it.
+    /// on the device that the worker has. The device choice is read once,
+    /// at the start: a choice that comes later waits for the task's devices
+    /// arm, so one camera-on sends one `SetDevices` at most, and a Join
+    /// restart fits its held places ([`JOIN_RESTART_ROOM`]). When a new
+    /// camera, resolution or effect still finds the queue full, the call
+    /// ends, as it does when the camera command itself finds the queue full.
+    /// The camera command holds its own place first (`hold_camera_place`),
+    /// so these never take it.
     fn settings_before_camera(&mut self, inner: &Inner) -> Result<(), EndReason> {
         take_newer_choice(&mut self.devices_seen, &mut self.unsent_devices);
         let new_camera = |call: &Self| {
@@ -5185,7 +5197,7 @@ impl Call {
                 .is_some_and(|(_, choice)| choice.camera != call.worker_camera)
         };
         if new_camera(self) {
-            self.send_devices()?;
+            self.apply_unsent_devices()?;
             if new_camera(self) {
                 return Err(EndReason::WorkerStopped);
             }
@@ -5196,7 +5208,7 @@ impl Call {
             return Err(EndReason::WorkerStopped);
         }
         self.effect_before_camera(inner)?;
-        self.send_devices()
+        self.apply_unsent_devices()
     }
 
     /// The user changed the microphone level or gain: the worker applies it
@@ -9647,6 +9659,79 @@ mod tests {
                 .any(|message| matches!(message, ToWorker::SetCamera { .. })),
             "no camera-on goes before the new camera: {sent:?}"
         );
+    }
+
+    /// GIVEN a Join restart with exactly `JOIN_RESTART_ROOM` free places and
+    /// a new camera, a send resolution and an effect that all wait WHEN the
+    /// restart runs THEN each command gets a place, in the order off,
+    /// devices, resolution, effect, on. GIVEN a choice of the microphone
+    /// only instead THEN it goes after the effect, still within the places.
+    /// The device choice is read once, so a restart sends one `SetDevices`.
+    #[tokio::test]
+    async fn given_every_setting_waiting_then_the_join_restart_fits_its_places() {
+        let fixture = test_call(
+            no_admission(),
+            Arc::new(Flags::default()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let inner = controller(FakeHost::new(true, None)).inner.clone();
+        let (mut call, mut to_worker) = (fixture.call, fixture.to_worker);
+        call.join_camera = true;
+        call.join_quality = VideoQuality::P480;
+        call.join_device = Some("cam-1".to_owned());
+        call.worker_camera = Some("cam-1".to_owned());
+        call.camera_wanted.store(true, Ordering::SeqCst);
+        let effect = VideoEffect {
+            background: persephone_call_protocol::Background::None,
+            filter: persephone_call_protocol::ColourFilter::Warm,
+        };
+        let choice = |camera: &str| {
+            Some((
+                Instant::now(),
+                DeviceChoice {
+                    recording: Some("mic-2".to_owned()),
+                    playout: None,
+                    camera: Some(camera.to_owned()),
+                },
+            ))
+        };
+        let commands = |to_worker: &mut mpsc::Receiver<ToWorker>| {
+            std::iter::from_fn(|| to_worker.try_recv().ok())
+                .filter_map(|message| match message {
+                    ToWorker::SetCamera { on: false, .. } => Some("off"),
+                    ToWorker::SetDevices { .. } => Some("devices"),
+                    ToWorker::SetVideoQuality { .. } => Some("quality"),
+                    ToWorker::SetVideoEffect { .. } => Some("effect"),
+                    ToWorker::SetCamera { on: true, .. } => Some("on"),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        // A new camera goes first.
+        fill_queue(&call, &mut to_worker, JOIN_RESTART_ROOM);
+        call.unsent_devices = choice("cam-2");
+        call.unsent_effect = Some((Instant::now(), effect));
+        call.video_quality.send_replace(Some(VideoQuality::P1440));
+        assert_eq!(call.restart_join_camera(&inner), Ok(()));
+        assert_eq!(
+            commands(&mut to_worker),
+            ["off", "devices", "quality", "effect", "on"]
+        );
+        assert_eq!(call.join_restart_due, None);
+        assert!(call.unsent_devices.is_none());
+
+        // A choice of the microphone only goes after the effect.
+        fill_queue(&call, &mut to_worker, JOIN_RESTART_ROOM);
+        call.unsent_devices = choice("cam-2");
+        call.unsent_effect = Some((Instant::now(), effect));
+        call.video_quality.send_replace(Some(VideoQuality::P720));
+        assert_eq!(call.restart_join_camera(&inner), Ok(()));
+        assert_eq!(
+            commands(&mut to_worker),
+            ["off", "quality", "effect", "devices", "on"]
+        );
+        assert!(call.unsent_devices.is_none());
     }
 
     /// GIVEN a restart of the Join's camera WHEN an off was accepted while
