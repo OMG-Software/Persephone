@@ -133,13 +133,18 @@ keeps its size until it restarts.
   while the group has another mode. So Auto and 1440p never open a 4K mode
   when a fast smaller mode exists, but a 4K mode at 30 frames a second
   beats a 1080p mode at 5. When every mode of the group is larger, the
-  smallest opens.
+  smallest opens. Otherwise the choice in the group is the one that the
+  next point gives for Linux V4L2.
 * Linux V4L2 takes raw YUYV, NV12 and I420 only, up to 2560x1440. MJPEG is
   refused. YUYV is converted to I420 only for the pictures that the 15
   frames a second limit lets through, not in the capture loop. The worker reads each mode's frame intervals and asks the driver
   for the chosen rate, at most 30. Among modes of at least 15 frames a second,
-  it picks the smallest that covers the tier, else the one that reaches the
-  highest tier up to the target by its short side, then the largest. An
+  it picks the mode that reaches the highest tier up to the target by its
+  short side, then the one that sends the largest picture in that tier's
+  box, then the faster one counted up to 15 frames a second, then the
+  smallest capture. So at 480p a 640x480 mode beats 1280x960, which sends
+  the same 640x480 at about 4 times the decoding, and at 1080p 1920x1080
+  beats 1440x1080, which sends less. An
   unknown rate counts as fast enough; a known rate below 1 frame a second
   counts as 1, so it is slow. Buffers are bounded: at most 16 MiB each and
   at most 16 buffers.
