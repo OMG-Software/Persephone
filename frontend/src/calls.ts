@@ -128,7 +128,9 @@ export const IDLE_CALL: CallStatus = {
   ringDeclined: false,
   deviceChange: null,
   effectRefused: false,
-  mirror: true
+  mirror: true,
+  autoLevel: true,
+  micGain: 100
 };
 
 /** This account is in a call, or joining one. */
@@ -476,6 +478,11 @@ export const UNDEAFEN_LABEL = 'Undeafen';
 /** The accessible description of the deafen button: what it does besides silencing the call. */
 export const DEAFEN_TEXT = 'Turns off all call sound and mutes your microphone';
 export const VOLUME_SAVE_TEXT = 'The call volume could not be saved.';
+/** The note when the call window could not change the microphone gain. */
+export const MIC_GAIN_CHANGE_TEXT = 'The microphone gain could not be changed.';
+/** The full-screen button of a screen share: its name and title (ADR-0060). */
+export const FULLSCREEN_LABEL = 'Full screen';
+export const EXIT_FULLSCREEN_LABEL = 'Exit full screen';
 
 /**
  * A slider value as a volume: a whole number from 0 to 100. Anything that is

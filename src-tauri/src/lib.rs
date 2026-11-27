@@ -2108,6 +2108,25 @@ async fn close_call_window<R: Runtime>(app: AppHandle<R>) -> Result<(), String> 
     Ok(())
 }
 
+/// Puts the call window in full screen, or takes it out (ADR-0060). Only the
+/// call window is addressed, by its fixed label. The page asks when an
+/// element of it enters or leaves full screen. On Windows wry leaves the web
+/// view's full-screen event unhandled, so the host turns the window full
+/// screen. On macOS and Linux the web view does it itself, and a second
+/// request would fight it. A closed call window is not an error.
+#[tauri::command]
+async fn set_call_fullscreen<R: Runtime>(app: AppHandle<R>, on: bool) -> Result<(), String> {
+    #[cfg(windows)]
+    if let Some(window) = app.get_webview_window(CALL_WINDOW) {
+        window
+            .set_fullscreen(on)
+            .map_err(|_| UNAVAILABLE.to_string())?;
+    }
+    #[cfg(not(windows))]
+    let _ = (app, on);
+    Ok(())
+}
+
 /// Saves the call microphone, speaker and camera as device IDs; null is the
 /// system default. The core checks the IDs again.
 #[tauri::command]
@@ -2637,6 +2656,7 @@ pub fn configure<R: Runtime>(
             call_device_test_status,
             open_call_window,
             close_call_window,
+            set_call_fullscreen,
             call_window_ready
         ])
         .on_page_load(|webview, payload| {

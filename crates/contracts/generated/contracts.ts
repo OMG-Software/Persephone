@@ -290,7 +290,20 @@ effectRefused: boolean,
  * call device record. True when idle, and in a status from before the
  * choice existed.
  */
-mirror: boolean, };
+mirror: boolean, 
+/**
+ * The automatic microphone level of the call (ADR-0062): the saved
+ * choice at the join, then each change. True when idle, and in a status
+ * from before the call window set the gain.
+ */
+autoLevel: boolean, 
+/**
+ * The manual microphone gain of the call in percent, 0 to
+ * [`CALL_MIC_GAIN_MAX`] in steps of [`CALL_MIC_GAIN_STEP`]
+ * (ADR-0062): the saved choice at the join, then each change. 100 when
+ * idle, and in a status from before the call window set the gain.
+ */
+micGain: number, };
 
 export type CallIntent = "audio" | "video";
 

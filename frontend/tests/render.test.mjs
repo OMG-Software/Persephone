@@ -352,6 +352,36 @@ test('GIVEN a call with a camera on and one off WHEN the call window renders THE
   assert.doesNotMatch(idle, /role="meter"|class="video-tile/);
 });
 
+test('GIVEN a call with a screen share WHEN the call window renders THEN the gain slider sits below the volume and only the share has a full screen button', async () => {
+  const { default: CallWindow } = await vite.ssrLoadModule('/src/CallWindow.svelte');
+  const person = (userId, deviceId, sharing) => ({ userId, deviceId, speaking: false, reachable: true, keyed: true, sharing, muted: false });
+  const initialStatus = {
+    phase: 'active', roomId: '!r:s', muted: false, deafened: false, volume: 60, ended: null, joinError: null,
+    camera: 'off', screen: 'off', ringDeclined: false, deviceChange: null, mirror: true, autoLevel: false, micGain: 250,
+    participants: [person('@a:s', 'A', true)],
+    video: [
+      { tile: 1, participant: { userId: '@a:s', deviceId: 'A' }, own: false, stream: 2 },
+      { tile: 5, participant: { userId: '@a:s', deviceId: 'A' }, own: false, stream: 3 }
+    ]
+  };
+  const { body: html } = render(CallWindow, { props: { initialStatus } });
+  const volume = html.indexOf('class="call-volume"');
+  const gain = html.indexOf('class="call-gain"');
+  assert.ok(volume >= 0 && gain > volume, 'the gain comes right after the volume');
+  assert.match(html, /class="call-levels"/);
+  const gainHtml = html.slice(gain, html.indexOf('</label>', gain));
+  assert.match(gainHtml, /Microphone gain/);
+  assert.match(gainHtml, /max="400"/);
+  assert.match(gainHtml, /step="5"/);
+  assert.match(gainHtml, /value="250"/);
+  assert.match(gainHtml, /aria-valuetext="250%"/);
+  assert.match(gainHtml, /<output class="note">250%<\/output>/);
+  // One full screen button, for the share only, beside the feed button.
+  assert.equal((html.match(/class="secondary call-fullscreen"/g) ?? []).length, 1);
+  assert.match(html, /aria-label="Full screen" title="Full screen"/);
+  assert.doesNotMatch(html, /<button[^>]*call-feed[^>]*>(?:(?!<\/button>)[\s\S])*call-fullscreen/);
+});
+
 test('GIVEN the technical details panel WHEN it renders before a reading THEN it waits, has a close button and shows no table', async () => {
   const { default: CallStats } = await vite.ssrLoadModule('/src/CallStats.svelte');
   const { body } = render(CallStats, { props: { onclose() {} } });

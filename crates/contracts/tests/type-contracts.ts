@@ -275,7 +275,7 @@ void bigintFilter;
 void unknownAttachment;
 void unknownSync;
 void missingHealth;
-const idleCall: CallStatus = { phase: "idle", roomId: null, muted: false, deafened: false, volume: 100, participants: [], ended: null, joinError: null, camera: "off", screen: "off", video: [], ringDeclined: false, deviceChange: null, effectRefused: false, mirror: true };
+const idleCall: CallStatus = { phase: "idle", roomId: null, muted: false, deafened: false, volume: 100, participants: [], ended: null, joinError: null, camera: "off", screen: "off", video: [], ringDeclined: false, deviceChange: null, effectRefused: false, mirror: true, autoLevel: true, micGain: 100 };
 const readyCall: CallReadiness = { available: false, reason: "no_call_server", activeMembers: 0 };
 // @ts-expect-error a status carries codes, never a token or URL
 const callWithToken: CallStatus = { ...idleCall, token: "secret" };

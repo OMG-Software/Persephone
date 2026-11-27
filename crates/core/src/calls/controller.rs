@@ -52,8 +52,9 @@ use matrix_sdk::{
     },
 };
 use persephone_call_protocol::{
-    CameraState, FailureCode, FrameKeyMsg, FromWorker, MAX_VOLUME_PERCENT, ScreenState, ToWorker,
-    TurnServer, VIDEO_TILES, VideoEffect, VideoQuality, valid_mic_gain,
+    CameraState, DEFAULT_MIC_GAIN_PERCENT, FailureCode, FrameKeyMsg, FromWorker,
+    MAX_VOLUME_PERCENT, ScreenState, ToWorker, TurnServer, VIDEO_TILES, VideoEffect, VideoQuality,
+    valid_mic_gain,
 };
 use persephone_contracts::{
     CALL_PARTICIPANTS_MAX, CallCamera, CallDeviceChange, CallDeviceTestKind, CallDeviceTestState,
@@ -241,6 +242,9 @@ pub enum CallState {
         effect_refused: bool,
         /// The page mirrors the own preview (ADR-0068).
         mirror: bool,
+        /// The microphone settings of the call (ADR-0062): the saved ones at
+        /// the join, then each change.
+        microphone: MicSettings,
     },
     Ended {
         room_id: OwnedRoomId,
@@ -430,6 +434,8 @@ struct View {
     deafened: bool,
     /// 0 to [`MAX_VOLUME_PERCENT`].
     volume: u8,
+    /// The automatic microphone level and the gain in use (ADR-0062).
+    microphone: MicSettings,
     /// Other devices only.
     members: Vec<ActiveMember>,
     speaking: HashSet<String>,
@@ -491,6 +497,7 @@ impl View {
             muted: false,
             deafened: false,
             volume: MAX_VOLUME_PERCENT,
+            microphone: MicSettings::default(),
             members: Vec::new(),
             speaking: HashSet::new(),
             mic_muted: HashSet::new(),
@@ -694,6 +701,21 @@ impl View {
             return Applied::Same;
         }
         self.volume = volume;
+        Applied::Changed
+    }
+
+    /// Starts the view with the saved microphone settings.
+    fn with_microphone(mut self, microphone: MicSettings) -> Self {
+        self.microphone = microphone;
+        self
+    }
+
+    /// The microphone settings changed; the worker does not answer them.
+    fn set_microphone(&mut self, microphone: MicSettings) -> Applied {
+        if self.microphone == microphone {
+            return Applied::Same;
+        }
+        self.microphone = microphone;
         Applied::Changed
     }
 
@@ -1012,6 +1034,7 @@ impl View {
             device_change: self.device_change,
             effect_refused: self.effect_refused,
             mirror: self.mirror,
+            microphone: self.microphone,
         }
     }
 }
@@ -1320,9 +1343,20 @@ struct RunHandle {
 /// 5; `set_microphone` refuses any other value, so a value in a channel is
 /// always valid.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct MicSettings {
-    auto_level: bool,
-    gain: u16,
+pub struct MicSettings {
+    pub auto_level: bool,
+    pub gain: u16,
+}
+
+impl Default for MicSettings {
+    /// What the device record gives when nothing is saved: the automatic
+    /// level on and a gain of 100 percent.
+    fn default() -> Self {
+        Self {
+            auto_level: true,
+            gain: DEFAULT_MIC_GAIN_PERCENT,
+        }
+    }
 }
 
 /// A microphone, speaker and camera choice; `None` is the system default.
@@ -2224,6 +2258,10 @@ impl CallController {
             view: View::new(room_id.to_owned(), sfu.url, scope.video)
                 .with_video_streams(video_streams)
                 .with_volume(scope.devices.volume())
+                .with_microphone(MicSettings {
+                    auto_level: scope.devices.auto_level(),
+                    gain: scope.devices.mic_gain(),
+                })
                 .with_mirror(own.mirror),
             changes,
             incoming,
@@ -4877,6 +4915,14 @@ impl Call {
         })
     }
 
+    /// The page sees the new microphone settings at once (the worker does
+    /// not answer them). Only a valid gain is shown.
+    fn show_microphone(&mut self, inner: &Inner, settings: MicSettings) {
+        if valid_mic_gain(settings.gain) && self.view.set_microphone(settings) == Applied::Changed {
+            self.publish(inner);
+        }
+    }
+
     /// Publishes the view. The check for an unread screen command and the
     /// page write are one step under the lock that `set_screen` holds while
     /// it shows a command and counts it. While the handle has a screen
@@ -5128,6 +5174,7 @@ impl Call {
                     let settings = *microphone.borrow_and_update();
                     if let Some(settings) = settings {
                         self.microphone_changed(settings)?;
+                        self.show_microphone(inner, settings);
                     }
                 }
                 Ok(()) = self.video_seen.changed() => {
@@ -6465,6 +6512,28 @@ mod tests {
         assert_eq!(audio.set_muted(true), vec![mic(true)]);
         assert!(audio.deafened);
         assert_eq!(audio.set_deafened(false), vec![ears(false), mic(true)]);
+    }
+
+    /// GIVEN a view WHEN the microphone settings change THEN the page state
+    /// shows them, and the same settings again change nothing.
+    #[test]
+    fn given_microphone_changes_then_the_view_shows_them() {
+        let mut view = view();
+        view.connected = true;
+        let CallState::Active { microphone, .. } = view.state() else {
+            panic!("active");
+        };
+        assert_eq!(microphone, MicSettings::default());
+        let louder = MicSettings {
+            auto_level: false,
+            gain: 250,
+        };
+        assert_eq!(view.set_microphone(louder), Applied::Changed);
+        assert_eq!(view.set_microphone(louder), Applied::Same);
+        let CallState::Active { microphone, .. } = view.state() else {
+            panic!("active");
+        };
+        assert_eq!(microphone, louder);
     }
 
     /// GIVEN a view WHEN the worker reports deafened, or the volume moves
@@ -9740,6 +9809,7 @@ mod tests {
             device_change: None,
             effect_refused: false,
             mirror: true,
+            microphone: MicSettings::default(),
         }
     }
 
@@ -9817,6 +9887,7 @@ mod tests {
             device_change: None,
             effect_refused: false,
             mirror: true,
+            microphone: MicSettings::default(),
         });
         assert!(calls.video_picture(0, 0, store.stream(0)).is_some());
         assert_eq!(calls.set_camera(false), Ok(()));
