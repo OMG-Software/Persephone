@@ -299,6 +299,7 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
         sound_retries: std::collections::VecDeque::new(),
         camera: None,
         stalled: None,
+        waiting_grant: None,
         gate: CameraGate::new(own_index),
         camera_failed: camera_failed_tx,
         open_tx,
@@ -1187,6 +1188,11 @@ struct Call<'a> {
     /// stalled camera). Its frames are already revoked. No new camera opens
     /// while it runs.
     stalled: Option<camera::Capture>,
+    /// The grant of a camera-on that came while an open was in flight (on the
+    /// Linux portal path it holds the new portal remote). A restart of that
+    /// open (`Completion::Restart`) opens with it; any other end of the open
+    /// drops it.
+    waiting_grant: Option<camera::Grant>,
     /// Decides what an open request and its completion do. It also holds the
     /// key index every own track encrypts with.
     gate: CameraGate,
@@ -2074,8 +2080,10 @@ impl Call<'_> {
     /// report now: `On` when the camera already runs, `Unavailable` when the
     /// open could not start, nothing while an open is in flight.
     ///
-    /// `grant` is what the camera-on brought. An open takes it; a camera-on
-    /// that opens nothing drops it, which closes its portal remote.
+    /// `grant` is what the camera-on brought. An open takes it. While an open
+    /// is in flight it waits in `waiting_grant` for a restart of that open
+    /// (ADR-0070); any other camera-on that opens nothing drops it, which
+    /// closes its portal remote.
     fn begin_camera(&mut self, grant: camera::Grant) -> Option<CameraState> {
         // An effect that cannot run keeps the camera off: the camera never
         // sends the background that the user chose to hide (ADR-0068).
@@ -2092,9 +2100,15 @@ impl Call<'_> {
         }
         let generation = match self.gate.request_on(self.camera.is_some()) {
             OnRequest::AlreadyOn => return Some(CameraState::On),
-            OnRequest::Pending => return None,
+            OnRequest::Pending => {
+                // Kept for a restart of the open in flight; a newer one
+                // replaces it.
+                self.waiting_grant = Some(grant);
+                return None;
+            }
             OnRequest::Start(generation) => generation,
         };
+        self.waiting_grant = None;
         // The quality at this start: a later `SetVideoQuality` waits for the
         // next one (ADR-0070).
         let quality = self.video_quality;
@@ -2166,6 +2180,11 @@ impl Call<'_> {
     ) -> Result<(), Closed> {
         let generation = done.generation;
         let decision = self.gate.complete(generation, done.result.is_ok());
+        // The grant that waited goes only to a restart of this open.
+        let waiting = match decision {
+            Completion::Release => None,
+            _ => self.waiting_grant.take(),
+        };
         match (decision, done.result) {
             (Completion::Release, result) => {
                 if let Ok(opened) = result {
@@ -2193,7 +2212,7 @@ impl Call<'_> {
                 if let Ok(opened) = result {
                     self.release_capture(opened.capture).await;
                 }
-                match self.begin_camera(camera::Grant::default()) {
+                match self.begin_camera(waiting.unwrap_or_default()) {
                     Some(state) => self.output.send(FromWorker::Camera { state }).await,
                     None => Ok(()),
                 }
