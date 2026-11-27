@@ -294,7 +294,8 @@ mod tests {
         assert!(format_allowed(PixelFormat::I420, 641, 361));
         assert!(format_allowed(PixelFormat::Yuyv, 640, 361));
         assert!(!format_allowed(PixelFormat::Yuyv, 641, 360));
-        assert!(!format_allowed(PixelFormat::Nv12, 1920, 1080));
+        assert!(format_allowed(PixelFormat::Nv12, 1920, 1080));
+        assert!(!format_allowed(PixelFormat::Nv12, 3840, 2160));
     }
 
     /// GIVEN a 4x2 YUYV picture WHEN converted THEN the planes hold the luma
