@@ -147,6 +147,59 @@ after the run. Not covered: a change during a running call, a PulseAudio
 daemon, sound hardware, a device that goes away during a call, the report
 after the last retry of a waiting target, and the native containment gate.
 
+Later change, not run: the follow-up of pull request 111 (one-client rule,
+ADR-0049) changed the child to open its record and playback streams on one
+connection (`pa_threaded_mainloop` and one `pa_context`, as libwebrtc does)
+instead of two `pa_simple` connections, and added
+`given_a_false_claim_of_the_process_id`. The runs above used the earlier
+child and the earlier rule. The changed tests have not run: the VM did not
+answer on 27 November 2026.
+
+### Stream owner on the sound server, 27 November 2026
+
+Source reading only, for the one-client rule of ADR-0049. No run on the
+project's VM, which did not answer.
+
+* PipeWire 1.0.5 (the version on the VM) and `master` as fetched on
+  27 November 2026, from `gitlab.freedesktop.org/pipewire/pipewire`:
+  * `src/modules/module-protocol-pulse/pulse-server.c`,
+    `do_set_client_name`: each PulseAudio client gets its own PipeWire
+    connection from `pipewire-pulse` (`pw_context_connect` with the
+    client's properties).
+  * `src/modules/module-protocol-native.c`, `client_new`: PipeWire sets
+    `pipewire.sec.pid`, `pipewire.sec.uid` and `pipewire.sec.gid` from
+    `SO_PEERCRED` of the connecting socket, which is the `pipewire-pulse`
+    process for a PulseAudio client.
+  * `src/pipewire/impl-client.c`, `check_client_property_update`: every
+    client update of a `pipewire.sec.*` key is refused.
+  * `src/modules/module-protocol-pulse/utils.c`, `get_client_pid`, and
+    `server.c`, `on_connect`: `pipewire-pulse` reads the real peer process
+    ID of a PulseAudio client only for its Flatpak check and does not store
+    it in a property.
+  * `pulse-server.c`, `fill_client_info`: the client info that a PulseAudio
+    client reads carries the PipeWire client's properties, so it shows
+    `pipewire.sec.pid`. `do_get_server_info` names the server
+    `PulseAudio (on PipeWire <version>)`.
+  * `pulse-server.c`, the stream creation commands: the stream's properties
+    start as a copy of the client's, and the stream's own property list is
+    read over them, so `pacat --property=application.process.id=<pid>` sets
+    the stream's claim.
+* Published output: KDE bug 516064 (`bugs.kde.org`) shows
+  `wpctl inspect` of a PulseAudio client on PipeWire 1.4.10 (Chromium,
+  `client.api = "pipewire-pulse"`, `application.process.id = "193"`) with
+  `pipewire.sec.pid = "3242"`, the same number as in its
+  `core.name = "pipewire-john-3242"` and `config.name =
+  "pipewire-pulse.conf"`: the `pipewire-pulse` process, not the application.
+* Conclusion: on PipeWire, `pipewire.sec.pid` of every PulseAudio client
+  names `pipewire-pulse`, so it cannot pick the worker's streams.
+* libwebrtc, `webrtc-sdk/webrtc` at `a545de4` (the commit named by the
+  pinned build tag `webrtc-a545de4`, by its name only), and the `m125` and
+  `m137` release branches:
+  `modules/audio_device/linux/audio_device_pulse_linux.cc` creates one
+  `pa_context` in `InitPulseAudio` and opens `playStream` and `recStream`
+  on it. So the worker's streams come from one sound server client. Not
+  measured in a running call.
+
 ### Earlier runs
 
 Each earlier run was its own run on the same VM, on 24 November 2026, of the

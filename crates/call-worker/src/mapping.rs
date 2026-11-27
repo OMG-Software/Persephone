@@ -196,6 +196,52 @@ pub fn own_streams(
         .collect()
 }
 
+/// The sound server clients of the streams that name this process in
+/// `application.process.id` (Linux, ADR-0049). That ID is the client's own
+/// word, so another program of the user can copy it. The client index is the
+/// server's own. libwebrtc opens its record and playback streams on one
+/// connection, so the call's own streams come from one client: claims from
+/// two clients mean that some are false, and nothing shows which.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Claimants {
+    /// No stream names this process.
+    #[default]
+    None,
+    /// Every stream that names this process comes from this client.
+    One(u32),
+    /// They come from more than one client, or one comes from no client.
+    Several,
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+impl Claimants {
+    /// Adds one more stream that names this process, with the server's
+    /// index of its client. `None` is a stream with no client (a module's
+    /// stream): it cannot be the call's, so its claim is false.
+    pub fn with(self, client: Option<u32>) -> Self {
+        match (self, client) {
+            (Self::None, Some(client)) => Self::One(client),
+            (Self::One(seen), Some(client)) if seen == client => self,
+            _ => Self::Several,
+        }
+    }
+
+    /// The claimants of two listings together (record and playback).
+    pub fn and(self, other: Self) -> Self {
+        match other {
+            Self::None => self,
+            Self::One(client) => self.with(Some(client)),
+            Self::Several => Self::Several,
+        }
+    }
+
+    /// Whether some claim is false. Then no stream may move.
+    pub fn unclear(self) -> bool {
+        self == Self::Several
+    }
+}
+
 /// Whether every stream of `before` is still on the device it was on: the
 /// server shows it again (same index) on the same named device. A stream
 /// whose device was not known before cannot be shown to be kept.
@@ -1184,6 +1230,38 @@ mod tests {
         // are dropped.
         let listing = (0..MAX_OWN_STREAMS as u32 + 5).map(|index| (index, Some(7), None));
         assert_eq!(own_streams(listing, 7, &[]).len(), MAX_OWN_STREAMS);
+    }
+
+    #[test]
+    fn given_claims_from_one_client_then_the_claimants_are_clear() {
+        // GIVEN no claim THEN nobody claims. GIVEN record and playback
+        // streams that all come from client 4 WHEN both listings are joined
+        // THEN they are one client's, and the streams may move.
+        assert_eq!(Claimants::default(), Claimants::None);
+        assert!(!Claimants::None.unclear());
+        let record = Claimants::None.with(Some(4)).with(Some(4));
+        let playback = Claimants::None.with(Some(4));
+        assert_eq!(record.and(playback), Claimants::One(4));
+        assert_eq!(Claimants::None.and(playback), Claimants::One(4));
+        assert_eq!(record.and(Claimants::None), Claimants::One(4));
+        assert!(!record.and(playback).unclear());
+    }
+
+    #[test]
+    fn given_claims_from_two_clients_or_none_then_the_claimants_are_unclear() {
+        // GIVEN a second client WHEN it claims this process THEN some claim
+        // is false, also when the other kind's listing adds it, and nothing
+        // makes it clear again. GIVEN a stream with no client WHEN it claims
+        // this process THEN the claim is false too.
+        let one = Claimants::None.with(Some(4));
+        assert_eq!(one.with(Some(5)), Claimants::Several);
+        assert_eq!(one.and(Claimants::None.with(Some(5))), Claimants::Several);
+        assert_eq!(one.with(Some(5)).with(Some(4)), Claimants::Several);
+        assert_eq!(Claimants::Several.and(Claimants::None), Claimants::Several);
+        assert_eq!(one.and(Claimants::Several), Claimants::Several);
+        assert_eq!(Claimants::None.with(None), Claimants::Several);
+        assert_eq!(one.with(None), Claimants::Several);
+        assert!(one.with(Some(5)).unclear());
     }
 
     fn on(device: &str) -> Vec<OwnStream> {
