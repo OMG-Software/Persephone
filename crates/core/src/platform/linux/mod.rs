@@ -4,7 +4,8 @@
 //! OpenURI portal ([`portal`]), the UI in its own process group and a
 //! memory-capped systemd user scope ([`ui`]), the shared Unix read rules for
 //! a picked file, the media worker under its seccomp allowlist, and the
-//! report of code loaded into Persephone ([`modules`], ADR-0047).
+//! report of code loaded into Persephone ([`modules`], ADR-0047), and the
+//! app menu entry of an AppImage ([`app_menu`], ADR-0072).
 //!
 //! Every service the layer needs fails closed when it is missing: no Secret
 //! Service keeps the profile locked, no display refuses the prompts and
@@ -12,6 +13,7 @@
 //! names: without a systemd user manager, the UI starts with a visible
 //! warning that its memory is not capped.
 
+pub mod app_menu;
 pub mod bus;
 pub mod call;
 pub mod camera_portal;

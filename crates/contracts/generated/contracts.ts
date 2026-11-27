@@ -591,6 +591,10 @@ export type DiagnosticsStatus = { on: boolean, full: boolean,
  */
 failed: boolean, available: boolean, path: string | null, };
 
+export type AppMenuState = "unavailable" | "provided" | "absent" | "added" | "outdated";
+
+export type AppMenuStatus = { state: AppMenuState, };
+
 export type HomeserverFound = { homeserver: string, fromWellKnown: boolean, };
 
 export type NewSession = { deviceId: string, displayName: string | null, };

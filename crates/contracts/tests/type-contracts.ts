@@ -19,6 +19,8 @@ import type {
   CallVideoTile,
   LocalSearchFilters,
   ConnectionHealth,
+  AppMenuState,
+  AppMenuStatus,
   DiagnosticsStatus,
   AttachmentKind,
   SyncMode,
@@ -238,6 +240,12 @@ const logMissingPath: DiagnosticsStatus = { on: false, full: false, failed: fals
 const logMissingFailed: DiagnosticsStatus = { on: true, full: false, available: true, path: null };
 // @ts-expect-error the state names a file only, never its content
 const logWithText: DiagnosticsStatus = { ...logOn, lines: ["x"] };
+const menuAbsent: AppMenuStatus = { state: "absent" };
+const menuStates: AppMenuState[] = ["unavailable", "provided", "absent", "added", "outdated"];
+// @ts-expect-error only the defined app menu states are accepted
+const menuInstalled: AppMenuStatus = { state: "installed" };
+// @ts-expect-error the app menu state names no path
+const menuWithPath: AppMenuStatus = { ...menuAbsent, path: "/home/example/Persephone.AppImage" };
 // @ts-expect-error only the defined module scan states are accepted
 const unknownScan: ModuleScanState = "done";
 // @ts-expect-error only the defined module signatures are accepted
@@ -385,6 +393,10 @@ void logNever;
 void logMissingPath;
 void logMissingFailed;
 void logWithText;
+void menuAbsent;
+void menuStates;
+void menuInstalled;
+void menuWithPath;
 void unknownDeviceChange;
 void levelWithName;
 void testStatus;

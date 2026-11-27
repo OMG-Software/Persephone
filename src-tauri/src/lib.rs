@@ -43,7 +43,7 @@ pub mod launcher;
 
 use core_link::{Band, CoreError, CoreLink, Video};
 use persephone_contracts::{
-    AccountChange, AccountSettings, AccountStatus, AppStatus, CallDeviceTestKind,
+    AccountChange, AccountSettings, AccountStatus, AppMenuStatus, AppStatus, CallDeviceTestKind,
     CallDeviceTestStatus, CallDevices, CallParticipantLevel, CallReadiness, CallRings, CallStats,
     CallStatus, ContactStatus, ConversationStart, DeviceList, DiagnosticsStatus, DisplayName,
     HomeserverFound, ImagePick, ImageView, InviteList, JoinedRoom, NewSessions, NotificationLevel,
@@ -1906,6 +1906,21 @@ async fn set_proxy_setting(core: State<'_, CoreLink>, proxy: Option<String>) -> 
     relay(core.inner(), Call::SetProxySetting { proxy }).await
 }
 
+/// Whether this run can add Persephone to the app menu, and what is there
+/// now (ADR-0072).
+#[tauri::command]
+async fn app_menu_status(core: State<'_, CoreLink>) -> Result<AppMenuStatus, String> {
+    relay(core.inner(), Call::AppMenuStatus {}).await
+}
+
+/// Adds Persephone's app menu entry (after the core's own question) or
+/// removes it; the reply is the new state (ADR-0072). The page names no
+/// path: the core uses the AppImage it runs from.
+#[tauri::command]
+async fn set_app_menu(core: State<'_, CoreLink>, on: bool) -> Result<AppMenuStatus, String> {
+    relay(core.inner(), Call::SetAppMenu { on }).await
+}
+
 /// Whether the diagnostic log is on, and its file (ADR-0058).
 #[tauri::command]
 async fn diagnostics_status(core: State<'_, CoreLink>) -> Result<DiagnosticsStatus, String> {
@@ -2586,6 +2601,8 @@ pub fn configure<R: Runtime>(
             diagnostics_status,
             set_diagnostics,
             diagnostic_records,
+            app_menu_status,
+            set_app_menu,
             call_devices,
             set_call_devices,
             acknowledge_sessions,

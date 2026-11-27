@@ -229,6 +229,32 @@ pub const DIAGNOSTICS: (&str, &str) = (
      Turn on the diagnostic log?",
 );
 
+/// The question before the core adds Persephone to the app menu for the
+/// running AppImage (ADR-0072): caption and message. "No" must be the
+/// default answer. The AppImage path is shown alone on its line, and the
+/// core refused any path with a control or bidirectional formatting
+/// character before it asks.
+pub fn app_menu(place: &crate::app_menu::Place) -> (&'static str, String) {
+    (
+        "Add Persephone to the app menu?",
+        format!(
+            "Persephone can add this AppImage to your app menu. The desktop then \
+             shows Persephone's icon on its windows and in the task manager:\n\n\
+             {appimage}\n\n\
+             Persephone writes {file} to {data}/applications and the icon \
+             {icon} to {data}/icons, for your user only. Windows that are open \
+             now show the icon after Persephone starts again.\n\n\
+             If you move or delete the AppImage, the menu entry stops working. \
+             You can update or remove it in Settings, under This session.\n\n\
+             Add Persephone to the app menu?",
+            appimage = place.appimage,
+            file = crate::app_menu::DESKTOP_FILE,
+            icon = crate::app_menu::ICON_NAME,
+            data = place.data_home,
+        ),
+    )
+}
+
 /// The Save dialog's title for a new recovery key, and the file name it
 /// suggests.
 pub const SAVE_RECOVERY_KEY: (&str, &str) = (

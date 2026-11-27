@@ -46,6 +46,8 @@ fn main() {
             "diagnostics_status",
             "set_diagnostics",
             "diagnostic_records",
+            "app_menu_status",
+            "set_app_menu",
             "call_devices",
             "set_call_devices",
             "register",

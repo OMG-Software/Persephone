@@ -35,6 +35,7 @@
   import RoomTools from './RoomTools.svelte';
   import ConnectionHealth from './ConnectionHealth.svelte';
   import HealthDetails from './HealthDetails.svelte';
+  import AppMenuSettings from './AppMenuSettings.svelte';
   import DiagnosticsSettings from './DiagnosticsSettings.svelte';
   import { callCamera, callDeafen, callDeclineRing, callDevices, callScreen, openCallWindow, callJoin, callLeave, callMute, callReadiness, callRings, callStatus, callVolume, changeRoom, roomMembers, jumpToDate, eventContext, setPinned, setRoomPreference, startConversation } from './bridge';
   import { LEAVE_NOT_DONE, LEAVE_QUESTION, LEAVING_TEXT, leaveAfterDraftFlush } from './roomLeave';
@@ -3020,6 +3021,8 @@
               {/if}
             </p>
           </div>
+          <!-- Only a Linux AppImage shows this panel (ADR-0072). -->
+          <AppMenuSettings />
           {#if lockOffered(status.store, passphraseOn)}
             <div class="panel">
               <h3>Lock</h3>

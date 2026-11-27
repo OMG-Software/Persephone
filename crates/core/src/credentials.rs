@@ -175,6 +175,15 @@ pub trait CredentialSource: Send + Sync {
         self.confirm_open_link(caption, message)
     }
 
+    /// Asks whether to add Persephone to the app menu for the running
+    /// AppImage (ADR-0072), with the question from `prompt_text::app_menu`.
+    /// `Ok(true)` only for an explicit yes. Every source that asks about
+    /// links asks this the same way.
+    fn confirm_app_menu(&self, place: &crate::app_menu::Place) -> Result<bool, PromptError> {
+        let (caption, message) = crate::prompt_text::app_menu(place);
+        self.confirm_open_link(caption, &message)
+    }
+
     /// Opens a checked link in the user's default browser (ADR-0024).
     /// Unsupported unless a source provides it.
     fn open_link(&self, _url: &str) -> Result<(), PromptError> {
