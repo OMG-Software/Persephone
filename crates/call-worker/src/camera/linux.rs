@@ -17,6 +17,7 @@ use std::sync::mpsc::Sender;
 use persephone_call_protocol::CameraState;
 
 use super::{CameraMode, CapturedFrame, linux_portal, mode, v4l2};
+use crate::send_tier::SendTier;
 
 /// The start of each camera ID on the portal path (then the `node.name`).
 const PORTAL_PREFIX: &str = "pipewire:";
@@ -63,6 +64,7 @@ pub fn list() -> Vec<(String, String)> {
 pub fn capture<F, E>(
     device_id: &str,
     remote: Option<OwnedFd>,
+    target: SendTier,
     stop: &Arc<AtomicBool>,
     open_result: Sender<Result<(), CameraState>>,
     on_frame: F,
@@ -80,7 +82,7 @@ pub fn capture<F, E>(
             };
             match own {
                 Some(own) => {
-                    linux_portal::capture(own, remote, stop, open_result, on_frame, on_end);
+                    linux_portal::capture(own, remote, target, stop, open_result, on_frame, on_end);
                 }
                 None => {
                     let _ = open_result.send(Err(CameraState::NotFound));
@@ -88,7 +90,7 @@ pub fn capture<F, E>(
             }
         }
         CameraMode::V4l2 => match untagged(V4L2_PREFIX, device_id) {
-            Some(own) => v4l2::capture(own, stop.as_ref(), open_result, on_frame, on_end),
+            Some(own) => v4l2::capture(own, target, stop.as_ref(), open_result, on_frame, on_end),
             None => {
                 let _ = open_result.send(Err(CameraState::NotFound));
             }
@@ -113,6 +115,7 @@ mod tests {
         capture(
             "x",
             None,
+            SendTier::P360,
             &Arc::new(AtomicBool::new(false)),
             tx,
             |_| {},

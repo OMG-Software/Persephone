@@ -1,5 +1,7 @@
 <script module lang="ts">
   import { callVideoFrame } from './bridge';
+  import { FullscreenReporter, toggleFullscreen } from './fullscreen';
+  import { GainSender } from './callGain';
   import { VideoFetcher } from './video';
 
   // One fetcher for the window's tiles, as in CallVideo.svelte.
@@ -13,11 +15,13 @@
     callCamera,
     callDeafen,
     callLeave,
+    callMicrophone,
     callMute,
     callScreen,
     callStatus,
     callVolume,
     callWindowReady,
+    setCallFullscreen,
     closeCallWindow,
     watchSession
   } from './bridge';
@@ -28,13 +32,22 @@
     DEVICE_CHANGE_TEXT,
     DEVICES_BUTTON_LABEL,
     END_TEXT,
+    EXIT_FULLSCREEN_LABEL,
     feedLabel,
+    FULLSCREEN_LABEL,
     IDLE_CALL,
     inCall,
     levelMap,
     deviceKey,
+    MIC_GAIN_CHANGE_TEXT,
+    MIC_GAIN_LABEL,
+    MIC_GAIN_MAX,
+    MIC_GAIN_STEP,
+    micGainText,
+    micGainValue,
     NO_KEY_TEXT,
     OWN_TILE_LABEL,
+    PARTICIPANT_DEAFENED_LABEL,
     PARTICIPANT_MUTED_LABEL,
     PHASE_TEXT,
     SCREEN_TILE_LABEL,
@@ -82,6 +95,7 @@
   const platform = platformOf(typeof navigator !== 'undefined' ? navigator.platform : '');
   let failure = $state<string | null>(null);
   let volumeDraft = $state<number | null>(null);
+  let gainDraft = $state<number | null>(null);
   // The viewer's pick of a large feed (ADR-0065) and the device panel.
   let pick = $state.raw<ViewPick>(AUTO_PICK);
   let devicesOpen = $state(false);
@@ -147,6 +161,46 @@
       failure = 'The call volume could not be changed.';
     }
   }
+
+  // The gain goes with the call's own automatic level flag, read from the
+  // newest status when the slider moves, never from an older copy.
+  // One send at a time: the newest chosen gain is the one the call uses and
+  // the profile saves. The draft shows the chosen value while sends wait.
+  let gainRequest = 0;
+  const gainSender = new GainSender(
+    (gain) => callMicrophone(status.autoLevel, gain),
+    (next, newest) => {
+      if (newest && gainRequest === request) take(next);
+    },
+    (failed) => {
+      gainDraft = null;
+      if (failed) failure = MIC_GAIN_CHANGE_TEXT;
+    }
+  );
+  function setGain(gain: number) {
+    gainDraft = gain;
+    gainRequest = ++request;
+    gainSender.set(gain);
+  }
+
+  // The element that fills the screen, if any (full screen of a screen
+  // share). The page learns of a change from the browser, also after Escape
+  // or when the share ends.
+  // Made on mount: the page has no document while it renders for a test.
+  let fullscreenReporter: FullscreenReporter | null = null;
+  let fullscreenKey = $state<string | null>(null);
+  function syncFullscreen() {
+    const tile = document.fullscreenElement;
+    fullscreenKey = tile instanceof HTMLElement ? (tile.dataset.cell ?? null) : null;
+    // The host turns the window full screen on Windows; Escape, the exit
+    // button and the end of the share all come here and send false.
+    fullscreenReporter?.report();
+  }
+  onMount(() => {
+    fullscreenReporter = new FullscreenReporter(document, setCallFullscreen);
+    document.addEventListener('fullscreenchange', syncFullscreen);
+    return () => document.removeEventListener('fullscreenchange', syncFullscreen);
+  });
 
   // The first status read: when it works, the page can show and run the
   // call, so it tells the host it is ready (ADR-0060). A failure leaves it
@@ -314,12 +368,13 @@
   const camera = $derived(cameraButton(status.camera));
   const screen = $derived(screenButton(status.screen));
   const volume = $derived(volumeDraft ?? status.volume);
+  const gain = $derived(gainDraft ?? status.micGain);
 </script>
 
 {#snippet feed(cell: CallCell, isLarge: boolean)}
   {@const shape = cell.tile === null ? undefined : shapes[cell.tile]}
   {@const layout = shape && cell.tile !== null ? tileLayout(shape.width, shape.height, shape.rotation, cell.own && status.mirror) : null}
-  <div class="video-tile call-cell" class:screen={cell.screen} class:speaking={cell.speaking} class:large={isLarge} style:--ratio={layout ? String(layout.ratio) : '1.7778'}>
+  <div class="video-tile call-cell" data-cell={cell.key} class:screen={cell.screen} class:speaking={cell.speaking} class:large={isLarge} style:--ratio={layout ? String(layout.ratio) : '1.7778'}>
     <button
       type="button"
       class="call-feed"
@@ -354,8 +409,21 @@
         {/if}
         {#if cell.screen}<span class="note">{SCREEN_TILE_LABEL}</span>{/if}
         {#if cell.muted}<span class="call-muted" role="img" aria-label={PARTICIPANT_MUTED_LABEL}><Icon name="mic-off" /></span>{/if}
+        {#if cell.deafened}<span class="call-deafened" role="img" aria-label={PARTICIPANT_DEAFENED_LABEL}><Icon name="headphones-off" /></span>{/if}
       </span>
     </button>
+    {#if cell.screen && cell.tile !== null}
+      {@const full = fullscreenKey === cell.key}
+      <button
+        type="button"
+        class="secondary call-fullscreen"
+        aria-label={full ? EXIT_FULLSCREEN_LABEL : FULLSCREEN_LABEL}
+        title={full ? EXIT_FULLSCREEN_LABEL : FULLSCREEN_LABEL}
+        onclick={(event) => void toggleFullscreen(document, event.currentTarget.closest<HTMLElement>('.video-tile')!)}
+      >
+        <Icon name={full ? 'minimize' : 'maximize'} />
+      </button>
+    {/if}
   </div>
 {/snippet}
 
@@ -414,6 +482,7 @@
           <li>
             <span class="call-roster-name">{OWN_TILE_LABEL}</span>
             {#if status.muted}<span class="call-muted" role="img" aria-label={PARTICIPANT_MUTED_LABEL}><Icon name="mic-off" /></span>{/if}
+            {#if status.deafened}<span class="call-deafened" role="img" aria-label={PARTICIPANT_DEAFENED_LABEL}><Icon name="headphones-off" /></span>{/if}
             <div
               class="call-level"
               class:loud={ownLevel >= SOUND_LEVEL_LOUD}
@@ -434,6 +503,7 @@
           <li>
             <span class="call-roster-name" id={nameId}><PersonName userId={person.userId} /></span>
             {#if person.muted}<span class="call-muted" role="img" aria-label={PARTICIPANT_MUTED_LABEL}><Icon name="mic-off" /></span>{/if}
+            {#if person.deafened}<span class="call-deafened" role="img" aria-label={PARTICIPANT_DEAFENED_LABEL}><Icon name="headphones-off" /></span>{/if}
             <div
               class="call-level"
               class:loud={level >= SOUND_LEVEL_LOUD}
@@ -476,20 +546,36 @@
         <Icon name="screen" />
         {screen.label}
       </button>
-      <label class="call-volume">
-        <Icon name="volume" />
-        <span>{VOLUME_LABEL}</span>
-        <input
-          type="range"
-          min="0"
-          max={VOLUME_MAX}
-          step="5"
-          value={volume}
-          aria-valuetext={volumeText(volume)}
-          onchange={(event) => void setVolume(volumeValue(Number(event.currentTarget.value)))}
-        />
-        <output class="note">{volumeText(volume)}</output>
-      </label>
+      <div class="call-levels">
+        <label class="call-volume">
+          <Icon name="volume" />
+          <span>{VOLUME_LABEL}</span>
+          <input
+            type="range"
+            min="0"
+            max={VOLUME_MAX}
+            step="5"
+            value={volume}
+            aria-valuetext={volumeText(volume)}
+            onchange={(event) => void setVolume(volumeValue(Number(event.currentTarget.value)))}
+          />
+          <output class="note">{volumeText(volume)}</output>
+        </label>
+        <label class="call-gain">
+          <Icon name="mic" />
+          <span>{MIC_GAIN_LABEL}</span>
+          <input
+            type="range"
+            min="0"
+            max={MIC_GAIN_MAX}
+            step={MIC_GAIN_STEP}
+            value={gain}
+            aria-valuetext={micGainText(gain)}
+            onchange={(event) => setGain(micGainValue(Number(event.currentTarget.value)))}
+          />
+          <output class="note">{micGainText(gain)}</output>
+        </label>
+      </div>
       <button
         type="button"
         class="secondary call-devices-button"

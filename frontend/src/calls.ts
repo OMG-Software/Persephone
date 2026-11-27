@@ -30,7 +30,8 @@ import type {
   CallRings,
   CallStatus,
   CallUnavailable,
-  CallVideoEffect
+  CallVideoEffect,
+  CallVideoQuality
 } from '../../crates/contracts/generated/contracts';
 import type { DesktopPlatform } from './modules';
 
@@ -127,7 +128,9 @@ export const IDLE_CALL: CallStatus = {
   ringDeclined: false,
   deviceChange: null,
   effectRefused: false,
-  mirror: true
+  mirror: true,
+  autoLevel: true,
+  micGain: 100
 };
 
 /** This account is in a call, or joining one. */
@@ -475,6 +478,11 @@ export const UNDEAFEN_LABEL = 'Undeafen';
 /** The accessible description of the deafen button: what it does besides silencing the call. */
 export const DEAFEN_TEXT = 'Turns off all call sound and mutes your microphone';
 export const VOLUME_SAVE_TEXT = 'The call volume could not be saved.';
+/** The note when the call window could not change the microphone gain. */
+export const MIC_GAIN_CHANGE_TEXT = 'The microphone gain could not be changed.';
+/** The full-screen button of a screen share: its name and title (ADR-0060). */
+export const FULLSCREEN_LABEL = 'Full screen';
+export const EXIT_FULLSCREEN_LABEL = 'Exit full screen';
 
 /**
  * A slider value as a volume: a whole number from 0 to 100. Anything that is
@@ -546,6 +554,33 @@ export const BACKGROUND_EFFECTS_UNAVAILABLE_TEXT =
   'Background blur and background pictures are not available in this version. They need a person mask, which a later version adds.';
 export const EFFECT_REFUSED_TEXT = 'This effect cannot run here. Your camera keeps the effect it had.';
 export const EFFECT_SAVE_TEXT = 'The video effect could not be saved.';
+
+// The own camera's send resolution (ADR-0070). The values are a closed set;
+// the host and the core check them again. The camera and the computer limit
+// the highest size, and a camera is never enlarged.
+export const VIDEO_QUALITY_LABEL = 'Video quality';
+export const VIDEO_QUALITY_HELP =
+  'Your camera and computer limit the highest resolution. Auto changes it with the connection.';
+export const VIDEO_QUALITY_SAVE_TEXT = 'The video quality could not be saved.';
+
+/** The video quality menu: Auto first, then the largest size to the smallest. */
+export const VIDEO_QUALITY_OPTIONS: readonly { value: CallVideoQuality; label: string }[] = [
+  { value: 'auto', label: 'Auto (best for the connection)' },
+  { value: '1440p', label: '1440p' },
+  { value: '1080p', label: '1080p' },
+  { value: '720p', label: '720p' },
+  { value: '480p', label: '480p' }
+];
+
+/** The menu's value as a send resolution; anything else is Auto. */
+export function videoQualityValue(value: unknown): CallVideoQuality {
+  return VIDEO_QUALITY_OPTIONS.find((option) => option.value === value)?.value ?? 'auto';
+}
+
+/** The device record after a saved send resolution. */
+export function withVideoQuality(devices: CallDevices, videoQuality: CallVideoQuality): CallDevices {
+  return { ...devices, videoQuality };
+}
 
 /** The background menu's texts, in menu order. */
 export const BACKGROUND_TEXT: Record<CallBackground, string> = {
@@ -757,7 +792,7 @@ export class LatestOnly<T> {
 export const DEVICES_UNSUPPORTED_TEXT = 'Calls are not available on this system yet.';
 export const DEVICES_UNREADABLE_TEXT = 'The saved call devices could not be read. Choose them again.';
 export const DEVICES_NOTE_TEXT =
-  'A microphone or speaker change applies to a running call at once, except on Linux, where it applies from the next call. A camera change applies from the next camera start. The volume changes at once.';
+  'A microphone or speaker change applies to a running call at once. A camera change restarts a camera that is on, so it applies at once. The volume changes at once.';
 
 /** The note under the menus, for a device reply. */
 export function devicesNote(devices: CallDevices): string {
@@ -898,11 +933,14 @@ export function levelMap(levels: readonly CallParticipantLevel[]): Map<string, n
 /** Read beside a participant whose microphone is off (ADR-0059). */
 export const PARTICIPANT_MUTED_LABEL = 'Microphone off';
 
+/** Read beside a participant who said it is deafened (ADR-0071). */
+export const PARTICIPANT_DEAFENED_LABEL = 'Deafened';
+
 /** What a failed device change in a call means (ADR-0059). */
 export const DEVICE_CHANGE_TEXT: Record<CallDeviceChange, string> = {
   not_found: 'The chosen microphone or speaker is not connected. The call keeps the one it had.',
   unsupported: 'This change cannot be made during a call on this system. It applies to the next call.',
-  kept: 'The chosen microphone could not be opened. The call keeps the one it had.',
+  kept: 'The chosen microphone or speaker could not be used. The call keeps the one it had.',
   failed: 'The microphone or speaker could not be changed, and the sound may have stopped. Choose a device again, or leave and rejoin the call.'
 };
 
@@ -925,12 +963,12 @@ export const DEVICE_SAVE_FAILURE_TEXT = 'The call devices could not be saved.';
  */
 export const DEVICE_SWITCH_TEXT: Record<CallDeviceChange, string> = {
   not_found: 'The chosen microphone or speaker is not connected. The call keeps the one it had.',
-  unsupported: 'This system cannot switch the microphone or speaker during a call (Linux today). Your choice applies from the next call.',
-  kept: 'The chosen microphone could not be opened. The call keeps the one it had.',
+  unsupported: 'This call cannot switch the microphone or speaker now. Your choice applies from the next call.',
+  kept: 'The chosen microphone or speaker could not be used. The call keeps the one it had.',
   failed: 'The microphone or speaker could not be changed, and the sound may have stopped. A lost speaker needs a rejoin: leave the call and join it again.'
 };
 export const DEVICE_SAVED_TEXT =
-  'Saved. If the call cannot use it, this line tells you. A camera change applies the next time you turn the camera on.';
+  'Saved. If the call cannot use it, this line tells you. A camera change restarts a camera that is on, so it applies at once.';
 export const DEVICE_SWITCHING_TEXT = 'Switching…';
 export const DEVICES_BUTTON_LABEL = 'Device settings';
 export const DEVICES_PANEL_LABEL = 'Call devices';

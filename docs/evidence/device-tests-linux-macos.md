@@ -76,6 +76,77 @@ camera test was not exercised.
 
 The table and the list above are the run at `812ba0d` only.
 
+### In-call sound move, 27 November 2026
+
+A later run, for the
+[ADR-0049](../adr/0049-contain-the-call-worker-on-linux-and-macos.md)
+amendment of 27 November 2026 (pull request 111). Source: branch
+`claude/call-av-settings` at commit
+`8965b120a556e1d36b0edfc855b1d80c4827141b`, a clean clone, `--locked`.
+`Cargo.lock` SHA-256:
+`b3f228bb9e9570a2a51e492c7e12553cb35cf21fd52e1ba9d9a97b703be6fbae`. Linux
+Mint 22.3, kernel 7.0.0-44-generic, rustc 1.99.1, clang 21.1.8, libwebrtc
+`webrtc-a545de4`, debug build.
+
+The sound server was a disposable PipeWire 1.0.5 with WirePlumber 0.4.17 and
+`pipewire-pulse` (`pactl` 16.1), not the desktop's server: its own runtime,
+configuration and state folders under a temporary folder, a private D-Bus
+session (`dbus-run-session`), and the ALSA, V4L2, libcamera and BlueZ monitors
+turned off, so it opened no device. It had two null sinks and two remapped
+sources:
+
+```sh
+pactl load-module module-null-sink sink_name=persephone_main
+pactl load-module module-null-sink sink_name=persephone_other
+pactl load-module module-remap-source source_name=persephone_mic_a master=persephone_main.monitor
+pactl load-module module-remap-source source_name=persephone_mic_b master=persephone_other.monitor
+pactl set-default-sink persephone_main
+pactl set-default-source persephone_mic_a
+```
+
+| Command | Exit |
+| --- | --- |
+| `PERSEPHONE_TEST_OTHER_SINK=pulse:persephone_other PERSEPHONE_TEST_OTHER_SOURCE=pulse:persephone_mic_b cargo test --locked -p persephone-call-worker -- --ignored --exact --test-threads=1 pulse_session_test::given_a_call_session pulse_session_test::given_a_speaker_that_waits_for_its_stream` (2 passed) | 0 |
+
+Rerun, same day: after the second review of pull request 111 changed the
+sound moves (a kind with no stream always waits, caller-started deadlines,
+last-try reports, monitors known for routes), the same command passed again
+(2 passed, exit 0) at commit `83afdcf652719c57ee8c752e6e4447a18ff4fc8d`, with
+the same `Cargo.lock`, machine, toolchain and disposable server setup. No
+server process was left.
+
+Both tests are synthetic session tests, not calls: they run no call loop and
+connect to no SFU. `given_a_call_session` starts the test binary as a child
+process that plays the worker side. The child applies stage 1, opens its own
+playback and record streams and the `Session`, then applies stage 2, and
+calls `pulse::Session` directly on request. A `pacat` and a `parec` of
+another program run on the defaults. The test checks with `pactl`:
+
+* a change to `pulse:persephone_mic_b` and `pulse:persephone_other` moves both
+  own streams, and the other program's streams stay on the defaults;
+* a name that is not a `pulse:` ID, and a missing device, answer
+  `DeviceNotFound`, and nothing moves;
+* a missing speaker with the start default as the microphone answers
+  `DeviceNotFound`, and the microphone does not move;
+* no choice moves the own streams back to the defaults of the call's start.
+
+`given_a_speaker_that_waits_for_its_stream` applies stage 1 only, because a
+stream that opens later needs a new socket. A new speaker before any playback
+stream answers done and moves the microphone at once. The playback stream
+then opens on the default sink, and the waiting target moves it to the chosen
+sink. After that, nothing waits.
+
+Observed: the other program's `pacat` and `parec` streams stayed on their
+original devices through every move. The assertions fail if the worker moves
+either of them. They do not show which rule picked the own streams: a
+different selector that also left out `pacat` and `parec` would pass too. No
+run with a broken selector was made. The child printed "Failed to load cookie
+file from cookie: Permission denied": the contained child cannot read the
+cookie, and `pipewire-pulse` does not need it. No server process was left
+after the run. Not covered: a change during a running call, a PulseAudio
+daemon, sound hardware, a device that goes away during a call, the report
+after the last retry of a waiting target, and the native containment gate.
+
 ### Earlier runs
 
 Each earlier run was its own run on the same VM, on 24 November 2026, of the

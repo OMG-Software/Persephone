@@ -7,7 +7,8 @@
 Technical Story: on KDE Plasma (Wayland), the 0.3.0 AppImage shows the
 generic `wayland` icon in the KWin title bar and the task manager when no
 integration tool installed it. Dolphin also shows no icon for the AppImage
-file. Pull request 111 sets the GLib program name to the product name, so the
+file. Pull request 111 (now in `main`) sets the GLib program name to the
+product name, so the
 Wayland app ID is `Persephone`, which matches the `Persephone.desktop` that
 every Linux package installs. That fixes the installed packages. This record
 covers the AppImage that nothing installed.
@@ -78,8 +79,9 @@ is rejected: it has a measured cost and no verified benefit (see below). The
 owner must approve this record before it is accepted.
 
 The entry works for KWin only with the program name of pull request 111,
-because KWin looks for `<app ID>.desktop`. Without that change the app ID is
-`persephone-ui`, and the entry adds Persephone to the app menu only.
+because KWin looks for `<app ID>.desktop`. That change is in `main`. Without
+it the app ID is `persephone-ui`, and the entry adds Persephone to the app
+menu only.
 
 ### When the page offers it
 
@@ -241,8 +243,8 @@ entry does not change Dolphin's file icon.
 ### Positive Consequences
 
 * KDE Plasma on Wayland shows Persephone's icon in the title bar, the task
-  manager and the app menu for an AppImage that nothing installed, once
-  pull request 111 is merged.
+  manager and the app menu for an AppImage that nothing installed. This
+  needs the program name of pull request 111, which is in `main`.
 * The menu entry and icons follow the XDG rules, so GNOME and other
   desktops that look up `<app ID>.desktop` show the icon too.
 * The page can only ask. The write, its checks and the question are in the
@@ -314,8 +316,8 @@ entry does not change Dolphin's file icon.
 
 ## Links
 
-* Depends on pull request 111 (program name `Persephone`, `linux/main.desktop`
-  with `StartupWMClass`).
+* Depends on pull request 111, merged to `main` (program name `Persephone`,
+  `linux/main.desktop` with `StartupWMClass`).
 * Uses the core question pattern of [ADR-0024](0024-open-links-only-after-the-core-asks-in-its-own-window.md)
   and [ADR-0058](0058-write-a-diagnostic-log-only-when-the-user-turns-it-on.md).
 * Keeps the boundary of [ADR-0004](0004-separate-the-key-holding-core-from-the-web-view-process.md).

@@ -12,7 +12,8 @@
       "reachable": true,
       "keyed": false,
       "sharing": true,
-      "muted": true
+      "muted": true,
+      "deafened": true
     }
   ],
   "ended": null,
@@ -48,5 +49,7 @@
   "ringDeclined": true,
   "deviceChange": "not_found",
   "effectRefused": true,
-  "mirror": false
+  "mirror": false,
+  "autoLevel": false,
+  "micGain": 250
 }

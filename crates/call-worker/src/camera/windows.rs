@@ -24,6 +24,7 @@ use windows::core::{GUID, PWSTR};
 
 use super::capture_size_ok;
 use super::{CapturedFrame, Format};
+use crate::send_tier::SendTier;
 use crate::video::{CaptureMode, pick_capture_mode};
 
 /// A failed COM or Media Foundation step: the step and its HRESULT go to the
@@ -185,7 +186,7 @@ impl Drop for Opened {
     }
 }
 
-fn open(device_id: &str) -> Result<(Opened, u32), CameraState> {
+fn open(device_id: &str, target: SendTier) -> Result<(Opened, u32), CameraState> {
     let activates = enum_devices()?;
     let activate = activates
         .into_iter()
@@ -219,14 +220,15 @@ fn open(device_id: &str) -> Result<(Opened, u32), CameraState> {
     let reader = unsafe { MFCreateSourceReaderFromMediaSource(&source, &attributes) }
         .map_err(failed("MFCreateSourceReaderFromMediaSource"))?;
     drop(source);
-    let stride = configure(&reader)?;
+    let stride = configure(&reader, target)?;
     opened.reader = Some(reader);
     Ok((opened, stride))
 }
 
 /// Picks the camera format and asks for NV12 out of it. Returns the stride
-/// of the output.
-fn configure(reader: &IMFSourceReader) -> Result<u32, CameraState> {
+/// of the output. The mode is the one that suits the tier `target`
+/// ([`pick_capture_mode`]).
+fn configure(reader: &IMFSourceReader, target: SendTier) -> Result<u32, CameraState> {
     // SAFETY: `reader` is a live reader; the stream index is the constant
     // the API defines.
     unsafe { reader.SetStreamSelection(STREAM, true) }.map_err(failed("SetStreamSelection"))?;
@@ -248,7 +250,7 @@ fn configure(reader: &IMFSourceReader) -> Result<u32, CameraState> {
         });
         types.push(media_type);
     }
-    let best = pick_capture_mode(&modes).ok_or_else(|| {
+    let best = pick_capture_mode(&modes, target).ok_or_else(|| {
         log::warn!("camera has no usable format: {} listed", modes.len());
         CameraState::Unavailable
     })?;
@@ -289,7 +291,8 @@ fn frame_rate(media_type: &IMFMediaType) -> Option<u32> {
     // SAFETY: `media_type` is a live attribute store; the GUID is valid.
     let packed = unsafe { media_type.GetUINT64(&MF_MT_FRAME_RATE) }.ok()?;
     let (numerator, denominator) = ((packed >> 32) as u32, packed as u32);
-    numerator.checked_div(denominator)
+    // A known rate below 1 frame a second is 1, never the unknown 0.
+    Some(crate::video::whole_fps(numerator, denominator))
 }
 
 /// The row stride of the reader's current (NV12) output. When the type has
@@ -317,6 +320,7 @@ fn current_stride(reader: &IMFSourceReader) -> Result<u32, CameraState> {
 /// delivers frames until `stop`, an error or the end of the stream.
 pub fn capture<F, E>(
     device_id: &str,
+    target: SendTier,
     stop: &AtomicBool,
     open_result: Sender<Result<(), CameraState>>,
     mut on_frame: F,
@@ -329,7 +333,7 @@ pub fn capture<F, E>(
         let _ = open_result.send(Err(CameraState::Unavailable));
         return;
     };
-    let (opened, mut stride) = match open(device_id) {
+    let (opened, mut stride) = match open(device_id, target) {
         Ok(opened) => opened,
         Err(error) => {
             let _ = open_result.send(Err(error));

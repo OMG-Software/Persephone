@@ -8,6 +8,7 @@
 //! encrypted, from a device its owner's cross-signing identity signed, whose
 //! identity did not change without approval.
 
+use super::deafen::{self, IncomingDeafen};
 use super::encryption_keys::{self, IncomingKey};
 use super::keys::{InsertRefusal, RemoteKeys};
 use matrix_sdk::{
@@ -46,9 +47,19 @@ pub struct DeviceSummary {
     pub curve25519: Option<String>,
 }
 
+/// Which call to-device event a candidate is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    /// A frame key (ADR-0043).
+    Key,
+    /// A deafened message (ADR-0071).
+    Deafened,
+}
+
 /// An event with everything [`accept`] needs besides the call's own state.
 #[derive(Clone)]
 pub struct Candidate {
+    pub kind: Kind,
     pub sender: OwnedUserId,
     pub content: Value,
     /// `None` when the event arrived unencrypted.
@@ -82,6 +93,7 @@ pub enum Refusal {
     /// The sender's identity changed, or the SDK could not say.
     IdentityUnsafe,
     Content(encryption_keys::Refusal),
+    DeafenContent(deafen::Refusal),
     /// The sender's device is not a current call member. The sender may
     /// have been faster than the membership event; see [`Refusal::is_early`].
     NotMember,
@@ -95,14 +107,10 @@ impl Refusal {
     }
 }
 
-/// Decides whether to keep a received key. Stores it in `keys` only when
-/// every check holds.
-pub fn accept(
-    candidate: &Candidate,
-    room_id: &RoomId,
-    is_member: &impl Fn(&str) -> bool,
-    keys: &mut RemoteKeys,
-) -> Result<IncomingKey, Refusal> {
+/// The sender's device, when the event's encryption checks hold: Olm, an
+/// authenticated sender, a known device that its owner signed, an unchanged
+/// identity.
+fn sender_device(candidate: &Candidate) -> Result<&OwnedDeviceId, Refusal> {
     let envelope = candidate.envelope.as_ref().ok_or(Refusal::NotEncrypted)?;
     if !envelope.olm {
         return Err(Refusal::NotOlm);
@@ -124,6 +132,18 @@ pub fn accept(
     if candidate.identity_changed != Some(false) {
         return Err(Refusal::IdentityUnsafe);
     }
+    Ok(sender_device)
+}
+
+/// Decides whether to keep a received key. Stores it in `keys` only when
+/// every check holds.
+pub fn accept(
+    candidate: &Candidate,
+    room_id: &RoomId,
+    is_member: &impl Fn(&str) -> bool,
+    keys: &mut RemoteKeys,
+) -> Result<IncomingKey, Refusal> {
+    let sender_device = sender_device(candidate)?;
     let key = encryption_keys::parse_incoming(
         &candidate.content,
         room_id,
@@ -140,6 +160,28 @@ pub fn accept(
             other => Refusal::Store(other),
         })?;
     Ok(key)
+}
+
+/// Decides whether to take a received deafened message: the checks of
+/// [`accept`], then the content, then the sender's device must be a current
+/// member. The caller applies the counter (`deafen::take`).
+pub fn accept_deafened(
+    candidate: &Candidate,
+    room_id: &RoomId,
+    is_member: &impl Fn(&str) -> bool,
+) -> Result<IncomingDeafen, Refusal> {
+    let sender_device = sender_device(candidate)?;
+    let message = deafen::parse_incoming(
+        &candidate.content,
+        room_id,
+        &candidate.sender,
+        sender_device,
+    )
+    .map_err(Refusal::DeafenContent)?;
+    if !is_member(&message.identity) {
+        return Err(Refusal::NotMember);
+    }
+    Ok(message)
 }
 
 /// The wire shape of a to-device event, as far as the handler needs it.
@@ -172,9 +214,11 @@ pub fn register(
                 let Ok(event) = serde_json::from_str::<Loose>(raw.json().get()) else {
                     return;
                 };
-                if event.event_type != encryption_keys::EVENT_TYPE {
-                    return;
-                }
+                let kind = match event.event_type.as_str() {
+                    encryption_keys::EVENT_TYPE => Kind::Key,
+                    deafen::EVENT_TYPE => Kind::Deafened,
+                    _ => return,
+                };
                 // Queue space first, so a flood costs no lookups.
                 let Ok(permit) = queue.try_reserve() else {
                     return;
@@ -212,6 +256,7 @@ pub fn register(
                     None => None,
                 };
                 permit.send(Candidate {
+                    kind,
                     sender: event.sender,
                     content: event.content,
                     envelope,
@@ -236,6 +281,7 @@ mod tests {
     fn candidate() -> Candidate {
         let identity = "@bob:example.org:BOBDEV";
         Candidate {
+            kind: Kind::Key,
             sender: owned_user_id!("@bob:example.org"),
             content: json!({
                 "room_id": ROOM,
@@ -284,6 +330,72 @@ mod tests {
         assert_eq!(key.identity, "@bob:example.org:BOBDEV");
         assert_eq!(key.index, 3);
         assert_eq!(stored, 1);
+    }
+
+    fn deafened_candidate() -> Candidate {
+        let identity = "@bob:example.org:BOBDEV";
+        Candidate {
+            kind: Kind::Deafened,
+            content: json!({
+                "room_id": ROOM,
+                "member_id": identity,
+                "member": { "id": identity, "claimed_device_id": "BOBDEV" },
+                "deafened": true,
+                "seq": 1,
+            }),
+            ..candidate()
+        }
+    }
+
+    /// GIVEN a deafened message from a cross-signed, unchanged, member
+    /// device WHEN decided THEN it is taken.
+    #[test]
+    fn given_every_check_holds_then_a_deafened_message_is_taken() {
+        let got = accept_deafened(
+            &deafened_candidate(),
+            room_id!("!room:example.org"),
+            &|_| true,
+        )
+        .expect("accepted");
+        assert_eq!(got.identity, "@bob:example.org:BOBDEV");
+        assert!(got.deafened);
+    }
+
+    /// GIVEN a deafened message that fails an encryption check, has a bad
+    /// content or comes from a device that is no member WHEN decided THEN it
+    /// is refused, and only the membership refusal can be cured later.
+    #[test]
+    fn given_a_deafened_message_that_fails_a_check_then_refused() {
+        let room = room_id!("!room:example.org");
+        let mut c = deafened_candidate();
+        c.envelope = None;
+        assert_eq!(
+            accept_deafened(&c, room, &|_| true).err(),
+            Some(Refusal::NotEncrypted)
+        );
+        let mut c = deafened_candidate();
+        c.device.as_mut().unwrap().cross_signed_by_owner = false;
+        assert_eq!(
+            accept_deafened(&c, room, &|_| true).err(),
+            Some(Refusal::NotCrossSigned)
+        );
+        let mut c = deafened_candidate();
+        c.identity_changed = Some(true);
+        assert_eq!(
+            accept_deafened(&c, room, &|_| true).err(),
+            Some(Refusal::IdentityUnsafe)
+        );
+        let mut c = deafened_candidate();
+        c.content["member"]["claimed_device_id"] = json!("OTHER");
+        assert_eq!(
+            accept_deafened(&c, room, &|_| true).err(),
+            Some(Refusal::DeafenContent(
+                deafen::Refusal::ClaimedDeviceMismatch
+            ))
+        );
+        let refusal = accept_deafened(&deafened_candidate(), room, &|_| false).err();
+        assert_eq!(refusal, Some(Refusal::NotMember));
+        assert!(refusal.unwrap().is_early());
     }
 
     /// GIVEN an event that arrived unencrypted WHEN decided THEN it is

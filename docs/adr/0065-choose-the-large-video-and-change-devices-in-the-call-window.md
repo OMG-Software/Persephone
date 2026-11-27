@@ -96,8 +96,9 @@ already has.
   anything, so a failure from before the panel opened (or from the main
   window's settings) is in view when the panel opens to fix it.
   The worker's answer can arrive after the save, and a failure from an earlier
-  change stays until the worker answers the new one. A camera change applies
-  at the next camera start (ADR-0059).
+  change stays until the worker answers the new one. A camera change restarts
+  a camera that is on, so it applies at once (ADR-0059, and
+  [ADR-0070](0070-choose-the-camera-send-resolution.md), proposed).
 
 ### Positive Consequences
 

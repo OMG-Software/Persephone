@@ -10,7 +10,7 @@
 //! port has another ID and a saved choice finds nothing (`NotFound`). Two
 //! cameras of the same model in the same port have the same ID: these ioctls
 //! report no serial number. Formats:
-//! NV12, YU12 (I420) and YUYV at most 1280x720; no MJPEG. Buffers are mapped
+//! NV12, YU12 (I420) and YUYV at most 2560x1440 (ADR-0070); no MJPEG. Buffers are mapped
 //! read-only (`MMAP` streaming). Opening a node is the only side effect of
 //! listing: nothing streams.
 //!
@@ -29,6 +29,7 @@ use persephone_call_protocol::CameraState;
 use super::CapturedFrame;
 use super::yuyv::{self, Offer, PixelFormat};
 use crate::containment::MAX_VIDEO_NODES;
+use crate::send_tier::SendTier;
 
 // --- The kernel ABI --------------------------------------------------------
 
@@ -39,6 +40,7 @@ const CAP_STREAMING: u32 = 0x0400_0000;
 const CAP_DEVICE_CAPS: u32 = 0x8000_0000;
 const BUF_FLAG_ERROR: u32 = 0x0000_0040;
 const FRMSIZE_DISCRETE: u32 = 1;
+const FRMIVAL_DISCRETE: u32 = 1;
 
 const fn fourcc(a: u8, b: u8, c: u8, d: u8) -> u32 {
     (a as u32) | ((b as u32) << 8) | ((c as u32) << 16) | ((d as u32) << 24)
@@ -82,6 +84,38 @@ struct FrmSizeEnum {
     /// uses all six (min and max width, step, min and max height, step).
     size: [u32; 6],
     reserved: [u32; 2],
+}
+
+/// `struct v4l2_frmivalenum`: the frame intervals of one format and size.
+#[repr(C)]
+#[allow(dead_code)]
+struct FrmIvalEnum {
+    index: u32,
+    pixel_format: u32,
+    width: u32,
+    height: u32,
+    type_: u32,
+    /// The union: discrete uses the first two words (numerator, denominator
+    /// of one interval); step-wise uses all six (the least interval, the
+    /// largest and the step, each as numerator and denominator).
+    interval: [u32; 6],
+    reserved: [u32; 2],
+}
+
+/// `struct v4l2_streamparm` for a capture stream: the frame interval is
+/// `numerator / denominator` seconds. The rest of the union is not used.
+#[repr(C)]
+#[allow(dead_code)]
+struct StreamParm {
+    type_: u32,
+    capability: u32,
+    capturemode: u32,
+    numerator: u32,
+    denominator: u32,
+    extendedmode: u32,
+    readbuffers: u32,
+    reserved: [u32; 4],
+    rest: [u8; 160],
 }
 
 #[repr(C)]
@@ -150,6 +184,8 @@ const _: () = {
     assert!(size_of::<Capability>() == 104);
     assert!(size_of::<FmtDesc>() == 64);
     assert!(size_of::<FrmSizeEnum>() == 44);
+    assert!(size_of::<FrmIvalEnum>() == 52);
+    assert!(size_of::<StreamParm>() == 204);
     assert!(size_of::<V4l2Format>() == 208);
     assert!(size_of::<PixFormat>() == 48);
     assert!(size_of::<RequestBuffers>() == 20);
@@ -173,6 +209,7 @@ const fn iowr(nr: u32, size: usize) -> u32 {
 const VIDIOC_QUERYCAP: u32 = ior(0, size_of::<Capability>());
 const VIDIOC_ENUM_FMT: u32 = iowr(2, size_of::<FmtDesc>());
 const VIDIOC_S_FMT: u32 = iowr(5, size_of::<V4l2Format>());
+const VIDIOC_S_PARM: u32 = iowr(22, size_of::<StreamParm>());
 const VIDIOC_REQBUFS: u32 = iowr(8, size_of::<RequestBuffers>());
 const VIDIOC_QUERYBUF: u32 = iowr(9, size_of::<Buffer>());
 const VIDIOC_QBUF: u32 = iowr(15, size_of::<Buffer>());
@@ -180,6 +217,7 @@ const VIDIOC_DQBUF: u32 = iowr(17, size_of::<Buffer>());
 const VIDIOC_STREAMON: u32 = iow(18, size_of::<i32>());
 const VIDIOC_STREAMOFF: u32 = iow(19, size_of::<i32>());
 const VIDIOC_ENUM_FRAMESIZES: u32 = iowr(74, size_of::<FrmSizeEnum>());
+const VIDIOC_ENUM_FRAMEINTERVALS: u32 = iowr(75, size_of::<FrmIvalEnum>());
 
 // --- Limits ----------------------------------------------------------------
 
@@ -190,13 +228,28 @@ const MAX_OFFERS: usize = 256;
 /// Capture buffers: asked for, and the most the driver may give.
 const WANTED_BUFFERS: u32 = 4;
 const MAX_BUFFERS: u32 = 16;
-/// The largest buffer the worker maps. A 1280x720 YUYV picture is 1.8 MB.
+/// The largest buffer the worker maps. A 2560x1440 YUYV picture is 7.4 MB.
+/// The driver gives at most [`MAX_BUFFERS`] of them, so the mappings stay
+/// under 256 MB; a mapping is address space, not memory the worker fills.
 const MAX_BUFFER_BYTES: u32 = 16 * 1024 * 1024;
 /// How long one wait for a picture lasts, so a stop is seen quickly.
 const POLL_MILLIS: i32 = 100;
 
+/// Intervals read for one format and size.
+const MAX_INTERVALS: u32 = 16;
+/// The most bytes in one row that the worker takes: YUYV at the widest size,
+/// with room for the driver's padding.
+const MAX_STRIDE: u32 = 2 * yuyv::MAX_LONG_SIDE * 2;
+
 /// Sizes tried on a camera that gives a range instead of a list.
-const STANDARD_SIZES: [(u32, u32); 4] = [(640, 360), (640, 480), (1280, 720), (320, 240)];
+const STANDARD_SIZES: [(u32, u32); 6] = [
+    (640, 360),
+    (640, 480),
+    (1280, 720),
+    (320, 240),
+    (1920, 1080),
+    (2560, 1440),
+];
 
 // --- Pure helpers ----------------------------------------------------------
 
@@ -366,8 +419,7 @@ fn enumerate(fd: RawFd) -> Vec<Offer> {
                     format,
                     width,
                     height,
-                    // The interval is not read: the worker does not set it.
-                    fps: 0,
+                    fps: max_frame_rate(fd, desc.pixelformat, width, height),
                 });
             }
             if size.type_ != FRMSIZE_DISCRETE || offers.len() >= MAX_OFFERS {
@@ -379,6 +431,52 @@ fn enumerate(fd: RawFd) -> Vec<Offer> {
         }
     }
     offers
+}
+
+/// The fastest frame rate of a format and size, in frames per second rounded
+/// down (at least 1 for an interval the driver gives), or 0 when the driver
+/// does not say. A list of intervals gives its shortest one; a range gives
+/// its least one.
+fn max_frame_rate(fd: RawFd, pixel_format: u32, width: u32, height: u32) -> u32 {
+    let mut fastest = 0;
+    for index in 0..MAX_INTERVALS {
+        let mut interval: FrmIvalEnum = zeroed_struct();
+        interval.index = index;
+        interval.pixel_format = pixel_format;
+        interval.width = width;
+        interval.height = height;
+        if ioctl(fd, VIDIOC_ENUM_FRAMEINTERVALS, &mut interval).is_err() {
+            break;
+        }
+        let [numerator, denominator, ..] = interval.interval;
+        fastest = fastest.max(rate_of(numerator, denominator));
+        if interval.type_ != FRMIVAL_DISCRETE {
+            break;
+        }
+    }
+    fastest
+}
+
+/// Frames per second, rounded down, of an interval of `numerator` over
+/// `denominator` seconds (`video::whole_fps`): an interval longer than a
+/// second gives 1, so the picker never takes it for an unknown speed. 0 for
+/// an interval of 0 seconds or no time base.
+fn rate_of(numerator: u32, denominator: u32) -> u32 {
+    crate::video::whole_fps(denominator, numerator)
+}
+
+/// Asks for `fps` frames per second, at most 30. Does nothing for an unknown
+/// rate. The answer is not checked: the stream runs at the interval of the
+/// driver when it refuses.
+fn set_frame_rate(fd: RawFd, fps: u32) {
+    if fps == 0 {
+        return;
+    }
+    let mut parm: StreamParm = zeroed_struct();
+    parm.type_ = BUF_TYPE_VIDEO_CAPTURE;
+    parm.numerator = 1;
+    parm.denominator = fps.min(30);
+    let _ = ioctl(fd, VIDIOC_S_PARM, &mut parm);
 }
 
 /// A read-only mapping of one driver buffer.
@@ -425,10 +523,10 @@ fn queue(fd: RawFd, index: u32) -> io::Result<()> {
 }
 
 /// Sets the format, maps the buffers and starts streaming.
-fn start_stream(fd: OwnedFd) -> Result<Stream, CameraState> {
+fn start_stream(fd: OwnedFd, target: SendTier) -> Result<Stream, CameraState> {
     let raw = fd.as_raw_fd();
     let offers = enumerate(raw);
-    let chosen = yuyv::choose(&offers).ok_or(CameraState::Unavailable)?;
+    let chosen = yuyv::choose(&offers, target).ok_or(CameraState::Unavailable)?;
     let offer = offers[chosen];
     let mut format: V4l2Format = zeroed_struct();
     format.type_ = BUF_TYPE_VIDEO_CAPTURE;
@@ -437,6 +535,10 @@ fn start_stream(fd: OwnedFd) -> Result<Stream, CameraState> {
     format.pix.pixelformat = fourcc_of(offer.format);
     format.pix.field = 1; // V4L2_FIELD_NONE
     ioctl(raw, VIDIOC_S_FMT, &mut format).map_err(|_| CameraState::Unavailable)?;
+    // Ask for the frame rate that the offer names, so the mode that was
+    // chosen for its speed runs at it. The driver may refuse: it then keeps
+    // its own interval.
+    set_frame_rate(raw, offer.fps);
     // The driver may change the request; accept only what the policy accepts.
     let (width, height) = (format.pix.width, format.pix.height);
     let negotiated = pixel_format(format.pix.pixelformat).ok_or(CameraState::Unavailable)?;
@@ -446,7 +548,7 @@ fn start_stream(fd: OwnedFd) -> Result<Stream, CameraState> {
     } else {
         format.pix.bytesperline
     };
-    if !yuyv::format_allowed(negotiated, width, height) || stride < row || stride > 4 * 1280 * 2 {
+    if !yuyv::format_allowed(negotiated, width, height) || stride < row || stride > MAX_STRIDE {
         return Err(CameraState::Unavailable);
     }
 
@@ -509,6 +611,7 @@ fn start_stream(fd: OwnedFd) -> Result<Stream, CameraState> {
 /// delivers pictures until `stop`, an error or an unplugged camera.
 pub fn capture<F, E>(
     device_id: &str,
+    target: SendTier,
     stop: &AtomicBool,
     open_result: Sender<Result<(), CameraState>>,
     mut on_frame: F,
@@ -517,7 +620,7 @@ pub fn capture<F, E>(
     F: FnMut(CapturedFrame<'_>) + Send,
     E: FnOnce() + Send,
 {
-    let stream = match open(device_id) {
+    let stream = match open(device_id, target) {
         Ok(stream) => stream,
         Err(error) => {
             let _ = open_result.send(Err(error));
@@ -535,13 +638,13 @@ pub fn capture<F, E>(
 }
 
 /// Finds the node with this ID and starts it. No other node is used.
-fn open(device_id: &str) -> Result<Stream, CameraState> {
+fn open(device_id: &str, target: SendTier) -> Result<Stream, CameraState> {
     for index in 0..MAX_VIDEO_NODES {
         let Some(fd) = open_node(index) else {
             continue;
         };
         if identify(fd.as_raw_fd()).is_some_and(|(id, _)| id == device_id) {
-            return start_stream(fd);
+            return start_stream(fd, target);
         }
     }
     Err(CameraState::NotFound)
@@ -554,7 +657,6 @@ fn read_frames<F: FnMut(CapturedFrame<'_>)>(
     on_frame: &mut F,
 ) -> bool {
     let raw = stream.fd.as_raw_fd();
-    let mut converted = Vec::new();
     while !stop.load(Ordering::Acquire) {
         let mut wait = libc::pollfd {
             fd: raw,
@@ -584,7 +686,7 @@ fn read_frames<F: FnMut(CapturedFrame<'_>)>(
             Err(_) => return true,
         }
         let index = buffer.index;
-        deliver(stream, &buffer, &mut converted, on_frame);
+        deliver(stream, &buffer, on_frame);
         if queue(raw, index).is_err() {
             return true;
         }
@@ -592,14 +694,10 @@ fn read_frames<F: FnMut(CapturedFrame<'_>)>(
     false
 }
 
-/// Hands one picture to the callback as NV12 or I420. A picture with the error
-/// flag, a bad buffer index or too few bytes is skipped.
-fn deliver<F: FnMut(CapturedFrame<'_>)>(
-    stream: &Stream,
-    buffer: &Buffer,
-    converted: &mut Vec<u8>,
-    on_frame: &mut F,
-) {
+/// Hands one picture to the callback as NV12, I420 or YUYV (converted only
+/// when the callback takes it). A picture with the error flag, a bad buffer
+/// index or too few bytes is skipped.
+fn deliver<F: FnMut(CapturedFrame<'_>)>(stream: &Stream, buffer: &Buffer, on_frame: &mut F) {
     let Some(map) = stream.maps.get(buffer.index as usize) else {
         return;
     };
@@ -615,15 +713,7 @@ fn deliver<F: FnMut(CapturedFrame<'_>)>(
     // it is queued again, which happens after this slice is gone.
     let bytes = unsafe { std::slice::from_raw_parts(map.ptr.cast::<u8>(), used) };
     let (width, height, stride) = (stream.width, stream.height, stream.stride);
-    yuyv::deliver_frame(
-        stream.format,
-        width,
-        height,
-        stride,
-        bytes,
-        converted,
-        on_frame,
-    );
+    yuyv::deliver_frame(stream.format, width, height, stride, bytes, on_frame);
 }
 
 #[cfg(test)]
@@ -645,6 +735,8 @@ mod tests {
         assert_eq!(VIDIOC_STREAMON, 0x4004_5612);
         assert_eq!(VIDIOC_STREAMOFF, 0x4004_5613);
         assert_eq!(VIDIOC_ENUM_FRAMESIZES, 0xC02C_564A);
+        assert_eq!(VIDIOC_ENUM_FRAMEINTERVALS, 0xC034_564B);
+        assert_eq!(VIDIOC_S_PARM, 0xC0CC_5616);
     }
 
     /// GIVEN the four-character codes WHEN built THEN they equal the kernel's.
@@ -724,14 +816,22 @@ mod tests {
         // Continuous range: step 1.
         assert_eq!(
             range_sizes([160, 1920, 1, 120, 1080, 1]),
-            vec![(640, 360), (640, 480), (1280, 720), (320, 240)]
+            vec![
+                (640, 360),
+                (640, 480),
+                (1280, 720),
+                (320, 240),
+                (1920, 1080)
+            ]
         );
-        // Step 16 in width and 8 in height from 160x120: 640x360 and 1280x720
-        // fit; 640x480 fits too; 320x240 fits.
-        assert_eq!(range_sizes([160, 1920, 16, 120, 1080, 8]).len(), 4);
+        // The range of a 4K camera also holds 2560x1440.
+        assert!(range_sizes([160, 3840, 1, 120, 2160, 1]).contains(&(2560, 1440)));
+        // Step 16 in width and 8 in height from 160x120: 640x360, 1280x720
+        // and 1920x1080 fit; 640x480 fits too; 320x240 fits.
+        assert_eq!(range_sizes([160, 1920, 16, 120, 1080, 8]).len(), 5);
         // Narrow range.
         assert_eq!(
-            range_sizes([1000, 1920, 0, 600, 1080, 0]),
+            range_sizes([1000, 1900, 0, 600, 1000, 0]),
             vec![(1280, 720)]
         );
         // Off the step: 360 - 100 = 260 is not a multiple of 64.
@@ -750,6 +850,31 @@ mod tests {
         assert_eq!(min_row_bytes(PixelFormat::Yuyv, u32::MAX), None);
     }
 
+    /// GIVEN frame intervals WHEN the rate is read THEN it is the whole
+    /// frames per second, rounded down, a zero interval gives none, and an
+    /// interval longer than a second gives 1, not the unknown 0.
+    #[test]
+    fn given_intervals_then_the_rate_rounds_down() {
+        assert_eq!(rate_of(1, 30), 30);
+        assert_eq!(rate_of(1001, 30000), 29);
+        assert_eq!(rate_of(1, 5), 5);
+        assert_eq!(rate_of(0, 30), 0);
+        assert_eq!(rate_of(1, 0), 0);
+        assert_eq!(rate_of(2, 1), 1, "0.5 fps is slow, not unknown");
+        assert_eq!(rate_of(u32::MAX, 1), 1);
+    }
+
+    /// GIVEN the widest picture WHEN its row is measured THEN it fits the
+    /// stride limit, and so does its buffer.
+    #[test]
+    fn given_the_widest_picture_then_row_and_buffer_fit_the_limits() {
+        let row = min_row_bytes(PixelFormat::Yuyv, yuyv::MAX_LONG_SIDE).expect("row");
+        assert!(row <= MAX_STRIDE);
+        let bytes = u64::from(row) * u64::from(yuyv::MAX_SHORT_SIDE);
+        assert!(bytes <= u64::from(MAX_BUFFER_BYTES));
+        assert!(u64::from(MAX_BUFFERS) * u64::from(MAX_BUFFER_BYTES) <= 256 << 20);
+    }
+
     /// GIVEN a missing node WHEN opened THEN there is no descriptor. (A
     /// machine may have /dev/video0; node 63 is used to stay clear of it.)
     #[test]
@@ -762,7 +887,7 @@ mod tests {
     #[test]
     fn given_unknown_id_when_opened_then_not_found() {
         assert_eq!(
-            open("uvcvideo|No Such Camera|usb-none").err(),
+            open("uvcvideo|No Such Camera|usb-none", SendTier::P360).err(),
             Some(CameraState::NotFound)
         );
     }

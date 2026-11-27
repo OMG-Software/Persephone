@@ -16,9 +16,11 @@ use matrix_sdk_crypto::store::CryptoStore;
 use persephone_call_protocol::{
     Background, BackgroundPicture, BlurStrength, ColourFilter, DEFAULT_MIC_GAIN_PERCENT,
     FromWorker, MAX_DEVICE_ID_BYTES, MAX_DEVICE_NAME_BYTES, MAX_DEVICES, MAX_VOLUME_PERCENT,
-    MediaDevice, ToWorker, VideoEffect, valid_mic_gain,
+    MediaDevice, ToWorker, VideoEffect, VideoQuality, valid_mic_gain,
 };
-use persephone_contracts::{CallBackground, CallColourFilter, CallVideoEffect, call_blur_valid};
+use persephone_contracts::{
+    CallBackground, CallColourFilter, CallVideoEffect, CallVideoQuality, call_blur_valid,
+};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -26,8 +28,8 @@ use std::time::{Duration, Instant};
 pub const DEVICES_KEY: &str = "persephone.call_devices.v1";
 /// The largest saved record: three IDs at the limit, each one escaped to
 /// at most two bytes a byte (`"` and `\`) plus its quotes, the field names
-/// the volume, the microphone settings, the video effect and the mirror
-/// flag. Every valid selection serializes under it.
+/// the volume, the microphone settings, the video effect, the mirror
+/// flag and the send resolution. Every valid selection serializes under it.
 const MAX_RECORD_BYTES: usize = 3 * (2 * MAX_DEVICE_ID_BYTES + 2) + 256;
 /// How long the worker has to answer `ListDevices`.
 pub const LIST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -65,6 +67,21 @@ pub struct Selection {
     /// is on: the page mirrored it before the choice existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mirror: Option<bool>,
+    /// The own camera's send resolution (ADR-0070). `None` is Auto.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_quality: Option<CallVideoQuality>,
+}
+
+/// The worker's form of a send resolution (ADR-0070). This is the one place
+/// that maps the page's choice to the call protocol.
+pub const fn worker_quality(quality: CallVideoQuality) -> VideoQuality {
+    match quality {
+        CallVideoQuality::Auto => VideoQuality::Auto,
+        CallVideoQuality::P480 => VideoQuality::P480,
+        CallVideoQuality::P720 => VideoQuality::P720,
+        CallVideoQuality::P1080 => VideoQuality::P1080,
+        CallVideoQuality::P1440 => VideoQuality::P1440,
+    }
 }
 
 // The page's blur bounds repeat the worker protocol's (ADR-0068). A blur
@@ -150,6 +167,16 @@ impl Selection {
     /// Whether the own preview is mirrored: the saved choice, else on.
     pub fn mirror(&self) -> bool {
         self.mirror.unwrap_or(true)
+    }
+
+    /// The saved send resolution, else Auto (ADR-0070).
+    pub fn video_quality(&self) -> CallVideoQuality {
+        self.video_quality.unwrap_or_default()
+    }
+
+    /// The saved send resolution in the call protocol's form.
+    pub fn worker_quality(&self) -> VideoQuality {
+        worker_quality(self.video_quality())
     }
 
     /// The automatic microphone level to use: the saved one, else on.
@@ -568,6 +595,42 @@ mod tests {
         }
     }
 
+    /// GIVEN records with and without a send resolution WHEN read THEN a
+    /// missing one is Auto, a saved one is kept with its protocol form, an
+    /// unknown name is unreadable, and no choice is not written (ADR-0070).
+    #[test]
+    fn given_a_saved_video_quality_then_it_is_read_or_auto() {
+        let old = parse(br#"{"recording":"a","playout":null,"volume":40}"#).unwrap();
+        assert_eq!(
+            (old.video_quality, old.video_quality(), old.worker_quality()),
+            (None, CallVideoQuality::Auto, VideoQuality::Auto)
+        );
+        for (name, quality, worker) in [
+            ("auto", CallVideoQuality::Auto, VideoQuality::Auto),
+            ("480p", CallVideoQuality::P480, VideoQuality::P480),
+            ("720p", CallVideoQuality::P720, VideoQuality::P720),
+            ("1080p", CallVideoQuality::P1080, VideoQuality::P1080),
+            ("1440p", CallVideoQuality::P1440, VideoQuality::P1440),
+        ] {
+            let record = format!(r#"{{"recording":null,"playout":null,"video_quality":"{name}"}}"#);
+            let read = parse(record.as_bytes()).unwrap();
+            assert_eq!(
+                (read.video_quality(), read.worker_quality()),
+                (quality, worker)
+            );
+            assert_eq!(parse(&serde_json::to_vec(&read).unwrap()), Ok(read));
+        }
+        for bad in [
+            &br#"{"recording":null,"playout":null,"video_quality":"4k"}"#[..],
+            br#"{"recording":null,"playout":null,"video_quality":"Auto"}"#,
+            br#"{"recording":null,"playout":null,"video_quality":720}"#,
+        ] {
+            assert_eq!(parse(bad), Err(Unreadable));
+        }
+        let none = String::from_utf8(serde_json::to_vec(&Selection::default()).unwrap()).unwrap();
+        assert!(!none.contains("video_quality"));
+    }
+
     /// GIVEN three IDs at the limit made only of characters JSON escapes
     /// WHEN saved THEN the record fits under the cap and reads back.
     #[test]
@@ -587,6 +650,7 @@ mod tests {
                     filter: CallColourFilter::Greyscale,
                 }),
                 mirror: Some(false),
+                video_quality: Some(CallVideoQuality::P1440),
             };
             assert!(selection.is_valid());
             let bytes = serde_json::to_vec(&selection).unwrap();

@@ -76,6 +76,8 @@
 * [0067 - Capture the Windows screen in a helper outside the call worker](0067-capture-the-windows-screen-in-a-helper-outside-the-call-worker.md)
 * [0068 - Add background blur, backgrounds, colour filters and a mirrored preview to call video](0068-add-background-blur-backgrounds-colour-filters-and-a-mirrored-preview-to-call-video.md)
 * [0069 - Build an Arch Linux package from the x86_64 .deb](0069-build-an-arch-linux-package-from-the-deb.md)
+* [0070 - Choose the camera send resolution](0070-choose-the-camera-send-resolution.md)
+* [0071 - Tell call members when you are deafened](0071-tell-call-members-when-you-are-deafened.md)
 * [0072 - Offer a desktop entry for the Linux AppImage](0072-offer-a-desktop-entry-for-the-linux-appimage.md)
 
 ## Superseded Records

@@ -29,6 +29,7 @@ import type {
   CallStatus,
   CallUnavailable,
   CallVideoEffect,
+  CallVideoQuality,
   CallVideoTile,
   ContactStatus,
   ConversationStart,
@@ -452,6 +453,14 @@ export function openCallWindow(): Promise<void> {
   return invoke<void>('open_call_window');
 }
 
+/**
+ * Puts the call window in full screen or out of it. The host does it on
+ * Windows only; the web view does it elsewhere (ADR-0060).
+ */
+export function setCallFullscreen(on: boolean): Promise<void> {
+  return invoke<void>('set_call_fullscreen', { on });
+}
+
 /** Closes the call window, if it is open. The call goes on. */
 export function closeCallWindow(): Promise<void> {
   return invoke<void>('close_call_window');
@@ -734,6 +743,17 @@ export function callVideoEffect(change: VideoEffectChange): Promise<CallStatus> 
   }
   if (typeof change.mirror === 'boolean') args.mirror = change.mirror;
   return invoke<CallStatus>('call_video_effect', args);
+}
+
+/**
+ * Sets the own camera's send resolution (ADR-0070): `auto`, `480p`, `720p`,
+ * `1080p` or `1440p`. It is saved for later calls. A camera that is on in
+ * a running call restarts, so the new size applies at once. The status says
+ * nothing about the camera's real size; the camera and the computer limit
+ * the highest one.
+ */
+export function callVideoQuality(quality: CallVideoQuality): Promise<CallStatus> {
+  return invoke<CallStatus>('call_video_quality', { quality });
 }
 
 /**

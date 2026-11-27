@@ -224,6 +224,9 @@ impl CoreTransport for FakeCore {
             Call::CallVideoEffect { effect, .. } => Ok(
                 serde_json::json!({"phase": "active", "roomId": "!r:example.invalid", "muted": false, "deafened": false, "volume": 100, "participants": [], "ended": null, "joinError": null, "camera": "off", "screen": "off", "video": [], "effectRefused": effect.is_some_and(|effect| effect.background == persephone_contracts::CallBackground::Blur)}),
             ),
+            Call::CallVideoQuality { .. } => Ok(
+                serde_json::json!({"phase": "active", "roomId": "!r:example.invalid", "muted": false, "deafened": false, "volume": 100, "participants": [], "ended": null, "joinError": null, "camera": "off", "screen": "off", "video": []}),
+            ),
             Call::VerifyThisDevice {} => Ok(serde_json::json!({
                 "identity": "unverified", "recovery": "enabled", "operation": "idle", "error": null, "verification": null, "canSetUpRecovery": false, "canStartNewBackup": false, "profilePassphrase": false,
                 "verification": {"flowId": "f1", "phase": "waiting", "emoji": [], "otherDevice": null}
@@ -1065,6 +1068,7 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-call-volume",
             "allow-call-microphone",
             "allow-call-video-effect",
+            "allow-call-video-quality",
             "allow-call-camera",
             "allow-call-screen",
             "allow-call-video-frame",
@@ -1167,14 +1171,17 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-call-mute",
             "allow-call-deafen",
             "allow-call-volume",
+            "allow-call-microphone",
             "allow-call-camera",
             "allow-call-screen",
             "allow-call-devices",
             "allow-set-call-devices",
             "allow-call-video-effect",
+            "allow-call-video-quality",
             "allow-call-stats",
             "allow-call-stats-read",
             "allow-close-call-window",
+            "allow-set-call-fullscreen",
             "allow-call-window-ready"
         ])
     );
@@ -1203,10 +1210,6 @@ fn given_the_call_window_then_only_call_commands_are_allowed() {
         ("minimise_to_tray", serde_json::json!({})),
         ("exit_app", serde_json::json!({})),
         (
-            "call_microphone",
-            serde_json::json!({"autoLevel": true, "gain": 100}),
-        ),
-        (
             "call_device_test",
             serde_json::json!({"test": "microphone", "device": null}),
         ),
@@ -1230,6 +1233,79 @@ fn given_the_call_window_then_only_call_commands_are_allowed() {
         )
         .is_err()
     );
+}
+
+/// GIVEN the call window WHEN it sets the microphone gain THEN it is relayed
+/// (ADR-0060); WHEN the gain is off the step or too high THEN it is refused
+/// before the core.
+#[test]
+fn given_the_call_window_then_it_sets_the_microphone_gain() {
+    let core = FakeCore::new(true);
+    let app = app_with(core.clone());
+    let _main = create_main_window(&app).unwrap();
+    let window = create_call_window(&app).unwrap();
+    let invoke = |args| invoke_on(&window, "call_microphone", app_origin(), args);
+    let before = core.calls.load(Ordering::SeqCst);
+    assert!(invoke(serde_json::json!({"autoLevel": false, "gain": 250})).is_ok());
+    assert_eq!(core.calls.load(Ordering::SeqCst), before + 1, "relayed");
+    for args in [
+        serde_json::json!({"autoLevel": false, "gain": 401}),
+        serde_json::json!({"autoLevel": false, "gain": 7}),
+        serde_json::json!({"autoLevel": false, "gain": -5}),
+        serde_json::json!({"gain": 100}),
+    ] {
+        assert!(invoke(args.clone()).is_err(), "{args} refused");
+    }
+    assert_eq!(
+        core.calls.load(Ordering::SeqCst),
+        before + 1,
+        "no more relays"
+    );
+}
+
+/// GIVEN the call window WHEN it asks for full screen THEN the host takes it
+/// and relays nothing to the core; WHEN `on` is missing or not a bool THEN it
+/// is refused; WHEN the main window asks THEN it is refused.
+#[test]
+fn given_the_call_window_then_it_sets_full_screen_in_the_host_only() {
+    let core = FakeCore::new(true);
+    let app = app_with(core.clone());
+    let main = create_main_window(&app).unwrap();
+    let window = create_call_window(&app).unwrap();
+    let before = core.calls.load(Ordering::SeqCst);
+    for on in [true, false] {
+        assert_eq!(
+            invoke_on(
+                &window,
+                "set_call_fullscreen",
+                app_origin(),
+                serde_json::json!({"on": on})
+            ),
+            Ok(serde_json::Value::Null)
+        );
+    }
+    for args in [
+        serde_json::json!({}),
+        serde_json::json!({"on": "true"}),
+        serde_json::json!({"on": 1}),
+        serde_json::json!({"on": null}),
+    ] {
+        assert!(
+            invoke_on(&window, "set_call_fullscreen", app_origin(), args.clone()).is_err(),
+            "{args} refused"
+        );
+    }
+    assert!(
+        invoke_on(
+            &main,
+            "set_call_fullscreen",
+            app_origin(),
+            serde_json::json!({"on": true})
+        )
+        .is_err(),
+        "the main window has no permission"
+    );
+    assert_eq!(core.calls.load(Ordering::SeqCst), before, "nothing relayed");
 }
 
 /// GIVEN the call window WHEN it lists the call devices and changes them
@@ -1288,6 +1364,12 @@ fn given_the_call_window_then_it_lists_and_changes_call_devices() {
         "active"
     );
     assert_eq!(core.calls.load(Ordering::SeqCst), relayed + 1);
+    // ... and the own camera's send resolution (ADR-0070).
+    assert_eq!(
+        invoke("call_video_quality", serde_json::json!({"quality": "720p"})).unwrap()["phase"],
+        "active"
+    );
+    assert_eq!(core.calls.load(Ordering::SeqCst), relayed + 2);
 }
 
 /// GIVEN the call statistics command WHEN the main window calls it THEN it is
@@ -2419,6 +2501,40 @@ fn given_call_commands_then_bounded_arguments_cross_and_replies_are_checked() {
     // The five valid microphone changes and the eight valid effects above
     // are the only calls since the start of this check.
     assert_eq!(core.calls.load(Ordering::SeqCst), before + 13);
+    // The send resolution (ADR-0070): a closed set of five names. Any other
+    // value, type or extra field never reaches the core.
+    let before_quality = core.calls.load(Ordering::SeqCst);
+    for quality in ["auto", "480p", "720p", "1080p", "1440p"] {
+        assert_eq!(
+            invoke(
+                "call_video_quality",
+                serde_json::json!({"quality": quality})
+            )
+            .unwrap()["phase"],
+            "active",
+            "{quality}"
+        );
+    }
+    for args in [
+        serde_json::json!({}),
+        serde_json::json!({"quality": null}),
+        serde_json::json!({"quality": "360p"}),
+        serde_json::json!({"quality": "2160p"}),
+        serde_json::json!({"quality": "Auto"}),
+        serde_json::json!({"quality": "1080"}),
+        serde_json::json!({"quality": 1080}),
+        serde_json::json!({"quality": ["720p"]}),
+    ] {
+        assert!(
+            invoke("call_video_quality", args.clone()).is_err(),
+            "{args}"
+        );
+    }
+    assert_eq!(
+        core.calls.load(Ordering::SeqCst),
+        before_quality + 5,
+        "a refused value never reached the core"
+    );
 }
 
 /// Sending relays the room and body only; oversized input never reaches the

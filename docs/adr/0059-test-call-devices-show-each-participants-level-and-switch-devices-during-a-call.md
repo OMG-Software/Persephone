@@ -116,13 +116,19 @@ no media permissions, and a browser test would prove nothing about the worker.
   `failed`) until the next change. `kept` (worker code `DeviceKept`) is a
   failed microphone switch that the worker undid: the old microphone
   captures again and the speaker is not lost, so the page does not ask to
-  rejoin. Linux reports `unsupported`: the PulseAudio path has no
-  switch yet.
+  rejoin. Linux moves the call's own sound server streams on a connection
+  that the worker opened before stage 2 (ADR-0049, amended 27 November 2026,
+  proposed). Where that connection could not open, Linux reports
+  `unsupported`. On Linux, `kept` also needs the routes read again: every own
+  stream is on its old device, else `failed`. A waiting speaker target whose
+  move is refused at the last try is reported the same way, unasked.
 * `SetDevices` also carries the camera choice. The worker keeps it, and the
-  call's next camera start opens it; a camera that is on keeps running until
-  it is turned off. On Linux a choice whose microphone and speaker equal the
-  join's is no sound change, so a change of the camera only does not report
-  `unsupported`.
+  call's next camera start opens it. Since 27 November 2026 the core restarts
+  a camera that is on or starting when the saved camera changes, so the
+  change applies at once
+  ([ADR-0070](0070-choose-the-camera-send-resolution.md), proposed). On Linux without that connection, a choice whose
+  microphone and speaker equal the join's is no sound change, so a change of
+  the camera only does not report `unsupported`.
 
 ### Device tests
 
@@ -180,7 +186,11 @@ no media permissions, and a browser test would prove nothing about the worker.
 * A camera that ran but was not released in time still ran: the test ends
   as `done`.
   `FailureCode::Unsupported` (10) is a test this platform does not have.
-* The call protocol is version 10.
+* This decision raised the call protocol to version 10. Later records raised
+  it again: it is version 16 since
+  [ADR-0070](0070-choose-the-camera-send-resolution.md) (`Join.video_quality`,
+  `SetVideoQuality`). `VERSION` in `crates/call-protocol` is the current
+  number.
 
 ### Positive Consequences
 
@@ -201,5 +211,7 @@ no media permissions, and a browser test would prove nothing about the worker.
   ([evidence](../evidence/device-tests-linux-macos.md)); the Linux camera
   test with the portal was not run.
 * The Linux camera test may show the desktop's camera portal dialog.
-* Linux cannot switch the microphone or speaker during a call.
+* Linux switches the microphone or speaker during a call only through the
+  sound server connection (ADR-0049 amendment, proposed). Without it, Linux
+  cannot.
 * Each test starts a worker process, which takes about a second.

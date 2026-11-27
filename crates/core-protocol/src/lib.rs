@@ -793,6 +793,13 @@ pub enum Call {
         #[serde(default)]
         mirror: Option<bool>,
     },
+    /// Set the own camera's send resolution (ADR-0070). It is saved for
+    /// later calls and applies to a running call: a camera that is on
+    /// restarts. The type allows only the closed set of names. Replies
+    /// `CallStatus`.
+    CallVideoQuality {
+        quality: persephone_contracts::CallVideoQuality,
+    },
     /// Start or stop the call statistics (ADR-0066). While on, the core
     /// asks the worker to read them and sends [`Event::CallStats`], at most
     /// about once a second. Only the call window may send it. Off at every
@@ -2732,6 +2739,18 @@ mod tests {
                 r#"{"id":1,"call":{"command":"call_video_effect","effect":null,"mirror":false}}"#,
             ),
             (
+                Call::CallVideoQuality {
+                    quality: persephone_contracts::CallVideoQuality::P1440,
+                },
+                r#"{"id":1,"call":{"command":"call_video_quality","quality":"1440p"}}"#,
+            ),
+            (
+                Call::CallVideoQuality {
+                    quality: persephone_contracts::CallVideoQuality::Auto,
+                },
+                r#"{"id":1,"call":{"command":"call_video_quality","quality":"auto"}}"#,
+            ),
+            (
                 Call::CallStatus {},
                 r#"{"id":1,"call":{"command":"call_status"}}"#,
             ),
@@ -3262,6 +3281,13 @@ mod tests {
             br#"{"id":1,"call":{"command":"call_video_effect","effect":{"background":"none","blur":50,"filter":"none","path":"C:/x"},"mirror":false}}"#,
             br#"{"id":1,"call":{"command":"call_video_effect","effect":{"background":"none","blur":50,"filter":"none"},"mirror":1}}"#,
             br#"{"id":1,"call":{"command":"call_video_effect","effect":{"background":"none","blur":50,"filter":"none"},"mirror":false,"x":1}}"#,
+            br#"{"id":1,"call":{"command":"call_video_quality"}}"#,
+            br#"{"id":1,"call":{"command":"call_video_quality","quality":null}}"#,
+            br#"{"id":1,"call":{"command":"call_video_quality","quality":"4k"}}"#,
+            br#"{"id":1,"call":{"command":"call_video_quality","quality":"Auto"}}"#,
+            br#"{"id":1,"call":{"command":"call_video_quality","quality":"360p"}}"#,
+            br#"{"id":1,"call":{"command":"call_video_quality","quality":720}}"#,
+            br#"{"id":1,"call":{"command":"call_video_quality","quality":"720p","x":1}}"#,
             br#"{"id":1,"call":{"command":"call_status","room_id":"!r:s"}}"#,
             br#"{"id":1,"call":{"command":"call_rings","room_id":"!r:s"}}"#,
             br#"{"id":1,"call":{"command":"call_decline_ring"}}"#,
