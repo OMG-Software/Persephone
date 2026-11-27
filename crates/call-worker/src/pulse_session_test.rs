@@ -3,6 +3,15 @@
 //! `pipewire-pulse` server with two speakers and two microphones that are
 //! not monitors, and the tools `pactl`, `pacat` and `parec`.
 //!
+//! Use a disposable sound server, never the desktop one. The setup changes
+//! the server's default sink and source and loads modules, and the test
+//! moves streams. Start a separate server under a temporary runtime
+//! directory (for example `pulseaudio -n --daemonize=yes --exit-idle-time=-1
+//! -L module-native-protocol-unix`, or `pipewire` with `pipewire-pulse`),
+//! and point the test and `pactl` at it with `XDG_RUNTIME_DIR` and
+//! `PULSE_SERVER`. The teardown must run also when the test fails, so set a
+//! `trap` before the first change.
+//!
 //! The test binary starts itself as a child. The child plays the call
 //! worker: it opens its own record and playback streams, opens the
 //! [`Session`], applies the real containment (stage 1 and stage 2, so no
@@ -11,15 +20,30 @@
 //! also keeps streams of other programs to show that they never move.
 //!
 //! ```text
-//! pactl load-module module-null-sink sink_name=persephone_main
-//! pactl load-module module-null-sink sink_name=persephone_other
-//! pactl load-module module-remap-source source_name=persephone_mic_a master=persephone_main.monitor
-//! pactl load-module module-remap-source source_name=persephone_mic_b master=persephone_other.monitor
+//! export XDG_RUNTIME_DIR="$(mktemp -d)" && chmod 700 "$XDG_RUNTIME_DIR"
+//! pulseaudio -n --daemonize=yes --exit-idle-time=-1 -L module-native-protocol-unix
+//! export PULSE_SERVER="unix:$XDG_RUNTIME_DIR/pulse/native"
+//! ORIG_SINK="$(pactl get-default-sink)"; ORIG_SOURCE="$(pactl get-default-source)"
+//! MODULES=""
+//! cleanup() {
+//!   pactl set-default-sink "$ORIG_SINK"; pactl set-default-source "$ORIG_SOURCE"
+//!   for id in $MODULES; do pactl unload-module "$id"; done
+//!   pulseaudio --kill; rm -rf "$XDG_RUNTIME_DIR"
+//! }
+//! trap cleanup EXIT
+//! MODULES="$MODULES $(pactl load-module module-null-sink sink_name=persephone_main)"
+//! MODULES="$MODULES $(pactl load-module module-null-sink sink_name=persephone_other)"
+//! MODULES="$MODULES $(pactl load-module module-remap-source source_name=persephone_mic_a master=persephone_main.monitor)"
+//! MODULES="$MODULES $(pactl load-module module-remap-source source_name=persephone_mic_b master=persephone_other.monitor)"
 //! pactl set-default-sink persephone_main
 //! pactl set-default-source persephone_mic_a
 //! PERSEPHONE_TEST_OTHER_SINK=pulse:persephone_other PERSEPHONE_TEST_OTHER_SOURCE=pulse:persephone_mic_b \
 //!   cargo test --locked -p persephone-call-worker -- --ignored --exact pulse_session_test::given_a_call_session
 //! ```
+//!
+//! The `trap` restores the defaults, unloads the null and remap modules and
+//! stops the temporary server when the shell ends, whether the test passed
+//! or failed.
 
 use std::ffi::{c_char, c_int, c_void};
 use std::io::{BufRead, BufReader, Write};
@@ -96,16 +120,17 @@ fn the_call_worker_side() {
     // "late": no playback stream yet (nobody else is in the call), and only
     // stage 1, because a stream opened later needs a new socket.
     let late = mode == "late";
-    let _record = open_stream(2);
-    let mut _playback = (!late).then(|| open_stream(1));
-    assert!(library().is_some());
-    // The same order as the worker: the connection first, then containment.
-    let session = Session::open(None, None).expect("the session opens");
+    // The same order as the worker: stage 1 first (before any input), then
+    // the sound server connections, then stage 2.
     // SAFETY: plain prctl, as the launcher does.
     unsafe {
         libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
     }
     assert_eq!(crate::containment::missing_controls(), 0, "stage 1");
+    let _record = open_stream(2);
+    let mut _playback = (!late).then(|| open_stream(1));
+    assert!(library().is_some());
+    let session = Session::open(None, None).expect("the session opens");
     if !late {
         assert!(crate::containment::apply_stage2(), "stage 2");
     }
@@ -123,8 +148,13 @@ fn the_call_worker_side() {
                 continue;
             }
             Some("APPLY") => {
-                let (waiting, failed) = session.apply_pending();
-                writeln!(out, "OK waiting={waiting} failed={failed:?}").unwrap();
+                let run = session.apply_pending(false);
+                writeln!(
+                    out,
+                    "OK waiting={} failed={:?}",
+                    run.waiting, run.moves_failed
+                )
+                .unwrap();
                 out.flush().unwrap();
                 continue;
             }
@@ -138,6 +168,17 @@ fn the_call_worker_side() {
             Err(code) => writeln!(out, "ERR {code:?}").unwrap(),
         }
         out.flush().unwrap();
+    }
+}
+
+/// A program that the test started. It is stopped and waited for when it
+/// goes out of scope, also after a panic.
+struct Reaper(Child);
+
+impl Drop for Reaper {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
     }
 }
 
@@ -246,21 +287,26 @@ fn given_a_call_session() {
     let default_sink = pactl(&["get-default-sink"]).trim().to_owned();
     let default_source = pactl(&["get-default-source"]).trim().to_owned();
 
-    let playing = Command::new("pacat")
-        .args(["--playback", "--raw"])
-        .stdin(Stdio::from(std::fs::File::open("/dev/zero").unwrap()))
-        .spawn()
-        .expect("pacat");
-    let recording = Command::new("parec")
-        .arg("--raw")
-        .stdout(Stdio::null())
-        .spawn()
-        .expect("parec");
-    let mut foreign = [playing, recording];
+    // Each program goes under its guard at once, so a panic or a failed
+    // start of the next one still stops it.
+    let playing = Reaper(
+        Command::new("pacat")
+            .args(["--playback", "--raw"])
+            .stdin(Stdio::from(std::fs::File::open("/dev/zero").unwrap()))
+            .spawn()
+            .expect("pacat"),
+    );
+    let recording = Reaper(
+        Command::new("parec")
+            .arg("--raw")
+            .stdout(Stdio::null())
+            .spawn()
+            .expect("parec"),
+    );
     let (mut child, mut reader) = start_child("1");
     std::thread::sleep(std::time::Duration::from_millis(300));
     let pid = child.id();
-    let (playing_pid, recording_pid) = (foreign[0].id(), foreign[1].id());
+    let (playing_pid, recording_pid) = (playing.0.id(), recording.0.id());
 
     let check = |sinks: &str, sources: &str, note: &str| {
         assert_eq!(on("sink-inputs", pid), [sinks], "own playback {note}");
@@ -292,11 +338,13 @@ fn given_a_call_session() {
         assert_eq!(reply, "ERR DeviceNotFound", "{bad}");
         check(sink, source, bad);
     }
-    // A good microphone is not moved when the speaker choice is bad.
+    // A good microphone is not moved when the speaker choice is bad. The
+    // microphone asked for is the start default, not the one in use, so an
+    // early microphone move shows.
     let reply = ask(
         &mut child,
         &mut reader,
-        &format!("SWITCH {other_source} pulse:persephone_missing"),
+        &format!("SWITCH pulse:{default_source} pulse:persephone_missing"),
     );
     assert_eq!(reply, "ERR DeviceNotFound");
     check(sink, source, "a bad speaker beside a good microphone");
@@ -309,10 +357,6 @@ fn given_a_call_session() {
     drop(child.stdin.take());
     let status = child.wait().unwrap();
     assert!(status.success(), "the child ended well: {status:?}");
-    for program in &mut foreign {
-        let _ = program.kill();
-        let _ = program.wait();
-    }
 }
 
 /// GIVEN a call with no playback stream yet and a new speaker, WHEN the
