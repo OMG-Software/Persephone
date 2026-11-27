@@ -6,9 +6,11 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use persephone_call_protocol::{
-    CameraState, MAX_VIDEO_PIXELS, MAX_VIDEO_ROTATION, MAX_VIDEO_SIDE, SCREEN_TILE, max_fps,
-    picture_fits,
+    CameraState, MAX_VIDEO_FPS, MAX_VIDEO_PIXELS, MAX_VIDEO_ROTATION, MAX_VIDEO_SIDE, SCREEN_TILE,
+    max_fps, picture_fits,
 };
+
+use crate::send_tier::SendTier;
 
 /// The tile of the own camera.
 pub const OWN_TILE: u8 = 0;
@@ -29,6 +31,14 @@ const PUBLISH_SHORT: u32 = 1080;
 /// Both sides are at least 1. Returns `None` for an empty picture.
 pub fn fit_within_box(width: u32, height: u32) -> Option<(u32, u32)> {
     fit_in(width, height, BOX_LONG, BOX_SHORT)
+}
+
+/// The size to send for a camera picture of `width` x `height` at `tier`: the
+/// largest size that fits the tier's box (the sides swap for a tall picture)
+/// with the same aspect. A picture that already fits keeps its size.
+pub fn fit_to_tier(width: u32, height: u32, tier: SendTier) -> Option<(u32, u32)> {
+    let (long, short) = tier.long_short();
+    fit_in(width, height, long, short)
 }
 
 /// The size to publish for a screen capture of `width` x `height`: the
@@ -366,38 +376,54 @@ pub struct CaptureMode {
     pub fps: u32,
 }
 
-/// The index of the best mode: the smallest picture that still has at least
-/// 640x360 (360x640 when the camera is tall), else the largest picture. On a
-/// tie, the faster mode wins, counted up to 30 fps. A mode with a side of 0
-/// is skipped.
+/// The index of the best mode for a camera that sends `target` (ADR-0070).
+/// A mode that reaches [`MAX_VIDEO_FPS`] is preferred: a camera that gives
+/// 5 frames per second at a large size would make the call worse. A mode
+/// whose speed is unknown (0) counts as reaching it. Among those modes, the
+/// smallest picture that covers the target's box (both sides, either
+/// orientation) wins; when none covers it, the largest picture wins. When no
+/// mode reaches the speed, the largest picture of all wins. On a tie, the
+/// faster mode wins, counted up to 30 fps, then the lower index. A mode with
+/// a side of 0 is skipped.
 #[cfg_attr(target_os = "macos", allow(dead_code))]
-pub fn pick_capture_mode(modes: &[CaptureMode]) -> Option<usize> {
+pub fn pick_capture_mode(modes: &[CaptureMode], target: SendTier) -> Option<usize> {
     let area = |mode: &CaptureMode| u64::from(mode.width) * u64::from(mode.height);
-    let big_enough = |mode: &CaptureMode| {
+    let (target_long, target_short) = target.long_short();
+    let covers = |mode: &CaptureMode| {
         let (long, short) = (mode.width.max(mode.height), mode.width.min(mode.height));
-        long >= BOX_LONG && short >= BOX_SHORT
+        long >= target_long && short >= target_short
     };
+    let reaches = |mode: &CaptureMode| mode.fps == 0 || mode.fps >= MAX_VIDEO_FPS;
     let usable = || {
         modes
             .iter()
             .enumerate()
             .filter(|(_, mode)| mode.width > 0 && mode.height > 0)
     };
-    // Smaller area is better among big enough modes; larger area otherwise.
-    let best = if usable().any(|(_, mode)| big_enough(mode)) {
-        usable()
-            .filter(|(_, mode)| big_enough(mode))
-            .min_by_key(|(index, mode)| (area(mode), std::cmp::Reverse(mode.fps.min(30)), *index))
-    } else {
-        usable().min_by_key(|(index, mode)| {
-            (
-                std::cmp::Reverse(area(mode)),
-                std::cmp::Reverse(mode.fps.min(30)),
-                *index,
-            )
-        })
+    // The largest picture, then the faster mode, then the lower index.
+    let largest = |candidates: Vec<(usize, &CaptureMode)>| {
+        candidates
+            .into_iter()
+            .min_by_key(|(index, mode)| {
+                (
+                    std::cmp::Reverse(area(mode)),
+                    std::cmp::Reverse(mode.fps.min(30)),
+                    *index,
+                )
+            })
+            .map(|(index, _)| index)
     };
-    best.map(|(index, _)| index)
+    let fast: Vec<_> = usable().filter(|(_, mode)| reaches(mode)).collect();
+    if fast.is_empty() {
+        return largest(usable().collect());
+    }
+    // Smaller area is better among the modes that cover the box.
+    let covering = fast
+        .iter()
+        .filter(|(_, mode)| covers(mode))
+        .min_by_key(|(index, mode)| (area(mode), std::cmp::Reverse(mode.fps.min(30)), *index))
+        .map(|(index, _)| *index);
+    covering.or_else(|| largest(fast))
 }
 
 #[cfg(test)]
@@ -830,25 +856,76 @@ mod tests {
             mode(640, 360, 15),
             mode(640, 360, 30),
         ];
-        assert_eq!(pick_capture_mode(&modes), Some(4));
+        assert_eq!(pick_capture_mode(&modes, SendTier::P360), Some(4));
         let small = [mode(160, 120, 30), mode(320, 240, 15), mode(320, 240, 30)];
-        assert_eq!(pick_capture_mode(&small), Some(2));
+        assert_eq!(pick_capture_mode(&small, SendTier::P360), Some(2));
         let tall = [mode(360, 640, 30), mode(720, 1280, 30)];
-        assert_eq!(pick_capture_mode(&tall), Some(0));
+        assert_eq!(pick_capture_mode(&tall, SendTier::P360), Some(0));
     }
 
     /// GIVEN no modes or only empty modes WHEN one is picked THEN there is
     /// none.
     #[test]
     fn given_no_usable_modes_when_picked_then_none() {
-        assert_eq!(pick_capture_mode(&[]), None);
+        assert_eq!(pick_capture_mode(&[], SendTier::P360), None);
         assert_eq!(
-            pick_capture_mode(&[mode(0, 480, 30), mode(640, 0, 30)]),
+            pick_capture_mode(&[mode(0, 480, 30), mode(640, 0, 30)], SendTier::P360),
             None
         );
         assert_eq!(
-            pick_capture_mode(&[mode(0, 480, 30), mode(640, 480, 30)]),
+            pick_capture_mode(&[mode(0, 480, 30), mode(640, 480, 30)], SendTier::P360),
             Some(1)
         );
+    }
+
+    /// GIVEN modes that differ in speed WHEN a mode is picked THEN a mode
+    /// that reaches 15 fps wins over a smaller one that does not, and over a
+    /// larger one that does not.
+    #[test]
+    fn given_slow_modes_when_picked_then_a_15_fps_mode_wins() {
+        // The 640x360 mode is too slow: the next one that covers is taken.
+        let modes = [mode(640, 360, 10), mode(1280, 720, 30), mode(640, 480, 15)];
+        assert_eq!(pick_capture_mode(&modes, SendTier::P360), Some(2));
+        // A large mode at 5 fps never beats a smaller mode at 15 fps.
+        let modes = [mode(1920, 1080, 5), mode(1280, 720, 15)];
+        assert_eq!(pick_capture_mode(&modes, SendTier::P1080), Some(1));
+        // A speed that is not known (0) counts as fast enough.
+        let modes = [mode(640, 360, 0), mode(1280, 720, 0)];
+        assert_eq!(pick_capture_mode(&modes, SendTier::P360), Some(0));
+        assert_eq!(pick_capture_mode(&modes, SendTier::P720), Some(1));
+        // No mode reaches 15 fps: the largest picture, the faster on a tie.
+        let modes = [mode(640, 360, 10), mode(1280, 720, 5), mode(1280, 720, 8)];
+        assert_eq!(pick_capture_mode(&modes, SendTier::P360), Some(2));
+    }
+
+    /// GIVEN a target tier WHEN a mode is picked THEN it is the smallest
+    /// mode that covers the tier's box, and the largest when none does.
+    #[test]
+    fn given_a_target_when_picked_then_the_smallest_covering_mode_wins() {
+        let modes = [
+            mode(640, 360, 30),
+            mode(1280, 720, 30),
+            mode(1920, 1080, 30),
+            mode(2560, 1440, 30),
+        ];
+        let want = [
+            (SendTier::P360, 0),
+            (SendTier::P480, 1),
+            (SendTier::P720, 1),
+            (SendTier::P1080, 2),
+            (SendTier::P1440, 3),
+        ];
+        for (tier, index) in want {
+            assert_eq!(pick_capture_mode(&modes, tier), Some(index), "{tier:?}");
+        }
+        // The camera has no mode that covers the target: its largest.
+        assert_eq!(pick_capture_mode(&modes[..2], SendTier::P1440), Some(1));
+        // A tall camera is covered in the other orientation.
+        let tall = [
+            mode(360, 640, 30),
+            mode(720, 1280, 30),
+            mode(1080, 1920, 30),
+        ];
+        assert_eq!(pick_capture_mode(&tall, SendTier::P720), Some(1));
     }
 }

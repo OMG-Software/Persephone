@@ -2,16 +2,17 @@
 //! Linux camera backends (the PipeWire portal and V4L2) use it. It has no
 //! I/O and no Linux types, so it is unit-tested on every OS.
 //!
-//! Only NV12, I420 and YUYV are accepted, at most 1280x720 (or 720x1280 for a
-//! tall camera). The worker never decodes MJPEG. YUYV is converted to I420
+//! Only NV12, I420 and YUYV are accepted, at most 2560x1440 (or 1440x2560 for a
+//! tall camera; ADR-0070). The worker never decodes MJPEG. YUYV is converted to I420
 //! here, with every size checked before a buffer is made.
 
 use super::{CapturedFrame, Format, capture_size_ok};
+use crate::send_tier::SendTier;
 use crate::video::{CaptureMode, pick_capture_mode};
 
 /// The longest and the shortest side the Linux backends take.
-const MAX_LONG_SIDE: u32 = 1280;
-const MAX_SHORT_SIDE: u32 = 720;
+pub const MAX_LONG_SIDE: u32 = 2560;
+pub const MAX_SHORT_SIDE: u32 = 1440;
 
 /// A pixel format the Linux backends take, best first. NV12 and I420 need no
 /// conversion.
@@ -24,7 +25,7 @@ pub enum PixelFormat {
 }
 
 /// Whether a camera may deliver this picture size: inside the capture limits
-/// and at most 1280x720 (720x1280 when tall).
+/// and at most 2560x1440 (1440x2560 when tall).
 pub fn size_allowed(width: u32, height: u32) -> bool {
     capture_size_ok(width, height)
         && width.max(height) <= MAX_LONG_SIDE
@@ -55,11 +56,11 @@ pub struct Offer {
 
 /// The index of the best allowed offer, or `None` when no offer is allowed
 /// (for example a camera that gives only MJPEG, which is not an `Offer`, or
-/// only pictures above 1280x720). Size and speed follow
-/// [`pick_capture_mode`]; on a tie the format that needs no conversion wins.
+/// only pictures above 2560x1440). Size and speed follow
+/// [`pick_capture_mode`] for the tier `target`; on a tie the format that needs no conversion wins.
 /// YUYV needs even widths and NV12 needs even sides, so other offers of those
 /// formats are skipped (see [`format_allowed`]).
-pub fn choose(offers: &[Offer]) -> Option<usize> {
+pub fn choose(offers: &[Offer], target: SendTier) -> Option<usize> {
     let mut allowed: Vec<(usize, &Offer)> = offers
         .iter()
         .enumerate()
@@ -75,7 +76,7 @@ pub fn choose(offers: &[Offer]) -> Option<usize> {
             fps: offer.fps,
         })
         .collect();
-    pick_capture_mode(&modes).map(|best| allowed[best].0)
+    pick_capture_mode(&modes, target).map(|best| allowed[best].0)
 }
 
 /// Hands one picture to `on_frame` as NV12 or I420. `stride` is the bytes per
@@ -192,17 +193,26 @@ mod tests {
         }
     }
 
-    /// GIVEN picture sizes WHEN checked THEN only sizes up to 1280x720 pass,
+    /// GIVEN picture sizes WHEN checked THEN only sizes up to 2560x1440 pass,
     /// in either orientation.
     #[test]
-    fn given_sizes_then_only_up_to_1280_by_720_pass() {
-        for (w, h) in [(640, 360), (1280, 720), (720, 1280), (320, 240), (2, 2)] {
+    fn given_sizes_then_only_up_to_2560_by_1440_pass() {
+        for (w, h) in [
+            (640, 360),
+            (1280, 720),
+            (1920, 1080),
+            (2560, 1440),
+            (1440, 2560),
+            (720, 1280),
+            (320, 240),
+            (2, 2),
+        ] {
             assert!(size_allowed(w, h), "{w}x{h}");
         }
         for (w, h) in [
-            (1920, 1080),
-            (1281, 720),
-            (1280, 721),
+            (2561, 1440),
+            (2560, 1441),
+            (3840, 2160),
             (0, 0),
             (1, 1),
             (4096, 4096),
@@ -212,17 +222,17 @@ mod tests {
     }
 
     /// GIVEN offers of several sizes WHEN one is chosen THEN a picture above
-    /// 1280x720 is never chosen and the smallest big-enough one wins.
+    /// 2560x1440 is never chosen and the smallest big-enough one wins.
     #[test]
     fn given_offers_then_the_choice_stays_inside_the_limit() {
         let offers = [
-            offer(PixelFormat::Yuyv, 1920, 1080, 30),
+            offer(PixelFormat::Yuyv, 3840, 2160, 30),
             offer(PixelFormat::Yuyv, 1280, 720, 10),
             offer(PixelFormat::Yuyv, 640, 360, 30),
         ];
-        assert_eq!(choose(&offers), Some(2));
-        assert_eq!(choose(&offers[..1]), None);
-        assert_eq!(choose(&[]), None);
+        assert_eq!(choose(&offers, SendTier::P360), Some(2));
+        assert_eq!(choose(&offers[..1], SendTier::P1440), None);
+        assert_eq!(choose(&[], SendTier::P360), None);
     }
 
     /// GIVEN equal offers in two formats WHEN one is chosen THEN the format
@@ -234,29 +244,44 @@ mod tests {
             offer(PixelFormat::I420, 640, 360, 30),
             offer(PixelFormat::Nv12, 640, 360, 30),
         ];
-        assert_eq!(choose(&offers), Some(2));
-        assert_eq!(choose(&offers[..2]), Some(1));
+        assert_eq!(choose(&offers, SendTier::P360), Some(2));
+        assert_eq!(choose(&offers[..2], SendTier::P360), Some(1));
     }
 
     /// GIVEN a YUYV offer with an odd width WHEN chosen THEN it is skipped.
     #[test]
     fn given_odd_width_yuyv_then_it_is_skipped() {
-        assert_eq!(choose(&[offer(PixelFormat::Yuyv, 641, 360, 30)]), None);
-        assert_eq!(choose(&[offer(PixelFormat::I420, 641, 360, 30)]), Some(0));
+        assert_eq!(
+            choose(&[offer(PixelFormat::Yuyv, 641, 360, 30)], SendTier::P360),
+            None
+        );
+        assert_eq!(
+            choose(&[offer(PixelFormat::I420, 641, 360, 30)], SendTier::P360),
+            Some(0)
+        );
     }
 
     /// GIVEN NV12 offers with an odd width or height WHEN chosen THEN they
     /// are skipped, because the worker cannot fit an odd NV12 picture.
     #[test]
     fn given_odd_size_nv12_then_it_is_skipped() {
-        assert_eq!(choose(&[offer(PixelFormat::Nv12, 641, 360, 30)]), None);
-        assert_eq!(choose(&[offer(PixelFormat::Nv12, 640, 361, 30)]), None);
+        assert_eq!(
+            choose(&[offer(PixelFormat::Nv12, 641, 360, 30)], SendTier::P360),
+            None
+        );
+        assert_eq!(
+            choose(&[offer(PixelFormat::Nv12, 640, 361, 30)], SendTier::P360),
+            None
+        );
         let offers = [
             offer(PixelFormat::Nv12, 641, 360, 30),
             offer(PixelFormat::I420, 642, 360, 30),
         ];
-        assert_eq!(choose(&offers), Some(1));
-        assert_eq!(choose(&[offer(PixelFormat::Nv12, 640, 360, 30)]), Some(0));
+        assert_eq!(choose(&offers, SendTier::P360), Some(1));
+        assert_eq!(
+            choose(&[offer(PixelFormat::Nv12, 640, 360, 30)], SendTier::P360),
+            Some(0)
+        );
     }
 
     /// GIVEN formats and sizes WHEN judged THEN odd NV12 and odd-width YUYV
@@ -403,5 +428,30 @@ mod tests {
         assert_eq!(i420_sizes(4, 2), Some((8, 2, 12)));
         assert_eq!(i420_sizes(5, 3), Some((15, 6, 27)));
         assert_eq!(i420_sizes(1, 1), None);
+    }
+
+    /// GIVEN offers of several sizes and speeds WHEN a target tier is given
+    /// THEN the smallest offer that covers it and reaches 15 fps wins, and a
+    /// slow large offer never beats a fast smaller one.
+    #[test]
+    fn given_a_target_then_the_offer_follows_cover_and_speed() {
+        let offers = [
+            offer(PixelFormat::Yuyv, 640, 480, 30),
+            offer(PixelFormat::Yuyv, 1280, 720, 10),
+            offer(PixelFormat::Yuyv, 1920, 1080, 5),
+            offer(PixelFormat::Nv12, 1280, 720, 30),
+        ];
+        // The NV12 offer sorts first: it is index 0 of the sorted list, and
+        // the answer is the index in the camera's own list.
+        assert_eq!(choose(&offers, SendTier::P720), Some(3));
+        assert_eq!(choose(&offers, SendTier::P1080), Some(3));
+        assert_eq!(choose(&offers[..3], SendTier::P1080), Some(0));
+        // A speed that is not known (0) counts as fast enough.
+        let unknown = [
+            offer(PixelFormat::Yuyv, 640, 480, 0),
+            offer(PixelFormat::Yuyv, 1920, 1080, 0),
+        ];
+        assert_eq!(choose(&unknown, SendTier::P1080), Some(1));
+        assert_eq!(choose(&unknown, SendTier::P360), Some(0));
     }
 }

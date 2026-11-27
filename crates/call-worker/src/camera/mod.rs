@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use persephone_call_protocol::{CameraState, MAX_DEVICES, MediaDevice};
 
+use crate::send_tier::SendTier;
 use crate::video::pick_camera;
 
 pub use crate::args::CameraMode;
@@ -312,12 +313,15 @@ pub fn list() -> Vec<MediaDevice> {
 /// capturing. It waits until the camera is open. `on_frame` runs on the
 /// capture thread for every picture; `on_end` runs there when the capture ends
 /// by itself (not after `stop`). `grant` is what the camera-on brought; the
-/// portal path connects only over its remote. `Err(NotFound)`: the chosen ID
+/// portal path connects only over its remote. `target` is the largest tier
+/// the camera will send (ADR-0070): the backend picks the capture mode for
+/// it. `Err(NotFound)`: the chosen ID
 /// is not listed, and no other camera is used. `Err(Unavailable)`: any other
 /// failure.
 pub fn open<F, E>(
     id: Option<&str>,
     grant: Grant,
+    target: SendTier,
     on_frame: F,
     on_end: E,
 ) -> Result<Capture, CameraState>
@@ -331,16 +335,17 @@ where
         if id == Some("") {
             return Err(CameraState::NotFound);
         }
-        return start(id.unwrap_or(""), grant, on_frame, on_end);
+        return start(id.unwrap_or(""), grant, target, on_frame, on_end);
     }
     let devices = list();
     let chosen = pick_camera(id, devices.iter().map(|device| device.id.as_str()))?;
-    start(&chosen, grant, on_frame, on_end)
+    start(&chosen, grant, target, on_frame, on_end)
 }
 
 fn start<F, E>(
     device_id: &str,
     grant: Grant,
+    target: SendTier,
     on_frame: F,
     on_end: E,
 ) -> Result<Capture, CameraState>
@@ -360,11 +365,19 @@ where
         .spawn(move || {
             let _done = signal;
             #[cfg(target_os = "linux")]
-            backend::capture(&id, grant.remote, &thread_stop, open_tx, on_frame, on_end);
+            backend::capture(
+                &id,
+                grant.remote,
+                target,
+                &thread_stop,
+                open_tx,
+                on_frame,
+                on_end,
+            );
             #[cfg(not(target_os = "linux"))]
             {
                 let Grant {} = grant;
-                backend::capture(&id, &thread_stop, open_tx, on_frame, on_end);
+                backend::capture(&id, target, &thread_stop, open_tx, on_frame, on_end);
             }
         })
         .map_err(|_| CameraState::Unavailable)?;
@@ -535,7 +548,13 @@ mod tests {
     /// no thread is started.
     #[test]
     fn given_unknown_camera_when_opened_then_it_fails_without_fallback() {
-        let result = open(Some("no-such-camera"), Grant::default(), |_| {}, || {});
+        let result = open(
+            Some("no-such-camera"),
+            Grant::default(),
+            SendTier::P360,
+            |_| {},
+            || {},
+        );
         assert_eq!(result.err(), Some(CameraState::NotFound));
     }
 
@@ -560,7 +579,7 @@ mod tests {
     fn given_no_camera_when_opened_without_choice_then_unavailable() {
         if list().is_empty() {
             assert_eq!(
-                open(None, Grant::default(), |_| {}, || {}).err(),
+                open(None, Grant::default(), SendTier::P360, |_| {}, || {}).err(),
                 Some(CameraState::Unavailable)
             );
         }

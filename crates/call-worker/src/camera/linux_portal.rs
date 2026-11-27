@@ -10,7 +10,7 @@
 //! device node or the session bus. A call without a remote finds no camera.
 //!
 //! Only nodes of media class `Video/Source` count. The ID is the node's
-//! `node.name`. Formats: NV12, I420 and YUY2 (YUYV) at most 1280x720;
+//! `node.name`. Formats: NV12, I420 and YUY2 (YUYV) at most 2560x1440;
 //! no MJPEG. Buffers must be shared memory (`MemPtr` or `MemFd`): the stream
 //! asks for nothing else, and a buffer of another type is refused. The
 //! PipeWire loop of one connection runs on the calling thread.
@@ -39,6 +39,7 @@ use spa::utils::{Choice, ChoiceEnum, ChoiceFlags, Direction, Fraction, Id, Recta
 
 use super::yuyv::{self, PixelFormat};
 use super::{CapturedFrame, MAX_CAPTURE_SIDE};
+use crate::send_tier::SendTier;
 use crate::video::pick_camera;
 
 /// `SPA_LOG_LEVEL_NONE`: the library logs nothing (the worker writes no stderr).
@@ -379,8 +380,12 @@ pub(crate) fn pod_bytes(value: &Value) -> Option<Vec<u8>> {
 }
 
 /// The format request: raw video in NV12, I420 or YUY2, from 2x2 up to
-/// 1280x720, any frame rate to 60.
-fn format_pod() -> Option<Vec<u8>> {
+/// 2560x1440, any frame rate to 60. The preferred size is the box of the tier
+/// `target` (ADR-0070): PipeWire fixates on the size nearest to it. The
+/// request does not name a least frame rate, because a camera that has only
+/// slow modes would then fail to open; this path cannot prefer 15 fps.
+fn format_pod(target: SendTier) -> Option<Vec<u8>> {
+    let (target_width, target_height) = target.long_short();
     let id = |value: u32| Value::Id(Id(value));
     let formats = [PixelFormat::Nv12, PixelFormat::I420, PixelFormat::Yuyv];
     let object = Object {
@@ -411,16 +416,16 @@ fn format_pod() -> Option<Vec<u8>> {
                     ChoiceFlags::empty(),
                     ChoiceEnum::Range {
                         default: Rectangle {
-                            width: 640,
-                            height: 360,
+                            width: target_width,
+                            height: target_height,
                         },
                         min: Rectangle {
                             width: 2,
                             height: 2,
                         },
                         max: Rectangle {
-                            width: 1280,
-                            height: 720,
+                            width: yuyv::MAX_LONG_SIDE,
+                            height: yuyv::MAX_SHORT_SIDE,
                         },
                     },
                 ))),
@@ -634,6 +639,7 @@ impl<F: FnMut(CapturedFrame<'_>)> StreamData<F> {
 pub fn capture<F, E>(
     device_id: &str,
     remote: Option<OwnedFd>,
+    target: SendTier,
     stop: &Arc<AtomicBool>,
     open_result: Sender<Result<(), CameraState>>,
     on_frame: F,
@@ -649,7 +655,7 @@ pub fn capture<F, E>(
         ended: false,
         closed: false,
     }));
-    run(device_id, remote, stop, &shared, on_frame);
+    run(device_id, remote, target, stop, &shared, on_frame);
     let (ended, never_opened) = shared.borrow_mut().finish();
     if ended && !never_opened && !stop.load(Ordering::Acquire) {
         on_end();
@@ -659,6 +665,7 @@ pub fn capture<F, E>(
 fn run<F: FnMut(CapturedFrame<'_>) + 'static>(
     device_id: &str,
     remote: Option<OwnedFd>,
+    target: SendTier,
     stop: &Arc<AtomicBool>,
     shared: &Rc<RefCell<Shared>>,
     on_frame: F,
@@ -721,7 +728,7 @@ fn run<F: FnMut(CapturedFrame<'_>) + 'static>(
     else {
         return;
     };
-    let Some(format) = format_pod() else {
+    let Some(format) = format_pod(target) else {
         return;
     };
     let Some(format) = Pod::from_bytes(&format) else {
@@ -923,7 +930,7 @@ mod tests {
     }
 
     /// GIVEN negotiated formats WHEN checked THEN only NV12, I420 and YUY2 up
-    /// to 1280x720 pass; an odd-width YUY2 and an odd-size NV12 do not, and
+    /// to 2560x1440 pass; an odd-width YUY2 and an odd-size NV12 do not, and
     /// an odd-size I420 does.
     #[test]
     fn given_negotiated_formats_then_only_the_policy_ones_pass() {
@@ -942,7 +949,9 @@ mod tests {
                 })
             );
         }
-        assert_eq!(accept(VideoFormat::NV12, size(1920, 1080)), None);
+        assert!(accept(VideoFormat::NV12, size(2560, 1440)).is_some());
+        assert_eq!(accept(VideoFormat::NV12, size(2562, 1440)), None);
+        assert_eq!(accept(VideoFormat::NV12, size(3840, 2160)), None);
         assert_eq!(accept(VideoFormat::NV12, size(0, 0)), None);
         assert_eq!(accept(VideoFormat::YUY2, size(641, 360)), None);
         assert_eq!(accept(VideoFormat::NV12, size(641, 360)), None);
@@ -997,7 +1006,7 @@ mod tests {
     /// objects, and the format request never names MJPEG or DMA buffers.
     #[test]
     fn given_request_pods_then_they_are_well_formed() {
-        let format = format_pod().expect("format pod");
+        let format = format_pod(SendTier::P1440).expect("format pod");
         let pod = Pod::from_bytes(&format).expect("pod");
         assert!(pod.is_object());
         let buffers = buffers_pod().expect("buffers pod");
@@ -1032,6 +1041,7 @@ mod tests {
         capture(
             "cam",
             None,
+            SendTier::P360,
             &Arc::new(AtomicBool::new(false)),
             tx,
             |_| {},

@@ -39,6 +39,7 @@ use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSObject, NSObjectProtoc
 use persephone_call_protocol::CameraState;
 
 use super::{CapturedFrame, Format, capture_size_ok};
+use crate::send_tier::SendTier;
 
 /// The longest wait for the user's answer to the camera permission prompt.
 const AUTHORIZATION_WAIT: Duration = Duration::from_secs(60);
@@ -317,17 +318,22 @@ impl Drop for Opened {
     }
 }
 
-/// The session presets the worker accepts, best first. All are at most
-/// 1280x720.
-fn presets() -> [&'static AVCaptureSessionPreset; 3] {
+/// The session presets the worker accepts, best first for the tier `target`
+/// (`SendTier::preset_order`). All are at most 1280x720.
+fn presets(target: SendTier) -> [&'static AVCaptureSessionPreset; 3] {
     // SAFETY: These are constants of the loaded framework.
-    unsafe {
-        [
-            AVCaptureSessionPreset960x540,
+    let (p1280, p960, p640) = unsafe {
+        (
             AVCaptureSessionPreset1280x720,
+            AVCaptureSessionPreset960x540,
             AVCaptureSessionPreset640x480,
-        ]
-    }
+        )
+    };
+    target.preset_order().map(|(width, _)| match width {
+        1280 => p1280,
+        960 => p960,
+        _ => p640,
+    })
 }
 
 /// The video settings that ask for NV12 (video range) pictures.
@@ -340,6 +346,7 @@ fn nv12_settings() -> Retained<NSDictionary<NSString, AnyObject>> {
 
 fn open(
     device_id: &str,
+    target: SendTier,
     stop: &AtomicBool,
     on_frame: Box<dyn FnMut(CapturedFrame<'_>) + Send>,
 ) -> Result<Opened, CameraState> {
@@ -364,7 +371,7 @@ fn open(
     // because `Opened` keeps it and `Drop` removes it.
     unsafe {
         session.beginConfiguration();
-        let preset_set = presets().into_iter().any(|preset| {
+        let preset_set = presets(target).into_iter().any(|preset| {
             let usable = session.canSetSessionPreset(preset);
             if usable {
                 session.setSessionPreset(preset);
@@ -412,6 +419,7 @@ fn open(
 /// the pictures.
 pub fn capture<F, E>(
     device_id: &str,
+    target: SendTier,
     stop: &AtomicBool,
     open_result: Sender<Result<(), CameraState>>,
     on_frame: F,
@@ -421,7 +429,7 @@ pub fn capture<F, E>(
     E: FnOnce() + Send,
 {
     autoreleasepool(|_| {
-        let opened = match open(device_id, stop, Box::new(on_frame)) {
+        let opened = match open(device_id, target, stop, Box::new(on_frame)) {
             Ok(opened) => opened,
             Err(error) => {
                 let _ = open_result.send(Err(error));

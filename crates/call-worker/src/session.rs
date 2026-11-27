@@ -40,8 +40,8 @@ use livekit::{
 use livekit_signaling::SignalError;
 use persephone_call_protocol::{
     CameraState, DeviceTest, FailureCode, FrameKeyMsg, FromWorker, MAX_OTHER_CONNECTIONS,
-    MAX_PARTICIPANTS, MAX_SCREEN_FPS, MAX_VIDEO_FPS, MAX_VIDEO_PIXELS, MAX_VIDEO_SIDE, SCREEN_TILE,
-    ScreenState, ScreenTarget, ToWorker, VIDEO_TILES, VideoEffect,
+    MAX_PARTICIPANTS, MAX_SCREEN_FPS, MAX_VIDEO_FPS, SCREEN_TILE, ScreenState, ScreenTarget,
+    ToWorker, VIDEO_TILES, VideoEffect, VideoQuality,
 };
 use tokio::sync::mpsc::{self, Receiver, UnboundedReceiver};
 use tokio::task::JoinHandle;
@@ -64,14 +64,16 @@ use crate::mapping::{pulse_device_list, sound_path};
 use crate::output::{Closed, Output, PictureSink};
 use crate::screen;
 use crate::segmenter;
+use crate::send_quality::{AutoQuality, Sample};
+use crate::send_tier::{FirstSize, SendTier, SharedTier};
 use crate::sound_defaults;
 use crate::sound_test;
 use crate::video::{
     Added, OWN_TILE, RateLimiter, ScreenQueue, TileAssigner, fit_for_tile, fit_publish_box,
-    fit_within_box, quarter_turns, rgba_len,
+    fit_to_tier, fit_within_box, quarter_turns, rgba_len,
 };
 use crate::{EXIT_DONE, EXIT_FAILED, Input};
-use stats_probe::{Sources, StatsProbe};
+use stats_probe::{LinkReading, Sources, StatsProbe};
 
 /// Element Call's key ring size (livekit-client keyringSize).
 const KEY_RING_SIZE: i32 = 256;
@@ -117,7 +119,7 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
         auto_level,
         mic_gain,
         video_effect,
-        video_quality: _video_quality,
+        video_quality,
     } = first
     else {
         return fail(output, FailureCode::Protocol).await;
@@ -282,6 +284,9 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
         camera_device,
         video_effect,
         shared_effect: SharedEffect::new(video_effect),
+        video_quality,
+        send_tier: Arc::new(SharedTier::new(SendTier::P360)),
+        auto_quality: None,
         joined_sound,
         camera: None,
         stalled: None,
@@ -978,11 +983,12 @@ async fn test_camera(
         camera::open(
             device.as_deref(),
             grant,
+            SendTier::P360,
             move |frame| {
                 if !limiter.admit(std::time::Instant::now()) {
                     return;
                 }
-                if let Some(mut picture) = fitted_i420(&frame)
+                if let Some(mut picture) = fitted_i420(&frame, SendTier::P360)
                     && apply_effects(&mut feed_effects, &mut picture)
                     && let Some((width, height, rgba)) = to_rgba(OWN_TILE, &picture)
                 {
@@ -1106,6 +1112,15 @@ struct Call<'a> {
     video_effect: VideoEffect,
     /// The same effect, for the camera's capture thread.
     shared_effect: Arc<SharedEffect>,
+    /// The most the own camera sends (ADR-0070, proposed): the join's, then
+    /// the newest `SetVideoQuality`. It applies at the next camera start; a
+    /// camera that is on keeps the tier it started with.
+    video_quality: VideoQuality,
+    /// The tier the camera sends now. The capture thread reads it on every
+    /// frame; the event loop is the only writer.
+    send_tier: Arc<SharedTier>,
+    /// The Auto controller of the running camera, with `Auto` only.
+    auto_quality: Option<AutoQuality>,
     /// The microphone and speaker choice of the join. On Linux no device
     /// changes during a call, so a `SetDevices` with this choice (a change of
     /// the camera only) is no sound change there.
@@ -1842,10 +1857,17 @@ struct CameraFeed {
     limiter: RateLimiter,
     /// The video effect (ADR-0068).
     effects: CameraEffects,
+    /// The send tier now (ADR-0070), read on every frame.
+    tier: Arc<SharedTier>,
+    /// The size of the first picture, for the session's cap on the tier.
+    first: Arc<FirstSize>,
 }
 
 impl CameraFeed {
     fn frame(&mut self, frame: CapturedFrame<'_>) {
+        // Before the admission: the session waits for it while the track is
+        // not yet published.
+        self.first.note(frame.width, frame.height);
         // Held until the picture is handed on, so a stop waits for it.
         let Some(_admitted) = self.live.admit() else {
             return;
@@ -1853,7 +1875,10 @@ impl CameraFeed {
         if !self.limiter.admit(std::time::Instant::now()) {
             return;
         }
-        let Some(mut picture) = fitted_i420(&frame) else {
+        // While an effect runs, the box stays 640x360: `Planes` and the
+        // segmenter work at that size and no larger (ADR-0068).
+        let tier = self.tier.get().with_effect(self.effects.leaves_plain());
+        let Some(mut picture) = fitted_i420(&frame, tier) else {
             return;
         };
         // The effect applies before the preview and the SFU get the
@@ -1861,7 +1886,7 @@ impl CameraFeed {
         if !apply_effects(&mut self.effects, &mut picture) {
             return;
         }
-        if let Some((width, height, rgba)) = to_rgba(OWN_TILE, &picture) {
+        if let Some((width, height, rgba)) = preview_rgba(&mut picture) {
             self.pictures.put(OWN_TILE, 0, width, height, rgba);
         }
         self.source
@@ -1932,20 +1957,28 @@ impl Call<'_> {
             OnRequest::Pending => return None,
             OnRequest::Start(generation) => generation,
         };
+        // The quality at this start: a later `SetVideoQuality` waits for the
+        // next one (ADR-0070).
+        let quality = self.video_quality;
+        let top = SendTier::top_for(quality);
+        let (top_long, top_short) = top.long_short();
         let source = NativeVideoSource::new(
             VideoResolution {
-                width: MAX_VIDEO_SIDE,
-                height: MAX_VIDEO_PIXELS / MAX_VIDEO_SIDE,
+                width: top_long,
+                height: top_short,
             },
             false,
         );
         let live = Arc::new(FrameAdmission::default());
+        let first = Arc::new(FirstSize::default());
         let mut feed = CameraFeed {
             source: source.clone(),
             live: live.clone(),
             pictures: self.output.pictures(),
             limiter: RateLimiter::default(),
             effects: CameraEffects::new(self.shared_effect.clone(), segmenter::open()),
+            tier: self.send_tier.clone(),
+            first: first.clone(),
         };
         let failed = self.camera_failed.clone();
         let choice = self.camera_device.clone();
@@ -1959,15 +1992,23 @@ impl Call<'_> {
                 let capture = camera::open(
                     choice.as_deref(),
                     grant,
+                    top,
                     move |frame| feed.frame(frame),
                     move || {
                         let _ = failed.try_send(generation);
                     },
                 )?;
+                // The mode that the camera opened decides how large the
+                // tier can be (ADR-0070): a camera that gives 1280x720 at
+                // best sends P720 at most. The wait is short, because the
+                // open waits for the stream to start.
+                let top = top.capped_by_capture(wait_for_first_size(&first));
                 Ok(OpenedCamera {
                     capture,
                     source,
                     live,
+                    top,
+                    quality,
                 })
             },
         );
@@ -2037,6 +2078,8 @@ impl Call<'_> {
             capture,
             source,
             live,
+            top,
+            quality,
         } = opened;
         let track = LocalVideoTrack::create_video_track("camera", RtcVideoSource::Native(source));
         let options = TrackPublishOptions {
@@ -2044,7 +2087,7 @@ impl Call<'_> {
             video_codec: VideoCodec::VP8,
             simulcast: false,
             video_encoding: Some(VideoEncoding {
-                max_bitrate: 600_000,
+                max_bitrate: top.bitrate(),
                 max_framerate: f64::from(MAX_VIDEO_FPS),
             }),
             ..TrackPublishOptions::default()
@@ -2069,6 +2112,16 @@ impl Call<'_> {
             &self.own_sids,
             self.gate.own_index(),
         );
+        // The tier is set before the first picture can go out. A fixed
+        // quality sends its top tier; Auto starts low and follows the link.
+        self.auto_quality = (quality == VideoQuality::Auto)
+            .then(|| AutoQuality::new(top, std::time::Instant::now()));
+        let start = self.auto_quality.as_ref().map_or(top, AutoQuality::tier);
+        self.send_tier.set(start);
+        self.stats.set_auto(self.auto_quality.is_some());
+        note_camera(format_args!(
+            "send tier {start:?}, top {top:?}, {quality:?}"
+        ));
         live.open();
         self.camera = Some(LocalCamera {
             generation,
@@ -2079,6 +2132,22 @@ impl Call<'_> {
         CameraState::On
     }
 
+    /// One reading of the link for the Auto controller. It stores a new tier
+    /// at once; the capture thread scales to it from its next picture.
+    fn auto_sample(&mut self, link: LinkReading) {
+        let Some(auto) = self.auto_quality.as_mut() else {
+            return;
+        };
+        let sample = Sample {
+            bits_per_second: link.outgoing_bits_per_second,
+            rtt_seconds: link.rtt_seconds,
+        };
+        if let Some(tier) = auto.sample(std::time::Instant::now(), sample) {
+            self.send_tier.set(tier);
+            note_camera(format_args!("send tier {tier:?}"));
+        }
+    }
+
     /// Turns the camera off: revokes frame admission, ends and joins the
     /// capture thread (the camera light goes off), drops the waiting preview
     /// picture and unpublishes the track. A capture that does not end in time
@@ -2087,6 +2156,10 @@ impl Call<'_> {
         let Some(camera) = self.camera.take() else {
             return CameraStop::WasOff;
         };
+        // The next camera starts a new run: the lowest round-trip time and
+        // the hold are not kept.
+        self.auto_quality = None;
+        self.stats.set_auto(false);
         // Off the runtime threads: the close waits for a frame in progress.
         let live = camera.live.clone();
         let _ = tokio::task::spawn_blocking(move || live.close()).await;
@@ -2744,7 +2817,7 @@ impl Call<'_> {
             publication,
             ..
         } = self;
-        stats.tick(Instant::now(), || {
+        stats.tick(Instant::now(), |all| {
             let mut sources = Sources {
                 one_connection: room.is_single_peer_connection_active(),
                 microphone: match publication.track() {
@@ -2762,6 +2835,13 @@ impl Call<'_> {
                     TrackSource::Screenshare => sources.screen = Some(track),
                     _ => {}
                 }
+            }
+            // The Auto camera quality alone needs the own camera track only:
+            // its transport gives the link numbers (ADR-0070).
+            if !all {
+                sources.microphone = None;
+                sources.screen = None;
+                return sources;
             }
             let rooms = std::iter::once((0, &**room)).chain(others.open_indexed());
             let mut participants = 0;
@@ -3176,8 +3256,12 @@ impl Call<'_> {
                 Ok(vec![FromWorker::DevicesSet { failure }])
             }
             ToWorker::SetVideoEffect { effect } => Ok(vec![self.set_video_effect(effect)]),
-            // The worker behaviour comes with ADR-0070.
-            ToWorker::SetVideoQuality { .. } => Ok(Vec::new()),
+            // ADR-0070: the quality applies at the next camera start; a camera
+            // that is on keeps its tier (the core restarts it). No answer.
+            ToWorker::SetVideoQuality { quality } => {
+                self.video_quality = quality;
+                Ok(Vec::new())
+            }
             ToWorker::Join { .. }
             | ToWorker::ListDevices
             | ToWorker::TestDevice { .. }
@@ -3197,6 +3281,10 @@ struct OpenedCamera {
     capture: camera::Capture,
     source: NativeVideoSource,
     live: Arc<FrameAdmission>,
+    /// The largest tier this camera and quality allow (ADR-0070).
+    top: SendTier,
+    /// The quality at the start of this open.
+    quality: VideoQuality,
 }
 
 /// Runs `open` on its own thread and sends the result to `tx`. The thread is
@@ -3474,6 +3562,10 @@ async fn event_loop(
                 outgoing.extend(call.sound.end(levels));
             }
             Some((generation, raw)) = stats_done.recv() => {
+                // The Auto camera quality gets every reading (ADR-0070).
+                if let Some(link) = call.stats.link(raw.as_ref()) {
+                    call.auto_sample(link);
+                }
                 // Never queued: the newest reading waits in a slot, and the
                 // control messages go out before it.
                 if let Some(FromWorker::Stats(stats)) = call.stats.end(generation, raw) {
@@ -3546,10 +3638,10 @@ fn apply_effects(effects: &mut CameraEffects, picture: &mut I420Buffer) -> bool 
         .is_some_and(|mut planes| effects.process(&mut planes))
 }
 
-/// A camera picture as I420, scaled to fit 640x360 (no enlarging).
-fn fitted_i420(frame: &CapturedFrame<'_>) -> Option<I420Buffer> {
+/// A camera picture as I420, scaled to fit the box of `tier` (no enlarging).
+fn fitted_i420(frame: &CapturedFrame<'_>, tier: SendTier) -> Option<I420Buffer> {
     let (width, height, stride) = (frame.width, frame.height, frame.stride);
-    let (fit_w, fit_h) = fit_within_box(width, height)?;
+    let (fit_w, fit_h) = fit_to_tier(width, height, tier)?;
     let scaled = (fit_w, fit_h) != (width, height);
     let picture = match frame.format {
         Format::Nv12 => {
@@ -3642,6 +3734,53 @@ fn screen_i420(frame: &screen::CapturedFrame<'_>) -> Option<I420Buffer> {
 /// libyuv's "ABGR" is the byte order R, G, B, A in memory. That is
 /// `VideoFormatType::ABGR` here (see the test below). `VideoFormatType::RGBA`
 /// would give A, B, G, R in memory.
+/// The own preview of a sent picture. A picture larger than the tile's box
+/// goes down in a copy first, so the preview never passes the protocol's
+/// limits (ADR-0070); the sent picture stays as it is.
+fn preview_rgba(picture: &mut I420Buffer) -> Option<(u32, u32, Vec<u8>)> {
+    let (width, height) = (picture.width(), picture.height());
+    let (fit_w, fit_h) = fit_within_box(width, height)?;
+    if (fit_w, fit_h) == (width, height) {
+        return to_rgba(OWN_TILE, picture);
+    }
+    to_rgba(OWN_TILE, &picture.scale(fit_w as i32, fit_h as i32))
+}
+
+/// How long the open of a camera waits for the first picture, to learn the
+/// size of the mode that it opened.
+const FIRST_PICTURE_WAIT: Duration = Duration::from_secs(2);
+
+/// Waits for the first picture of the capture, on the open thread. `None`
+/// when none comes in time.
+fn wait_for_first_size(first: &FirstSize) -> Option<(u32, u32)> {
+    let end = std::time::Instant::now() + FIRST_PICTURE_WAIT;
+    loop {
+        if let Some(size) = first.get() {
+            return Some(size);
+        }
+        if std::time::Instant::now() >= end {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// One diagnostic note about the own camera's send tier, while the log is on
+/// (ADR-0058, ADR-0070). It names tiers and the quality only: never a device
+/// ID or name.
+fn note_camera(args: std::fmt::Arguments<'_>) {
+    let diagnostics = crate::diagnostics::global();
+    if !diagnostics.admit(crate::diagnostics::Source::Note) {
+        return;
+    }
+    diagnostics.push_admitted(
+        crate::diagnostics::Source::Note,
+        crate::diagnostics::INFO,
+        "persephone::call_worker::camera",
+        &bounded_text(args),
+    );
+}
+
 fn to_rgba(tile: u8, picture: &I420Buffer) -> Option<(u32, u32, Vec<u8>)> {
     let (width, height) = (picture.width(), picture.height());
     // The size is checked against the tile's limits before the buffer exists.
@@ -5044,7 +5183,7 @@ mod tests {
             let data = nv12_data(height, width);
             let frame = CapturedFrame::checked(Format::Nv12, width, height, width, &data)
                 .expect("frame fits");
-            let picture = fitted_i420(&frame).expect("converted");
+            let picture = fitted_i420(&frame, SendTier::P360).expect("converted");
             assert_eq!(
                 (picture.width(), picture.height()),
                 want,
@@ -5059,7 +5198,7 @@ mod tests {
     fn given_padded_frame_when_converted_then_size_is_the_picture_size() {
         let data = nv12_data(32, 80);
         let frame = CapturedFrame::checked(Format::Nv12, 64, 32, 80, &data).expect("fits");
-        let picture = fitted_i420(&frame).expect("converted");
+        let picture = fitted_i420(&frame, SendTier::P360).expect("converted");
         assert_eq!((picture.width(), picture.height()), (64, 32));
     }
 
@@ -5068,7 +5207,7 @@ mod tests {
     fn given_odd_nv12_frame_when_converted_then_it_is_refused() {
         let data = nv12_data(34, 66);
         let frame = CapturedFrame::checked(Format::Nv12, 65, 34, 66, &data).expect("fits");
-        assert!(fitted_i420(&frame).is_none());
+        assert!(fitted_i420(&frame, SendTier::P360).is_none());
     }
 
     /// GIVEN an I420 camera frame WHEN converted THEN the size follows the fit
@@ -5078,7 +5217,7 @@ mod tests {
         let len = CapturedFrame::expected_len(Format::I420, 1280, 720, 1280).unwrap();
         let data = vec![90_u8; len];
         let frame = CapturedFrame::checked(Format::I420, 1280, 720, 1280, &data).expect("fits");
-        let picture = fitted_i420(&frame).expect("converted");
+        let picture = fitted_i420(&frame, SendTier::P360).expect("converted");
         assert_eq!((picture.width(), picture.height()), (640, 360));
     }
 
