@@ -346,12 +346,14 @@ impl CallWorkerLink {
         }
     }
 
-    /// Holds `count` places in the command queue for commands that must go
-    /// together, so no other sender (a share's stop from another thread)
-    /// takes one of them in between. `Ok(false)` when fewer are free: then
-    /// nothing is held. Only a closed queue is an error. `send` and
-    /// `try_queue` use the held places first, in order, until
-    /// `release_places` gives back the ones left.
+    /// Holds `count` places in the command queue for commands that must all
+    /// go, so no other sender (a share's stop that another thread queues
+    /// through `command_sender`) takes one of them and leaves a later command
+    /// of the group without room. Such a command may still go between the
+    /// group's commands. `Ok(false)` when fewer are free: then nothing is
+    /// held. Only a closed queue is an error. `send` and `try_queue` use the
+    /// held places first, until `release_places` gives back the ones left;
+    /// other threads have only `command_sender`, so they never use them.
     pub fn hold_places(&self, count: usize) -> Result<bool, WorkerGone> {
         let mut places = Vec::with_capacity(count);
         for _ in 0..count {
@@ -375,6 +377,8 @@ impl CallWorkerLink {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// Any held place. A place is room in the queue, not a position: the
+    /// commands go in the order they are sent, whichever place each uses.
     fn take_held(&self) -> Option<mpsc::OwnedPermit<ToWorker>> {
         self.held_places().pop()
     }

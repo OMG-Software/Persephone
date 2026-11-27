@@ -9389,7 +9389,8 @@ mod tests {
 
     /// GIVEN a worker queue with five free places WHEN the task holds them
     /// THEN another sender finds the queue full, the task's own commands go
-    /// through the held places in order, and the places that no command
+    /// through the held places in the order they are sent (a place is
+    /// room, not a position), and the places that no command
     /// used come back at the release. GIVEN four free places THEN holding
     /// five holds nothing.
     #[tokio::test]
