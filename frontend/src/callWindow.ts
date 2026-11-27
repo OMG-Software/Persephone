@@ -136,6 +136,7 @@ export type CallCell = {
   tile: number | null;
   screen: boolean;
   muted: boolean;
+  deafened: boolean;
   speaking: boolean;
 };
 
@@ -154,6 +155,7 @@ export function callGrid(status: CallStatus): CallCell[] {
       tile: ownTile?.tile ?? null,
       screen: false,
       muted: status.muted,
+      deafened: status.deafened,
       speaking: false
     }
   ];
@@ -172,6 +174,7 @@ export function callGrid(status: CallStatus): CallCell[] {
       tile: tile?.tile ?? null,
       screen: false,
       muted: person.muted,
+      deafened: person.deafened,
       speaking: person.speaking
     });
   }
@@ -184,6 +187,7 @@ export function callGrid(status: CallStatus): CallCell[] {
       tile: SCREEN_TILE,
       screen: true,
       muted: false,
+      deafened: false,
       speaking: false
     });
   }

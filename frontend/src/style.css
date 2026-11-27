@@ -3785,8 +3785,10 @@ mark {
   overflow-wrap: anywhere;
 }
 
-/* A participant whose microphone is off (ADR-0059). */
-.call-muted {
+/* A participant whose microphone is off (ADR-0059), or who said it is
+   deafened (ADR-0071). */
+.call-muted,
+.call-deafened {
   display: inline-flex;
   flex: none;
   color: var(--ink3);

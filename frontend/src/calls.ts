@@ -898,6 +898,9 @@ export function levelMap(levels: readonly CallParticipantLevel[]): Map<string, n
 /** Read beside a participant whose microphone is off (ADR-0059). */
 export const PARTICIPANT_MUTED_LABEL = 'Microphone off';
 
+/** Read beside a participant who said it is deafened (ADR-0071). */
+export const PARTICIPANT_DEAFENED_LABEL = 'Deafened';
+
 /** What a failed device change in a call means (ADR-0059). */
 export const DEVICE_CHANGE_TEXT: Record<CallDeviceChange, string> = {
   not_found: 'The chosen microphone or speaker is not connected. The call keeps the one it had.',

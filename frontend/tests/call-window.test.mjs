@@ -21,6 +21,7 @@ const person = (userId, deviceId, more = {}) => ({
   keyed: true,
   sharing: false,
   muted: false,
+  deafened: false,
   ...more
 });
 
@@ -29,7 +30,8 @@ test('GIVEN a call with cameras on and off WHEN the grid is made THEN every devi
     ...IDLE_CALL,
     phase: 'active',
     muted: true,
-    participants: [person('@a:s', 'A', { speaking: true }), person('@b:s', 'B', { muted: true })],
+    deafened: true,
+    participants: [person('@a:s', 'A', { speaking: true }), person('@b:s', 'B', { muted: true, deafened: true })],
     video: [
       { tile: 0, participant: null, own: true, stream: 1 },
       { tile: 2, participant: { userId: '@a:s', deviceId: 'A' }, own: false, stream: 3 },
@@ -38,13 +40,13 @@ test('GIVEN a call with cameras on and off WHEN the grid is made THEN every devi
   };
   const cells = callGrid(status);
   assert.deepEqual(
-    cells.map((cell) => [cell.own, cell.userId, cell.tile, cell.screen, cell.muted, cell.speaking]),
+    cells.map((cell) => [cell.own, cell.userId, cell.tile, cell.screen, cell.muted, cell.deafened, cell.speaking]),
     [
-      [true, null, 0, false, true, false],
-      [false, '@a:s', 2, false, false, true],
+      [true, null, 0, false, true, true, false],
+      [false, '@a:s', 2, false, false, false, true],
       // B shares a screen but has no camera: a placeholder, then the screen.
-      [false, '@b:s', null, false, true, false],
-      [false, '@b:s', 5, true, false, false]
+      [false, '@b:s', null, false, true, true, false],
+      [false, '@b:s', 5, true, false, false, false]
     ]
   );
   assert.equal(new Set(cells.map((cell) => cell.key)).size, cells.length, 'keys are unique');

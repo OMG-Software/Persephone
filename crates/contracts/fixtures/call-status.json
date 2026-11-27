@@ -12,7 +12,8 @@
       "reachable": true,
       "keyed": false,
       "sharing": true,
-      "muted": true
+      "muted": true,
+      "deafened": true
     }
   ],
   "ended": null,

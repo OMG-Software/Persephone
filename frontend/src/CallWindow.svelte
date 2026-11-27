@@ -35,6 +35,7 @@
     deviceKey,
     NO_KEY_TEXT,
     OWN_TILE_LABEL,
+    PARTICIPANT_DEAFENED_LABEL,
     PARTICIPANT_MUTED_LABEL,
     PHASE_TEXT,
     SCREEN_TILE_LABEL,
@@ -354,6 +355,7 @@
         {/if}
         {#if cell.screen}<span class="note">{SCREEN_TILE_LABEL}</span>{/if}
         {#if cell.muted}<span class="call-muted" role="img" aria-label={PARTICIPANT_MUTED_LABEL}><Icon name="mic-off" /></span>{/if}
+        {#if cell.deafened}<span class="call-deafened" role="img" aria-label={PARTICIPANT_DEAFENED_LABEL}><Icon name="headphones-off" /></span>{/if}
       </span>
     </button>
   </div>
@@ -414,6 +416,7 @@
           <li>
             <span class="call-roster-name">{OWN_TILE_LABEL}</span>
             {#if status.muted}<span class="call-muted" role="img" aria-label={PARTICIPANT_MUTED_LABEL}><Icon name="mic-off" /></span>{/if}
+            {#if status.deafened}<span class="call-deafened" role="img" aria-label={PARTICIPANT_DEAFENED_LABEL}><Icon name="headphones-off" /></span>{/if}
             <div
               class="call-level"
               class:loud={ownLevel >= SOUND_LEVEL_LOUD}
@@ -434,6 +437,7 @@
           <li>
             <span class="call-roster-name" id={nameId}><PersonName userId={person.userId} /></span>
             {#if person.muted}<span class="call-muted" role="img" aria-label={PARTICIPANT_MUTED_LABEL}><Icon name="mic-off" /></span>{/if}
+            {#if person.deafened}<span class="call-deafened" role="img" aria-label={PARTICIPANT_DEAFENED_LABEL}><Icon name="headphones-off" /></span>{/if}
             <div
               class="call-level"
               class:loud={level >= SOUND_LEVEL_LOUD}
