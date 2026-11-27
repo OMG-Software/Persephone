@@ -44,16 +44,21 @@ that we need, and does not touch the member state event.
   content has `room_id`, `member_id`, `member.id` and
   `member.claimed_device_id` as the frame key event has them, and
   `deafened` (boolean) and `seq` (unsigned integer).
-* `seq` is a counter that the sender raises on each change in one call. A
-  receiver ignores a message whose `seq` is not higher than the last one it
-  took from that sender device, so a late message cannot undo a newer one.
+* `seq` is a counter. It starts at the milliseconds since the Unix epoch
+  when the call starts, and the sender adds 1 on each change. A receiver
+  ignores a message whose `seq` is not higher than the last one it took
+  from that sender device, so a late message cannot undo a newer one. A new
+  call's counter is above any counter of an earlier call of the same
+  device, so a note that a receiver kept from an earlier call is replaced.
+  The counter shows members roughly when the state changed, which they can
+  already see from the call.
 * The core sends the message to the devices that get the frame key, with the
   same checks: only devices that their owner signed, and no user whose
   identity changed without approval (`encryption_keys::send_event`).
 * The core sends it after the worker answers `Deafened` and the state
-  differs from the one last shared. It also sends it to a member device that
-  joins while this device is deafened. "Not deafened" is the default and is
-  not sent to a new member. A failed send is not fatal and is not retried;
+  differs from the one last shared. It also sends the current state, deafened
+  or not, to each member device that joins, and to the members that are
+  already there when this device starts the call. A failed send is not fatal and is not retried;
   the next change or the next new member sends the state again.
 * The core takes a message only when it is Olm-encrypted, from a device that
   its owner signed, with an unchanged identity, with content that names that
@@ -82,10 +87,13 @@ that we need, and does not touch the member state event.
   event type, and their members never show a headset icon in this client.
 * Members learn the state of a person who deafens. Members already see the
   microphone state, and the owner asked for this display.
-* A device that rejoins quickly can send a `seq` that an old note still
-  holds, until the member leave is read. The note is cleared when the leave
-  is read, so the effect is a short delay.
-* One more to-device message for each change, to each member device.
+* One more to-device message for each change, and one for each member
+  device at the start of the call and at each join, also when not deafened.
+  This replaces a note that a receiver kept when it did not read a leave.
+* The counter is a clock reading, so it shows roughly when the state
+  changed. A clock set far ahead makes later calls of that device lose
+  against it only until the clock is right; a restart of the clock backwards
+  between two calls can hide the new state of the later call.
 * Not verified against a live homeserver or a second client yet.
 
 ## Pros and Cons of the Options

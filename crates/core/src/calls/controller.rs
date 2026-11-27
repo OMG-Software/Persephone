@@ -2190,7 +2190,7 @@ impl CallController {
             state_key,
             own_identity,
             own_device: device_id,
-            deafen_seq: 0,
+            deafen_seq: deafen::first_seq(now_ms()),
             deafen_shared: false,
             own_keys,
             remote: RemoteKeys::new(),
@@ -4842,21 +4842,14 @@ impl Call {
         self.send_deafen(all).await
     }
 
-    /// Tells the members that just joined that this device is deafened. Not
-    /// deafened is the default and is not sent.
+    /// Tells the members that just joined, and the members that were there
+    /// when this call started, the current state, deafened or not. The
+    /// counter has not changed, but it is above any counter of an earlier
+    /// call of this device, so the state replaces a note that a receiver
+    /// kept from one (ADR-0071).
     async fn share_deafen_with_new(&self, joined: &[MemberKey]) -> Result<(), EndReason> {
-        if !self.deafen_shared {
-            return Ok(());
-        }
-        let to = self
-            .view
-            .members
-            .iter()
-            .filter(|m| joined.contains(&member_key(m)))
-            .take(MAX_CALL_MEMBERS)
-            .map(|m| (m.user_id.clone(), m.device_id.clone()))
-            .collect();
-        self.send_deafen(to).await
+        self.send_deafen(deafen_recipients(&self.view.members, joined))
+            .await
     }
 
     /// Reads the members and gives the current key to all of them.
@@ -4872,6 +4865,10 @@ impl Call {
         };
         let all = recipients(&outgoing, &self.view.members, &[]);
         self.send_keys(&outgoing, all).await?;
+        // The members that are already there learn the state too. The
+        // later member changes then see them as known, not as joined.
+        let present: Vec<MemberKey> = self.view.members.iter().map(member_key).collect();
+        self.share_deafen_with_new(&present).await?;
         self.plan_others(inner)?;
         self.publish(inner);
         Ok(())
@@ -5302,6 +5299,20 @@ impl Call {
             membership
         );
     }
+}
+
+/// The devices of `members` that are in `joined`, at most
+/// [`MAX_CALL_MEMBERS`]: who gets the own deafen state (ADR-0071).
+fn deafen_recipients(
+    members: &[ActiveMember],
+    joined: &[MemberKey],
+) -> Vec<(OwnedUserId, OwnedDeviceId)> {
+    members
+        .iter()
+        .filter(|m| joined.contains(&member_key(m)))
+        .take(MAX_CALL_MEMBERS)
+        .map(|m| (m.user_id.clone(), m.device_id.clone()))
+        .collect()
 }
 
 /// Keeps `candidate` until the membership of its sender may have arrived.
@@ -11057,6 +11068,33 @@ mod tests {
             view.apply(&muted(0, &format!("@s{index}:example.org:S"), true));
         }
         assert!(view.mic_muted.len() <= persephone_call_protocol::MAX_PARTICIPANTS);
+    }
+
+    /// GIVEN members that are there at the start and one that joined later
+    /// WHEN the recipients of the state are chosen THEN a join gets only the
+    /// joined device, and the start gets every device, whatever the state.
+    #[test]
+    fn given_joined_members_then_only_they_get_the_deafen_state() {
+        let members = vec![
+            member("@a:example.org", "A", "https://sfu.example.org"),
+            member("@b:example.org", "B", "https://sfu.example.org"),
+        ];
+        let ids = |to: Vec<(OwnedUserId, OwnedDeviceId)>| {
+            to.iter()
+                .map(|(u, d)| format!("{u}:{d}"))
+                .collect::<Vec<_>>()
+        };
+        let joined = vec![member_key(&members[1])];
+        assert_eq!(
+            ids(deafen_recipients(&members, &joined)),
+            ["@b:example.org:B"]
+        );
+        let present: Vec<MemberKey> = members.iter().map(member_key).collect();
+        assert_eq!(
+            ids(deafen_recipients(&members, &present)),
+            ["@a:example.org:A", "@b:example.org:B"]
+        );
+        assert!(deafen_recipients(&members, &[]).is_empty());
     }
 
     fn said(identity: &str, deafened: bool, seq: u64) -> IncomingDeafen {

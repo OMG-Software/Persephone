@@ -35,6 +35,15 @@ pub fn outgoing_content(
     })
 }
 
+/// The counter at the start of a call: the milliseconds since the Unix
+/// epoch at `now_ms`. A new call's counter is then above any counter of an
+/// earlier call of this device, so a receiver that kept an old note takes
+/// the new call's messages. It shows members roughly when the state
+/// changed, which they can already see from the call. Each change adds 1.
+pub fn first_seq(now_ms: u64) -> u64 {
+    now_ms
+}
+
 /// A checked deafened message.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IncomingDeafen {
@@ -248,6 +257,27 @@ mod tests {
         let mut c = content(true, 1);
         c["padding"] = json!("x".repeat(MAX_CONTENT_BYTES));
         assert_eq!(parse(&c).unwrap_err(), Refusal::TooLarge);
+    }
+
+    /// GIVEN a call that starts later than an earlier one WHEN the first
+    /// counters are made THEN the later one is higher, also after many
+    /// changes of the earlier call, and a note of the earlier call is
+    /// replaced.
+    #[test]
+    fn given_a_later_call_then_its_counter_is_above_the_earlier_one() {
+        let earlier = first_seq(1_000_000) + 500;
+        let later = first_seq(1_060_000);
+        assert!(later > earlier);
+        let old = Note {
+            deafened: true,
+            seq: earlier,
+        };
+        let message = IncomingDeafen {
+            identity: IDENTITY.to_owned(),
+            deafened: false,
+            seq: later,
+        };
+        assert_eq!(take(Some(old), &message).map(|n| n.deafened), Some(false));
     }
 
     /// GIVEN a known counter WHEN a message with a lower or equal counter comes THEN it is stale.
