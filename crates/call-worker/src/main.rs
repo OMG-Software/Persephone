@@ -26,6 +26,8 @@ mod output;
 mod pulse;
 mod screen;
 mod segmenter;
+mod send_quality;
+mod send_tier;
 mod session;
 mod sound_defaults;
 mod sound_test;
