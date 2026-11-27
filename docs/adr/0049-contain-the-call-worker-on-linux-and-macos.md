@@ -299,12 +299,14 @@ widen that.
 
 Verification: unit tests cover the stream and name choice, the routes check,
 the commit rule and the rollback with a fake sound server. The in-call move
-(a change during a running call, both containment stages, real streams) is
-not run yet: its live test, `pulse_session_test.rs`, is ignored and needs a
-disposable sound server with two speakers and two microphones. The contained
-sound tests on Linux Mint 22.3 with `pipewire-pulse` show only that the
-worker checks and opens devices at launch (`PULSE_SOURCE`, `PULSE_SINK`). See
-[the device test evidence](../evidence/device-tests-linux-macos.md) for that.
+(a change during a running call, both containment stages, real streams) has
+its live test, `pulse_session_test.rs`, which is ignored by default and needs
+a disposable sound server with two speakers and two microphones. It passed
+once on Linux Mint 22.3 with a disposable PipeWire 1.0.5 and `pipewire-pulse`
+(27 November 2026). A PulseAudio daemon and sound hardware were not tested.
+The earlier contained sound tests show that the worker checks and opens
+devices at launch (`PULSE_SOURCE`, `PULSE_SINK`). See
+[the device test evidence](../evidence/device-tests-linux-macos.md) for both.
 This amendment is not accepted until the owner approves it.
 
 ### Positive Consequences
