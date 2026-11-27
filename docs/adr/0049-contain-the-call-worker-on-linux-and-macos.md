@@ -241,7 +241,9 @@ The worker applies two stages itself.
 
 ### Linux: microphone and speaker changes during a call (amended 27 November 2026)
 
-Amendment status: proposed, needs owner approval.
+Amendment status: proposed, needs owner approval. On 27 November 2026 the
+owner accepted one part of it: the best-effort process ID match below, as a
+known security limitation (see Containment). The rest still needs approval.
 
 Problem: the worker's sound target is fixed at launch (`PULSE_SOURCE` and
 `PULSE_SINK`), libwebrtc gives only `index:` IDs on Linux, and stage 2 allows
@@ -271,7 +273,7 @@ Decision:
 * It moves only streams that name this process: those whose
   `application.process.id` equals the worker's process ID. That match is
   best effort, not proof of ownership: it is a security limitation that
-  needs the owner's approval (see Containment and Negative Consequences).
+  the owner accepted (see Containment and Negative Consequences).
   No stream that names
   another process is read for any other purpose or moved. Both choices are
   checked before either stream moves. A non-`pulse:` ID or a name the server
@@ -316,11 +318,10 @@ stream then moves with the worker's, to the device the user chose. That gives
 it nothing it lacks, because it can already move any stream itself. PulseAudio
 gives no server-checked owner for a stream, and a PipeWire-only check was not
 reviewed, so this is a known security limitation: the worker cannot tell
-its own streams from those of a client that copies its process ID. This
-amendment proposes to accept that
-best-effort match: failing closed without a checked owner would remove device
-changes during a call on Linux. It needs the owner's approval, as the rest of
-the amendment does. A stronger check is open: PipeWire's server sets
+its own streams from those of a client that copies its process ID. The
+owner accepted that best-effort match on 27 November 2026, because failing
+closed without a checked owner would remove device changes during a call on
+Linux. A stronger check is open: PipeWire's server sets
 `pipewire.sec.pid` on a client from its socket's credentials, and matching a
 stream's client by it was not reviewed or measured. A listing keeps only streams that name the
 worker's process ID, before its limit, so other programs' streams never push
@@ -362,9 +363,10 @@ This amendment is not accepted until the owner approves it.
   which the client sets. A stream of another client of the same user that
   copies the worker's process ID moves to the device that the user chose
   during a call. This is a security limitation, not an ownership check. The
-  owner must accept it, or require a server-checked owner (for example
-  PipeWire's `pipewire.sec.pid`, not reviewed) and fail closed without one,
-  which removes device changes during a call on Linux.
+  owner accepted it on 27 November 2026 instead of requiring a
+  server-checked owner (for example PipeWire's `pipewire.sec.pid`, not
+  reviewed) and failing closed without one, which would remove device
+  changes during a call on Linux.
 * Linux: calls need Linux 6.2 or newer with Landlock turned on.
 * Linux V4L2 path: the worker can open any camera node, and there is no
   desktop permission dialog.
