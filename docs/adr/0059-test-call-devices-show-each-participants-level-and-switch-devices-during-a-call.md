@@ -121,8 +121,10 @@ no media permissions, and a browser test would prove nothing about the worker.
   proposed). Where that connection could not open, Linux reports
   `unsupported`.
 * `SetDevices` also carries the camera choice. The worker keeps it, and the
-  call's next camera start opens it; a camera that is on keeps running until
-  it is turned off. On Linux without that connection, a choice whose
+  call's next camera start opens it. Since 27 November 2026 the core restarts
+  a camera that is on or starting when the saved camera changes, so the
+  change applies at once
+  ([ADR-0070](0070-choose-the-camera-send-resolution.md), proposed). On Linux without that connection, a choice whose
   microphone and speaker equal the join's is no sound change, so a change of
   the camera only does not report `unsupported`.
 

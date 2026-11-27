@@ -8155,6 +8155,7 @@ mod tests {
             device_change,
             effect_refused,
             mirror,
+            microphone: MicSettings::default(),
         }
     }
 
