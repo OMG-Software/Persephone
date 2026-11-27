@@ -19,31 +19,39 @@
 //! parent asks. The parent checks the result from outside with `pactl` and
 //! also keeps streams of other programs to show that they never move.
 //!
+//! Run the setup in a subshell, so the parent shell keeps its environment.
+//! `PULSE_RUNTIME_PATH` points the daemon, `pactl` and `pulseaudio --kill`
+//! at the private `pulse` directory of the temporary runtime directory, so
+//! they never reach the desktop's server.
+//!
 //! ```text
-//! export XDG_RUNTIME_DIR="$(mktemp -d)" && chmod 700 "$XDG_RUNTIME_DIR"
-//! pulseaudio -n --daemonize=yes --exit-idle-time=-1 -L module-native-protocol-unix
-//! export PULSE_SERVER="unix:$XDG_RUNTIME_DIR/pulse/native"
-//! ORIG_SINK="$(pactl get-default-sink)"; ORIG_SOURCE="$(pactl get-default-source)"
-//! MODULES=""
-//! cleanup() {
-//!   pactl set-default-sink "$ORIG_SINK"; pactl set-default-source "$ORIG_SOURCE"
-//!   for id in $MODULES; do pactl unload-module "$id"; done
-//!   pulseaudio --kill; rm -rf "$XDG_RUNTIME_DIR"
-//! }
-//! trap cleanup EXIT
-//! MODULES="$MODULES $(pactl load-module module-null-sink sink_name=persephone_main)"
-//! MODULES="$MODULES $(pactl load-module module-null-sink sink_name=persephone_other)"
-//! MODULES="$MODULES $(pactl load-module module-remap-source source_name=persephone_mic_a master=persephone_main.monitor)"
-//! MODULES="$MODULES $(pactl load-module module-remap-source source_name=persephone_mic_b master=persephone_other.monitor)"
-//! pactl set-default-sink persephone_main
-//! pactl set-default-source persephone_mic_a
-//! PERSEPHONE_TEST_OTHER_SINK=pulse:persephone_other PERSEPHONE_TEST_OTHER_SOURCE=pulse:persephone_mic_b \
-//!   cargo test --locked -p persephone-call-worker -- --ignored --exact pulse_session_test::given_a_call_session
+//! (
+//!   export XDG_RUNTIME_DIR="$(mktemp -d)" && chmod 700 "$XDG_RUNTIME_DIR"
+//!   export PULSE_RUNTIME_PATH="$XDG_RUNTIME_DIR/pulse"
+//!   pulseaudio -n --daemonize=yes --exit-idle-time=-1 -L module-native-protocol-unix
+//!   export PULSE_SERVER="unix:$PULSE_RUNTIME_PATH/native"
+//!   ORIG_SINK="$(pactl get-default-sink)"; ORIG_SOURCE="$(pactl get-default-source)"
+//!   MODULES=""
+//!   cleanup() {
+//!     pactl set-default-sink "$ORIG_SINK"; pactl set-default-source "$ORIG_SOURCE"
+//!     for id in $MODULES; do pactl unload-module "$id"; done
+//!     pulseaudio --kill; rm -rf "$XDG_RUNTIME_DIR"
+//!   }
+//!   trap cleanup EXIT
+//!   MODULES="$MODULES $(pactl load-module module-null-sink sink_name=persephone_main)"
+//!   MODULES="$MODULES $(pactl load-module module-null-sink sink_name=persephone_other)"
+//!   MODULES="$MODULES $(pactl load-module module-remap-source source_name=persephone_mic_a master=persephone_main.monitor)"
+//!   MODULES="$MODULES $(pactl load-module module-remap-source source_name=persephone_mic_b master=persephone_other.monitor)"
+//!   pactl set-default-sink persephone_main
+//!   pactl set-default-source persephone_mic_a
+//!   PERSEPHONE_TEST_OTHER_SINK=pulse:persephone_other PERSEPHONE_TEST_OTHER_SOURCE=pulse:persephone_mic_b \
+//!     cargo test --locked -p persephone-call-worker -- --ignored --exact pulse_session_test::given_a_call_session
+//! )
 //! ```
 //!
 //! The `trap` restores the defaults, unloads the null and remap modules and
-//! stops the temporary server when the shell ends, whether the test passed
-//! or failed.
+//! stops the temporary server when the subshell ends, whether the test
+//! passed or failed.
 
 use std::ffi::{c_char, c_int, c_void};
 use std::io::{BufRead, BufReader, Write};
@@ -130,7 +138,7 @@ fn the_call_worker_side() {
     let _record = open_stream(2);
     let mut _playback = (!late).then(|| open_stream(1));
     assert!(library().is_some());
-    let session = Session::open(None, None).expect("the session opens");
+    let session = Session::open().expect("the session opens");
     if !late {
         assert!(crate::containment::apply_stage2(), "stage 2");
     }
@@ -148,7 +156,7 @@ fn the_call_worker_side() {
                 continue;
             }
             Some("APPLY") => {
-                let run = session.apply_pending(false);
+                let run = session.apply_pending(std::time::Instant::now(), false);
                 writeln!(
                     out,
                     "OK waiting={} failed={:?}",
@@ -163,7 +171,11 @@ fn the_call_worker_side() {
         }
         let choice = |word: Option<&str>| word.filter(|word| *word != "-").map(str::to_owned);
         let (recording, playout) = (choice(words.next()), choice(words.next()));
-        match session.switch(recording.as_deref(), playout.as_deref()) {
+        match session.switch(
+            std::time::Instant::now(),
+            recording.as_deref(),
+            playout.as_deref(),
+        ) {
             Ok(()) => writeln!(out, "OK").unwrap(),
             Err(code) => writeln!(out, "ERR {code:?}").unwrap(),
         }

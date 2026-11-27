@@ -163,9 +163,9 @@ pub const MAX_OWN_STREAMS: usize = 8;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OwnStream {
     pub index: u32,
-    /// The name of the device the server shows the stream on. `None` when
-    /// that device is not in the lists (a monitor, or one that went away):
-    /// such a stream counts as not on any target.
+    /// The name of the device the server shows the stream on (a monitor
+    /// source counts). `None` when that device is not known (one that went
+    /// away): such a stream counts as not on any target.
     pub device: Option<String>,
 }
 
@@ -214,12 +214,6 @@ pub struct SoundKnown<'a> {
     /// call started: what "System default" means during the call (ADR-0059).
     pub default_source: Option<&'a str>,
     pub default_sink: Option<&'a str>,
-    /// The microphone and speaker that a new stream would use; `None` when
-    /// that is not known. Only a kind with no own stream uses it: with a
-    /// stream, the server's route of that stream decides, because the
-    /// server moves streams by itself when a device goes away.
-    pub source: Option<&'a str>,
-    pub sink: Option<&'a str>,
 }
 
 /// What the sound server shows now (Linux, ADR-0049).
@@ -238,15 +232,17 @@ pub struct SoundNow<'a> {
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub enum SoundTarget {
-    /// The call already uses the chosen device. A device that waited for a
-    /// stream is no longer wanted.
+    /// Every own stream of this kind is on the chosen device. A device that
+    /// waited for a stream is no longer wanted.
     #[default]
     Keep,
     /// Move the own streams to this name now.
     Move(String),
     /// The call has no own stream of this kind yet (nobody else is in the
     /// call, so libwebrtc opened no playback stream). Keep the name until a
-    /// stream exists; the change counts as done. A newer choice replaces it.
+    /// stream exists, even when it equals the device that a new stream would
+    /// open on now: the server's default may change before the stream opens.
+    /// The change counts as done. A newer choice replaces it.
     Wait(String),
 }
 
@@ -259,16 +255,14 @@ pub struct SoundMove {
 }
 
 /// The target for one kind. With own streams, their routes decide: every
-/// stream on the name is `Keep`, else `Move`. With no stream, `in_use` (where
-/// a new stream would open) decides between `Keep` and `Wait`.
+/// stream on the name is `Keep`, else `Move`. With no stream, the target is
+/// always `Wait`: a stream that opens later with no device name opens on the
+/// server's default at that moment, which may not be the default of the call
+/// start. The first try that sees the stream checks its route.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-fn sound_target(name: &str, in_use: Option<&str>, streams: &[OwnStream]) -> SoundTarget {
+fn sound_target(name: &str, streams: &[OwnStream]) -> SoundTarget {
     if streams.is_empty() {
-        if in_use == Some(name) {
-            SoundTarget::Keep
-        } else {
-            SoundTarget::Wait(name.to_owned())
-        }
+        SoundTarget::Wait(name.to_owned())
     } else if streams
         .iter()
         .all(|stream| stream.device.as_deref() == Some(name))
@@ -302,8 +296,8 @@ fn pulse_target<'a>(
 /// that is not a `pulse:` ID, or a name the server lacks, is
 /// `DeviceNotFound`. A kind whose own streams all are on the target (by the
 /// server's route, not by what the call last asked for) is left alone. A
-/// kind that must move but has no own stream yet is not a failure: its
-/// target waits (`SoundTarget::Wait`) until a stream exists.
+/// kind with no own stream yet is not a failure: its target waits
+/// (`SoundTarget::Wait`) until a stream exists, whatever the choice is.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn plan_sound_move(
     recording: Option<&str>,
@@ -314,8 +308,8 @@ pub fn plan_sound_move(
     let source = pulse_target(recording, known.default_source, now.sources)?;
     let sink = pulse_target(playout, known.default_sink, now.sinks)?;
     Ok(SoundMove {
-        source: sound_target(source, known.source, now.own_recording),
-        sink: sound_target(sink, known.sink, now.own_playout),
+        source: sound_target(source, now.own_recording),
+        sink: sound_target(sink, now.own_playout),
     })
 }
 
@@ -1203,8 +1197,6 @@ mod tests {
         SoundKnown {
             default_source: Some("mic-a.monitor"),
             default_sink: Some("spk-a"),
-            source: Some("mic-a"),
-            sink: Some("spk-a"),
         }
     }
 
@@ -1252,7 +1244,7 @@ mod tests {
     #[test]
     fn given_a_stream_on_the_target_when_planned_then_it_is_kept_without_a_move() {
         // GIVEN own streams that the server shows on the chosen devices,
-        // WHEN planned, THEN nothing moves, whatever the cache says.
+        // WHEN planned, THEN nothing moves.
         let (rec, play) = (on("mic-b"), on("spk-b"));
         assert_eq!(
             plan_sound_move(
@@ -1267,12 +1259,10 @@ mod tests {
 
     #[test]
     fn given_a_stream_moved_away_by_the_server_when_planned_then_it_moves_back() {
-        // GIVEN a cache that says the call is on the target, and a stream
-        // that the server moved to another device (the target went away and
-        // came back), or one on no listed device, WHEN planned, THEN the
-        // stream moves.
-        let mut known = known();
-        known.sink = Some("spk-b");
+        // GIVEN a stream that the server moved to another device (the
+        // target went away and came back), or one on no listed device, WHEN
+        // planned, THEN the stream moves.
+        let known = known();
         let (rec, play) = (on("mic-a"), on("spk-a"));
         assert_eq!(
             plan_sound_move(None, Some("pulse:spk-b"), &known, &now(&rec, &play)).map(|m| m.sink),
@@ -1316,14 +1306,15 @@ mod tests {
     }
 
     #[test]
-    fn given_the_same_devices_when_planned_then_nothing_moves_and_no_stream_is_needed() {
-        // GIVEN choices equal to where a new stream opens and no own
-        // streams, WHEN planned, THEN nothing moves and nothing fails.
+    fn given_no_stream_when_planned_then_the_target_waits_whatever_the_choice_is() {
+        // GIVEN no own stream and a choice equal to the default of the call
+        // start, WHEN planned, THEN the target waits: a stream that opens
+        // later may open on another default, so its route must be checked.
         assert_eq!(
             plan_sound_move(Some("pulse:mic-a"), None, &known(), &now(&[], &[])),
             Ok(SoundMove {
-                source: SoundTarget::Keep,
-                sink: SoundTarget::Keep,
+                source: SoundTarget::Wait("mic-a".to_owned()),
+                sink: SoundTarget::Wait("spk-a".to_owned()),
             })
         );
     }
@@ -1397,15 +1388,23 @@ mod tests {
     }
 
     #[test]
-    fn given_a_pending_target_when_the_device_in_use_is_chosen_then_it_is_cleared() {
-        // GIVEN a call on spk-a with no playback stream, WHEN spk-a is chosen
-        // again, THEN the plan is Keep, which clears a waiting target.
-        let rec = on("mic-a");
+    fn given_a_stream_on_the_chosen_device_then_a_waiting_target_is_cleared() {
+        // GIVEN a playback stream that opened on spk-a, WHEN spk-a is chosen
+        // again, THEN the plan is Keep, which clears a waiting target. With
+        // no stream, the same choice waits instead (the stream may open on
+        // another default).
+        let (rec, play) = (on("mic-a"), on("spk-a"));
+        assert_eq!(
+            plan_sound_move(None, Some("pulse:spk-a"), &known(), &now(&rec, &play))
+                .unwrap()
+                .sink,
+            SoundTarget::Keep
+        );
         assert_eq!(
             plan_sound_move(None, Some("pulse:spk-a"), &known(), &now(&rec, &[]))
                 .unwrap()
                 .sink,
-            SoundTarget::Keep
+            SoundTarget::Wait("spk-a".to_owned())
         );
     }
 

@@ -137,6 +137,12 @@ pub struct StatsProbe {
     /// The own camera runs in Auto quality: reads go on without the core's
     /// switch, for the controller only.
     auto: bool,
+    /// Numbers the runs of the Auto quality: every `set_auto` call starts a
+    /// new one (a camera start, a camera stop, a new quality).
+    auto_run: u64,
+    /// The run that was current when the read in flight started. Its link
+    /// numbers belong to that run only.
+    read_run: u64,
     /// Numbers the reads, so the report of a read that was stopped never
     /// frees the slot of a newer one.
     generation: u64,
@@ -153,6 +159,8 @@ impl StatsProbe {
             done,
             on: false,
             auto: false,
+            auto_run: 0,
+            read_run: 0,
             generation: 0,
             task: None,
             started: None,
@@ -178,16 +186,21 @@ impl StatsProbe {
     /// Turns the reads for the Auto camera quality on or off. They read the
     /// own camera track only, unless the statistics are on too. The reads
     /// that were started keep their numbers: a switch here never drops one.
+    /// Each call starts a new run, so the link numbers of a read that began
+    /// in an earlier run are never used for this one (see [`StatsProbe::link`]).
     pub fn set_auto(&mut self, auto: bool) {
         self.auto = auto;
+        self.auto_run += 1;
     }
 
     /// The link numbers of a reading, when the Auto camera quality needs
     /// them: the first connection's estimate of the outgoing bandwidth and
-    /// round-trip time. A read that did not finish gives none, and a
-    /// reading from before a switch is as good as any other here.
+    /// round-trip time. A read that did not finish gives none. A read that
+    /// began in an earlier Auto run (another camera's) gives none: its
+    /// round-trip time must never become the lowest of the new run. Call it
+    /// before `end`, while the finishing read is still the one in flight.
     pub fn link(&self, raw: Option<&RawStats>) -> Option<LinkReading> {
-        if !self.auto {
+        if !self.auto || self.read_run != self.auto_run {
             return None;
         }
         let connection = raw?.connections.iter().find(|c| c.connection == 0)?;
@@ -228,6 +241,7 @@ impl StatsProbe {
             return;
         }
         self.started = Some(now);
+        self.read_run = self.auto_run;
         let done = self.done.clone();
         let generation = self.generation;
         let base = self.base;
@@ -807,6 +821,26 @@ mod tests {
         );
         assert_eq!(tick(&mut probe, start + STATS_INTERVAL), 0, "2 seconds");
         assert_eq!(tick(&mut probe, start + AUTO_INTERVAL), 1);
+        probe.shutdown();
+    }
+
+    /// GIVEN a read that started in one Auto run WHEN a new run starts
+    /// (`set_auto` again, for the next camera) before the read finishes THEN
+    /// its reading gives no link numbers; a read of the current run does.
+    #[tokio::test]
+    async fn given_a_read_of_an_earlier_auto_run_then_it_gives_no_link_numbers() {
+        let (mut probe, mut reports) = probe();
+        probe.set_auto(true);
+        let start = Instant::now();
+        assert_eq!(tick(&mut probe, start), 1);
+        probe.set_auto(true);
+        let (generation, _raw) = reports.recv().await.unwrap();
+        let reading = linked(2_000_000.0, 0.03);
+        assert!(probe.link(Some(&reading)).is_none(), "an earlier run");
+        probe.end(generation, Some(reading));
+        assert_eq!(tick(&mut probe, start + AUTO_INTERVAL), 1);
+        let (_generation, _raw) = reports.recv().await.unwrap();
+        assert!(probe.link(Some(&linked(2_000_000.0, 0.03))).is_some());
         probe.shutdown();
     }
 

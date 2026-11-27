@@ -179,7 +179,7 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
     // because stage 2 allows no new socket. A failure only means that a
     // microphone or speaker change during the call is `Unsupported`.
     #[cfg(target_os = "linux")]
-    let pulse = open_pulse(recording_device.as_deref(), playout_device.as_deref()).await;
+    let pulse = open_pulse().await;
     let audio = match start_audio() {
         Ok(audio) => audio,
         Err(code) => return fail(output, code).await,
@@ -470,17 +470,11 @@ async fn retry_wait(at: Option<Instant>) {
 /// Opens the call's sound server connection on a blocking thread (Linux,
 /// ADR-0049). `None` when it cannot open; the call goes on without it.
 #[cfg(target_os = "linux")]
-async fn open_pulse(
-    recording: Option<&str>,
-    playout: Option<&str>,
-) -> Option<Arc<crate::pulse::Session>> {
-    let (recording, playout) = (recording.map(str::to_owned), playout.map(str::to_owned));
-    let opened = tokio::task::spawn_blocking(move || {
-        crate::pulse::Session::open(recording.as_deref(), playout.as_deref())
-    })
-    .await
-    .ok()
-    .flatten();
+async fn open_pulse() -> Option<Arc<crate::pulse::Session>> {
+    let opened = tokio::task::spawn_blocking(crate::pulse::Session::open)
+        .await
+        .ok()
+        .flatten();
     if opened.is_none() {
         note_audio(
             crate::diagnostics::WARN,
@@ -649,6 +643,36 @@ fn sound_unchanged_here(
     playout: &Option<String>,
 ) -> bool {
     cfg!(target_os = "linux") && joined.0 == *recording && joined.1 == *playout
+}
+
+/// What `Call::change_sound` does with a sound change when the call has a
+/// sound server connection (Linux, ADR-0049).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SoundRoute {
+    /// No sound change: the answer has no sound error.
+    Skip,
+    /// Send the change to `pulse::Session::switch`, which answers.
+    Switch,
+}
+
+/// Decides the route of a sound change. When the server's defaults are
+/// unknown (the query failed at the join) and the choices equal the join's,
+/// the change is a camera-only change and gives no sound error. Any other
+/// change goes to the session, which answers `Unsupported` while the
+/// defaults are unknown (`Session::switch`).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn sound_route(
+    defaults_unresolved: bool,
+    joined: &(Option<String>, Option<String>),
+    recording: &Option<String>,
+    playout: &Option<String>,
+) -> SoundRoute {
+    if defaults_unresolved && joined.0 == *recording && joined.1 == *playout {
+        SoundRoute::Skip
+    } else {
+        SoundRoute::Switch
+    }
 }
 
 /// Moves the running call to other devices (`SetDevices`, ADR-0059). Both
@@ -1993,8 +2017,11 @@ impl Call<'_> {
     }
 
     /// Starts the bounded tries after an event that may open a stream: remote
-    /// audio subscribed, or the own microphone published or unmuted. libwebrtc
-    /// may open its stream a little later. Nothing waits: no timer.
+    /// audio subscribed, the own microphone published or unmuted, or a
+    /// device change that left a target waiting (`change_sound`). libwebrtc
+    /// may open its stream a little later. When nothing waits, no timer runs.
+    /// A stream that is still not open after the tries keeps waiting without
+    /// a report, and the next such event starts the tries again.
     fn sound_trigger(&mut self) {
         #[cfg(target_os = "linux")]
         if self.pulse.as_ref().is_some_and(|pulse| pulse.has_pending()) {
@@ -2007,8 +2034,13 @@ impl Call<'_> {
     /// answer: every failure is noted by kind and the target stays. The last
     /// try of a series drops a target whose move failed and answers with an
     /// unasked `DevicesSet`, so the core shows it (`DeviceKept`, or
-    /// `AudioDevice` when a stream was lost). A stream that is not open yet
-    /// is no failure: the target keeps waiting and nothing is sent.
+    /// `AudioDevice` when a stream was lost or the routes could not be
+    /// read). A stream that is not open yet is no failure: the target keeps
+    /// waiting and nothing is sent. The task's deadlines start here, at
+    /// `started`, and end at `CHANGE_TIMEOUT`; the wait adds `REPORT_GRACE`.
+    /// A wait that still times out means that the blocking thread did not
+    /// run in time: an earlier try then runs again, and the last try answers
+    /// `AudioDevice`, as its outcome is not known.
     async fn retry_pending_sound(&mut self) -> Vec<FromWorker> {
         #[cfg(target_os = "linux")]
         {
@@ -2018,9 +2050,17 @@ impl Call<'_> {
                 return Vec::new();
             };
             let last = self.sound_retries.is_empty();
-            let apply = tokio::task::spawn_blocking(move || pulse.apply_pending(last));
-            let run = match tokio::time::timeout(crate::pulse::CHANGE_TIMEOUT, apply).await {
+            let started = std::time::Instant::now();
+            let apply = tokio::task::spawn_blocking(move || pulse.apply_pending(started, last));
+            let wait = crate::pulse::CHANGE_TIMEOUT + crate::pulse::REPORT_GRACE;
+            let run = match tokio::time::timeout(wait, apply).await {
                 Ok(Ok(run)) => run,
+                _ if last => {
+                    self.sound_retries.clear();
+                    return vec![FromWorker::DevicesSet {
+                        failure: Some(FailureCode::AudioDevice),
+                    }];
+                }
                 _ => crate::pulse::PendingRun {
                     waiting: true,
                     moves_failed: Vec::new(),
@@ -2057,7 +2097,8 @@ impl Call<'_> {
     /// Applies a microphone and speaker choice during the call and gives the
     /// failure, if any. On Linux the sound server connection moves the call's
     /// own streams on a blocking thread (ADR-0049); without it, only the
-    /// join's own choice is accepted.
+    /// join's own choice is accepted. A change that leaves a target waiting
+    /// starts the tries (`sound_trigger`).
     async fn change_sound(
         &mut self,
         recording: Option<String>,
@@ -2065,21 +2106,34 @@ impl Call<'_> {
     ) -> Option<FailureCode> {
         #[cfg(target_os = "linux")]
         if let Some(pulse) = self.pulse.clone() {
-            // The defaults query failed at the join and nothing changed
-            // since: a choice equal to the join's is no sound change (a
-            // camera-only change), as without a session. A real change is
-            // not resolved without the defaults and stays `Unsupported`.
-            if pulse.defaults_unresolved()
-                && sound_unchanged_here(&self.joined_sound, &recording, &playout)
+            // The defaults query failed at the join: a choice equal to the
+            // join's is no sound change (a camera-only change), as without a
+            // session. A real change is not resolved without the defaults:
+            // `Session::switch` answers `Unsupported`.
+            if sound_route(
+                pulse.defaults_unresolved(),
+                &self.joined_sound,
+                &recording,
+                &playout,
+            ) == SoundRoute::Skip
             {
                 return None;
             }
-            // The whole change is bound: the loop never waits longer.
+            // The change's deadlines start here, so a task that starts late
+            // sends nothing. The loop waits for them to end, plus a grace.
+            let started = std::time::Instant::now();
             let change = tokio::task::spawn_blocking(move || {
-                pulse.switch(recording.as_deref(), playout.as_deref())
+                pulse.switch(started, recording.as_deref(), playout.as_deref())
             });
-            return match tokio::time::timeout(crate::pulse::CHANGE_TIMEOUT, change).await {
-                Ok(Ok(result)) => result.err(),
+            let wait = crate::pulse::CHANGE_TIMEOUT + crate::pulse::REPORT_GRACE;
+            return match tokio::time::timeout(wait, change).await {
+                Ok(Ok(Ok(()))) => {
+                    // A target that waits for a stream is tried soon, also
+                    // when no sound event follows.
+                    self.sound_trigger();
+                    None
+                }
+                Ok(Ok(Err(code))) => Some(code),
                 _ => Some(FailureCode::AudioDevice),
             };
         }
@@ -4676,6 +4730,32 @@ mod tests {
             &Some("mic-1".to_owned()),
             &Some("spk".to_owned())
         ));
+    }
+
+    /// GIVEN the server's defaults are unknown and the join's sound choice
+    /// WHEN `SetDevices` carries it again (a camera-only change) THEN the
+    /// change is skipped and gives no sound error; WHEN another choice
+    /// arrives THEN it goes to the session, whose `Session::switch` answers
+    /// `Unsupported` (that answer is in `pulse.rs`, which needs a real sound
+    /// server, so it is not built here); WHEN the defaults are known THEN
+    /// even the same choice goes to the session, which finds what changes.
+    #[test]
+    fn given_unknown_defaults_then_only_the_joined_choice_is_skipped() {
+        let joined = (Some("pulse:mic-1".to_owned()), None);
+        let same = (&joined.0, &joined.1);
+        assert_eq!(sound_route(true, &joined, same.0, same.1), SoundRoute::Skip);
+        assert_eq!(
+            sound_route(true, &joined, &Some("pulse:mic-2".to_owned()), &None),
+            SoundRoute::Switch
+        );
+        assert_eq!(
+            sound_route(true, &joined, &joined.0, &Some("pulse:spk".to_owned())),
+            SoundRoute::Switch
+        );
+        assert_eq!(
+            sound_route(false, &joined, same.0, same.1),
+            SoundRoute::Switch
+        );
     }
 
     /// A sound device fake that keeps LiveKit 0.11's capture state: the
