@@ -298,12 +298,17 @@ streams already, through the socket that the call needs; this change does not
 widen that.
 
 Verification: unit tests cover the stream and name choice, the routes check,
-the commit rule and the rollback with a fake sound server. The in-call move
-(a change during a running call, both containment stages, real streams) has
-its live test, `pulse_session_test.rs`, which is ignored by default and needs
-a disposable sound server with two speakers and two microphones. It passed
-once on Linux Mint 22.3 with a disposable PipeWire 1.0.5 and `pipewire-pulse`
-(27 November 2026). A PulseAudio daemon and sound hardware were not tested.
+the commit rule and the rollback with a fake sound server. The session test
+`pulse_session_test.rs` is ignored by default and needs a disposable sound
+server with two speakers and two microphones. It is a synthetic test, not a
+call: `given_a_call_session` starts the test binary as a child process that
+opens its own record and playback streams and calls `pulse::Session`
+directly, under both containment stages, and checks the moves of those
+existing streams from outside. It runs no call loop and connects to no SFU.
+The second test, `given_a_speaker_that_waits_for_its_stream`, applies stage 1
+only. Both passed once on Linux Mint 22.3 with a disposable PipeWire 1.0.5 and
+`pipewire-pulse` (27 November 2026). Still open: a change during a running
+call, a PulseAudio daemon, sound hardware and the native containment gate.
 The earlier contained sound tests show that the worker checks and opens
 devices at launch (`PULSE_SOURCE`, `PULSE_SINK`). See
 [the device test evidence](../evidence/device-tests-linux-macos.md) for both.

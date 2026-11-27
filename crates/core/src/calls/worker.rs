@@ -327,6 +327,11 @@ impl CallWorkerLink {
         }
     }
 
+    /// The free places in the command queue right now.
+    pub fn room(&self) -> usize {
+        self.commands.capacity()
+    }
+
     /// A sender for the command queue, to wait for room in it.
     pub fn command_sender(&self) -> mpsc::Sender<ToWorker> {
         self.commands.clone()

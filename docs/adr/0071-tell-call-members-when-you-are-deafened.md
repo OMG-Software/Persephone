@@ -61,9 +61,15 @@ that we need, and does not touch the member state event.
   already there when this device starts the call. The call loop only queues the
   hint: a sender task of the call sends it, so a slow homeserver never delays
   the call's commands. The task merges waiting hints (the newest content, the
-  recipients together, at most 32), and the call's end joins it. A failed send
-  is not fatal and is not retried; the next change or the next new member
-  sends the state again.
+  recipients together, at most 32), and the call's end joins it. A device that
+  leaves the call before its send starts is taken out of the waiting
+  recipients, so it gets no state chosen after it left. The cap drops
+  recipients on purpose: when 32 devices already wait, a device that joins
+  before that send starts is left out, and it shows the state it knew (none,
+  for a new member) until the state changes again. A failed send is not fatal
+  and is not retried: its recipients also get the state only at the next
+  change (a new member gets it when it joins). Both cases only leave an icon
+  stale.
 * The core takes a message only when it is Olm-encrypted, from a device that
   its owner signed, with an unchanged identity, with content that names that
   device, and from a current member of the running call. A message that

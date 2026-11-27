@@ -108,10 +108,19 @@ pactl set-default-source persephone_mic_a
 | --- | --- |
 | `PERSEPHONE_TEST_OTHER_SINK=pulse:persephone_other PERSEPHONE_TEST_OTHER_SOURCE=pulse:persephone_mic_b cargo test --locked -p persephone-call-worker -- --ignored --exact --test-threads=1 pulse_session_test::given_a_call_session pulse_session_test::given_a_speaker_that_waits_for_its_stream` (2 passed) | 0 |
 
-`given_a_call_session` starts the worker side as a child process. The child
-applies stage 1, opens its own playback and record streams and the
-`Session`, then applies stage 2. A `pacat` and a `parec` of another program
-run on the defaults. The test checks with `pactl`:
+Rerun, same day: after the second review of pull request 111 changed the
+sound moves (a kind with no stream always waits, caller-started deadlines,
+last-try reports, monitors known for routes), the same command passed again
+(2 passed, exit 0) at commit `83afdcf652719c57ee8c752e6e4447a18ff4fc8d`, with
+the same `Cargo.lock`, machine, toolchain and disposable server setup. No
+server process was left.
+
+Both tests are synthetic session tests, not calls: they run no call loop and
+connect to no SFU. `given_a_call_session` starts the test binary as a child
+process that plays the worker side. The child applies stage 1, opens its own
+playback and record streams and the `Session`, then applies stage 2, and
+calls `pulse::Session` directly on request. A `pacat` and a `parec` of
+another program run on the defaults. The test checks with `pactl`:
 
 * a change to `pulse:persephone_mic_b` and `pulse:persephone_other` moves both
   own streams, and the other program's streams stay on the defaults;
@@ -127,14 +136,16 @@ stream answers done and moves the microphone at once. The playback stream
 then opens on the default sink, and the waiting target moves it to the chosen
 sink. After that, nothing waits.
 
-The other program's streams are the control for the stream choice: a move
-that chose streams by anything but the own process ID would move them too,
-and the test would fail. No run with broken code was made. The child printed
-"Failed to load cookie file from cookie: Permission denied": the contained
-child cannot read the cookie, and `pipewire-pulse` does not need it. No
-server process was left after the run. Not covered: a PulseAudio daemon,
-sound hardware, a device that goes away during a call, and the report after
-the last retry of a waiting target.
+Observed: the other program's `pacat` and `parec` streams stayed on their
+original devices through every move. The assertions fail if the worker moves
+either of them. They do not show which rule picked the own streams: a
+different selector that also left out `pacat` and `parec` would pass too. No
+run with a broken selector was made. The child printed "Failed to load cookie
+file from cookie: Permission denied": the contained child cannot read the
+cookie, and `pipewire-pulse` does not need it. No server process was left
+after the run. Not covered: a change during a running call, a PulseAudio
+daemon, sound hardware, a device that goes away during a call, the report
+after the last retry of a waiting target, and the native containment gate.
 
 ### Earlier runs
 

@@ -2284,6 +2284,8 @@ impl CallController {
             video_effect: guard.video_effect.clone(),
             quality_seen: guard.video_quality.subscribe(),
             video_quality: guard.video_quality.clone(),
+            join_quality: quality,
+            join_camera: scope.video && !portal_camera,
             unsent_quality: None,
             devices_seen: guard.devices.subscribe(),
             unsent_devices: None,
@@ -2470,38 +2472,42 @@ impl CallController {
     /// the page's own camera commands, so the camera portal, the request
     /// numbers and every gate apply as for the user's own commands. The
     /// call task sends the newest device choice and send resolution before
-    /// the camera-on (`settings_before_camera`). A camera that is off,
-    /// unavailable or not found stays as it is; so does a call that is not
-    /// running. The off and the on go together or not at all: the queue
+    /// the camera-on (`settings_before_camera`). The user's newest accepted
+    /// camera request decides (`camera_wanted`): a camera that the user
+    /// turned off stays off, whatever the published state still shows. A
+    /// camera that is unavailable or not found stays as it is; so does a
+    /// call that is not running. A published `Off` while the user wants the
+    /// camera is the old capture's report during a restart, so the restart
+    /// goes on. The off and the on go together or not at all: the queue
     /// must have room for both. Without it nothing is queued, the camera
     /// goes on as it was, the restart stays owed (`restart_owed`) and the
     /// error is `Busy`.
     pub fn restart_camera(&self) -> Result<(), CallError> {
-        // The camera state is read under the slot lock, which every camera
-        // command holds while it publishes. So an off that the user asked
-        // for just before is seen here, and the restart does not undo it.
+        // Every camera command holds the slot lock while it accepts, and
+        // `camera_wanted` is written only there. So the value read under
+        // the lock is the newest accepted request, also when a task
+        // publish has put an older camera state back.
         let slot = self.inner.slot();
-        let on = matches!(
-            &*self.inner.state.borrow(),
-            CallState::Active {
-                camera: CallCamera::On | CallCamera::Starting,
-                ..
-            }
-        );
+        let camera = match &*self.inner.state.borrow() {
+            CallState::Active { camera, .. } => Some(*camera),
+            _ => None,
+        };
         let Slot::Running(run) = &*slot else {
-            return if on {
+            return if matches!(camera, Some(CallCamera::On | CallCamera::Starting)) {
                 Err(CallError::NotInCall)
             } else {
                 Ok(())
             };
         };
-        if !on {
+        let restart = run.camera_wanted.load(Ordering::SeqCst)
+            && matches!(
+                camera,
+                Some(CallCamera::On | CallCamera::Starting | CallCamera::Off)
+            );
+        if !restart {
             // A camera that is off starts with the newest settings.
             run.restart_owed.store(false, Ordering::SeqCst);
             return Ok(());
-        }
-        if !matches!(*self.inner.state.borrow(), CallState::Active { .. }) {
-            return Err(CallError::NotInCall);
         }
         let mut permits = match run.commands.try_reserve_many(2) {
             Ok(permits) => permits,
@@ -3108,6 +3114,12 @@ struct Call {
     /// change that the task has not read yet, so a camera never starts at an
     /// older resolution.
     quality_seen: watch::Receiver<Option<VideoQuality>>,
+    /// The send resolution that the Join carried, and whether the Join
+    /// started the camera. A resolution chosen while the call joined does
+    /// not reach a camera that the Join opened, so the task restarts that
+    /// camera once at the start (`restart_join_camera`).
+    join_quality: VideoQuality,
+    join_camera: bool,
     /// The newest send resolution while the worker's queue is full, and when
     /// it goes again. A camera-on sends it first.
     unsent_quality: Option<(Instant, VideoQuality)>,
@@ -3804,8 +3816,13 @@ impl Call {
         if !on {
             // A new camera choice goes before the off, so a restart of the
             // camera (ADR-0070) shows the worker the order devices, off, on.
-            // A full queue keeps the choice for a retry; an off needs no more.
-            self.send_devices()?;
+            // It goes only when the queue has room for the off after it.
+            // Else the choice waits: the next camera-on sends it first
+            // (`settings_before_camera`), and the retry timer sends it
+            // otherwise. The off must never find the queue full.
+            if self.link.room() >= 2 {
+                self.send_devices()?;
+            }
         }
         if on {
             // An earlier `set_camera(false)` blocked the own tile. Only the
@@ -4925,6 +4942,29 @@ impl Call {
         Ok(())
     }
 
+    /// A send resolution chosen while the call joined applies only at the
+    /// next camera start, but the Join already started the camera at its
+    /// own resolution. When the newest choice differs, the camera restarts
+    /// once from here: off, then the settings, then on. The view and the
+    /// request numbers stay as they are; the worker's answers update the
+    /// view. A choice that equals the Join's changes nothing.
+    fn restart_join_camera(&mut self, inner: &Inner) -> Result<(), EndReason> {
+        let newest = *self.quality_seen.borrow();
+        let changed = newest.is_some_and(|quality| quality != self.join_quality);
+        if !(self.join_camera && changed && self.camera_wanted.load(Ordering::SeqCst)) {
+            return Ok(());
+        }
+        self.send_worker(ToWorker::SetCamera {
+            on: false,
+            remote: false,
+        })?;
+        self.settings_before_camera(inner)?;
+        self.send_worker(ToWorker::SetCamera {
+            on: true,
+            remote: false,
+        })
+    }
+
     /// Applies a send resolution that the task has not read yet.
     fn take_unread_quality(&mut self) -> Result<(), EndReason> {
         if !self.quality_seen.has_changed().unwrap_or(false) {
@@ -5177,6 +5217,7 @@ impl Call {
         self.devices_seen.mark_changed();
         // The same for the send resolution (ADR-0070).
         self.quality_seen.mark_changed();
+        self.restart_join_camera(inner)?;
         // The diagnostic log's switch, sent at once and on each change.
         let mut diagnostics = crate::diagnostics::global().watch();
         diagnostics.mark_changed();
@@ -5406,6 +5447,13 @@ impl Call {
         if !diff.left.is_empty() {
             let view = &self.view;
             self.remote.retain_members(|id| view.is_member(id));
+            // A device that left gets no deafen state that was changed
+            // after it left.
+            self.deafen_sender.retain_members(|user, device| {
+                view.members
+                    .iter()
+                    .any(|m| m.user_id == *user && m.device_id == *device)
+            });
         }
         // These go only when the queue has room: a full queue must not end
         // the call, and only a closed one does. The worker ignores
@@ -5664,6 +5712,11 @@ impl DeafenJob {
         self.content = Some(content);
     }
 
+    /// Drops the waiting recipients for which `keep` is false.
+    fn retain(&mut self, keep: impl Fn(&OwnedUserId, &OwnedDeviceId) -> bool) {
+        self.recipients.retain(|(user, device)| keep(user, device));
+    }
+
     /// Takes the batch to send, if there is one. The job is empty after.
     fn take(&mut self) -> Option<(Vec<(OwnedUserId, OwnedDeviceId)>, serde_json::Value)> {
         let recipients = std::mem::take(&mut self.recipients);
@@ -5717,6 +5770,12 @@ impl DeafenSender {
         self.shared.wake.notify_one();
     }
 
+    /// Drops the waiting recipients that are no longer call members. A send
+    /// that already runs keeps the batch it took.
+    fn retain_members(&self, keep: impl Fn(&OwnedUserId, &OwnedDeviceId) -> bool) {
+        plain(&self.shared.job).retain(keep);
+    }
+
     /// Stops the task and waits until it has ended. A hint that has not
     /// started is dropped; one that runs ends within its own timeout.
     async fn stop_and_join(&mut self) {
@@ -5757,11 +5816,26 @@ fn deafen_recipients(
 }
 
 /// Keeps `candidate` until the membership of its sender may have arrived.
-/// At most [`MAX_PARKED`] young ones are kept; the oldest goes first.
+/// At most [`MAX_PARKED`] young ones are kept. A deafen hint only costs the
+/// picture of one member, but a frame key keeps media readable, so a hint
+/// never evicts a key. When the list is full, a hint replaces the oldest
+/// parked hint, or is dropped if none is parked. A key evicts the oldest
+/// parked hint first, and only when none is parked, the oldest key.
 fn park(parked: &mut Vec<Candidate>, candidate: Candidate) {
     parked.retain(|c| c.received.elapsed() < PARK_TIME);
     if parked.len() >= MAX_PARKED {
-        parked.remove(0);
+        let oldest_hint = parked
+            .iter()
+            .position(|c| c.kind == incoming::Kind::Deafened);
+        match (oldest_hint, candidate.kind) {
+            (Some(at), _) => {
+                parked.remove(at);
+            }
+            (None, incoming::Kind::Deafened) => return,
+            (None, _) => {
+                parked.remove(0);
+            }
+        }
     }
     parked.push(candidate);
 }
@@ -7955,6 +8029,8 @@ mod tests {
             video_effect,
             quality_seen: video_quality.subscribe(),
             video_quality,
+            join_quality: VideoQuality::Auto,
+            join_camera: false,
             unsent_quality: None,
             devices_seen: devices.subscribe(),
             unsent_devices: None,
@@ -8735,6 +8811,8 @@ mod tests {
         let held: Vec<_> = (0..3).map(|_| sender.try_reserve().unwrap()).collect();
         assert_eq!(calls.restart_camera(), Err(CallError::Busy));
         drop(held);
+        // The user turned the camera off.
+        set_camera_wanted(&calls, false);
         let _ = calls.inner.state.send_if_modified(|state| {
             if let CallState::Active { camera, .. } = state {
                 *camera = CallCamera::Off;
@@ -8820,6 +8898,221 @@ mod tests {
 
         job.merge(Vec::new(), serde_json::json!({ "seq": 5 }));
         assert!(job.take().is_none(), "no recipients, no send");
+    }
+
+    /// GIVEN a running call whose state still shows the camera on but whose
+    /// newest accepted request is off WHEN `restart_camera` runs THEN no
+    /// command is queued and the result is `Ok`. GIVEN the user wants the
+    /// camera and the state shows `Off` (the old capture's report during a
+    /// restart) WHEN `restart_camera` runs THEN an off and an on are queued.
+    #[tokio::test]
+    async fn given_the_camera_intent_when_the_camera_restarts_then_the_intent_decides() {
+        let calls = controller(FakeHost::new(true, None));
+        let (_store, mut commands, _) = running_call(&calls, camera_state(CallCamera::On));
+        set_camera_wanted(&calls, false);
+        assert_eq!(calls.restart_camera(), Ok(()));
+        assert_eq!(waiting_cameras(&mut commands), Vec::<bool>::new());
+        assert!(!calls.restart_owed());
+
+        let calls = controller(FakeHost::new(true, None));
+        let (_store, mut commands, _) = running_call(&calls, camera_state(CallCamera::Off));
+        set_camera_wanted(&calls, true);
+        assert_eq!(calls.restart_camera(), Ok(()));
+        assert_eq!(waiting_cameras(&mut commands), vec![false, true]);
+
+        for camera in [
+            CallCamera::Unavailable,
+            CallCamera::NotFound,
+            CallCamera::EffectUnavailable,
+        ] {
+            let calls = controller(FakeHost::new(true, None));
+            let (_store, mut commands, _) = running_call(&calls, camera_state(camera));
+            set_camera_wanted(&calls, true);
+            assert_eq!(calls.restart_camera(), Ok(()), "{camera:?}");
+            assert_eq!(
+                waiting_cameras(&mut commands),
+                Vec::<bool>::new(),
+                "{camera:?}"
+            );
+        }
+    }
+
+    fn set_camera_wanted(calls: &CallController, wanted: bool) {
+        let Slot::Running(run) = &*calls.inner.slot() else {
+            panic!("running");
+        };
+        run.camera_wanted.store(wanted, Ordering::SeqCst);
+    }
+
+    /// GIVEN a call whose Join started the camera at 480p and a newest
+    /// choice of 1440p WHEN the task starts THEN the worker gets the camera
+    /// off, the new resolution and the camera on, in that order. GIVEN the
+    /// Join's own resolution THEN no camera command goes. The run ends at
+    /// the member read, which needs a session that a unit test has not.
+    #[tokio::test]
+    async fn given_a_quality_chosen_during_the_join_then_the_join_camera_restarts() {
+        for (newest, restarts) in [(VideoQuality::P1440, true), (VideoQuality::P480, false)] {
+            let fixture = test_call(
+                no_admission(),
+                Arc::new(Flags::default()),
+                Arc::new(AtomicBool::new(false)),
+            );
+            let inner = controller(FakeHost::new(true, None)).inner.clone();
+            let (mut call, mut to_worker) = (fixture.call, fixture.to_worker);
+            call.join_camera = true;
+            call.join_quality = VideoQuality::P480;
+            call.camera_wanted.store(true, Ordering::SeqCst);
+            call.video_quality.send_replace(Some(newest));
+            let (_stop_tx, mut stop) = oneshot::channel();
+            let (_commands_tx, mut commands) = mpsc::channel(4);
+
+            let ended = call.run(&inner, &mut stop, &mut commands).await;
+            assert!(matches!(ended, Err(EndReason::SessionEnded)));
+            let sent: Vec<ToWorker> = std::iter::from_fn(|| to_worker.try_recv().ok()).collect();
+            if restarts {
+                assert_eq!(
+                    sent,
+                    vec![
+                        ToWorker::SetCamera {
+                            on: false,
+                            remote: false
+                        },
+                        ToWorker::SetVideoQuality {
+                            quality: VideoQuality::P1440
+                        },
+                        ToWorker::SetCamera {
+                            on: true,
+                            remote: false
+                        },
+                    ]
+                );
+            } else {
+                assert!(
+                    !sent
+                        .iter()
+                        .any(|message| matches!(message, ToWorker::SetCamera { .. })),
+                    "the Join's own camera stays: {sent:?}"
+                );
+            }
+        }
+    }
+
+    /// GIVEN a worker queue with one free place and a device choice that
+    /// waits WHEN the camera is turned off THEN the off is queued, the call
+    /// goes on and the choice still waits.
+    #[tokio::test]
+    async fn given_one_free_place_when_the_camera_turns_off_then_the_off_gets_it() {
+        let fixture = test_call(
+            no_admission(),
+            Arc::new(Flags::default()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let inner = controller(FakeHost::new(true, None)).inner.clone();
+        let (mut call, mut to_worker) = (fixture.call, fixture.to_worker);
+        call.unsent_devices = Some((
+            Instant::now(),
+            DeviceChoice {
+                recording: None,
+                playout: None,
+                camera: Some("cam-2".to_owned()),
+            },
+        ));
+        fill_queue(&call, &mut to_worker, 1);
+
+        call.camera_command(&inner, false, 1).unwrap();
+        let sent: Vec<ToWorker> = std::iter::from_fn(|| to_worker.try_recv().ok()).collect();
+        assert!(sent.contains(&ToWorker::SetCamera {
+            on: false,
+            remote: false
+        }));
+        assert!(
+            !sent
+                .iter()
+                .any(|message| matches!(message, ToWorker::SetDevices { .. }))
+        );
+        assert!(call.unsent_devices.is_some(), "the choice still waits");
+    }
+
+    fn parked_candidate(kind: incoming::Kind, user: usize) -> Candidate {
+        Candidate {
+            kind,
+            sender: OwnedUserId::try_from(format!("@u{user}:example.org")).unwrap(),
+            content: serde_json::Value::Null,
+            envelope: None,
+            device: None,
+            identity_changed: None,
+            received: Instant::now(),
+        }
+    }
+
+    fn parked_senders(parked: &[Candidate]) -> Vec<OwnedUserId> {
+        parked.iter().map(|c| c.sender.clone()).collect()
+    }
+
+    /// GIVEN eight parked keys WHEN an early deafen hint arrives THEN all
+    /// the keys stay and the hint is dropped. GIVEN seven keys and one hint
+    /// WHEN a new key arrives THEN the hint goes and the eight keys stay.
+    /// GIVEN eight hints WHEN a new hint arrives THEN the oldest hint goes.
+    #[test]
+    fn given_parked_keys_then_a_deafen_hint_never_evicts_one() {
+        let mut parked = Vec::new();
+        for user in 0..MAX_PARKED {
+            park(&mut parked, parked_candidate(incoming::Kind::Key, user));
+        }
+        let before = parked_senders(&parked);
+        park(&mut parked, parked_candidate(incoming::Kind::Deafened, 100));
+        assert_eq!(parked_senders(&parked), before);
+
+        let mut parked = Vec::new();
+        for user in 0..MAX_PARKED - 1 {
+            park(&mut parked, parked_candidate(incoming::Kind::Key, user));
+        }
+        park(&mut parked, parked_candidate(incoming::Kind::Deafened, 100));
+        assert_eq!(parked.len(), MAX_PARKED);
+        park(
+            &mut parked,
+            parked_candidate(incoming::Kind::Key, MAX_PARKED),
+        );
+        assert_eq!(parked.len(), MAX_PARKED);
+        assert!(parked.iter().all(|c| c.kind == incoming::Kind::Key));
+        let expected: Vec<OwnedUserId> = (0..MAX_PARKED - 1)
+            .chain([MAX_PARKED])
+            .map(|user| parked_candidate(incoming::Kind::Key, user).sender)
+            .collect();
+        assert_eq!(parked_senders(&parked), expected);
+
+        let mut parked = Vec::new();
+        for user in 0..MAX_PARKED {
+            park(
+                &mut parked,
+                parked_candidate(incoming::Kind::Deafened, user),
+            );
+        }
+        park(&mut parked, parked_candidate(incoming::Kind::Deafened, 100));
+        assert_eq!(parked.len(), MAX_PARKED);
+        assert_eq!(
+            parked.last().map(|c| c.sender.clone()),
+            Some(parked_candidate(incoming::Kind::Deafened, 100).sender)
+        );
+        assert!(
+            parked
+                .iter()
+                .all(|c| c.sender != parked_candidate(incoming::Kind::Deafened, 0).sender)
+        );
+    }
+
+    /// GIVEN a waiting deafen job for devices A and B WHEN B leaves and a
+    /// new content is merged for A THEN the job's recipients are only A.
+    #[test]
+    fn given_a_device_that_left_then_it_leaves_the_waiting_deafen_job() {
+        let (a, b) = (deafen_pair(1), deafen_pair(2));
+        let mut job = DeafenJob::default();
+        job.merge(vec![a.clone(), b.clone()], serde_json::json!({ "seq": 1 }));
+        job.retain(|user, device| (user.clone(), device.clone()) != b);
+        job.merge(vec![a.clone()], serde_json::json!({ "seq": 2 }));
+        let (recipients, content) = job.take().expect("a batch waits");
+        assert_eq!(recipients, vec![a]);
+        assert_eq!(content, serde_json::json!({ "seq": 2 }));
     }
 
     /// A fake deafen send that records its batches and waits for a permit.
@@ -10233,6 +10526,14 @@ mod tests {
         state: CallState,
     ) -> (VideoStore, mpsc::Receiver<Command>, Arc<AtomicBool>) {
         let room = room_id!("!r:example.org");
+        // A camera that shows on or starting is one that the user asked for.
+        let wanted = matches!(
+            &state,
+            CallState::Active {
+                camera: CallCamera::On | CallCamera::Starting,
+                ..
+            }
+        );
         let (killed, kill) = killer();
         let (commands, command_rx) = mpsc::channel(4);
         let store = VideoStore::new();
@@ -10244,7 +10545,7 @@ mod tests {
             kill,
             stop: None,
             commands,
-            camera_wanted: Arc::new(AtomicBool::new(false)),
+            camera_wanted: Arc::new(AtomicBool::new(wanted)),
             screen_control: Arc::default(),
             volume: watch::channel(MAX_VOLUME_PERCENT).0,
             microphone: watch::channel(None).0,
