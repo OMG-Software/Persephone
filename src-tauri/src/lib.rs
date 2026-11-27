@@ -2827,6 +2827,19 @@ pub fn context<R: Runtime>() -> tauri::Context<R> {
     tauri::generate_context!()
 }
 
+/// The program name on Linux: the product name. The bundler names the
+/// desktop file of every Linux package after it
+/// (`usr/share/applications/{productName}.desktop`; the AppImage and the
+/// Arch package use the .deb's files), and `linux/main.desktop` gives the
+/// same name as `StartupWMClass`. GTK sends the program name as each
+/// window's Wayland app ID and X11 `WM_CLASS`. KWin finds a Wayland window's
+/// icon only through `<app ID>.desktop`, so GTK's default, the executable
+/// name `persephone-ui`, showed the generic icon.
+#[cfg(any(target_os = "linux", test))]
+fn program_name(config: &tauri::Config) -> Option<&str> {
+    config.product_name.as_deref()
+}
+
 /// Runs the UI when the core started it. Started any other way, it becomes a
 /// launcher for the core ([`launcher`]) before any Tauri or channel state
 /// exists, because without the core channel the UI has nothing to relay to.
@@ -2854,8 +2867,15 @@ pub fn run() {
     };
     // Off until the core says the diagnostic log is on (ADR-0058).
     diagnostics::install(core.clone());
+    let context = context();
+    // Before the event loop starts GTK, which otherwise takes the executable
+    // name.
+    #[cfg(target_os = "linux")]
+    if let Some(name) = program_name(context.config()) {
+        gtk::glib::set_prgname(Some(name));
+    }
     let app = configure(tauri::Builder::default(), core, subscriptions)
-        .build(context())
+        .build(context)
         .expect("Persephone UI failed to start");
     // The display GTK opened for the window, for the capture note on Linux
     // (ADR-0047). `run` is on the GTK main thread, and the window exists once
@@ -2870,6 +2890,33 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// GIVEN the bundle configuration THEN the Linux program name (each
+    /// window's Wayland app ID and X11 `WM_CLASS`), the desktop file that
+    /// the bundler installs (`{productName}.desktop`, for the .deb, the .rpm
+    /// and the AppImage) and that file's `StartupWMClass` are one name. The
+    /// bundler fills the template's `{{name}}` with the product name. The
+    /// template paths are bundle-only settings, so they are read from the
+    /// file that the bundler reads.
+    #[test]
+    fn given_the_bundle_config_then_the_program_name_names_the_desktop_file() {
+        let context = context::<tauri::Wry>();
+        let file: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        assert_eq!(program_name(context.config()), Some("Persephone"));
+        assert_eq!(file["productName"], "Persephone");
+        for kind in ["deb", "rpm"] {
+            assert_eq!(
+                file["bundle"]["linux"][kind]["desktopTemplate"], "linux/main.desktop",
+                "{kind}"
+            );
+        }
+        let names: Vec<&str> = include_str!("../linux/main.desktop")
+            .lines()
+            .filter(|line| line.starts_with("StartupWMClass=") || line.starts_with("Name="))
+            .collect();
+        assert_eq!(names, ["StartupWMClass={{name}}", "Name={{name}}"]);
+    }
 
     /// GIVEN a call page that has not said it is ready WHEN an open waits
     /// THEN the wait ends false; WHEN the page says so THEN it is true;
