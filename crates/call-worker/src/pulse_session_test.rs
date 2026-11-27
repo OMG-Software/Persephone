@@ -28,7 +28,6 @@ use std::process::{Child, Command, Stdio};
 use crate::pulse::{Session, library, symbol};
 
 const CHILD_FLAG: &str = "PERSEPHONE_SESSION_CHILD";
-const PARENT_TEST: &str = "pulse_session_test::given_a_call_session";
 const CHILD_TEST: &str = "pulse_session_test::the_call_worker_side";
 
 #[repr(C)]
@@ -228,7 +227,7 @@ fn given_a_call_session() {
     let mut reader = BufReader::new(child.stdout.take().unwrap());
     // The harness prints its own lines before ours.
     let mut line = String::new();
-    while line.trim() != "READY" {
+    while !line.trim().ends_with("READY") {
         line.clear();
         assert!(reader.read_line(&mut line).unwrap() > 0, "the child ended");
     }
