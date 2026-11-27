@@ -448,6 +448,14 @@ export function openCallWindow(): Promise<void> {
   return invoke<void>('open_call_window');
 }
 
+/**
+ * Puts the call window in full screen or out of it. The host does it on
+ * Windows only; the web view does it elsewhere (ADR-0060).
+ */
+export function setCallFullscreen(on: boolean): Promise<void> {
+  return invoke<void>('set_call_fullscreen', { on });
+}
+
 /** Closes the call window, if it is open. The call goes on. */
 export function closeCallWindow(): Promise<void> {
   return invoke<void>('close_call_window');

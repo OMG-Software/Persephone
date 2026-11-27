@@ -43,6 +43,9 @@
   --avatar-4: #a83d63;
   --avatar-5: #86681e;
   --scrim: rgba(0, 0, 0, 0.6);
+  /* A full screen picture: black with white text in every theme. */
+  --stage: #000000;
+  --stage-ink: #ffffff;
   --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.35);
   --shadow-modal: 0 24px 80px rgba(0, 0, 0, 0.6);
   --radius: 4px;
@@ -3465,20 +3468,32 @@ mark {
   border-color: var(--danger);
 }
 
-/* The call volume: a slider with its value, under the call controls. */
-.call-volume {
+/* The call volume and, right below it, the microphone gain (ADR-0060): two
+   sliders with their values, stacked in one group at the end of the call
+   controls. The group wraps to its own row in a narrow window. */
+.call-levels {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.call-volume,
+.call-gain {
   display: flex;
   align-items: center;
   gap: 8px;
   margin-left: auto;
 }
 
-.call-volume input {
+.call-volume input,
+.call-gain input {
   width: 160px;
   accent-color: var(--accent);
 }
 
-.call-volume output {
+.call-volume output,
+.call-gain output {
   width: 5ch;
   text-align: right;
 }
@@ -3909,6 +3924,48 @@ mark {
 
 .call-feed[aria-pressed='true'] .video-frame {
   outline: 2px solid var(--accent);
+}
+
+/* The full-screen button of a screen share sits on the tile's top right
+   corner, beside the feed button and not inside it. */
+.call-cell {
+  position: relative;
+}
+
+.call-fullscreen {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: inline-flex;
+  align-items: center;
+  padding: 4px;
+}
+
+/* In full screen the tile fills the screen on black: the picture keeps its
+   shape and is only scaled by CSS (its frame is as wide as the screen
+   allows for its ratio), and the name line stays under it. */
+.call-cell:fullscreen {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  background: var(--stage);
+  color: var(--stage-ink);
+}
+
+.call-cell:fullscreen .call-feed {
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  cursor: default;
+}
+
+.call-cell:fullscreen .video-frame {
+  flex: none;
+  width: min(100vw, calc((100vh - 28px) * var(--ratio, 1.7778)));
+  border-radius: 0;
+  outline: 0;
 }
 
 .call-large {
