@@ -4791,6 +4791,15 @@ mod tests {
             SoundRoute::Switch
         );
         assert_eq!(sound_route(None, &joined.0, &joined.1), SoundRoute::Switch);
+        // GIVEN a join with "System default" for both (the accepted choice
+        // that a failed defaults read keeps) WHEN a camera-only `SetDevices`
+        // carries it THEN it is skipped; a real choice is not.
+        let system = (None, None);
+        assert_eq!(sound_route(Some(&system), &None, &None), SoundRoute::Skip);
+        assert_eq!(
+            sound_route(Some(&system), &None, &Some("pulse:spk".to_owned())),
+            SoundRoute::Switch
+        );
     }
 
     /// GIVEN a change during the call WHEN it is answered THEN the accepted

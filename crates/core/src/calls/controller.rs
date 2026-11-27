@@ -3823,16 +3823,24 @@ impl Call {
         // The camera that the Join opened stops or is replaced here; a new
         // camera-on starts with the newest settings.
         self.join_camera = false;
-        if !on {
+        // The off's own place is held first, so neither the device choice
+        // below nor a share's stop that another thread queues (`WorkerStop`)
+        // can take it. A full queue ends the call, as the off itself would.
+        let off_place = if on {
+            None
+        } else {
+            match self.link.hold_place() {
+                Ok(Some(place)) => Some(place),
+                Ok(None) | Err(_) => return Err(EndReason::WorkerStopped),
+            }
+        };
+        if off_place.is_some() {
             // A new camera choice goes before the off, so a restart of the
             // camera (ADR-0070) shows the worker the order devices, off, on.
-            // It goes only when the queue has room for the off after it.
-            // Else the choice waits: the next camera-on sends it first
-            // (`settings_before_camera`), and the retry timer sends it
-            // otherwise. The off must never find the queue full.
-            if self.link.room() >= 2 {
-                self.send_devices()?;
-            }
+            // Without a free place it waits: the next camera-on sends it
+            // first (`settings_before_camera`), and the retry timer sends it
+            // otherwise.
+            self.send_devices()?;
         }
         if on {
             // An earlier `set_camera(false)` blocked the own tile. Only the
@@ -3854,7 +3862,14 @@ impl Call {
                 self.portal_capture = false;
                 self.portal_sent = false;
             }
-            self.send_worker(ToWorker::SetCamera { on, remote: false })?;
+            let command = ToWorker::SetCamera { on, remote: false };
+            match off_place {
+                // The held place keeps the order: the choice went first.
+                Some(place) => {
+                    place.send(command);
+                }
+                None => self.send_worker(command)?,
+            }
         }
         let changed = self.view.request_camera(on) == Applied::Changed;
         // A camera-on may have lifted the own-tile block above while the

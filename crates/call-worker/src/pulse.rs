@@ -1045,10 +1045,12 @@ struct Devices {
     generation: u64,
 }
 
-/// The two deadlines of one change. Forward moves must end by `forward`, so
-/// the rollback still has time up to `full`.
+/// The deadlines of one change. Forward moves must end by `forward`, so
+/// the rollback still has time up to `full`; the microphone's end by
+/// `first`, so the speaker's keep their own time ([`Deadlines::forward_for`]).
 #[derive(Clone, Copy)]
 struct Deadlines {
+    first: Instant,
     forward: Instant,
     full: Instant,
 }
@@ -1057,9 +1059,21 @@ impl Deadlines {
     /// The deadlines of a change that starts at `start`.
     fn starting_at(start: Instant) -> Self {
         let full = start + CHANGE_TIMEOUT;
+        let forward = full.checked_sub(ROLLBACK_RESERVE).unwrap_or(start);
         Self {
-            forward: full.checked_sub(ROLLBACK_RESERVE).unwrap_or(start),
+            first: start + forward.saturating_duration_since(start) / 2,
+            forward,
             full,
+        }
+    }
+
+    /// The end of the forward moves of `kind`. The microphone goes first and
+    /// has half of the forward time, so a slow microphone move never uses
+    /// up the speaker's: each kind gets its own bounded try.
+    fn forward_for(&self, kind: Kind) -> Instant {
+        match kind {
+            Kind::Recording => self.first,
+            Kind::Playout => self.forward,
         }
     }
 }
@@ -1305,7 +1319,7 @@ fn run_change(
             moved = moved
                 && move_to(
                     server,
-                    deadlines.forward,
+                    deadlines.forward_for(kind),
                     kind,
                     name,
                     snapshot.streams(kind),
@@ -1392,7 +1406,14 @@ fn run_pending(
             continue;
         };
         let mut touched = Vec::new();
-        let moved = move_to(server, deadlines.forward, kind, name, streams, &mut touched);
+        let moved = move_to(
+            server,
+            deadlines.forward_for(kind),
+            kind,
+            name,
+            streams,
+            &mut touched,
+        );
         // A stream that moved to its target changes the call's routes,
         // also when the other kind fails in this try.
         devices.applied[slot] |= moved && !touched.is_empty();
@@ -1690,6 +1711,39 @@ mod tests {
         let limits = deadlines();
         assert_eq!(limits.full - limits.forward, ROLLBACK_RESERVE);
         assert!(ROLLBACK_RESERVE < CHANGE_TIMEOUT);
+        // The microphone has the first half of the forward time; the speaker
+        // keeps at least the second half.
+        assert!(limits.first < limits.forward);
+        assert_eq!(limits.forward_for(Kind::Recording), limits.first);
+        assert_eq!(limits.forward_for(Kind::Playout), limits.forward);
+    }
+
+    #[test]
+    fn given_a_microphone_move_out_of_time_then_the_speaker_still_moves() {
+        // GIVEN waiting targets of both kinds and a microphone whose forward
+        // time has run out, WHEN the last try runs, THEN the speaker move is
+        // still sent within its own time and its wait ends; the microphone is
+        // reported, as AudioDevice because the speaker route moved.
+        let server = Fake::with(vec![at(1, "mic-a")], vec![at(2, "spk-a")]);
+        let mut devices = Devices {
+            pending: [Some("mic-b".to_owned()), Some("spk-b".to_owned())],
+            ..Devices::default()
+        };
+        let limits = Deadlines {
+            first: Instant::now() - Duration::from_secs(1),
+            forward: Instant::now() + Duration::from_secs(5),
+            full: Instant::now() + Duration::from_secs(6),
+        };
+        let run = run_pending(&server, &mut devices, (true, 0), limits);
+        assert_eq!(server.route(Kind::Playout, 2).as_deref(), Some("spk-b"));
+        assert_eq!(server.route(Kind::Recording, 1).as_deref(), Some("mic-a"));
+        assert_eq!(
+            run,
+            PendingRun {
+                waiting: false,
+                moves_failed: vec![("microphone", FailureCode::AudioDevice)],
+            }
+        );
     }
 
     #[test]
@@ -1700,6 +1754,7 @@ mod tests {
         let server = Fake::with(vec![at(1, "mic-a")], vec![at(2, "spk-a")]);
         let mut devices = Devices::default();
         let limits = Deadlines {
+            first: Instant::now() - Duration::from_secs(1),
             forward: Instant::now() - Duration::from_secs(1),
             full: Instant::now() + Duration::from_secs(5),
         };

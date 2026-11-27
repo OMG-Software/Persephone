@@ -332,6 +332,17 @@ impl CallWorkerLink {
         self.commands.capacity()
     }
 
+    /// Holds one place in the command queue for a command that must go, so
+    /// no other sender (a share's stop from another thread) takes it first.
+    /// `Ok(None)` is a full queue; only a closed queue is an error.
+    pub fn hold_place(&self) -> Result<Option<mpsc::OwnedPermit<ToWorker>>, WorkerGone> {
+        match self.commands.clone().try_reserve_owned() {
+            Ok(place) => Ok(Some(place)),
+            Err(mpsc::error::TrySendError::Full(_)) => Ok(None),
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(WorkerGone),
+        }
+    }
+
     /// A sender for the command queue, to wait for room in it.
     pub fn command_sender(&self) -> mpsc::Sender<ToWorker> {
         self.commands.clone()
