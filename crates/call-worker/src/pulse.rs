@@ -1424,8 +1424,11 @@ fn run_pending(
             &mut touched,
         );
         // A stream that moved to its target changes the call's routes,
-        // also when the other kind fails in this try.
-        devices.applied[slot] |= moved && !touched.is_empty();
+        // also when the other kind fails in this try. So does a stream that
+        // an earlier try left on its target (a move that timed out but
+        // happened, and could not be undone: `lost`), although this try
+        // moves nothing.
+        devices.applied[slot] |= moved && (!touched.is_empty() || devices.lost[slot]);
         tries[slot] = Some((touched, moved));
     }
     // Then the commit and the rollback of each kind, under the full
@@ -1811,6 +1814,46 @@ mod tests {
                 moves_failed: vec![("microphone", FailureCode::AudioDevice)],
             }
         );
+    }
+
+    #[test]
+    fn given_an_earlier_move_not_undone_then_a_last_speaker_failure_is_audio_device() {
+        // GIVEN waiting targets of both kinds, an earlier try whose
+        // microphone move timed out but happened and could not be undone,
+        // and a speaker that the server refuses, WHEN the last try finds the
+        // microphone on its target and moves nothing, THEN the speaker's
+        // failure is AudioDevice: the call does not run on the devices it
+        // had.
+        let server = Fake {
+            silent: vec![(1, "mic-b")],
+            refuse: vec![(1, "mic-a"), (2, "spk-b")],
+            ..Fake::with(vec![at(1, "mic-a")], vec![at(2, "spk-a")])
+        };
+        let mut devices = Devices {
+            pending: [Some("mic-b".to_owned()), Some("spk-b".to_owned())],
+            ..Devices::default()
+        };
+        let first = run_pending(&server, &mut devices, (false, 0), deadlines());
+        assert_eq!(
+            first.moves_failed,
+            vec![
+                ("microphone", FailureCode::AudioDevice),
+                ("speaker", FailureCode::DeviceKept),
+            ]
+        );
+        assert_eq!(server.route(Kind::Recording, 1).as_deref(), Some("mic-b"));
+        assert!(devices.lost[Kind::Recording.slot()]);
+
+        let last = run_pending(&server, &mut devices, (true, 0), deadlines());
+        assert_eq!(
+            last,
+            PendingRun {
+                waiting: false,
+                moves_failed: vec![("speaker", FailureCode::AudioDevice)],
+            }
+        );
+        assert_eq!(server.route(Kind::Recording, 1).as_deref(), Some("mic-b"));
+        assert_eq!(server.route(Kind::Playout, 2).as_deref(), Some("spk-a"));
     }
 
     #[test]
