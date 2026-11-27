@@ -311,6 +311,8 @@ export type CallColourFilter = "none" | "greyscale" | "warm" | "cool" | "brighte
 
 export type CallVideoEffect = { background: CallBackground, blur: number, filter: CallColourFilter, };
 
+export type CallVideoQuality = "auto" | "480p" | "720p" | "1080p" | "1440p";
+
 export type CallDevices = { supported: boolean, recording: Array<CallDevice>, playout: Array<CallDevice>, cameras: Array<CallDevice>, selectedRecording: string | null, selectedPlayout: string | null, selectedCamera: string | null, volume: number, autoLevel: boolean, micGain: number, 
 /**
  * The saved video effect of the own camera (ADR-0068). No effect when
@@ -323,6 +325,11 @@ effect: CallVideoEffect,
  * the picture as it is.
  */
 mirror: boolean, 
+/**
+ * The saved send resolution of the own camera (ADR-0070). Auto when
+ * nothing is saved.
+ */
+videoQuality: CallVideoQuality, 
 /**
  * Whether this build can run the background effects that need the
  * person mask: blur and pictures (ADR-0068). The page offers them only

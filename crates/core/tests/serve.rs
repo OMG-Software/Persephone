@@ -668,6 +668,89 @@ fn given_a_profile_when_the_call_volume_is_set_then_it_is_saved_with_the_devices
     );
 }
 
+/// GIVEN an open profile WHEN the page sets the camera send resolution THEN
+/// it is saved in the call device record, kept when the devices or the video
+/// effect are saved, and the devices and the effect keep it; no record reads
+/// as Auto, and no call is not an error (ADR-0070).
+#[test]
+fn given_a_profile_when_the_video_quality_is_set_then_it_is_saved_with_the_devices() {
+    use persephone_contracts::{CallStatus, CallVideoQuality};
+    use persephone_core::calls::devices::{Selection, load};
+    let dir = tempfile::TempDir::new().unwrap();
+    let core = Core::default().with_session(common::open_session(dir.path()));
+    let saved = |core: &Core| -> Selection {
+        let lease = core.session().admit().unwrap();
+        lease.stores().block_on(load(lease.stores())).unwrap()
+    };
+    assert_eq!(
+        saved(&core).video_quality(),
+        CallVideoQuality::Auto,
+        "no record is Auto"
+    );
+    for quality in [
+        CallVideoQuality::P1080,
+        CallVideoQuality::P480,
+        CallVideoQuality::Auto,
+        CallVideoQuality::P1440,
+    ] {
+        assert_eq!(
+            answer::<CallStatus>(&core, Call::CallVideoQuality { quality }),
+            Ok(CallStatus::idle()),
+            "{quality:?}"
+        );
+        assert_eq!(saved(&core).video_quality(), quality);
+    }
+    assert_eq!(
+        answer::<serde_json::Value>(
+            &core,
+            Call::SetCallDevices {
+                recording: Some("mic".into()),
+                playout: None,
+                camera: Some("cam".into()),
+            },
+        ),
+        Ok(serde_json::Value::Null)
+    );
+    let record = saved(&core);
+    assert_eq!(
+        record.video_quality(),
+        CallVideoQuality::P1440,
+        "saving the devices keeps the resolution"
+    );
+    assert_eq!(record.camera.as_deref(), Some("cam"));
+    assert_eq!(
+        answer::<CallStatus>(
+            &core,
+            Call::CallVideoEffect {
+                effect: None,
+                mirror: Some(false),
+            },
+        ),
+        Ok(CallStatus::idle())
+    );
+    assert_eq!(
+        saved(&core).video_quality(),
+        CallVideoQuality::P1440,
+        "saving the effect keeps the resolution"
+    );
+    assert_eq!(
+        answer::<CallStatus>(
+            &core,
+            Call::CallVideoQuality {
+                quality: CallVideoQuality::P720
+            }
+        ),
+        Ok(CallStatus::idle())
+    );
+    let record = saved(&core);
+    assert_eq!(record.video_quality(), CallVideoQuality::P720);
+    assert_eq!(
+        (record.camera.as_deref(), record.mirror),
+        (Some("cam"), Some(false)),
+        "the resolution keeps the devices and the mirror"
+    );
+}
+
 /// GIVEN an open profile WHEN the page sets the video effect and the mirror
 /// THEN both are saved in the call device record, kept when the devices are
 /// saved again, and the effect keeps the devices; WHEN it sends only one of
@@ -914,6 +997,9 @@ fn given_a_profile_then_call_commands_follow_the_session() {
         Call::CallVideoEffect {
             effect: Some(persephone_contracts::CallVideoEffect::default()),
             mirror: Some(false),
+        },
+        Call::CallVideoQuality {
+            quality: persephone_contracts::CallVideoQuality::P720,
         },
         Call::CallReadiness {
             room_id: room.into(),

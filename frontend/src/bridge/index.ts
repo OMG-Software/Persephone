@@ -27,6 +27,7 @@ import type {
   CallStatus,
   CallUnavailable,
   CallVideoEffect,
+  CallVideoQuality,
   CallVideoTile,
   ContactStatus,
   ConversationStart,
@@ -730,6 +731,17 @@ export function callVideoEffect(change: VideoEffectChange): Promise<CallStatus> 
   }
   if (typeof change.mirror === 'boolean') args.mirror = change.mirror;
   return invoke<CallStatus>('call_video_effect', args);
+}
+
+/**
+ * Sets the own camera's send resolution (ADR-0070): `auto`, `480p`, `720p`,
+ * `1080p` or `1440p`. It is saved for later calls. A camera that is on in
+ * a running call restarts, so the new size applies at once. The status says
+ * nothing about the camera's real size; the camera and the computer limit
+ * the highest one.
+ */
+export function callVideoQuality(quality: CallVideoQuality): Promise<CallStatus> {
+  return invoke<CallStatus>('call_video_quality', { quality });
 }
 
 /**

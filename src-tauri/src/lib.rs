@@ -962,6 +962,17 @@ async fn call_video_effect(
     relay(core.inner(), call).await
 }
 
+/// Sets the own camera's send resolution (ADR-0070), for the running call
+/// and later ones. The value is one of a closed set, which the type
+/// enforces. The core saves it, and restarts a camera that is on.
+#[tauri::command]
+async fn call_video_quality(
+    core: State<'_, CoreLink>,
+    quality: persephone_contracts::CallVideoQuality,
+) -> Result<CallStatus, String> {
+    relay(core.inner(), Call::CallVideoQuality { quality }).await
+}
+
 /// Turns the camera on or off. The worker's answer arrives as a call change.
 #[tauri::command]
 async fn call_camera(core: State<'_, CoreLink>, on: bool) -> Result<CallStatus, String> {
@@ -2528,6 +2539,7 @@ pub fn configure<R: Runtime>(
             call_volume,
             call_microphone,
             call_video_effect,
+            call_video_quality,
             call_camera,
             call_screen,
             call_stats,

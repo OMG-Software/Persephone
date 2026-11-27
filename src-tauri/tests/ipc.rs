@@ -224,6 +224,9 @@ impl CoreTransport for FakeCore {
             Call::CallVideoEffect { effect, .. } => Ok(
                 serde_json::json!({"phase": "active", "roomId": "!r:example.invalid", "muted": false, "deafened": false, "volume": 100, "participants": [], "ended": null, "joinError": null, "camera": "off", "screen": "off", "video": [], "effectRefused": effect.is_some_and(|effect| effect.background == persephone_contracts::CallBackground::Blur)}),
             ),
+            Call::CallVideoQuality { .. } => Ok(
+                serde_json::json!({"phase": "active", "roomId": "!r:example.invalid", "muted": false, "deafened": false, "volume": 100, "participants": [], "ended": null, "joinError": null, "camera": "off", "screen": "off", "video": []}),
+            ),
             Call::VerifyThisDevice {} => Ok(serde_json::json!({
                 "identity": "unverified", "recovery": "enabled", "operation": "idle", "error": null, "verification": null, "canSetUpRecovery": false, "canStartNewBackup": false, "profilePassphrase": false,
                 "verification": {"flowId": "f1", "phase": "waiting", "emoji": [], "otherDevice": null}
@@ -1059,6 +1062,7 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-call-volume",
             "allow-call-microphone",
             "allow-call-video-effect",
+            "allow-call-video-quality",
             "allow-call-camera",
             "allow-call-screen",
             "allow-call-video-frame",
@@ -1166,6 +1170,7 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-call-devices",
             "allow-set-call-devices",
             "allow-call-video-effect",
+            "allow-call-video-quality",
             "allow-call-stats",
             "allow-call-stats-read",
             "allow-close-call-window",
@@ -1282,6 +1287,12 @@ fn given_the_call_window_then_it_lists_and_changes_call_devices() {
         "active"
     );
     assert_eq!(core.calls.load(Ordering::SeqCst), relayed + 1);
+    // ... and the own camera's send resolution (ADR-0070).
+    assert_eq!(
+        invoke("call_video_quality", serde_json::json!({"quality": "720p"})).unwrap()["phase"],
+        "active"
+    );
+    assert_eq!(core.calls.load(Ordering::SeqCst), relayed + 2);
 }
 
 /// GIVEN the call statistics command WHEN the main window calls it THEN it is
@@ -2413,6 +2424,40 @@ fn given_call_commands_then_bounded_arguments_cross_and_replies_are_checked() {
     // The five valid microphone changes and the eight valid effects above
     // are the only calls since the start of this check.
     assert_eq!(core.calls.load(Ordering::SeqCst), before + 13);
+    // The send resolution (ADR-0070): a closed set of five names. Any other
+    // value, type or extra field never reaches the core.
+    let before_quality = core.calls.load(Ordering::SeqCst);
+    for quality in ["auto", "480p", "720p", "1080p", "1440p"] {
+        assert_eq!(
+            invoke(
+                "call_video_quality",
+                serde_json::json!({"quality": quality})
+            )
+            .unwrap()["phase"],
+            "active",
+            "{quality}"
+        );
+    }
+    for args in [
+        serde_json::json!({}),
+        serde_json::json!({"quality": null}),
+        serde_json::json!({"quality": "360p"}),
+        serde_json::json!({"quality": "2160p"}),
+        serde_json::json!({"quality": "Auto"}),
+        serde_json::json!({"quality": "1080"}),
+        serde_json::json!({"quality": 1080}),
+        serde_json::json!({"quality": ["720p"]}),
+    ] {
+        assert!(
+            invoke("call_video_quality", args.clone()).is_err(),
+            "{args}"
+        );
+    }
+    assert_eq!(
+        core.calls.load(Ordering::SeqCst),
+        before_quality + 5,
+        "a refused value never reached the core"
+    );
 }
 
 /// Sending relays the room and body only; oversized input never reaches the
