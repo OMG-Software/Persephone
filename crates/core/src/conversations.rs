@@ -156,7 +156,10 @@ fn invited_room(client: &Client, room_id: &str) -> Result<Room, ErrorCode> {
 ///   `m.direct` map this client last synced, without the lock that
 ///   `Account::mark_as_dm` takes. So a direct one also holds `starts`, the
 ///   slot of conversation starts (`Client::create_dm` marks through that
-///   lock), and is `limit_exceeded` while one runs.
+///   lock), and is `limit_exceeded` while one runs. Known limit, as before
+///   the long joins: a mark that another write made after this client's
+///   last sync (a finished start, a long accept, another device) is not in
+///   that map, so the SDK's write can remove it.
 /// * An invitation whose invite state shows no encryption is joined with the
 ///   long join of `joins`, so a big room on another server has
 ///   `joins::JOIN_TIMEOUT`. A direct one is then marked direct for its
@@ -169,8 +172,9 @@ fn invited_room(client: &Client, room_id: &str) -> Result<Room, ErrorCode> {
 /// Both answers are those of a join (`joins::request_error`): a rate limit
 /// or a server error is `unavailable`, because the homeserver can still be
 /// joining. When `gone` is true, the long join and its mark stop and the
-/// answer is `locked`. A mark that stops leaves the room joined but not
-/// marked direct; nothing marks it later.
+/// answer is `locked`. After a mark stops, the room stays joined and it is
+/// not known whether it is marked direct: the homeserver can have received
+/// the request before the stop. Nothing marks it later.
 pub async fn accept(
     client: &Client,
     room_id: &str,
