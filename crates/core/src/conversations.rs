@@ -152,7 +152,10 @@ fn invited_room(client: &Client, room_id: &str) -> Result<Room, ErrorCode> {
 /// * An invitation that may be to an encrypted room is joined by the SDK.
 ///   The SDK then imports the room history the inviter shared (a room key
 ///   bundle) and marks a direct invitation as direct. Its join has the
-///   client's 30 s limit. The SDK's mark (`Room::set_is_direct`) writes the
+///   client's 30 s limit for each request, and `gone` does not stop it: it
+///   writes the stores (`room_joined`, the bundle import), and
+///   `docs/architecture/sdk-lifecycle.md` keeps such work until it ends, so
+///   a lock waits for it as for any other SDK call. The SDK's mark (`Room::set_is_direct`) writes the
 ///   `m.direct` map this client last synced, without the lock that
 ///   `Account::mark_as_dm` takes. So a direct one also holds `starts`, the
 ///   slot of conversation starts (`Client::create_dm` marks through that
