@@ -2698,6 +2698,15 @@ impl Session {
         self.shared.open_generation()
     }
 
+    /// Whether work admitted in `generation` may go on: the session is still
+    /// the open one of `generation` and no sign-out holds new work back. Long
+    /// work, such as a room join, checks this and stops when it is false, so
+    /// a lock or a sign-out need not wait for it.
+    pub fn may_continue(&self, generation: u64) -> bool {
+        let inner = lock(&self.shared);
+        inner.state == StoreState::Protected && inner.generation == generation && !inner.held
+    }
+
     /// The room's messages sent from this device in this session.
     pub fn pending_messages(&self, room_id: &str) -> Vec<PendingMessage> {
         guard(&self.shared.outbox).for_room(room_id)
@@ -3667,6 +3676,25 @@ mod tests {
         shared.while_open(generation, &mut || runs += 1);
         assert_eq!(runs, 1);
         assert_eq!(Env::open_generation(&*shared), None);
+    }
+
+    /// GIVEN an open session WHEN long work asks whether it may go on THEN
+    /// it may only in the open generation, not while a sign-out holds new
+    /// work back, and not once a lock began.
+    #[test]
+    fn given_a_hold_or_a_lock_then_long_work_may_not_continue() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let session = Session::open(dir.path().into(), Arc::new(Plain), unlock());
+        assert_eq!(settled(&session), StoreState::Protected);
+        let generation = session.open_generation().expect("open");
+        assert!(session.may_continue(generation));
+        assert!(!session.may_continue(generation + 1));
+        assert!(session.hold_new_work(Instant::now() + Duration::from_secs(1)));
+        assert!(!session.may_continue(generation));
+        session.release_new_work();
+        assert!(session.may_continue(generation));
+        session.lock(Duration::ZERO, || {});
+        assert!(!session.may_continue(generation));
     }
 
     #[test]

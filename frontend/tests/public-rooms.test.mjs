@@ -5,6 +5,7 @@ import {
   MAX_DIRECTORY_FILTER_BYTES, MAX_LISTED_ROOMS, MAX_SERVER_NAME_BYTES, addPage, filterProblem, joinFailure,
   listFailure, memberText, ownServer, roomLabel, serverProblem
 } from '../src/publicRooms.ts';
+import { JOIN_BUSY, JOIN_UNFINISHED, answerFailure } from '../src/joining.ts';
 
 let vite;
 let render;
@@ -118,8 +119,26 @@ test('GIVEN failure codes WHEN shown THEN each failure says what happened and wh
   assert.match(listFailure('limit_exceeded', false), /still running/);
   assert.match(joinFailure('not_found'), /Browse again/);
   assert.match(joinFailure('rejected'), /refused/);
-  assert.match(joinFailure('limit_exceeded'), /Try again in a moment/);
-  assert.match(joinFailure('core_unavailable'), /could not be reached.*room list/);
+  assert.match(joinFailure('limit_exceeded'), /Another room is being joined.*when that is done/);
+  // A join that timed out, a busy homeserver and an unreachable one look the
+  // same to the page: the homeserver can still be joining.
+  assert.match(joinFailure('core_unavailable'), /can still be joining.*several minutes.*room list/);
+  assert.doesNotMatch(joinFailure('core_unavailable'), /could not be reached/);
+});
+
+test('GIVEN a failed answer to an invitation WHEN shown THEN an accept says what a join says, and a decline does not', () => {
+  assert.equal(answerFailure('core_unavailable', true), JOIN_UNFINISHED, 'the homeserver can still be joining');
+  assert.match(answerFailure('core_unavailable', false), /could not be reached/);
+  for (const accept of [true, false]) {
+    assert.equal(answerFailure('limit_exceeded', accept), JOIN_BUSY);
+    assert.match(answerFailure('not_found', accept), /no longer pending/);
+    assert.match(answerFailure('locked', accept), /locked/);
+  }
+  assert.match(answerFailure('rejected', true), /refused.*withdrawn.*banned/);
+  assert.match(answerFailure('rejected', false), /refused to decline/);
+  // The old generic texts were wrong for an answer.
+  assert.doesNotMatch(answerFailure('limit_exceeded', true), /live updates/);
+  assert.doesNotMatch(answerFailure('rejected', true), /core is unavailable/);
 });
 
 test('GIVEN the directory dialog opens WHEN nothing was browsed THEN it names the own homeserver as inert text and lists nothing', () => {

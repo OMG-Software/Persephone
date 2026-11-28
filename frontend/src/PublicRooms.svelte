@@ -2,6 +2,7 @@
   import { onDestroy } from 'svelte';
   import { joinPublicRoom, publicRooms, type PublicRoom } from './bridge';
   import FeatureDialog from './FeatureDialog.svelte';
+  import { JOIN_WAIT } from './joining.ts';
   import {
     MAX_DIRECTORY_FILTER_BYTES, MAX_LISTED_ROOMS, MAX_SERVER_NAME_BYTES, addPage, filterProblem, joinFailure,
     listFailure, memberText, roomLabel, serverProblem, type Listing
@@ -112,7 +113,7 @@
   }
 </script>
 
-<FeatureDialog title="Public rooms" {onclose} closeDisabled={joining}>
+<FeatureDialog title="Public rooms" {onclose}>
   <div class="public-rooms">
     <form class="public-rooms-search" onsubmit={browse}>
       <label for="public-rooms-server">Server</label>
@@ -192,6 +193,11 @@
           <button type="button" class="primary" disabled={joining} onclick={() => join(viewed!)}>
             {joining ? 'Joining…' : 'Join room'}
           </button>
+          {#if joining}
+            <p class="note" role="status">
+              {JOIN_WAIT} You can close this window. If the join finishes, the room appears in the room list.
+            </p>
+          {/if}
         {:else}
           <p class="note">This room does not let anyone join. It may ask you to knock, or let in only invited people.</p>
         {/if}

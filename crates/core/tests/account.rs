@@ -543,6 +543,13 @@ fn plain_state() -> Value {
 
 impl wiremock::Respond for LiveRoom {
     fn respond(&self, _: &wiremock::Request) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(self.body())
+    }
+}
+
+impl LiveRoom {
+    /// The next round's sync body.
+    fn body(&self) -> Value {
         let n = self.round.fetch_add(1, Ordering::SeqCst);
         let mut rooms = json!({ROOM:{"state":{"events":room_state()},"timeline":{"events":[text(&format!("$live{n}"), "live")],"limited":true,"prev_batch":"history"},"ephemeral":{"events":[]},"account_data":{"events":[]}}});
         if self.plain {
@@ -558,13 +565,95 @@ impl wiremock::Respond for LiveRoom {
             rooms[GROUP] = json!({"summary":{"m.joined_member_count":3,"m.invited_member_count":0},"state":{"events":group_state()},"timeline":{"events":[],"limited":false},"ephemeral":{"events":[]},"account_data":{"events":[]}});
             account_data = json!([{"type":"m.direct","content":{CONTACT:[DM, GROUP]}}]);
         }
-        ResponseTemplate::new(200).set_body_json(json!({
+        json!({
             "next_batch": format!("classic-{n}"),
             "account_data":{"events":account_data},
             "presence":{"events":presence},
             "rooms":{"join":rooms},
             "to_device":{"events":[]},"device_lists":{"changed":[],"left":[]},"device_one_time_keys_count":{"signed_curve25519":50}
-        }))
+        })
+    }
+}
+
+/// Classic sync like [`LiveRoom`] that also reports `room` as joined, with
+/// no encryption, once `joined` is set: the homeserver joined it.
+struct JoinedLater {
+    live: LiveRoom,
+    room: &'static str,
+    joined: Arc<AtomicBool>,
+}
+
+impl Respond for JoinedLater {
+    fn respond(&self, _: &wiremock::Request) -> ResponseTemplate {
+        let mut body = self.live.body();
+        if self.joined.load(Ordering::SeqCst) {
+            body["rooms"]["join"][self.room] = json!({"state":{"events":[
+                {"type":"m.room.create","state_key":"","sender":"@creator:remote.test","event_id":"$ocreate","origin_server_ts":1,"content":{"room_version":"11"}},
+                {"type":"m.room.member","state_key":USER,"sender":USER,"event_id":"$ojoin","origin_server_ts":2,"content":{"membership":"join"}}
+            ]},"timeline":{"events":[],"limited":false},"ephemeral":{"events":[]},"account_data":{"events":[]}});
+        }
+        ResponseTemplate::new(200).set_body_json(body)
+    }
+}
+
+/// Answers a join of `room` after `delay`, and sets `joined` for
+/// [`JoinedLater`] as it starts to answer.
+struct SlowJoin {
+    room: &'static str,
+    delay: Duration,
+    joined: Arc<AtomicBool>,
+}
+
+impl Respond for SlowJoin {
+    fn respond(&self, _: &wiremock::Request) -> ResponseTemplate {
+        self.joined.store(true, Ordering::SeqCst);
+        ResponseTemplate::new(200)
+            .set_body_json(json!({"room_id": self.room}))
+            .set_delay(self.delay)
+    }
+}
+
+/// The inviter of [`Invitations`].
+const INVITER: &str = "@carol:remote.test";
+
+/// One invitation from `INVITER` for [`Invitations`]: its room, the extra
+/// events of its invite state, whether it is direct, and whether the
+/// homeserver has joined it.
+struct Invitation {
+    room: &'static str,
+    state: Value,
+    direct: bool,
+    joined: Arc<AtomicBool>,
+}
+
+/// Classic sync like [`LiveRoom`] that also reports each invitation: as an
+/// invitation, or once joined, as a joined room with its inviter.
+struct Invitations {
+    live: LiveRoom,
+    invitations: Vec<Invitation>,
+}
+
+impl Respond for Invitations {
+    fn respond(&self, _: &wiremock::Request) -> ResponseTemplate {
+        let mut body = self.live.body();
+        for (n, invitation) in self.invitations.iter().enumerate() {
+            if invitation.joined.load(Ordering::SeqCst) {
+                body["rooms"]["join"][invitation.room] = json!({"state":{"events":[
+                    {"type":"m.room.create","state_key":"","sender":INVITER,"event_id":format!("$create{n}"),"origin_server_ts":1,"content":{"room_version":"11"}},
+                    {"type":"m.room.member","state_key":INVITER,"sender":INVITER,"event_id":format!("$inviter{n}"),"origin_server_ts":2,"content":{"membership":"join"}},
+                    {"type":"m.room.member","state_key":USER,"sender":USER,"event_id":format!("$joined{n}"),"origin_server_ts":3,"content":{"membership":"join"}}
+                ]},"timeline":{"events":[],"limited":false},"ephemeral":{"events":[]},"account_data":{"events":[]}});
+            } else {
+                let mut events = vec![
+                    json!({"type":"m.room.create","state_key":"","sender":INVITER,"content":{"room_version":"11"}}),
+                    json!({"type":"m.room.member","state_key":USER,"sender":INVITER,"content":{"membership":"invite","is_direct":invitation.direct}}),
+                ];
+                events.extend(invitation.state.as_array().cloned().unwrap_or_default());
+                body["rooms"]["invite"][invitation.room] =
+                    json!({"invite_state":{"events":events}});
+            }
+        }
+        ResponseTemplate::new(200).set_body_json(body)
     }
 }
 
@@ -5422,7 +5511,9 @@ fn given_an_encrypted_room_then_an_image_is_never_uploaded_in_plain() {
 /// listed THEN the homeserver is asked for it with the filter, and only a
 /// room listed as open to anyone can be joined, through the server that
 /// listed it. A room asking to knock or never listed is `not_found` and no
-/// join is sent. A rate limit or a server error is `unavailable`, and a
+/// join is sent. While a join waits for the homeserver, a second join is
+/// `limit_exceeded`. The reply comes once sync lists the joined room. For a
+/// listing or a join, a rate limit or a server error is `unavailable`, and a
 /// refusal `rejected`.
 #[test]
 fn given_a_listed_directory_then_only_its_open_rooms_can_be_joined() {
@@ -5486,26 +5577,75 @@ fn given_a_listed_directory_then_only_its_open_rooms_can_be_joined() {
         "no join was sent"
     );
 
-    server.answer_once(
-        "POST",
-        "^/_matrix/client/v3/join/.+$",
-        200,
-        json!({"room_id": "!open:remote.test"}),
+    let joined = Arc::new(AtomicBool::new(false));
+    server.runtime.block_on(async {
+        Mock::given(method("GET"))
+            .and(path("/_matrix/client/v3/sync"))
+            .respond_with(JoinedLater {
+                live: LiveRoom::default(),
+                room: "!open:remote.test",
+                joined: joined.clone(),
+            })
+            .with_priority(1)
+            .mount(&server.server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path_regex("^/_matrix/client/v3/join/.+$"))
+            .respond_with(SlowJoin {
+                room: "!open:remote.test",
+                delay: Duration::from_secs(2),
+                joined: joined.clone(),
+            })
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&server.server)
+            .await;
+    });
+    let join = || {
+        call(
+            &core,
+            Call::JoinPublicRoom {
+                room_id: "!open:remote.test".into(),
+            },
+        )
+    };
+    std::thread::scope(|scope| {
+        let first = scope.spawn(join);
+        wait_for("the join request", || {
+            server.requests_matching(JOIN).len() == 1
+        });
+        assert_eq!(join(), Outcome::Error(ErrorCode::LimitExceeded));
+        let reply: Value = value(first.join().unwrap());
+        assert_eq!(reply, json!({"roomId": "!open:remote.test"}));
+    });
+    assert!(
+        value::<RoomList>(call(&core, Call::RoomList {}))
+            .rooms
+            .iter()
+            .any(|room| room.room_id == "!open:remote.test"),
+        "the joined room is listed when the reply comes"
     );
-    let joined: Value = value(call(
-        &core,
-        Call::JoinPublicRoom {
-            room_id: "!open:remote.test".into(),
-        },
-    ));
-    assert_eq!(joined, json!({"roomId": "!open:remote.test"}));
     let joins = server.requests_matching(JOIN);
-    assert_eq!(joins.len(), 1);
+    assert_eq!(joins.len(), 1, "the second join sent nothing");
     assert!(
         joins[0].0.contains("via=remote.test") || joins[0].0.contains("server_name=remote.test"),
         "joined through the listing server: {}",
         joins[0].0
     );
+    server.answer_once(
+        "POST",
+        "^/_matrix/client/v3/join/.+$",
+        429,
+        json!({"errcode": "M_UNKNOWN", "error": "a membership change for this room is in progress"}),
+    );
+    assert_eq!(join(), Outcome::Error(ErrorCode::Unavailable));
+    server.answer_once(
+        "POST",
+        "^/_matrix/client/v3/join/.+$",
+        403,
+        json!({"errcode": "M_FORBIDDEN", "error": "You are banned from this room"}),
+    );
+    assert_eq!(join(), Outcome::Error(ErrorCode::Rejected));
 
     server.answer_once(
         "POST",
@@ -5528,6 +5668,146 @@ fn given_a_listed_directory_then_only_its_open_rooms_can_be_joined() {
         json!({"errcode": "M_UNKNOWN", "error": "Bad gateway"}),
     );
     assert_eq!(list(None), Outcome::Error(ErrorCode::Unavailable));
+}
+
+/// GIVEN two invitations over federation, one whose invite state shows
+/// encryption and a direct one whose invite state shows none WHEN the
+/// encrypted one is accepted THEN the SDK joins it (`/rooms/{id}/join`), so
+/// that it can import the history its inviter shared. WHEN the other is
+/// accepted and the homeserver answers after 2 s THEN the long join is used
+/// (`/join/{id}`); while it waits, another answer is `limit_exceeded`. Once
+/// done, the room is listed and marked direct with its inviter in
+/// `m.direct`.
+#[test]
+fn given_invitations_then_only_one_showing_no_encryption_takes_the_long_join() {
+    const SECRET: &str = "!secret:remote.test";
+    const BIG: &str = "!big:remote.test";
+    const LONG_JOIN: &str = "/_matrix/client/v3/join/";
+    let server = Homeserver::signed_in();
+    let dir = TempDir::new().unwrap();
+    let secret_joined = Arc::new(AtomicBool::new(false));
+    let big_joined = Arc::new(AtomicBool::new(false));
+    server.runtime.block_on(async {
+        Mock::given(method("GET"))
+            .and(path("/_matrix/client/v3/sync"))
+            .respond_with(Invitations {
+                live: LiveRoom::default(),
+                invitations: vec![
+                    Invitation {
+                        room: SECRET,
+                        state: json!([{"type":"m.room.encryption","state_key":"","sender":INVITER,"content":{"algorithm":"m.megolm.v1.aes-sha2"}}]),
+                        direct: false,
+                        joined: secret_joined.clone(),
+                    },
+                    Invitation {
+                        room: BIG,
+                        state: json!([]),
+                        direct: true,
+                        joined: big_joined.clone(),
+                    },
+                ],
+            })
+            .with_priority(1)
+            .mount(&server.server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"^/_matrix/client/v3/rooms/[^/]+/join$"))
+            .respond_with(SlowJoin {
+                room: SECRET,
+                delay: Duration::ZERO,
+                joined: secret_joined.clone(),
+            })
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&server.server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"^/_matrix/client/v3/join/.+$"))
+            .respond_with(SlowJoin {
+                room: BIG,
+                delay: Duration::from_secs(2),
+                joined: big_joined.clone(),
+            })
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&server.server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/_matrix/client/v3/rooms/[^/]+/members$"))
+            .respond_with(Members(json!([
+                {"type":"m.room.member","state_key":INVITER,"sender":INVITER,"event_id":"$minviter","origin_server_ts":2,"content":{"membership":"join"}},
+                {"type":"m.room.member","state_key":USER,"sender":USER,"event_id":"$mown","origin_server_ts":3,"content":{"membership":"join"}}
+            ])))
+            .with_priority(1)
+            .mount(&server.server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path_regex(r"^/_matrix/client/v3/user/[^/]+/account_data/m\.direct$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server.server)
+            .await;
+    });
+    let core = core_with_room(&server, dir.path());
+    let _locked = LockOnDrop(&core);
+    wait_for("both invitations", || {
+        value::<Value>(call(&core, Call::InviteList {}))["invites"]
+            .as_array()
+            .is_some_and(|invites| invites.len() == 2)
+    });
+    // `requests_matching` gives `path?query`; compare the path only.
+    let path_ends = |request: &(String, Value), end: &str| {
+        request
+            .0
+            .split('?')
+            .next()
+            .is_some_and(|path| path.ends_with(end))
+    };
+    let answer = |room: &str, accept: bool| {
+        let room_id = room.to_owned();
+        call(
+            &core,
+            if accept {
+                Call::AcceptInvite { room_id }
+            } else {
+                Call::DeclineInvite { room_id }
+            },
+        )
+    };
+
+    assert_eq!(answer(SECRET, true), Outcome::Ok(Value::Null));
+    let sdk_joins: Vec<_> = server
+        .requests_matching("/_matrix/client/v3/rooms/")
+        .into_iter()
+        .filter(|request| path_ends(request, "/join"))
+        .collect();
+    assert_eq!(sdk_joins.len(), 1, "the SDK joined: {sdk_joins:?}");
+    assert!(
+        server.requests_matching(LONG_JOIN).is_empty(),
+        "no long join for a room that shows encryption"
+    );
+
+    std::thread::scope(|scope| {
+        let first = scope.spawn(|| answer(BIG, true));
+        wait_for("the long join", || {
+            server.requests_matching(LONG_JOIN).len() == 1
+        });
+        assert_eq!(answer(BIG, false), Outcome::Error(ErrorCode::LimitExceeded));
+        assert_eq!(first.join().unwrap(), Outcome::Ok(Value::Null));
+    });
+    assert!(
+        value::<RoomList>(call(&core, Call::RoomList {}))
+            .rooms
+            .iter()
+            .any(|room| room.room_id == BIG),
+        "the joined room is listed when the reply comes"
+    );
+    let marked: Vec<Value> = server
+        .requests_matching("/_matrix/client/v3/user/")
+        .into_iter()
+        .filter(|request| path_ends(request, "/account_data/m.direct"))
+        .map(|(_, body)| body)
+        .collect();
+    assert_eq!(marked, [json!({INVITER: [BIG]})], "marked direct once");
 }
 
 /// GIVEN a signed-in account with its room open and three events the

@@ -47,6 +47,7 @@
   import RoomGroups from './RoomGroups.svelte';
   import PublicRooms from './PublicRooms.svelte';
   import { ownServer } from './publicRooms.ts';
+  import { answerFailure } from './joining.ts';
   import SavedDrafts from './SavedDrafts.svelte';
   import StoredRoomGroups from './StoredRoomGroups.svelte';
   import { DraftKeeper } from './drafts';
@@ -429,6 +430,8 @@
   // Direct-message invitations, and the one being answered.
   let invites = $state<InviteList | null>(null);
   let inviteBusy = $state<string | null>(null);
+  // Whether that answer is an accept, which can take minutes.
+  let inviteAccepting = $state(false);
   // A finished or cancelled verification stays on screen until this is its ID.
   let dismissedFlow = $state<string | null>(null);
   // A room-list reply replaces the list only if it is newer than the one
@@ -685,6 +688,7 @@
     if (inviteBusy) return;
     const generation = sessionGeneration;
     inviteBusy = roomId;
+    inviteAccepting = accept;
     try {
       await (accept ? acceptInvite(roomId) : declineInvite(roomId));
       if (generation !== sessionGeneration) return;
@@ -692,10 +696,7 @@
       if (accept && generation === sessionGeneration) open(roomId);
     } catch (reason) {
       if (generation === sessionGeneration) {
-        error =
-          String(reason) === 'not_found'
-            ? 'That invitation is no longer pending.'
-            : describe(reason);
+        error = answerFailure(String(reason), accept);
         refreshInvites();
       }
     } finally {
@@ -3126,6 +3127,7 @@
         onsearch={() => (paletteOpen = rooms !== null)}
         {invites}
         {inviteBusy}
+        {inviteAccepting}
         onnewconversation={signedIn ? () => (newConversationOpen = true) : undefined}
         onnewroom={signedIn ? () => (newRoomOpen = true) : undefined}
         onexplore={signedIn ? () => (directoryOpen = true) : undefined}

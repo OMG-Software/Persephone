@@ -22,8 +22,14 @@
 //!   without a directory listing the room.
 //! * Public rooms are usually not encrypted. Joining one does not change
 //!   ADR-0005: sending there still needs the user's consent.
+//! * A join uses the long join of `joins`: it waits up to
+//!   `joins::JOIN_TIMEOUT` for the homeserver, because joining a big room on
+//!   another server can take minutes.
 
-use crate::views::{project_body, project_name};
+use crate::{
+    joins::{self, request_error},
+    views::{project_body, project_name},
+};
 use matrix_sdk::{
     Client, RoomState,
     ruma::{
@@ -220,18 +226,6 @@ fn page(
     (PublicRoomPage { rooms, next, total }, offers)
 }
 
-/// A refusal from the homeserver (a 4xx answer) is `rejected`. Anything
-/// transient is `unavailable`: no answer at all, a server error (5xx), or a
-/// rate limit (429), as for media (`media.rs`).
-fn request_error(error: Option<&matrix_sdk::ruma::api::error::Error>) -> ErrorCode {
-    match error {
-        Some(error) if error.status_code.is_client_error() && error.status_code.as_u16() != 429 => {
-            ErrorCode::Rejected
-        }
-        _ => ErrorCode::Unavailable,
-    }
-}
-
 /// Lists one page of a public room directory. Returns the page and the rooms
 /// it offers to join.
 pub async fn list(
@@ -259,18 +253,17 @@ pub async fn list(
     }))
 }
 
-/// Joins a listed room through the server that listed it.
+/// Joins a listed room through the server that listed it, with the long
+/// join of `joins`. When `gone` is true, the join stops and is `locked`.
 pub async fn join(
     client: &Client,
     room_id: &RoomId,
     via: &[OwnedServerName],
+    gone: impl Fn() -> bool,
 ) -> Result<JoinedRoom, ErrorCode> {
-    let room = client
-        .join_room_by_id_or_alias(room_id.into(), via)
-        .await
-        .map_err(|error| request_error(error.as_client_api_error()))?;
+    let room_id = joins::join(client, room_id, via, &gone).await?;
     Ok(JoinedRoom {
-        room_id: room.room_id().to_string(),
+        room_id: room_id.to_string(),
     })
 }
 

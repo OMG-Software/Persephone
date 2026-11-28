@@ -19,6 +19,9 @@
 //!   from this homeserver or over federation. The inviter's name and the
 //!   room's name are the homeserver's word, projected like any name. A
 //!   direct invitation is joined as a direct room, which the SDK marks so.
+//!   An invitation whose invite state shows no encryption is joined with
+//!   the long join of `joins`, and is then marked direct here (see
+//!   [`accept`]).
 //! * A user ID sent as an identifier (a directory match the page may start a
 //!   conversation with, an inviter) is sent unchanged, never projected: a
 //!   projection could cut a valid ID short. Only IDs within the Matrix limit
@@ -29,10 +32,11 @@
 //!   only when the user has turned directory search on.
 //! * A failure to reach the homeserver is `unavailable`; an answer refusing
 //!   the request is `Refused` (or `not_found` for an invitation that is no
-//!   longer pending). Nothing is retried.
+//!   longer pending). Accepting answers as any join does: a rate limit or a
+//!   server error is `unavailable` too. Nothing is retried.
 
 use crate::{
-    contacts,
+    contacts, joins,
     views::{MAX_ROOMS, project_name},
 };
 use matrix_sdk::{
@@ -143,10 +147,55 @@ fn invited_room(client: &Client, room_id: &str) -> Result<Room, ErrorCode> {
         .ok_or(ErrorCode::NotFound)
 }
 
-/// Joins the room of an invitation.
-pub async fn accept(client: &Client, room_id: &str) -> Result<(), ErrorCode> {
+/// Joins the room of an invitation (owner decision, 28 November 2026).
+///
+/// * An invitation that may be to an encrypted room is joined by the SDK.
+///   The SDK then imports the room history the inviter shared (a room key
+///   bundle) and marks a direct invitation as direct. Its join has the
+///   client's 30 s limit.
+/// * An invitation whose invite state shows no encryption is joined with the
+///   long join of `joins`, so a big room on another server has
+///   `joins::JOIN_TIMEOUT`. A direct one is then marked as direct, as the SDK
+///   does. This join imports no shared history. If a server leaves the
+///   encryption event out of the invite state of an encrypted room, that
+///   room's shared history is not imported: it fails closed.
+///
+/// Both answers are those of a join (`joins::request_error`): a rate limit
+/// or a server error is `unavailable`, because the homeserver can still be
+/// joining. When `gone` is true, the long join stops and is `locked`.
+pub async fn accept(
+    client: &Client,
+    room_id: &str,
+    gone: impl Fn() -> bool,
+) -> Result<(), ErrorCode> {
     let room = invited_room(client, room_id)?;
-    room.join().await.map_err(|error| request_error(&error))
+    if may_be_encrypted(&room).await {
+        return room.join().await.map_err(|error| join_error(&error));
+    }
+    let direct = room.is_direct().await.unwrap_or(false);
+    joins::join(client, room.room_id(), &[], &gone).await?;
+    if direct {
+        room.set_is_direct(true)
+            .await
+            .map_err(|error| join_error(&error))?;
+    }
+    Ok(())
+}
+
+/// Whether an invited room may be encrypted: the SDK knows that it is, its
+/// invite state has an encryption event, or the store cannot say.
+async fn may_be_encrypted(room: &Room) -> bool {
+    room.encryption_state().is_encrypted()
+        || !matches!(
+            room.get_state_event_static::<RoomEncryptionEventContent>()
+                .await,
+            Ok(None)
+        )
+}
+
+/// The answer to a join made by the SDK, as for any join.
+fn join_error(error: &matrix_sdk::Error) -> ErrorCode {
+    joins::request_error(error.as_client_api_error())
 }
 
 /// Refuses an invitation by leaving its room.

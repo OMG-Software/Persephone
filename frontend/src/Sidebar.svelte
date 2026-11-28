@@ -14,6 +14,7 @@
     rooms,
     invites = null,
     inviteBusy = null,
+    inviteAccepting = false,
     selected,
     preferences = [],
     userId,
@@ -41,6 +42,8 @@
     invites?: InviteList | null;
     // The room whose invitation is being answered, if any.
     inviteBusy?: string | null;
+    // Whether that answer is an accept.
+    inviteAccepting?: boolean;
     selected: string | null;
     preferences?: RoomPreference[];
     // The signed-in account, or null for synthetic data.
@@ -133,6 +136,7 @@
         invites={invites.invites}
         truncated={invites.truncated}
         busy={inviteBusy}
+        accepting={inviteAccepting}
         {onaccept}
         {ondecline}
       />
