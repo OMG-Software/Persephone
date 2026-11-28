@@ -13,6 +13,14 @@ export const JOIN_UNFINISHED =
 /** A join or an invitation answer while another one runs (`limit_exceeded`). */
 export const JOIN_BUSY = 'Another room is being joined, or another invitation answered. Try again when that is done.';
 
+/**
+ * An accept while other work runs (`limit_exceeded`): a join or another answer, or, for a direct invitation to a
+ * room that may be encrypted, a new conversation, a new room or an invite.
+ */
+export const ACCEPT_BUSY =
+  'Other work is running: a join, an answer to an invitation, a new conversation or room, or an invite. '
+  + 'Try again when it is done.';
+
 /** Shown while a join runs. */
 export const JOIN_WAIT = 'A big room on another server can take several minutes to join.';
 
@@ -26,7 +34,7 @@ export function answerFailure(code: string, accept: boolean): string {
         ? 'The homeserver refused. The invitation may have been withdrawn, or you may be banned from the room.'
         : 'The homeserver refused to decline the invitation.';
     case 'limit_exceeded':
-      return JOIN_BUSY;
+      return accept ? ACCEPT_BUSY : JOIN_BUSY;
     case 'locked':
       return 'The session is locked.';
     default:

@@ -512,7 +512,9 @@ pub struct Core {
     budgets: Arc<ResourceBudgets>,
     media: MediaService,
     /// Starting a conversation, creating a room or inviting someone, one at
-    /// a time.
+    /// a time. Accepting a direct invitation that the SDK joins holds it
+    /// too, because the SDK's direct mark does not take `mark_as_dm`'s lock
+    /// (see `conversations::accept`).
     conversation: conversations::Busy,
     /// One user-directory search at a time.
     search: conversations::Busy,
@@ -2229,7 +2231,13 @@ impl Core {
             let outcome = match &work {
                 Work::Accept(room_id) => self
                     .with_matrix(generation, async |client| {
-                        conversations::accept(&client, room_id, self.join_gone(generation)).await
+                        conversations::accept(
+                            &client,
+                            room_id,
+                            self.join_gone(generation),
+                            &self.conversation,
+                        )
+                        .await
                     })
                     .map(|()| serde_json::Value::Null),
                 Work::Decline(room_id) => self

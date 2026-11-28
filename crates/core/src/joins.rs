@@ -102,7 +102,7 @@ async fn join_within(
 
 /// Runs `work` until it ends, or until `gone` is true at one of the checks
 /// every [`JOIN_CHECK`]. Then `work` is dropped and the result is `None`.
-async fn until_gone<T>(work: impl Future<Output = T>, gone: &impl Fn() -> bool) -> Option<T> {
+pub async fn until_gone<T>(work: impl Future<Output = T>, gone: &impl Fn() -> bool) -> Option<T> {
     let watch = async {
         while !gone() {
             tokio::time::sleep(JOIN_CHECK).await;

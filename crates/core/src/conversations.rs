@@ -18,10 +18,10 @@
 //! * Every pending invitation is listed and may be answered: direct or not,
 //!   from this homeserver or over federation. The inviter's name and the
 //!   room's name are the homeserver's word, projected like any name. A
-//!   direct invitation is joined as a direct room, which the SDK marks so.
-//!   An invitation whose invite state shows no encryption is joined with
-//!   the long join of `joins`, and is then marked direct here (see
-//!   [`accept`]).
+//!   direct invitation is joined as a direct room, which the SDK marks so;
+//!   while a conversation starts, such an accept is `limit_exceeded`. An
+//!   invitation whose invite state shows no encryption is joined with the
+//!   long join of `joins`, and is then marked direct here (see [`accept`]).
 //! * A user ID sent as an identifier (a directory match the page may start a
 //!   conversation with, an inviter) is sent unchanged, never projected: a
 //!   projection could cut a valid ID short. Only IDs within the Matrix limit
@@ -152,31 +152,54 @@ fn invited_room(client: &Client, room_id: &str) -> Result<Room, ErrorCode> {
 /// * An invitation that may be to an encrypted room is joined by the SDK.
 ///   The SDK then imports the room history the inviter shared (a room key
 ///   bundle) and marks a direct invitation as direct. Its join has the
-///   client's 30 s limit.
+///   client's 30 s limit. The SDK's mark (`Room::set_is_direct`) writes the
+///   `m.direct` map this client last synced, without the lock that
+///   `Account::mark_as_dm` takes. So a direct one also holds `starts`, the
+///   slot of conversation starts (`Client::create_dm` marks through that
+///   lock), and is `limit_exceeded` while one runs.
 /// * An invitation whose invite state shows no encryption is joined with the
 ///   long join of `joins`, so a big room on another server has
-///   `joins::JOIN_TIMEOUT`. A direct one is then marked as direct, as the SDK
-///   does. This join imports no shared history. If a server leaves the
-///   encryption event out of the invite state of an encrypted room, that
-///   room's shared history is not imported: it fails closed.
+///   `joins::JOIN_TIMEOUT`. A direct one is then marked direct for its
+///   inviter through `Account::mark_as_dm`, as a conversation start marks:
+///   under the SDK's lock, on the homeserver's current map. This join
+///   imports no shared history. If a server leaves the encryption event out
+///   of the invite state of an encrypted room, that room's shared history is
+///   not imported: it fails closed.
 ///
 /// Both answers are those of a join (`joins::request_error`): a rate limit
 /// or a server error is `unavailable`, because the homeserver can still be
-/// joining. When `gone` is true, the long join stops and is `locked`.
+/// joining. When `gone` is true, the long join and its mark stop and the
+/// answer is `locked`. A mark that stops leaves the room joined but not
+/// marked direct; nothing marks it later.
 pub async fn accept(
     client: &Client,
     room_id: &str,
     gone: impl Fn() -> bool,
+    starts: &Busy,
 ) -> Result<(), ErrorCode> {
     let room = invited_room(client, room_id)?;
+    let direct = room.is_direct().await.unwrap_or(false);
     if may_be_encrypted(&room).await {
+        let _no_start = direct.then(|| starts.begin()).transpose()?;
         return room.join().await.map_err(|error| join_error(&error));
     }
-    let direct = room.is_direct().await.unwrap_or(false);
-    joins::join(client, room.room_id(), &[], &gone).await?;
-    if direct {
-        room.set_is_direct(true)
+    // The inviter sent this account's invite event, so read it while the
+    // room is still an invitation. A store that cannot name them leaves the
+    // room unmarked.
+    let inviter = if direct {
+        room.invite_details()
             .await
+            .ok()
+            .map(|invite| invite.inviter_id)
+    } else {
+        None
+    };
+    joins::join(client, room.room_id(), &[], &gone).await?;
+    if let Some(inviter) = inviter {
+        let (account, inviter) = (client.account(), [inviter]);
+        joins::until_gone(account.mark_as_dm(room.room_id(), &inviter), &gone)
+            .await
+            .ok_or(ErrorCode::Locked)?
             .map_err(|error| join_error(&error))?;
     }
     Ok(())

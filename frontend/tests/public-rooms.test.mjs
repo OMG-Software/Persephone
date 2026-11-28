@@ -5,7 +5,7 @@ import {
   MAX_DIRECTORY_FILTER_BYTES, MAX_LISTED_ROOMS, MAX_SERVER_NAME_BYTES, addPage, filterProblem, joinFailure,
   listFailure, memberText, ownServer, roomLabel, serverProblem
 } from '../src/publicRooms.ts';
-import { JOIN_BUSY, JOIN_UNFINISHED, answerFailure } from '../src/joining.ts';
+import { ACCEPT_BUSY, JOIN_BUSY, JOIN_UNFINISHED, answerFailure } from '../src/joining.ts';
 
 let vite;
 let render;
@@ -129,8 +129,11 @@ test('GIVEN failure codes WHEN shown THEN each failure says what happened and wh
 test('GIVEN a failed answer to an invitation WHEN shown THEN an accept says what a join says, and a decline does not', () => {
   assert.equal(answerFailure('core_unavailable', true), JOIN_UNFINISHED, 'the homeserver can still be joining');
   assert.match(answerFailure('core_unavailable', false), /could not be reached/);
+  // A direct invitation that the SDK joins waits for conversation starts too.
+  assert.equal(answerFailure('limit_exceeded', true), ACCEPT_BUSY);
+  assert.match(ACCEPT_BUSY, /a join.*an answer to an invitation.*new conversation or room.*an invite/);
+  assert.equal(answerFailure('limit_exceeded', false), JOIN_BUSY);
   for (const accept of [true, false]) {
-    assert.equal(answerFailure('limit_exceeded', accept), JOIN_BUSY);
     assert.match(answerFailure('not_found', accept), /no longer pending/);
     assert.match(answerFailure('locked', accept), /locked/);
   }

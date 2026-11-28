@@ -3698,6 +3698,59 @@ mod tests {
     }
 
     #[test]
+    /// GIVEN long work (a join) holding a lease WHEN a sign-out holds new work
+    /// or a lock begins THEN the work may not continue while the hold or the
+    /// lock still waits for its lease, so it can stop, and the hold or the
+    /// lock ends once that lease drops.
+    fn given_long_work_holding_a_lease_then_a_waiting_hold_or_lock_stops_it() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let session = Session::open(dir.path().into(), Arc::new(Plain), unlock());
+        assert_eq!(settled(&session), StoreState::Protected);
+        *guard(&session.shared.status) = signed_in("@alice:s", None);
+        let generation = session.open_generation().expect("open");
+        // What `Core::join_gone` checks every 100 ms, waiting at most 5 s.
+        let stops = || {
+            let started = Instant::now();
+            while session.may_continue(generation) {
+                assert!(
+                    started.elapsed() < Duration::from_secs(5),
+                    "never told to stop"
+                );
+                std::thread::yield_now();
+            }
+        };
+        let deadline = || Instant::now() + Duration::from_secs(30);
+
+        let work = session.admit().unwrap();
+        let sign_out = session.admit().unwrap();
+        std::thread::scope(|scope| {
+            let held = scope.spawn(|| session.hold_new_work(deadline()));
+            stops();
+            assert!(!held.is_finished(), "the hold still waits for the work");
+            drop(work);
+            assert!(held.join().unwrap(), "the hold ends once the work stopped");
+        });
+        session.release_new_work();
+        drop(sign_out);
+
+        assert!(
+            session.may_continue(generation),
+            "a released hold admits work again"
+        );
+        let work = session.admit().unwrap();
+        std::thread::scope(|scope| {
+            let locked = scope.spawn(|| session.lock(Duration::from_secs(30), || {}));
+            stops();
+            assert!(!locked.is_finished(), "the lock still waits for the work");
+            drop(work);
+            assert!(
+                locked.join().unwrap().1.is_some(),
+                "the stores closed after the drain"
+            );
+        });
+    }
+
+    #[test]
     /// Prevent a sync round from publishing health after its session generation ends.
     fn given_lock_during_sync_then_health_reset_rejects_stale_round_commit() {
         let dir = tempfile::TempDir::new().unwrap();
