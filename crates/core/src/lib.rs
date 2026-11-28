@@ -47,6 +47,7 @@ pub mod discovery;
 pub mod files;
 pub mod homeserver;
 pub mod identities;
+mod joins;
 pub mod links;
 pub mod local_search;
 pub mod matrix_views;
@@ -510,7 +511,10 @@ pub struct Core {
     /// Shared by the frame reader and the images, under one aggregate limit.
     budgets: Arc<ResourceBudgets>,
     media: MediaService,
-    /// Starting a conversation or answering an invitation, one at a time.
+    /// Starting a conversation, creating a room or inviting someone, one at
+    /// a time. Accepting a direct invitation that the SDK joins holds it
+    /// too, because the SDK's direct mark does not take `mark_as_dm`'s lock
+    /// (see `conversations::accept`).
     conversation: conversations::Busy,
     /// One user-directory search at a time.
     search: conversations::Busy,
@@ -586,6 +590,10 @@ pub struct Core {
     app_menu: Arc<dyn app_menu::AppMenu>,
     /// One add (with its question) or remove at a time.
     app_menu_change: conversations::Busy,
+    /// Joining a listed room or answering an invitation, one at a time. A
+    /// join keeps a session lease for up to `joins::JOIN_TIMEOUT`, and sync
+    /// needs the same leases. Starting conversations is not blocked by it.
+    joining: conversations::Busy,
 }
 
 /// Counts one running long call until it is dropped, with its thread or with
@@ -851,6 +859,7 @@ impl Core {
             diagnostics_stopping: AtomicBool::new(false),
             app_menu: app_menu::platform(),
             app_menu_change: conversations::Busy::default(),
+            joining: conversations::Busy::default(),
         }
     }
 
@@ -2206,6 +2215,9 @@ impl Core {
             Work::NotificationLevel | Work::SetNotificationLevel(_) => Slot::Held {
                 _guard: self.notification_level.begin()?,
             },
+            Work::JoinPublicRoom(_) | Work::Accept(_) | Work::Decline(_) => Slot::Held {
+                _guard: self.joining.begin()?,
+            },
             _ => Slot::Held {
                 _guard: self.conversation.begin()?,
             },
@@ -2219,7 +2231,13 @@ impl Core {
             let outcome = match &work {
                 Work::Accept(room_id) => self
                     .with_matrix(generation, async |client| {
-                        conversations::accept(&client, room_id).await
+                        conversations::accept(
+                            &client,
+                            room_id,
+                            self.join_gone(generation),
+                            &self.conversation,
+                        )
+                        .await
                     })
                     .map(|()| serde_json::Value::Null),
                 Work::Decline(room_id) => self
@@ -2278,7 +2296,8 @@ impl Core {
                     match via {
                         None => Err(ErrorCode::NotFound),
                         Some(via) => json(self.with_matrix(generation, async |client| {
-                            directory::join(&client, room_id, &via).await
+                            directory::join(&client, room_id, &via, self.join_gone(generation))
+                                .await
                         })),
                     }
                 }
@@ -2644,6 +2663,13 @@ impl Core {
         }
         drop(lease);
         result
+    }
+
+    /// Whether the page or the session that asked for a join in `generation`
+    /// has gone: the page closed, the session locked, or a sign-out waits.
+    /// A long join (`joins`) stops then, so none of them waits for it.
+    fn join_gone(&self, generation: u64) -> impl Fn() -> bool + '_ {
+        move || self.hub.closing.load(Ordering::SeqCst) || !self.session.may_continue(generation)
     }
 
     fn with_matrix<T>(

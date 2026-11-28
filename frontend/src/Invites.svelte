@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { InviteSummary } from '../../crates/contracts/generated/contracts';
+  import { JOIN_WAIT } from './joining.ts';
 
   // Room invitations, direct-message or not, from any homeserver. The
   // inviter's ID and name and the room's name are their own word: shown as
@@ -8,6 +9,7 @@
     invites,
     truncated,
     busy,
+    accepting = false,
     onaccept,
     ondecline
   }: {
@@ -15,6 +17,8 @@
     truncated: boolean;
     // The room whose invitation is being answered, if any.
     busy: string | null;
+    // Whether that answer is an accept, which can take minutes.
+    accepting?: boolean;
     onaccept: (roomId: string) => void;
     ondecline: (roomId: string) => void;
   } = $props();
@@ -58,6 +62,9 @@
             onclick={() => ondecline(invite.roomId)}>Decline</button
           >
         </div>
+        {#if accepting && busy === invite.roomId}
+          <p class="note" role="status">Joining. {JOIN_WAIT}</p>
+        {/if}
       </li>
     {/each}
   </ul>

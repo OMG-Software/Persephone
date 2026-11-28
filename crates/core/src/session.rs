@@ -2698,6 +2698,15 @@ impl Session {
         self.shared.open_generation()
     }
 
+    /// Whether work admitted in `generation` may go on: the session is still
+    /// the open one of `generation` and no sign-out holds new work back. Long
+    /// work, such as a room join, checks this and stops when it is false, so
+    /// a lock or a sign-out need not wait for it.
+    pub fn may_continue(&self, generation: u64) -> bool {
+        let inner = lock(&self.shared);
+        inner.state == StoreState::Protected && inner.generation == generation && !inner.held
+    }
+
     /// The room's messages sent from this device in this session.
     pub fn pending_messages(&self, room_id: &str) -> Vec<PendingMessage> {
         guard(&self.shared.outbox).for_room(room_id)
@@ -3667,6 +3676,78 @@ mod tests {
         shared.while_open(generation, &mut || runs += 1);
         assert_eq!(runs, 1);
         assert_eq!(Env::open_generation(&*shared), None);
+    }
+
+    /// GIVEN an open session WHEN long work asks whether it may go on THEN
+    /// it may only in the open generation, not while a sign-out holds new
+    /// work back, and not once a lock began.
+    #[test]
+    fn given_a_hold_or_a_lock_then_long_work_may_not_continue() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let session = Session::open(dir.path().into(), Arc::new(Plain), unlock());
+        assert_eq!(settled(&session), StoreState::Protected);
+        let generation = session.open_generation().expect("open");
+        assert!(session.may_continue(generation));
+        assert!(!session.may_continue(generation + 1));
+        assert!(session.hold_new_work(Instant::now() + Duration::from_secs(1)));
+        assert!(!session.may_continue(generation));
+        session.release_new_work();
+        assert!(session.may_continue(generation));
+        session.lock(Duration::ZERO, || {});
+        assert!(!session.may_continue(generation));
+    }
+
+    #[test]
+    /// GIVEN long work (a join) holding a lease WHEN a sign-out holds new work
+    /// or a lock begins THEN the work may not continue while the hold or the
+    /// lock still waits for its lease, so it can stop, and the hold or the
+    /// lock ends once that lease drops.
+    fn given_long_work_holding_a_lease_then_a_waiting_hold_or_lock_stops_it() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let session = Session::open(dir.path().into(), Arc::new(Plain), unlock());
+        assert_eq!(settled(&session), StoreState::Protected);
+        *guard(&session.shared.status) = signed_in("@alice:s", None);
+        let generation = session.open_generation().expect("open");
+        // What `Core::join_gone` checks every 100 ms, waiting at most 5 s.
+        let stops = || {
+            let started = Instant::now();
+            while session.may_continue(generation) {
+                assert!(
+                    started.elapsed() < Duration::from_secs(5),
+                    "never told to stop"
+                );
+                std::thread::yield_now();
+            }
+        };
+        let deadline = || Instant::now() + Duration::from_secs(30);
+
+        let work = session.admit().unwrap();
+        let sign_out = session.admit().unwrap();
+        std::thread::scope(|scope| {
+            let held = scope.spawn(|| session.hold_new_work(deadline()));
+            stops();
+            assert!(!held.is_finished(), "the hold still waits for the work");
+            drop(work);
+            assert!(held.join().unwrap(), "the hold ends once the work stopped");
+        });
+        session.release_new_work();
+        drop(sign_out);
+
+        assert!(
+            session.may_continue(generation),
+            "a released hold admits work again"
+        );
+        let work = session.admit().unwrap();
+        std::thread::scope(|scope| {
+            let locked = scope.spawn(|| session.lock(Duration::from_secs(30), || {}));
+            stops();
+            assert!(!locked.is_finished(), "the lock still waits for the work");
+            drop(work);
+            assert!(
+                locked.join().unwrap().1.is_some(),
+                "the stores closed after the drain"
+            );
+        });
     }
 
     #[test]

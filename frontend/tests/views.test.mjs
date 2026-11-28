@@ -1065,6 +1065,16 @@ test('GIVEN direct-message invitations WHEN listed THEN inviters are isolated, e
 
   const busy = render(Invites, { props: { ...props, busy: '!a:example.invalid' } }).body;
   assert.equal((busy.match(/disabled/g) ?? []).length, 4, 'one answer at a time');
+  assert.doesNotMatch(busy, /Joining\./, 'a decline shows no join note');
+
+  // An accept can take minutes: only the invitation being accepted says so.
+  const accepting = render(Invites, { props: { ...props, busy: '!a:example.invalid', accepting: true } }).body;
+  assert.equal((accepting.match(/role="status"/g) ?? []).length, 1);
+  assert.match(
+    accepting,
+    /Joining\.\s*(?:<!--[^>]*-->)*\s*A big room on another server can take several minutes to join\./
+  );
+  assert.doesNotMatch(html, /Joining\./, 'nothing is being joined');
 });
 
 test('GIVEN room invitations over federation WHEN listed THEN the room name is isolated text and a missing inviter is "Someone"', () => {

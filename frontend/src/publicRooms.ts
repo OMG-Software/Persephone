@@ -3,6 +3,7 @@
 // sends is untrusted text: the page shows it escaped and isolated.
 
 import type { PublicRoom, PublicRoomPage } from '../../crates/contracts/generated/contracts';
+import { JOIN_BUSY, JOIN_UNFINISHED } from './joining.ts';
 
 /** The core's limits on a server name, a directory filter, and listed rooms. */
 export const MAX_SERVER_NAME_BYTES = 261;
@@ -105,10 +106,10 @@ export function joinFailure(code: string): string {
     case 'rejected':
       return 'The homeserver refused. The room may be closed to you, or you may be banned from it.';
     case 'limit_exceeded':
-      return 'Another room is being joined. Try again in a moment.';
+      return JOIN_BUSY;
     case 'locked':
       return 'The session is locked.';
     default:
-      return 'The homeserver could not be reached. If you joined the room anyway, it appears in the room list.';
+      return JOIN_UNFINISHED;
   }
 }
